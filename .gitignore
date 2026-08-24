@@ -1,0 +1,8 @@
+venv
+backend/.env
+backend/app/__pycache__
+__pycache__
+frontend/node_modules
+blussit-prelaunch/frontend/node_modules
+.claude
+backend/uploads/photos
