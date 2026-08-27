@@ -1,17 +1,20 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, Clock, Eye, Phone, Sparkles } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, Clock, Phone, Sparkles } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
+import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useAuth } from "../../context/AuthContext";
-import { format, minutesUntilSlotStart, todayIST, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
+import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { ISSUE_LABELS, isOpenIssue, needsCaptain } from "../../lib/constants";
 import { useBookingFilters } from "../../lib/useBookingFilters";
+import { useLiveChannel } from "../../lib/socket";
 import type { Booking } from "../../types";
 
 type View = "attention" | "late_starts" | "all";
@@ -55,6 +58,17 @@ function byScheduledAsc(a: Booking, b: Booking) {
   return d !== 0 ? d : (a.scheduled_slot || "").localeCompare(b.scheduled_slot || "");
 }
 
+const PRIORITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+// Priority first (HIGH before MEDIUM before LOW), then within the same
+// priority the existing cutoff/slot-timing order — matches the ops spec's
+// tiebreak sequence exactly.
+function byPriorityThenScheduled(a: Booking, b: Booking) {
+  const p = (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1);
+  return p !== 0 ? p : byScheduledAsc(a, b);
+}
+
+const PRIORITY_OPTIONS: ("high" | "medium" | "low")[] = ["high", "medium", "low"];
+
 function bookingLabel(b: Booking): string {
   if (b.combo_name) return b.combo_name;
   if (b.service_names?.length) return b.service_names.join(", ");
@@ -87,7 +101,6 @@ function WhatHappened({ booking }: { booking: Booking }) {
 
 export default function BookingQueuePage() {
   const { user } = useAuth();
-  const navigate = useNavigate();
   const centerId = user?.service_center_id || "";
   const queryClient = useQueryClient();
 
@@ -118,7 +131,7 @@ export default function BookingQueuePage() {
 
   const [reschedulingBooking, setReschedulingBooking] = useState<Booking | null>(null);
   const [newDate, setNewDate] = useState("");
-  const [newTime, setNewTime] = useState("");
+  const [newSlot, setNewSlot] = useState("");
 
   const [resolvingBooking, setResolvingBooking] = useState<Booking | null>(null);
   const [resolveNote, setResolveNote] = useState("");
@@ -126,18 +139,29 @@ export default function BookingQueuePage() {
   const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
+  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  const { data: center } = useQuery({ queryKey: ["center-detail-for-queue", centerId], queryFn: () => adminServiceCenterApi.get(centerId), enabled: !!centerId });
+
   // One query, fetched unfiltered — everything else (new/flagged/status
   // filter/sort) is derived from it client-side. Simpler than juggling two
   // separate server-filtered queries, and center booking volumes here don't
   // need more than a single page to stay complete.
+  const centerBookingsQueryKey = ["center-bookings", centerId];
   const { data, isLoading } = useQuery({
-    queryKey: ["center-bookings", centerId],
+    queryKey: centerBookingsQueryKey,
     queryFn: () => bookingApi.forCenter(centerId, { page: 1, page_size: 100 }),
     enabled: !!centerId,
-    refetchInterval: 10000,
+    // Live-pushed over "center-bookings:{centerId}" (see below) — this
+    // interval is now just the reconnect-window fallback, not the primary
+    // update path.
+    refetchInterval: 60000,
     refetchIntervalInBackground: true,
   });
   const items = data?.data || [];
+
+  useLiveChannel(centerId ? `center-bookings:${centerId}` : null, () => {
+    queryClient.invalidateQueries({ queryKey: centerBookingsQueryKey });
+  });
 
   const { data: captains } = useQuery({
     queryKey: ["center-captains-list", centerId],
@@ -145,21 +169,19 @@ export default function BookingQueuePage() {
     enabled: !!centerId,
   });
 
-  // Bounds the reschedule "New time" picker to this store's actual working
-  // hours (admin-configured) instead of a generic 24-hour dial — rarely
-  // changes, so this is cheap to keep around for the lifetime of the page.
-  const { data: center } = useQuery({
-    queryKey: ["center-detail", centerId],
-    queryFn: () => adminServiceCenterApi.get(centerId),
-    enabled: !!centerId,
-    staleTime: 5 * 60 * 1000,
-  });
-
   const captainName = (id?: string | null) => captains?.data.find((c) => c.id === id)?.full_name || "—";
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["center-bookings"] });
 
-  const newBookings = useMemo(() => items.filter(needsCaptain).sort(byScheduledAsc), [items]);
-  const openIssues = useMemo(() => items.filter(isOpenIssue).sort(byScheduledAsc), [items]);
+  // Excludes anything already flagged (isOpenIssue) — once the automated
+  // sweep has flagged a booking (e.g. its window fully expired with no
+  // captain), it belongs ONLY in "Flagged issues" below with that section's
+  // more accurate, more severe wording. Without this exclusion the exact
+  // same booking showed in BOTH sections at once with contradictory
+  // messages — "Starting now — assign immediately" right next to "window
+  // expired — needs action" for the same booking, which is exactly the
+  // confusing double-listing this line exists to prevent.
+  const newBookings = useMemo(() => items.filter((b) => needsCaptain(b) && !isOpenIssue(b)).sort(byPriorityThenScheduled), [items]);
+  const openIssues = useMemo(() => items.filter(isOpenIssue).sort(byPriorityThenScheduled), [items]);
   const lateStartBookings = useMemo(
     () => items.filter(startedLate).sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime()),
     [items]
@@ -199,6 +221,28 @@ export default function BookingQueuePage() {
     setDateTo,
   } = useBookingFilters(statusFiltered);
 
+  // Supports "jump straight to this one booking" links from elsewhere in
+  // the app (e.g. a booking row in a captain's profile) — ?highlight=<id>
+  // switches to the "All bookings" view and searches for that booking's
+  // own number, which narrows the table down to exactly that one row
+  // without needing any scroll-to-row machinery in the shared DataTable.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const highlightId = searchParams.get("highlight");
+    if (!highlightId || !items.length) return;
+    const target = items.find((b) => b.id === highlightId);
+    if (!target) return;
+    setView("all");
+    setStatusFilter("");
+    setSearch(target.booking_number);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("highlight");
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, searchParams]);
+
   const assignMutation = useMutation({
     mutationFn: () =>
       isReassign ? bookingApi.reassignCaptain(assigningBooking!.id, captainId) : bookingApi.assignCaptain(assigningBooking!.id, captainId),
@@ -212,16 +256,48 @@ export default function BookingQueuePage() {
   });
 
   const rescheduleMutation = useMutation({
-    mutationFn: () => bookingApi.reschedule(reschedulingBooking!.id, newDate, newTime),
+    mutationFn: () => bookingApi.reschedule(reschedulingBooking!.id, newDate, newSlot),
     onSuccess: () => {
       invalidate();
       setReschedulingBooking(null);
       setNewDate("");
-      setNewTime("");
+      setNewSlot("");
       setError("");
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
+
+  const priorityMutation = useMutation({
+    mutationFn: ({ id, priority }: { id: string; priority: "high" | "medium" | "low" }) => bookingApi.updatePriority(id, priority),
+    onSuccess: invalidate,
+  });
+
+  const prioritySelector = (b: Booking) => (
+    <div className="flex gap-1">
+      {PRIORITY_OPTIONS.map((p) => (
+        <button
+          key={p}
+          type="button"
+          disabled={priorityMutation.isPending}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (p !== b.priority) priorityMutation.mutate({ id: b.id, priority: p });
+          }}
+          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors disabled:opacity-50 ${
+            b.priority === p
+              ? p === "high"
+                ? "bg-[var(--color-error)] text-white"
+                : p === "medium"
+                  ? "bg-amber-500 text-white"
+                  : "bg-gray-400 text-white"
+              : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+          }`}
+        >
+          {p}
+        </button>
+      ))}
+    </div>
+  );
 
   const resolveMutation = useMutation({
     mutationFn: () => bookingApi.resolveIssue(resolvingBooking!.id, resolveNote || undefined),
@@ -255,8 +331,11 @@ export default function BookingQueuePage() {
   const canReassign = (b: Booking) => b.status === "assigned";
   const canCancel = (b: Booking) => !["completed", "cancelled"].includes(b.status);
 
+  // Sits inside a row that now opens the booking detail drawer on click
+  // (DataTable's onRowClick) — stopPropagation here so clicking any of
+  // these action buttons doesn't ALSO trigger that row-open behavior.
   const bookingActions = (b: Booking) => (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
       {needsCaptain(b) && (
         <Button size="sm" onClick={() => openAssign(b, false)}>
           Assign captain
@@ -282,9 +361,6 @@ export default function BookingQueuePage() {
           <Ban className="h-3.5 w-3.5" /> Cancel
         </Button>
       )}
-      <Button size="sm" variant="ghost" onClick={() => navigate(`/manager/bookings/${b.id}`)}>
-        <Eye className="h-3.5 w-3.5" />
-      </Button>
     </div>
   );
 
@@ -349,7 +425,11 @@ export default function BookingQueuePage() {
                   const minutesLeft = minutesUntilSlotStart(b.scheduled_date, b.scheduled_slot);
                   const urgent = isUrgentUnassigned(b);
                   return (
-                  <Card key={b.id} className={urgent ? "border-l-4 border-l-[var(--color-error)] bg-red-50/40 p-4" : "p-4"}>
+                  <Card
+                    key={b.id}
+                    className={`cursor-pointer transition-shadow hover:shadow-[var(--shadow-lifted)] ${urgent ? "border-l-4 border-l-[var(--color-error)] bg-red-50/40 p-4" : "p-4"}`}
+                    onClick={() => setSelectedBooking(b)}
+                  >
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
@@ -357,12 +437,19 @@ export default function BookingQueuePage() {
                           {format(b.scheduled_date)} · {b.scheduled_slot}
                         </p>
                       </div>
-                      <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">₹{b.total_amount}</span>
+                      <div className="flex flex-col items-end gap-1.5">
+                        <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">₹{b.total_amount}</span>
+                        {prioritySelector(b)}
+                      </div>
                     </div>
                     {urgent && (
                       <div className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-error)]">
                         <AlertTriangle className="h-3.5 w-3.5" />
-                        {minutesLeft <= 0 ? "Starting now — assign immediately" : `Starts in ${Math.round(minutesLeft)} min — assign now`}
+                        {minutesLeft < -60
+                          ? "Already past its scheduled time — assign urgently or reschedule"
+                          : minutesLeft <= 0
+                            ? "Starting now — assign immediately"
+                            : `Starts in ${Math.round(minutesLeft)} min — assign now`}
                       </div>
                     )}
                     <div className="mt-2 space-y-1 text-sm text-[var(--color-text-secondary)]">
@@ -397,7 +484,11 @@ export default function BookingQueuePage() {
             ) : (
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 {openIssues.map((b) => (
-                  <Card key={b.id} className="border-l-4 border-l-amber-500 bg-amber-50/40 p-4">
+                  <Card
+                    key={b.id}
+                    className="cursor-pointer border-l-4 border-l-amber-500 bg-amber-50/40 p-4 transition-shadow hover:shadow-[var(--shadow-lifted)]"
+                    onClick={() => setSelectedBooking(b)}
+                  >
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
@@ -405,7 +496,10 @@ export default function BookingQueuePage() {
                           {format(b.scheduled_date)} · {b.scheduled_slot} · Captain: {captainName(b.captain_id)}
                         </p>
                       </div>
-                      <StatusBadge status={b.status} />
+                      <div className="flex flex-col items-end gap-1.5">
+                        <StatusBadge status={b.status} />
+                        {prioritySelector(b)}
+                      </div>
                     </div>
                     <div className="mt-2">
                       <WhatHappened booking={b} />
@@ -453,11 +547,12 @@ export default function BookingQueuePage() {
               {visibleLateStarts.map((b) => (
                 <Card
                   key={b.id}
-                  className={
+                  className={`cursor-pointer transition-shadow hover:shadow-[var(--shadow-lifted)] ${
                     b.captain_start_stage === "severely_late"
                       ? "border-l-4 border-l-[var(--color-error)] bg-red-50/40 p-4"
                       : "border-l-4 border-l-amber-500 bg-amber-50/40 p-4"
-                  }
+                  }`}
+                  onClick={() => setSelectedBooking(b)}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>
@@ -513,6 +608,7 @@ export default function BookingQueuePage() {
             isLoading={isLoading}
             data={filteredAll}
             emptyTitle="No bookings"
+            onRowClick={(b) => setSelectedBooking(b)}
             columns={[
               { header: "Booking #", accessor: (b) => <span className="font-mono-num">{b.booking_number}</span> },
               { header: "Customer", accessor: (b) => b.customer_name || "—" },
@@ -557,17 +653,9 @@ export default function BookingQueuePage() {
           again afterward.
         </p>
         <div className="space-y-4">
-          <Input label="New date" type="date" min={todayIST()} value={newDate} onChange={(e) => setNewDate(e.target.value)} />
-          <Input
-            label="New time"
-            type="time"
-            min={center?.working_hours_start}
-            max={center?.working_hours_end}
-            value={newTime}
-            onChange={(e) => setNewTime(e.target.value)}
-          />
+          <SlotPicker serviceCenterId={reschedulingBooking?.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-          <Button className="w-full" disabled={!newDate || !newTime} isLoading={rescheduleMutation.isPending} onClick={() => rescheduleMutation.mutate()}>
+          <Button className="w-full" disabled={!newDate || !newSlot} isLoading={rescheduleMutation.isPending} onClick={() => rescheduleMutation.mutate()}>
             Confirm reschedule
           </Button>
         </div>
@@ -608,6 +696,13 @@ export default function BookingQueuePage() {
           </Button>
         </div>
       </Modal>
+
+      <BookingDetailDrawer
+        booking={selectedBooking}
+        onClose={() => setSelectedBooking(null)}
+        captainName={selectedBooking ? captainName(selectedBooking.captain_id) : null}
+        centerName={center?.name}
+      />
     </div>
   );
 }

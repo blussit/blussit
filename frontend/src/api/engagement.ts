@@ -7,9 +7,9 @@ export const subscriptionApi = {
   mySubscriptions: () => apiClient.get<ApiSuccess<UserSubscription[]>>("/subscriptions/my").then((r) => r.data.data),
   forCustomer: (customerId: string) =>
     apiClient.get<ApiSuccess<UserSubscription[]>>(`/subscriptions/customer/${customerId}`).then((r) => r.data.data),
-  assign: (payload: { customer_id: string; plan_id: string; vehicle_id: string; auto_renew?: boolean }) =>
+  assign: (payload: { customer_id: string; plan_id: string; auto_renew?: boolean }) =>
     apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions/assign", payload).then((r) => r.data.data),
-  subscribe: (payload: { plan_id: string; vehicle_id?: string; auto_renew?: boolean }) =>
+  subscribe: (payload: { plan_id: string; auto_renew?: boolean }) =>
     apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions", payload).then((r) => r.data.data),
   cancel: (id: string) => apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/cancel`).then((r) => r.data.data),
   upgrade: (id: string, newPlanId: string) =>
@@ -31,12 +31,24 @@ export const couponApi = {
 export const reviewApi = {
   listPublic: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Review>>("/reviews", { params }).then((r) => r.data),
-  create: (payload: { booking_id: string; rating: number; comment?: string }) =>
+  mine: () => apiClient.get<ApiSuccess<Review[]>>("/reviews/my").then((r) => r.data.data),
+  create: (payload: { booking_id: string; captain_rating: number; captain_comment?: string; service_rating: number; service_comment?: string }) =>
     apiClient.post<ApiSuccess<Review>>("/reviews", payload).then((r) => r.data.data),
+  update: (id: string, payload: { captain_rating?: number; captain_comment?: string; service_rating?: number; service_comment?: string }) =>
+    apiClient.put<ApiSuccess<Review>>(`/reviews/${id}`, payload).then((r) => r.data.data),
+  remove: (id: string) => apiClient.delete(`/reviews/${id}`).then((r) => r.data),
   captainSummary: (captainId: string) =>
     apiClient.get<ApiSuccess<{ avg_rating: number; count: number }>>(`/reviews/captain/${captainId}/summary`).then((r) => r.data.data),
   captainReviews: (captainId: string) =>
     apiClient.get<ApiSuccess<Review[]>>(`/reviews/captain/${captainId}`).then((r) => r.data.data),
+  forBooking: (bookingId: string) => apiClient.get<ApiSuccess<Review | null>>(`/reviews/booking/${bookingId}`).then((r) => r.data.data),
+  // Denormalized (customer/captain/service-center names resolved) —
+  // Section 12's Reviews page for admin (all centers) / manager (own
+  // center only, backend-enforced).
+  forCenter: (serviceCenterId: string, params?: { page?: number; page_size?: number }) =>
+    apiClient.get<ApiPaginated<Review>>(`/reviews/center/${serviceCenterId}`, { params }).then((r) => r.data),
+  forAdmin: (params?: { page?: number; page_size?: number; include_deleted?: boolean }) =>
+    apiClient.get<ApiPaginated<Review>>("/reviews/admin/all", { params }).then((r) => r.data),
 };
 
 export const notificationApi = {
@@ -47,7 +59,7 @@ export const notificationApi = {
 };
 
 export const complaintApi = {
-  create: (payload: { booking_id?: string; subject: string; description: string; priority?: string }) =>
+  create: (payload: { booking_id: string; subject: string; description: string; priority?: string }) =>
     apiClient.post<ApiSuccess<Complaint>>("/complaints", payload).then((r) => r.data.data),
   mine: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Complaint>>("/complaints/my", { params }).then((r) => r.data),
@@ -57,4 +69,6 @@ export const complaintApi = {
     apiClient.get<ApiPaginated<Complaint>>("/complaints", { params }).then((r) => r.data),
   update: (id: string, payload: { status?: string; priority?: string; resolution_note?: string }) =>
     apiClient.put<ApiSuccess<Complaint>>(`/complaints/${id}`, payload).then((r) => r.data.data),
+  reply: (id: string, payload: { message: string; status?: string }) =>
+    apiClient.post<ApiSuccess<Complaint>>(`/complaints/${id}/reply`, payload).then((r) => r.data.data),
 };

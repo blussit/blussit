@@ -1,9 +1,8 @@
 """
-Authentication business logic. OTP delivery is a placeholder in Phase 1
-(no SMS/WhatsApp provider is wired up yet) — `_generate_otp` simply
-stores a fixed-format OTP against the identifier so the flow can be
-tested end-to-end and swapped for a real provider later without
-touching the API surface.
+Authentication business logic. OTP delivery is real — every OTP and
+password-reset temp password goes out over WhatsApp (see WhatsAppService),
+with a safe log-only fallback when no WhatsApp credentials are configured
+(see get_whatsapp_provider) so this all still works end-to-end in dev/test.
 """
 import random
 import string
@@ -11,11 +10,12 @@ from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import BadRequestException, ConflictException, UnauthorizedException
+from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, PhoneNotVerifiedException, UnauthorizedException
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.models.enums import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest, StaffCreateRequest, UserPublic
+from app.services.whatsapp_service import WhatsAppService
 
 
 class AuthService:
@@ -23,6 +23,7 @@ class AuthService:
         self.db = db
         self.users = UserRepository(db)
         self.otp_store = db["otp_requests"]
+        self.whatsapp = WhatsAppService(db)
 
     async def register_customer(self, payload: RegisterRequest) -> dict:
         if payload.email and await self.users.find_by_email(payload.email):
@@ -124,9 +125,36 @@ class AuthService:
             raise BadRequestException("Current password is incorrect")
         await self.users.update_by_id(user_id, {"password_hash": hash_password(new_password), "must_change_password": False})
 
-    async def request_otp(self, identifier: str) -> str:
-        """Phase 1 placeholder: generates and stores an OTP, to be delivered
-        via SMS/WhatsApp once those integrations land in Phase 2."""
+    _OTP_RESEND_COOLDOWN_SECONDS = 30
+    _OTP_MAX_ATTEMPTS = 5
+
+    async def request_otp(self, identifier: str, purpose: str = "verification") -> None:
+        """Generates an OTP and sends it via WhatsApp to the phone on file
+        for this identifier (email or phone both resolve to the same
+        account's real phone number — WhatsApp is the only delivery
+        channel this app has, so that's where every OTP goes regardless of
+        which identifier the caller typed). Raises if the account has no
+        phone number at all, or if a code was just sent (cooldown) — never
+        returns the code itself; callers must not echo it back to the
+        client (that was Phase 1's placeholder and is exactly the security
+        hole real delivery closes)."""
+        user = await self.users.find_by_identifier(identifier)
+        if not user:
+            raise NotFoundException("No account found for this identifier")
+        phone = user.get("phone")
+        if not phone:
+            raise BadRequestException("This account has no phone number on file to send a verification code to.")
+
+        existing = await self.otp_store.find_one({"identifier": identifier})
+        now = datetime.now(timezone.utc)
+        if existing and existing.get("last_sent_at"):
+            last_sent = existing["last_sent_at"]
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            elapsed = (now - last_sent).total_seconds()
+            if elapsed < self._OTP_RESEND_COOLDOWN_SECONDS:
+                raise BadRequestException(f"Please wait {int(self._OTP_RESEND_COOLDOWN_SECONDS - elapsed)}s before requesting another code.")
+
         otp = "".join(random.choices(string.digits, k=6))
         await self.otp_store.update_one(
             {"identifier": identifier},
@@ -134,19 +162,32 @@ class AuthService:
                 "$set": {
                     "identifier": identifier,
                     "otp": otp,
-                    "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+                    "purpose": purpose,
+                    "expires_at": now + timedelta(minutes=10),
+                    "last_sent_at": now,
+                    "attempts": 0,
                     "verified": False,
                 }
             },
             upsert=True,
         )
-        return otp
+        sent = await self.whatsapp.send_otp(phone, otp, purpose)
+        if not sent:
+            raise BadRequestException("Couldn't send the verification code — please try again in a moment.")
 
     async def verify_otp(self, identifier: str, otp: str) -> bool:
         record = await self.otp_store.find_one({"identifier": identifier})
-        if not record or record["otp"] != otp:
+        if not record:
             return False
-        if record["expires_at"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        if record.get("attempts", 0) >= self._OTP_MAX_ATTEMPTS:
+            return False
+        expires_at = record["expires_at"]
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
+            return False
+        if record["otp"] != otp:
+            await self.otp_store.update_one({"identifier": identifier}, {"$inc": {"attempts": 1}})
             return False
         await self.otp_store.update_one({"identifier": identifier}, {"$set": {"verified": True}})
         return True
@@ -159,6 +200,53 @@ class AuthService:
         if not user:
             raise BadRequestException("No account found for this identifier")
         await self.users.update_by_id(str(user["_id"]), {"password_hash": hash_password(new_password), "must_change_password": False})
+
+    async def request_phone_verification(self, user_id: str) -> None:
+        """Gates a customer's first self-service booking/subscription
+        (Section: phone verification) — same underlying OTP store as
+        forgot-password, just keyed by the logged-in user's own phone
+        (not an arbitrary typed-in identifier) and a distinct purpose so
+        the WhatsApp message reads correctly."""
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        if not user.get("phone"):
+            raise BadRequestException("Add a phone number to your profile before verifying it.")
+        await self.request_otp(user["phone"], purpose="verification")
+
+    async def confirm_phone_verification(self, user_id: str, otp: str) -> dict:
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        if not user.get("phone"):
+            raise BadRequestException("This account has no phone number on file.")
+        if not await self.verify_otp(user["phone"], otp):
+            raise BadRequestException("Invalid or expired code.")
+        updated = await self.users.update_by_id(user_id, {"phone_verified": True})
+        return updated
+
+    async def staff_reset_customer_password(self, customer_id: str, actor_id: str) -> None:
+        """A manager/admin resetting a customer's forgotten password on
+        their behalf. Deliberately returns nothing — the generated temp
+        password is NEVER handed back in the API response, so it never
+        appears in the manager's UI, network tab, or logs on their side;
+        it goes straight to the customer's own WhatsApp instead. The
+        customer is forced through a real password change on next login
+        (must_change_password), same as any other temp-password account."""
+        customer = await self.users.find_by_id(customer_id)
+        if not customer:
+            raise NotFoundException("Customer not found")
+        if customer.get("role") != UserRole.CUSTOMER.value:
+            raise ForbiddenException("This action is only for customer accounts.")
+        phone = customer.get("phone")
+        if not phone:
+            raise BadRequestException("This customer has no phone number on file to send a temporary password to.")
+
+        temp_password = "".join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=10))
+        await self.users.update_by_id(customer_id, {"password_hash": hash_password(temp_password), "must_change_password": True})
+        sent = await self.whatsapp.send_temp_password(phone, temp_password)
+        if not sent:
+            raise BadRequestException("Password was reset, but the WhatsApp message couldn't be sent — ask the customer to use 'Forgot password' instead.")
 
     def _issue_tokens(self, user: dict) -> dict:
         access_token = create_access_token(

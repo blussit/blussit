@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LocateFixed, Pencil, Plus, Power } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { CalendarClock, LocateFixed, Pencil, Plus, Power } from "lucide-react";
 import { adminServiceCenterApi, adminUserApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { MapPicker } from "../../components/shared/MapPicker";
@@ -22,9 +23,11 @@ const emptyForm = {
   manager_id: "",
   working_hours_start: "08:00",
   working_hours_end: "20:00",
+  slot_duration_minutes: "",
 };
 
 export default function AdminServiceCentersPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
   const { data: managers } = useQuery({ queryKey: ["admin-managers"], queryFn: () => adminUserApi.list({ role: "manager", page: 1, page_size: 100 }) });
@@ -52,6 +55,7 @@ export default function AdminServiceCentersPage() {
     manager_id: form.manager_id || undefined,
     working_hours_start: form.working_hours_start,
     working_hours_end: form.working_hours_end,
+    slot_duration_minutes: form.slot_duration_minutes ? Number(form.slot_duration_minutes) : undefined,
   });
 
   const createMutation = useMutation({
@@ -101,6 +105,7 @@ export default function AdminServiceCentersPage() {
       manager_id: center.manager_id || "",
       working_hours_start: center.working_hours_start || "08:00",
       working_hours_end: center.working_hours_end || "20:00",
+      slot_duration_minutes: center.slot_duration_minutes != null ? String(center.slot_duration_minutes) : "",
     });
     setOpen(true);
   };
@@ -164,6 +169,9 @@ export default function AdminServiceCentersPage() {
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
                   <Pencil className="h-3.5 w-3.5" />
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => navigate(`/admin/service-centers/${c.id}/capacity`)}>
+                  <CalendarClock className="h-3.5 w-3.5" /> Capacity
                 </Button>
                 <Button
                   size="sm"
@@ -236,6 +244,36 @@ export default function AdminServiceCentersPage() {
             <Input label="Opens at" type="time" value={form.working_hours_start} onChange={(e) => setForm({ ...form, working_hours_start: e.target.value })} />
             <Input label="Closes at" type="time" value={form.working_hours_end} onChange={(e) => setForm({ ...form, working_hours_end: e.target.value })} />
           </div>
+
+          <div className="rounded-xl border border-dashed border-gray-300 p-4">
+            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Booking slot duration</p>
+            <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
+              Customers book into admin-generated slots (e.g. 09:00-12:00) within the hours above — this only controls how
+              long each slot is. Leave blank to use the platform-wide default from Pricing &amp; wallets.
+            </p>
+            <Input
+              label="Slot duration (min)"
+              type="number"
+              min={5}
+              placeholder="Platform default"
+              className="max-w-xs"
+              value={form.slot_duration_minutes}
+              onChange={(e) => setForm({ ...form, slot_duration_minutes: e.target.value })}
+            />
+            <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+              Daily booking limits, per-slot capacity, and capacity scheduling are all managed from this center's{" "}
+              <span className="font-medium text-[var(--color-text-primary)]">Capacity</span> page, not here.
+              {editing && (
+                <>
+                  {" "}
+                  <button type="button" className="font-medium text-[var(--color-primary)] hover:underline" onClick={() => navigate(`/admin/service-centers/${editing.id}/capacity`)}>
+                    Open Capacity →
+                  </button>
+                </>
+              )}
+            </p>
+          </div>
+
           <Select label="Manager" value={form.manager_id} onChange={(e) => setForm({ ...form, manager_id: e.target.value })}>
             <option value="">Not assigned</option>
             {(managers?.data || []).map((m) => (

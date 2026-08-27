@@ -5,6 +5,7 @@ import { addressApi } from "../../api/profile";
 import { Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
 import { MapPicker, type ResolvedAddress } from "../../components/shared/MapPicker";
 import { getErrorMessage } from "../../lib/api-client";
+import { useConfirm } from "../../context/ConfirmContext";
 
 const emptyForm = {
   label: "Home",
@@ -21,6 +22,7 @@ const emptyForm = {
 
 export default function AddressesPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data: addresses, isLoading } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -56,8 +58,8 @@ export default function AddressesPage() {
     onError: (err) => setDeleteError(getErrorMessage(err)),
   });
 
-  const handleDelete = (id: string, label: string) => {
-    if (!window.confirm(`Remove "${label}"? This can't be undone.`)) return;
+  const handleDelete = async (id: string, label: string) => {
+    if (!(await confirm({ title: `Remove "${label}"?`, message: "This can't be undone.", tone: "danger" }))) return;
     setDeleteError("");
     deleteMutation.mutate(id);
   };

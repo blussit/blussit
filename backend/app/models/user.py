@@ -21,6 +21,15 @@ class UserModel(BusinessRecordBase):
     referred_by: Optional[str] = None
     service_center_id: Optional[str] = None  # applicable to captain/manager
     last_login_at: Optional[datetime] = None
+    # Piggybacked off the real GPS captures that already happen during a
+    # captain's job (start_heading, before/after photos) — not a separate
+    # continuous location-tracking system (none exists in this app), so
+    # this is "as of their last active job action", not truly live. See
+    # BookingService's heading/photo capture methods for where it's set,
+    # and StaffDirectoryService.eligible_captains_for_booking for how a
+    # manager sees it at assignment time.
+    last_known_location: Optional[dict] = None  # {"latitude": float, "longitude": float}
+    last_location_at: Optional[datetime] = None
     email_verified: bool = False
     phone_verified: bool = False
     must_change_password: bool = False  # set when staff creates the account with a temp password

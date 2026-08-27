@@ -9,7 +9,6 @@ export default function ForgotPasswordPage() {
   const [step, setStep] = useState<"request" | "reset" | "done">("request");
   const [identifier, setIdentifier] = useState("");
   const [otp, setOtp] = useState("");
-  const [debugOtp, setDebugOtp] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -19,8 +18,7 @@ export default function ForgotPasswordPage() {
     setError("");
     setIsLoading(true);
     try {
-      const result = await authApi.forgotPassword(identifier);
-      setDebugOtp(result.debug_otp);
+      await authApi.forgotPassword(identifier);
       setStep("reset");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -72,13 +70,8 @@ export default function ForgotPasswordPage() {
             <>
               <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">Enter reset code</h1>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                We generated a code for <span className="font-medium">{identifier}</span>.
+                We sent a code to the WhatsApp number on file for <span className="font-medium">{identifier}</span>.
               </p>
-              {debugOtp && (
-                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                  Phase 1 preview (no SMS/WhatsApp provider yet) — your code is <strong>{debugOtp}</strong>
-                </p>
-              )}
               <form className="mt-6 space-y-4" onSubmit={resetPassword}>
                 <Input label="Reset code" value={otp} onChange={(e) => setOtp(e.target.value)} required />
                 <Input label="New password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />

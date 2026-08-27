@@ -11,6 +11,16 @@ class VehicleCreateRequest(BaseModel):
     color: Optional[str] = None
     image: Optional[str] = None
     is_default: bool = False
+    # Set true only after the customer has seen and confirmed the
+    # "already registered with another account" warning (see
+    # POST /vehicles/check-registration) — required to actually register a
+    # plate that's already on one other account. Never trusted alone: the
+    # backend re-counts at write time regardless of this flag.
+    acknowledge_shared_registration: bool = False
+
+
+class RegistrationCheckRequest(BaseModel):
+    registration_number: str = Field(min_length=3, max_length=20)
 
 
 class VehicleUpdateRequest(BaseModel):
@@ -21,6 +31,7 @@ class VehicleUpdateRequest(BaseModel):
     color: Optional[str] = None
     image: Optional[str] = None
     is_default: Optional[bool] = None
+    acknowledge_shared_registration: bool = False
 
 
 class AddressCreateRequest(BaseModel):

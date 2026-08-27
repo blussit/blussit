@@ -6,7 +6,9 @@ import { bookingApi } from "../../api/booking";
 import { reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { Button, Card, CardBody, CardHeader, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
-import { formatDateTime, todayIST } from "../../lib/date";
+import { SlotPicker } from "../../components/shared/SlotPicker";
+import { useLiveChannel } from "../../lib/socket";
+import { formatDateTime } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { ISSUE_LABELS } from "../../lib/constants";
 
@@ -20,17 +22,47 @@ export default function BookingDetailPage() {
   const [cancelReason, setCancelReason] = useState("");
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [newDate, setNewDate] = useState("");
-  const [newTime, setNewTime] = useState("");
+  const [newSlot, setNewSlot] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [rating, setRating] = useState(5);
-  const [comment, setComment] = useState("");
+  const [captainRating, setCaptainRating] = useState(5);
+  const [captainComment, setCaptainComment] = useState("");
+  const [serviceRating, setServiceRating] = useState(5);
+  const [serviceComment, setServiceComment] = useState("");
   const [error, setError] = useState("");
 
+  const bookingQueryKey = ["booking", id];
   const { data: booking, isLoading } = useQuery({
-    queryKey: ["booking", id],
+    queryKey: bookingQueryKey,
     queryFn: () => bookingApi.get(id as string),
     enabled: !!id,
+    // Live-pushed over "booking:{id}" below (status/assignment/priority
+    // changes) — this interval is the fallback for while the socket is
+    // reconnecting, not the primary way this page stays current.
+    refetchInterval: 45000,
   });
+
+  useLiveChannel(id ? `booking:${id}` : null, () => {
+    queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+  });
+
+  const { data: myReviews } = useQuery({ queryKey: ["my-reviews"], queryFn: reviewApi.mine, enabled: isCustomer });
+  const myReview = myReviews?.find((r) => r.booking_id === id);
+
+  const openReview = () => {
+    setError("");
+    if (myReview) {
+      setCaptainRating(myReview.captain_rating);
+      setCaptainComment(myReview.captain_comment || "");
+      setServiceRating(myReview.service_rating);
+      setServiceComment(myReview.service_comment || "");
+    } else {
+      setCaptainRating(5);
+      setCaptainComment("");
+      setServiceRating(5);
+      setServiceComment("");
+    }
+    setReviewOpen(true);
+  };
 
   const cancelMutation = useMutation({
     mutationFn: () => bookingApi.cancel(id as string, cancelReason),
@@ -43,21 +75,34 @@ export default function BookingDetailPage() {
   });
 
   const rescheduleMutation = useMutation({
-    mutationFn: () => bookingApi.reschedule(id as string, newDate, newTime),
+    mutationFn: () => bookingApi.reschedule(id as string, newDate, newSlot),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["booking", id] });
       setRescheduleOpen(false);
       setNewDate("");
-      setNewTime("");
+      setNewSlot("");
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
 
   const reviewMutation = useMutation({
-    mutationFn: () => reviewApi.create({ booking_id: id as string, rating, comment }),
+    mutationFn: () =>
+      myReview
+        ? reviewApi.update(myReview.id, { captain_rating: captainRating, captain_comment: captainComment, service_rating: serviceRating, service_comment: serviceComment })
+        : reviewApi.create({ booking_id: id as string, captain_rating: captainRating, captain_comment: captainComment, service_rating: serviceRating, service_comment: serviceComment }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["booking", id] });
+      queryClient.invalidateQueries({ queryKey: ["my-reviews"] });
       setReviewOpen(false);
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
+  const deleteReviewMutation = useMutation({
+    mutationFn: () => reviewApi.remove(myReview!.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["booking", id] });
+      queryClient.invalidateQueries({ queryKey: ["my-reviews"] });
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -260,10 +305,20 @@ export default function BookingDetailPage() {
             Cancel booking
           </Button>
         )}
-        {isCustomer && booking.status === "completed" && !booking.is_rated && (
-          <Button variant="outline" onClick={() => setReviewOpen(true)}>
+        {isCustomer && booking.status === "completed" && !myReview && (
+          <Button variant="outline" onClick={openReview}>
             <Star className="h-4 w-4" /> Rate this service
           </Button>
+        )}
+        {isCustomer && myReview && (
+          <>
+            <Button variant="outline" onClick={openReview}>
+              <Star className="h-4 w-4" /> Edit review
+            </Button>
+            <Button variant="ghost" isLoading={deleteReviewMutation.isPending} onClick={() => deleteReviewMutation.mutate()}>
+              Delete review
+            </Button>
+          </>
         )}
         {isCustomer && booking.status === "completed" && (
           <Button variant="outline" onClick={() => navigate("/app/book")}>
@@ -297,11 +352,10 @@ export default function BookingDetailPage() {
           <p className="text-sm text-[var(--color-text-secondary)]">
             This clears the current captain — you'll need a new one assigned to the new time.
           </p>
-          <Input label="New date" type="date" min={todayIST()} value={newDate} onChange={(e) => setNewDate(e.target.value)} />
-          <Input label="New time" type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} />
+          <SlotPicker serviceCenterId={booking.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
           <Button
             className="w-full"
-            disabled={!newDate || !newTime}
+            disabled={!newDate || !newSlot}
             isLoading={rescheduleMutation.isPending}
             onClick={() => rescheduleMutation.mutate()}
           >
@@ -310,18 +364,33 @@ export default function BookingDetailPage() {
         </div>
       </Modal>
 
-      <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} title="Rate your experience">
+      <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} title={myReview ? "Edit your review" : "Rate your experience"}>
         <div className="space-y-4">
-          <div className="flex gap-1">
-            {[1, 2, 3, 4, 5].map((r) => (
-              <button key={r} onClick={() => setRating(r)}>
-                <Star className={`h-7 w-7 ${r <= rating ? "fill-amber-400 text-amber-400" : "text-gray-200"}`} />
-              </button>
-            ))}
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Captain</p>
+            <div className="flex gap-1">
+              {[1, 2, 3, 4, 5].map((r) => (
+                <button key={r} onClick={() => setCaptainRating(r)}>
+                  <Star className={`h-7 w-7 ${r <= captainRating ? "fill-amber-400 text-amber-400" : "text-gray-200"}`} />
+                </button>
+              ))}
+            </div>
+            <Input className="mt-2" placeholder="Comment on your captain (optional)" value={captainComment} onChange={(e) => setCaptainComment(e.target.value)} />
           </div>
-          <Input label="Comment (optional)" value={comment} onChange={(e) => setComment(e.target.value)} />
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Service quality</p>
+            <div className="flex gap-1">
+              {[1, 2, 3, 4, 5].map((r) => (
+                <button key={r} onClick={() => setServiceRating(r)}>
+                  <Star className={`h-7 w-7 ${r <= serviceRating ? "fill-amber-400 text-amber-400" : "text-gray-200"}`} />
+                </button>
+              ))}
+            </div>
+            <Input className="mt-2" placeholder="Comment on the service (optional)" value={serviceComment} onChange={(e) => setServiceComment(e.target.value)} />
+          </div>
+          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button className="w-full" isLoading={reviewMutation.isPending} onClick={() => reviewMutation.mutate()}>
-            Submit review
+            {myReview ? "Save changes" : "Submit review"}
           </Button>
         </div>
       </Modal>

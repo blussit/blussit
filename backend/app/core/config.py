@@ -50,6 +50,25 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100
 
+    # WhatsApp messaging (OTPs, temp passwords, purchase/booking updates) —
+    # same provider-abstraction shape as STORAGE_PROVIDER above.
+    # "log" (default) never calls a real API: it writes every message to
+    # the whatsapp_outbox collection instead, so OTP/notification flows are
+    # fully testable with zero external dependency. Set WHATSAPP_PROVIDER
+    # to "meta_cloud" and fill in the two keys below to send for real via
+    # the official WhatsApp Cloud API (https://developers.facebook.com/docs/whatsapp/cloud-api) —
+    # see app/services/whatsapp_service.py. Even with meta_cloud selected,
+    # the factory silently falls back to "log" if either key is blank,
+    # so a half-configured .env can never crash a booking/OTP flow.
+    WHATSAPP_PROVIDER: str = "log"
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    # Not used for sending (messages only need the phone number id above) —
+    # kept for whenever an incoming-webhook receiver is added, which is
+    # scoped to the WABA rather than one phone number.
+    WHATSAPP_BUSINESS_ACCOUNT_ID: str = ""
+    WHATSAPP_API_VERSION: str = "v21.0"
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

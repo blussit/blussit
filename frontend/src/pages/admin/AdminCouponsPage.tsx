@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Power, Trash2 } from "lucide-react";
 import { adminCouponApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { Coupon } from "../../types";
 
@@ -17,6 +18,7 @@ const emptyForm = {
 
 export default function AdminCouponsPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data, isLoading } = useQuery({ queryKey: ["admin-coupons"], queryFn: () => adminCouponApi.list({ page: 1, page_size: 30 }) });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -85,8 +87,8 @@ export default function AdminCouponsPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete coupon "${c.code}"?`)) deleteMutation.mutate(c.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete coupon "${c.code}"?`, tone: "danger" })) deleteMutation.mutate(c.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />

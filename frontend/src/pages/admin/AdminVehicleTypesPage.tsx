@@ -1,21 +1,37 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Power, Trash2 } from "lucide-react";
+import { Pencil, Plus, Power, Star, Trash2 } from "lucide-react";
 import { vehicleTypeApi } from "../../api/catalog";
-import { adminVehicleTypeApi } from "../../api/admin";
+import { adminVehicleTypeApi, analyticsApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { VehicleTypeOption } from "../../types";
 
 const emptyForm = { name: "", display_order: 0, is_active: true };
 
+function Stat({ label, value, tone, icon }: { label: string; value: number | string; tone?: "error"; icon?: ReactNode }) {
+  return (
+    <div className="rounded-xl bg-gray-50 p-3">
+      <p className="text-xs text-[var(--color-text-secondary)]">{label}</p>
+      <p className={`mt-0.5 flex items-center gap-1 font-mono-num text-lg font-bold ${tone === "error" ? "text-[var(--color-error)]" : "text-[var(--color-text-primary)]"}`}>
+        {icon}
+        {value}
+      </p>
+    </div>
+  );
+}
+
 export default function AdminVehicleTypesPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data, isLoading } = useQuery({ queryKey: ["admin-vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
+  const { data: breakdown } = useQuery({ queryKey: ["vehicle-type-breakdown"], queryFn: () => analyticsApi.vehicleTypeBreakdown() });
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<VehicleTypeOption | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
+  const [statsFor, setStatsFor] = useState<VehicleTypeOption | null>(null);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["admin-vehicle-types"] });
@@ -82,6 +98,7 @@ export default function AdminVehicleTypesPage() {
         isLoading={isLoading}
         data={data || []}
         emptyTitle="No vehicle types yet"
+        onRowClick={(t) => setStatsFor(t)}
         columns={[
           { header: "Name", accessor: (t) => t.name },
           { header: "Order", accessor: (t) => t.display_order },
@@ -89,7 +106,7 @@ export default function AdminVehicleTypesPage() {
           {
             header: "",
             accessor: (t) => (
-              <div className="flex gap-2">
+              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
                 <Button size="sm" variant="outline" onClick={() => openEdit(t)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
@@ -100,8 +117,8 @@ export default function AdminVehicleTypesPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete "${t.name}"? Anything still restricted to it will need to be re-tagged.`)) deleteMutation.mutate(t.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete "${t.name}"?`, message: "Anything still restricted to it will need to be re-tagged.", tone: "danger" })) deleteMutation.mutate(t.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -111,6 +128,24 @@ export default function AdminVehicleTypesPage() {
           },
         ]}
       />
+
+      <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${statsFor.name} — bookings` : ""}>
+        {statsFor && (() => {
+          const s = breakdown?.find((b) => b.vehicle_type_id === statsFor.id);
+          if (!s) return <p className="text-sm text-[var(--color-text-secondary)]">No bookings for this vehicle type yet.</p>;
+          return (
+            <div className="grid grid-cols-2 gap-3">
+              <Stat label="Total bookings" value={s.total_bookings} />
+              <Stat label="Completed" value={s.completed_bookings} />
+              <Stat label="Delayed" value={s.delayed_count} tone={s.delayed_count > 0 ? "error" : undefined} />
+              <Stat label="Avg rating" value={s.avg_rating != null ? s.avg_rating.toFixed(1) : "—"} icon={<Star className="h-3.5 w-3.5 fill-[var(--color-secondary)] text-[var(--color-secondary)]" />} />
+              <Stat label="Avg service time" value={s.avg_service_minutes != null ? `${s.avg_service_minutes} min` : "—"} />
+              <Stat label="Avg travel time" value={s.avg_travel_minutes != null ? `${s.avg_travel_minutes} min` : "—"} />
+              <Stat label="Avg total job time" value={s.avg_total_minutes != null ? `${s.avg_total_minutes} min` : "—"} />
+            </div>
+          );
+        })()}
+      </Modal>
 
       <Modal open={open} onClose={closeModal} title={editing ? "Edit vehicle type" : "Add vehicle type"}>
         <form

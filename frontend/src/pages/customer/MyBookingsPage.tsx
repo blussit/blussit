@@ -64,19 +64,12 @@ export default function MyBookingsPage() {
         data={filtered}
         emptyTitle="No bookings found"
         emptyDescription="Try a different filter or book your first service."
+        onRowClick={(b) => navigate(`/app/bookings/${b.id}`)}
         columns={[
           { header: "Booking #", accessor: (b) => <span className="font-mono-num">{b.booking_number}</span> },
           { header: "Date", accessor: (b) => `${format(b.scheduled_date)} · ${b.scheduled_slot}` },
           { header: "Amount", accessor: (b) => <span className="font-mono-num">₹{b.total_amount}</span> },
           { header: "Status", accessor: (b) => <StatusBadge status={b.status} /> },
-          {
-            header: "",
-            accessor: (b) => (
-              <Button size="sm" variant="outline" onClick={() => navigate(`/app/bookings/${b.id}`)}>
-                View
-              </Button>
-            ),
-          },
         ]}
       />
     </div>

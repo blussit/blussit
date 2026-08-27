@@ -16,12 +16,13 @@ export default function AdminPricingPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [policyForm, setPolicyForm] = useState({
-    operating_start: "",
-    operating_end: "",
-    min_lead_minutes: "",
+    slot_duration_minutes: "",
+    slot_booking_cutoff_minutes: "",
+    delay_tolerance_minutes: "",
     captain_travel_buffer_minutes: "",
     photo_geofence_radius_m: "",
     late_start_grace_minutes: "",
+    captain_start_lockout_hours: "",
   });
   const [policySaved, setPolicySaved] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
@@ -55,12 +56,13 @@ export default function AdminPricingPage() {
   const savePolicyMutation = useMutation({
     mutationFn: () =>
       adminBookingPolicyApi.set({
-        operating_start: policyForm.operating_start || undefined,
-        operating_end: policyForm.operating_end || undefined,
-        min_lead_minutes: policyForm.min_lead_minutes ? Number(policyForm.min_lead_minutes) : undefined,
+        slot_duration_minutes: policyForm.slot_duration_minutes ? Number(policyForm.slot_duration_minutes) : undefined,
+        slot_booking_cutoff_minutes: policyForm.slot_booking_cutoff_minutes ? Number(policyForm.slot_booking_cutoff_minutes) : undefined,
+        delay_tolerance_minutes: policyForm.delay_tolerance_minutes ? Number(policyForm.delay_tolerance_minutes) : undefined,
         captain_travel_buffer_minutes: policyForm.captain_travel_buffer_minutes ? Number(policyForm.captain_travel_buffer_minutes) : undefined,
         photo_geofence_radius_m: policyForm.photo_geofence_radius_m ? Number(policyForm.photo_geofence_radius_m) : undefined,
         late_start_grace_minutes: policyForm.late_start_grace_minutes ? Number(policyForm.late_start_grace_minutes) : undefined,
+        captain_start_lockout_hours: policyForm.captain_start_lockout_hours ? Number(policyForm.captain_start_lockout_hours) : undefined,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["booking-policy"] });
@@ -131,34 +133,37 @@ export default function AdminPricingPage() {
         <CardBody>
           <h2 className="mb-1 font-semibold text-[var(--color-text-primary)]">Booking rules</h2>
           <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-            Controls what times customers can book, how far ahead captains must be scheduled, and when a proof photo gets
-            flagged for being too far from the address.
+            Slots are generated from each service center's own opening/closing hours (set per center) — the rules below are the
+            platform-wide defaults layered on top: how long each slot is, how close to a slot's end it can still be booked, how
+            far ahead captains must be scheduled, and when a proof photo or a running-long service gets flagged.
           </p>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input
-              label="Opens at"
-              type="time"
-              placeholder={policy?.operating_start}
-              value={policyForm.operating_start}
-              onChange={(e) => setPolicyForm({ ...policyForm, operating_start: e.target.value })}
-              hint={`Current: ${policy?.operating_start}`}
+              label="Default slot duration (minutes)"
+              type="number"
+              min={5}
+              placeholder={String(policy?.slot_duration_minutes ?? 0)}
+              value={policyForm.slot_duration_minutes}
+              onChange={(e) => setPolicyForm({ ...policyForm, slot_duration_minutes: e.target.value })}
+              hint={`Current: ${policy?.slot_duration_minutes} min — a center can override this with its own value`}
             />
             <Input
-              label="Closes at"
-              type="time"
-              placeholder={policy?.operating_end}
-              value={policyForm.operating_end}
-              onChange={(e) => setPolicyForm({ ...policyForm, operating_end: e.target.value })}
-              hint={`Current: ${policy?.operating_end}`}
-            />
-            <Input
-              label="Minimum lead time (minutes)"
+              label="Slot booking cutoff (minutes before slot end)"
               type="number"
               min={0}
-              placeholder={String(policy?.min_lead_minutes ?? 0)}
-              value={policyForm.min_lead_minutes}
-              onChange={(e) => setPolicyForm({ ...policyForm, min_lead_minutes: e.target.value })}
-              hint={`Current: ${policy?.min_lead_minutes} min`}
+              placeholder={String(policy?.slot_booking_cutoff_minutes ?? 0)}
+              value={policyForm.slot_booking_cutoff_minutes}
+              onChange={(e) => setPolicyForm({ ...policyForm, slot_booking_cutoff_minutes: e.target.value })}
+              hint={`Current: a slot stops being bookable ${policy?.slot_booking_cutoff_minutes} min before it ends`}
+            />
+            <Input
+              label="Delay tolerance (minutes)"
+              type="number"
+              min={0}
+              placeholder={String(policy?.delay_tolerance_minutes ?? 0)}
+              value={policyForm.delay_tolerance_minutes}
+              onChange={(e) => setPolicyForm({ ...policyForm, delay_tolerance_minutes: e.target.value })}
+              hint={`Current: a service is flagged as delayed once it runs ${policy?.delay_tolerance_minutes} min past its expected duration`}
             />
             <Input
               label="Captain travel buffer (minutes)"
@@ -186,6 +191,15 @@ export default function AdminPricingPage() {
               value={policyForm.late_start_grace_minutes}
               onChange={(e) => setPolicyForm({ ...policyForm, late_start_grace_minutes: e.target.value })}
               hint={`Current: ${policy?.late_start_grace_minutes} min past the slot before a late start is "severe"`}
+            />
+            <Input
+              label="Captain start lockout (hours)"
+              type="number"
+              min={1}
+              placeholder={String(policy?.captain_start_lockout_hours ?? 0)}
+              value={policyForm.captain_start_lockout_hours}
+              onChange={(e) => setPolicyForm({ ...policyForm, captain_start_lockout_hours: e.target.value })}
+              hint={`Current: ${policy?.captain_start_lockout_hours}h past the grace period before a captain can no longer start it — needs reschedule/reassign instead`}
             />
           </div>
           {policyError && <p className="mt-2 text-sm text-[var(--color-error)]">{policyError}</p>}

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Package, Pencil, Plus, Trash2 } from "lucide-react";
 import { inventoryApi } from "../../api/admin";
 import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { InventoryItem } from "../../types";
@@ -13,6 +14,7 @@ export default function ManagerInventoryPage() {
   const { user } = useAuth();
   const centerId = user?.service_center_id || "";
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<InventoryItem | null>(null);
   const [form, setForm] = useState(emptyForm);
@@ -111,8 +113,8 @@ export default function ManagerInventoryPage() {
                     size="sm"
                     variant="ghost"
                     isLoading={deleteMutation.isPending}
-                    onClick={() => {
-                      if (confirm(`Delete "${i.item_name}" from inventory?`)) deleteMutation.mutate(i.id);
+                    onClick={async () => {
+                      if (await confirm({ title: `Delete "${i.item_name}" from inventory?`, tone: "danger" })) deleteMutation.mutate(i.id);
                     }}
                   >
                     <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />

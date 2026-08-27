@@ -22,7 +22,18 @@ export interface User {
   profile_image?: string | null;
   service_center_id?: string | null;
   must_change_password?: boolean;
+  // Set once a customer completes phone-OTP verification (gates their
+  // first self-service booking/subscription) — see PhoneVerificationModal.
+  phone_verified?: boolean;
   created_at: string;
+  // Only ever populated for captains, and only by the manager/admin-scoped
+  // staff-directory endpoints (staffDirectoryApi.captainsForCenter) — see
+  // StaffDirectoryService.list_captains_for_center's docstring for why
+  // this isn't on the shared backend UserPublic projection. Absent
+  // (undefined) on every other User-shaped response in this app.
+  latitude?: number | null;
+  longitude?: number | null;
+  last_location_at?: string | null;
 }
 
 export interface Vehicle {
@@ -96,14 +107,78 @@ export interface ComboOffer {
 }
 
 export interface BookingPolicy {
+  // Legacy — no longer used to generate/validate booking slots (every
+  // service center has its own real working hours, which slots are
+  // always generated from). Kept only so old references don't break.
   operating_start: string;
   operating_end: string;
   min_lead_minutes: number;
-  slot_granularity_minutes: number;
+  slot_duration_minutes: number;
+  slot_booking_cutoff_minutes: number;
+  delay_tolerance_minutes: number;
   captain_travel_buffer_minutes: number;
   photo_geofence_radius_m: number;
   late_start_grace_minutes: number;
+  // How many hours past late_start_grace_minutes a captain can still be
+  // allowed to start an ASSIGNED booking at all — past this, start_heading
+  // is blocked outright and the booking needs a manager reschedule/reassign
+  // (see the backend's captain_missed_window flag).
+  captain_start_lockout_hours: number;
   wallet_gating_enabled: boolean;
+}
+
+// What the customer picks — see BookingService.available_slots. remaining
+// is only ever populated when status is "low" or "full"; never infer a
+// total capacity from any combination of these fields, the backend never
+// sends it.
+export interface SlotAvailability {
+  key: string;
+  start: string;
+  end: string;
+  status: "available" | "low" | "full";
+  remaining: number | null;
+}
+
+// Staff-facing — unlike SlotAvailability, this carries the real numbers.
+// See BookingService.admin_slot_capacity.
+export interface SlotCapacityDetail {
+  key: string;
+  start: string;
+  end: string;
+  capacity: number;
+  booked_count: number;
+  remaining: number;
+  is_closed: boolean;
+}
+
+export interface DailyCapacitySummary {
+  capacity: number;
+  booked_count: number;
+  remaining: number;
+}
+
+// See CapacityPolicyService — the effective-dated policy (daily max +
+// per-slot distribution) that a not-yet-touched date/slot starts out
+// with. Distinct from SlotCapacityDetail/DailyCapacitySummary above,
+// which are the actual per-date reservation counters.
+export interface CapacityPolicy {
+  max_bookings_per_day: number | null;
+  slot_distribution: Record<string, number>;
+}
+
+export interface CapacityPolicyChange extends CapacityPolicy {
+  id: string;
+  service_center_id: string;
+  effective_date: string;
+  note?: string | null;
+  created_at: string;
+  status?: "active" | "scheduled" | "past";
+}
+
+export interface CapacityPolicyOverview {
+  current: CapacityPolicy;
+  scheduled: CapacityPolicyChange | null;
+  slot_keys: string[];
 }
 
 export interface HomepageConfig {
@@ -156,6 +231,10 @@ export interface Booking {
   id: string;
   booking_number: string;
   customer_id: string;
+  // Only present on the response to a customer's OWN self-service
+  // POST /bookings (not on any other booking read) — the opaque ticket
+  // /thank-you redeems (see PurchaseConfirmationModel).
+  confirmation_token?: string;
   vehicle_id: string;
   address_id: string;
   service_center_id: string;
@@ -164,8 +243,13 @@ export interface Booking {
   subscription_id?: string | null;
   scheduled_date: string;
   scheduled_slot: string;
+  slot_start?: string | null;
+  slot_end?: string | null;
+  estimated_start_at?: string | null;
+  priority: "high" | "medium" | "low";
   duration_minutes?: number;
   actual_duration_minutes?: number | null;
+  delay_minutes?: number | null;
   status: BookingStatus;
   payment_status: string;
   payment_method: string;
@@ -203,6 +287,9 @@ export interface Booking {
   after_photo?: PhotoCapture | null;
   service_started_at?: string | null;
   completed_at?: string | null;
+  assigned_at?: string | null;
+  manager_notified_at?: string | null;
+  closed_at?: string | null;
   status_history?: { status: string; note?: string; created_at: string }[];
   // Denormalized onto the response for display — see BookingService._enrich_bookings.
   customer_name?: string | null;
@@ -290,7 +377,14 @@ export interface UserSubscription {
   id: string;
   customer_id: string;
   plan_id: string;
-  vehicle_id: string;
+  // Only on the response to a customer's own POST /subscriptions.
+  confirmation_token?: string;
+  plan_name?: string;
+  // No longer locked to one vehicle — eligibility is by vehicle TYPE (see
+  // plan.vehicle_types). Present (non-null) only on subscriptions created
+  // under the earlier vehicle-locked design; never treat it as
+  // authoritative for eligibility.
+  vehicle_id?: string | null;
   status: "active" | "expired" | "cancelled" | "paused";
   // Computed at read time — "expired" whenever end_date has passed, even if
   // the stored `status` field hasn't been lazily flipped yet (only actually
@@ -324,19 +418,37 @@ export interface ServiceCenter {
   contact_email?: string | null;
   working_hours_start?: string;
   working_hours_end?: string;
+  slot_duration_minutes?: number | null;
+  max_bookings_per_day?: number | null;
+  default_slot_capacity?: number | null;
   is_active: boolean;
+}
+
+export interface ComplaintReply {
+  author_id: string;
+  author_role: string;
+  message: string;
+  created_at: string;
 }
 
 export interface Complaint {
   id: string;
   customer_id: string;
+  // Optional only for complaints created before booking_id became
+  // mandatory — every complaint created going forward always has one.
   booking_id?: string | null;
   service_center_id?: string | null;
   subject: string;
   description: string;
   priority: "low" | "medium" | "high" | "urgent";
   status: "open" | "in_progress" | "resolved" | "closed";
+  resolution_note?: string | null;
+  replies?: ComplaintReply[];
   created_at: string;
+  // Enriched by the backend for listing/detail display — never sent by the client.
+  booking_number?: string | null;
+  customer_name?: string | null;
+  service_center_name?: string | null;
 }
 
 export interface Review {
@@ -344,9 +456,30 @@ export interface Review {
   booking_id: string;
   customer_id: string;
   captain_id?: string | null;
-  rating: number;
+  // Legacy — present only on reviews written before the captain/service
+  // split existed. Prefer captain_rating/service_rating below.
+  rating?: number | null;
   comment?: string | null;
+  captain_rating: number;
+  captain_comment?: string | null;
+  service_rating: number;
+  service_comment?: string | null;
+  original_review?: Record<string, unknown> | null;
+  edit_count?: number;
   created_at: string;
+  updated_at?: string;
+  is_deleted?: boolean;
+  service_center_id?: string | null;
+  // Denormalized by ReviewService._enrich — only populated on the admin/
+  // manager listing endpoints (list_all_for_admin, list_for_center), not
+  // on the customer's own reviewApi.mine().
+  customer_name?: string | null;
+  booking_number?: string | null;
+  service_names?: string[] | null;
+  combo_name?: string | null;
+  vehicle_type_id?: string | null;
+  captain_name?: string | null;
+  service_center_name?: string | null;
 }
 
 export interface Notification {

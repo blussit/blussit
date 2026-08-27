@@ -62,6 +62,12 @@ async def create_indexes() -> None:
     await db.users.create_index("service_center_id")
 
     await db.vehicles.create_index("owner_id")
+    # For the semi-unique-registration check (allow the same plate on up to
+    # 2 accounts) — plain, not unique, since duplicates up to 2 are
+    # intentionally allowed. Populated at write time on the normalized form
+    # (uppercased, spaces/hyphens stripped) so the count query is an index
+    # lookup, not a collection-wide normalize-and-scan.
+    await db.vehicles.create_index("registration_number_normalized")
     await db.addresses.create_index("owner_id")
 
     await db.bookings.create_index("customer_id")
@@ -79,8 +85,33 @@ async def create_indexes() -> None:
     await db.bookings.create_index([("customer_id", 1), ("created_at", -1)])
     await db.bookings.create_index([("captain_id", 1), ("scheduled_date", 1)])
     await db.bookings.create_index([("status", 1), ("created_at", -1)])
+    # DB-level duplicate-booking guard: a customer can't hold two ACTIVE
+    # bookings for the same vehicle in the same slot, no matter how a
+    # double-click/multi-tab/retry races the application-level check in
+    # BookingService._customer_conflict — MongoDB rejects the second insert
+    # outright (DuplicateKeyError), which create_booking translates into a
+    # clean BadRequestException. Partial: only active-status bookings are
+    # constrained, so a cancelled/completed one never blocks a fresh rebooking.
+    await db.bookings.create_index(
+        [("customer_id", 1), ("vehicle_id", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
+        unique=True,
+        partialFilterExpression={"status": {"$in": ["pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
+    )
 
     await db.booking_status_history.create_index("booking_id")
+
+    # Slot/daily capacity reservation counters — see
+    # app/models/booking.py's SlotCapacityModel/DailyCapacityModel and
+    # BookingService._reserve_slot_capacity. The unique index is what makes
+    # BaseRepository.get_or_init's concurrent-first-use race safe.
+    await db.slot_capacity.create_index([("service_center_id", 1), ("date", 1), ("slot_key", 1)], unique=True)
+    await db.daily_capacity.create_index([("service_center_id", 1), ("date", 1)], unique=True)
+
+    # Effective-dated capacity policy changes — see
+    # app/models/capacity_policy.py and CapacityPolicyService. Unique so
+    # re-scheduling the same future (or today's) date is naturally an
+    # edit-in-place, not a duplicate.
+    await db.capacity_policy_changes.create_index([("service_center_id", 1), ("effective_date", 1)], unique=True)
 
     await db.services.create_index("category_id")
     await db.services.create_index("slug", unique=True, sparse=True)
@@ -121,3 +152,13 @@ async def create_indexes() -> None:
 
     await db.service_centers.create_index([("location.latitude", 1), ("location.longitude", 1)])
     await db.addresses.create_index([("latitude", 1), ("longitude", 1)])
+
+    # Public /thank-you page tickets — token must be unique (it's the
+    # entire lookup key for an unauthenticated route), and a TTL index
+    # lets Mongo garbage-collect expired ones on its own rather than this
+    # collection growing forever.
+    await db.purchase_confirmations.create_index("token", unique=True)
+    await db.purchase_confirmations.create_index("expires_at", expireAfterSeconds=0)
+
+    await db.whatsapp_outbox.create_index("phone")
+    await db.whatsapp_outbox.create_index("created_at")

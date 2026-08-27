@@ -5,17 +5,21 @@ import { vehicleApi } from "../../api/profile";
 import { vehicleTypeApi } from "../../api/catalog";
 import { Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { useConfirm } from "../../context/ConfirmContext";
 
 const emptyForm = { vehicle_type: "", brand: "", model: "", registration_number: "", color: "", is_default: false };
 
 export default function VehiclesPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data: vehicles, isLoading } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
   const [deleteError, setDeleteError] = useState("");
+  const [sharedRegOpen, setSharedRegOpen] = useState(false);
+  const [checkingRegistration, setCheckingRegistration] = useState(false);
 
   // Default the form to the first admin-configured type once they've loaded
   // — there's no more hardcoded "car" to fall back to.
@@ -29,10 +33,11 @@ export default function VehiclesPage() {
   const typeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || "Vehicle";
 
   const createMutation = useMutation({
-    mutationFn: vehicleApi.create,
+    mutationFn: (acknowledge?: boolean) => vehicleApi.create({ ...form, acknowledge_shared_registration: acknowledge }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["vehicles"] });
       setOpen(false);
+      setSharedRegOpen(false);
       setForm((f) => ({ ...emptyForm, vehicle_type: f.vehicle_type }));
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -49,16 +54,28 @@ export default function VehiclesPage() {
     onError: (err) => setDeleteError(getErrorMessage(err)),
   });
 
-  const handleDelete = (id: string, label: string) => {
-    if (!window.confirm(`Remove ${label}? This can't be undone.`)) return;
+  const handleDelete = async (id: string, label: string) => {
+    if (!(await confirm({ title: `Remove ${label}?`, message: "This can't be undone.", tone: "danger" }))) return;
     setDeleteError("");
     deleteMutation.mutate(id);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    createMutation.mutate(form);
+    setCheckingRegistration(true);
+    try {
+      const check = await vehicleApi.checkRegistration(form.registration_number);
+      setCheckingRegistration(false);
+      if (check.already_registered) {
+        setSharedRegOpen(true);
+        return;
+      }
+      createMutation.mutate(undefined);
+    } catch (err) {
+      setCheckingRegistration(false);
+      setError(getErrorMessage(err));
+    }
   };
 
   return (
@@ -133,10 +150,28 @@ export default function VehiclesPage() {
             Set as default vehicle
           </label>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-          <Button type="submit" className="w-full" isLoading={createMutation.isPending}>
+          <Button type="submit" className="w-full" isLoading={checkingRegistration || createMutation.isPending}>
             Add vehicle
           </Button>
         </form>
+      </Modal>
+
+      <Modal open={sharedRegOpen} onClose={() => setSharedRegOpen(false)} title="Already registered elsewhere">
+        <div className="space-y-4">
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            This vehicle is already registered with another account. You can continue using this vehicle from that account, or
+            continue adding it to this account.
+          </p>
+          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+          <div className="flex gap-3">
+            <Button type="button" variant="outline" className="flex-1" onClick={() => setSharedRegOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" className="flex-1" isLoading={createMutation.isPending} onClick={() => createMutation.mutate(true)}>
+              Continue
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

@@ -60,3 +60,15 @@ class BadRequestException(AppException):
 
     def __init__(self, message: str = "Bad request", details: dict | None = None):
         super().__init__(message, details)
+
+
+class PhoneNotVerifiedException(ForbiddenException):
+    """Raised when a customer tries to book/subscribe for themselves
+    without ever having completed OTP phone verification. Deliberately a
+    distinct error_code (not just a ForbiddenException with a message) so
+    the frontend can detect this exact case and open the OTP modal instead
+    of showing a generic error banner — see PhoneVerificationModal.tsx."""
+    error_code = "PHONE_NOT_VERIFIED"
+
+    def __init__(self, message: str = "Please verify your phone number with an OTP before booking.", details: dict | None = None):
+        super().__init__(message, details)

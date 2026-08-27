@@ -5,6 +5,11 @@ import type { Booking } from "../types";
 // flag value here once, not in three separate files.
 export const ISSUE_LABELS: Record<string, string> = {
   captain_not_started: "Captain hasn't started — past scheduled time",
+  // Distinct from captain_not_started above: the window is now so far
+  // expired the captain can no longer even start it (see the backend's
+  // captain_start_lockout_hours) — this always needs a reschedule/reassign
+  // decision, not just a nudge.
+  captain_missed_window: "Missed its window — reschedule or reassign needed",
   captain_not_reached: "Never got a captain — window expired",
   captain_late_start: "Captain started late",
   captain_delay: "Taking unusually long on the way",

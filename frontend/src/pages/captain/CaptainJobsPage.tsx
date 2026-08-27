@@ -1,15 +1,26 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BadgeCheck, MapPin, ShieldAlert, Wrench } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { bookingPolicyApi } from "../../api/catalog";
+import { staffDirectoryApi } from "../../api/admin";
 import { getErrorMessage } from "../../lib/api-client";
-import { Button, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
+import { Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
 import { PhotoCapture, type CapturedPhoto } from "../../components/shared/PhotoCapture";
-import { JobCard, type JobAction } from "../../components/captain/JobCard";
+import { type JobAction } from "../../components/captain/JobCard";
+import { JobRow } from "../../components/captain/JobRow";
+import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { useBookingFilters } from "../../lib/useBookingFilters";
+import { useLiveChannel } from "../../lib/socket";
+import { useAuth } from "../../context/AuthContext";
 import type { Booking, BookingStatus } from "../../types";
+
+// How often a captain's device sends a location update while they have an
+// active job — frequent enough that a manager watching (CaptainPicker /
+// ManagerCaptainsPage's live map) sees real movement, sparse enough not to
+// drain a phone's battery or hammer the backend. Only ever runs while
+// ACTIVE_STATUSES below has at least one job — see the effect further down.
+const LOCATION_PING_INTERVAL_MS = 25000;
 
 type ModalKind = "heading" | "verify" | "before" | "after" | "cancel" | "report-risk" | null;
 
@@ -20,6 +31,7 @@ type ModalKind = "heading" | "verify" | "before" | "after" | "cancel" | "report-
 const ACTIVE_STATUSES: BookingStatus[] = ["assigned", "captain_on_the_way", "service_started"];
 
 export default function CaptainJobsPage() {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<string>("");
   const [activeJob, setActiveJob] = useState<Booking | null>(null);
@@ -29,14 +41,50 @@ export default function CaptainJobsPage() {
   const [riskNote, setRiskNote] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
+  const [detailJob, setDetailJob] = useState<Booking | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["my-jobs", status],
     queryFn: () => bookingApi.myJobs({ status: status || undefined, page: 1, page_size: 100 }),
   });
-  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["my-jobs"] });
+
+  // Live-pushed over "user:{captainId}" — new assignment, reassignment away,
+  // or a status/priority change on any of this captain's jobs. Independent
+  // of whatever status tab is currently selected below.
+  useLiveChannel(user ? `user:${user.id}` : null, invalidate);
+
+  // Unfiltered (not the `status`-filtered query above) so the location
+  // ping keeps running regardless of which tab the captain has open —
+  // whether they currently have ANY job in an "actively working" status is
+  // its own question from "what's currently displayed."
+  const { data: allJobsForPing } = useQuery({
+    queryKey: ["my-jobs-ping-check"],
+    queryFn: () => bookingApi.myJobs({ page: 1, page_size: 100 }),
+    refetchInterval: LOCATION_PING_INTERVAL_MS,
+  });
+  const hasActiveJob = (allJobsForPing?.data || []).some((j) => (ACTIVE_STATUSES as string[]).includes(j.status));
+
+  useEffect(() => {
+    if (!hasActiveJob || !navigator.geolocation) return;
+    const send = () => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          staffDirectoryApi.pingLocation(pos.coords.latitude, pos.coords.longitude).catch(() => {
+            // Best-effort background sender — a missed ping (no active job
+            // anymore by the time this lands, a flaky connection, geolocation
+            // denied mid-session) is never worth surfacing to the captain.
+          });
+        },
+        () => {},
+        { enableHighAccuracy: true, timeout: 15000 }
+      );
+    };
+    send(); // one immediately, so a manager sees a fresh position right away
+    const timer = setInterval(send, LOCATION_PING_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [hasActiveJob]);
   const closeModal = () => {
     setModalKind(null);
     setActiveJob(null);
@@ -106,6 +154,15 @@ export default function CaptainJobsPage() {
       closeModal();
     },
     onError: (e) => setActionError(getErrorMessage(e)),
+  });
+
+  // Lets a captain escalate a job they discover is more urgent than it
+  // looked (e.g. an upset customer, a time-sensitive request) — deliberately
+  // one-way (escalate to high, not a full priority editor) to keep the
+  // captain's own workflow simple; a manager still has full control.
+  const markUrgentMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.updatePriority(id, "high"),
+    onSuccess: invalidate,
   });
 
   const openHeadingModal = (job: Booking) => {
@@ -232,21 +289,22 @@ export default function CaptainJobsPage() {
           description={status === "completed" ? "Jobs you've completed will show up here." : "New bookings assigned to you will appear here."}
         />
       ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card className="overflow-hidden">
           {visibleJobs.map((job: Booking) => (
-            <JobCard
+            <JobRow
               key={job.id}
               job={job}
               action={actionFor(job)}
               canCancel={job.status === "assigned" || job.status === "captain_on_the_way"}
               canReportRisk={canReportRisk(job)}
-              showEarnings={!!policy?.wallet_gating_enabled}
               onAction={(kind) => (kind === "heading" ? openHeadingModal(job) : openActionModal(job, kind))}
               onCancel={() => openActionModal(job, "cancel")}
               onReportRisk={() => openActionModal(job, "report-risk")}
+              onMarkUrgent={() => markUrgentMutation.mutate(job.id)}
+              onOpenDetails={() => setDetailJob(job)}
             />
           ))}
-        </div>
+        </Card>
       )}
 
       {/* Heading confirmation */}
@@ -366,6 +424,8 @@ export default function CaptainJobsPage() {
           </Button>
         </div>
       </Modal>
+
+      <BookingDetailDrawer booking={detailJob} onClose={() => setDetailJob(null)} />
     </div>
   );
 }

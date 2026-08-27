@@ -29,6 +29,12 @@ class BookingStatus(str, Enum):
     RESCHEDULED = "rescheduled"
 
 
+class BookingPriority(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 class PaymentStatus(str, Enum):
     PENDING = "pending"
     PAID = "paid"

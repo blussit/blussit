@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Calendar, Car, Check, CheckCircle2, Clock, Gift, MapPin } from "lucide-react";
+import { Calendar, Car, Check, CheckCircle2, Gift, MapPin } from "lucide-react";
 import { vehicleApi, addressApi } from "../../api/profile";
-import { catalogApi, comboOfferApi, bookingPolicyApi, vehicleTypeApi } from "../../api/catalog";
+import { catalogApi, comboOfferApi, serviceCenterApi, vehicleTypeApi } from "../../api/catalog";
 import { bookingApi } from "../../api/booking";
 import { couponApi, subscriptionApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
@@ -12,14 +12,15 @@ import { MapPicker, type ResolvedAddress } from "../../components/shared/MapPick
 import { SubscriptionPicker } from "../../components/shared/SubscriptionPicker";
 import { AddressPicker } from "../../components/shared/AddressPicker";
 import { SubscriptionQuickBook } from "../../components/shared/SubscriptionQuickBook";
+import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
+import { SlotPicker } from "../../components/shared/SlotPicker";
 import { getErrorMessage } from "../../lib/api-client";
-import { todayIST } from "../../lib/date";
 import type { Address, ComboOffer, Service, VehicleType } from "../../types";
 
-const STEPS = ["Vehicle & Service", "Address", "Review & Pay"];
+const STEPS = ["Vehicle & Service", "Address & Time", "Review & Pay"];
 const STEP_HINTS = [
-  "Which vehicle, what service, and when.",
-  "Where should we come?",
+  "Which vehicle and what service.",
+  "Where and when should we come?",
   "Check the price and choose how to pay — including any subscription plan you own.",
 ];
 
@@ -34,12 +35,12 @@ export default function NewBookingPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [step, setStep] = useState(0);
+  const [verifyOpen, setVerifyOpen] = useState(false);
 
   const [serviceIds, setServiceIds] = useState<string[]>([]);
   const [comboId, setComboId] = useState<string | null>(null);
   const [date, setDate] = useState("");
-  const [time, setTime] = useState("");
-  const [timeError, setTimeError] = useState("");
+  const [slot, setSlot] = useState("");
 
   const [vehicleType, setVehicleType] = useState<VehicleType>("");
   const [carNumber, setCarNumber] = useState("");
@@ -66,7 +67,6 @@ export default function NewBookingPage() {
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState("");
 
-  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
   const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: addresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const { data: servicesData, isLoading: servicesLoading } = useQuery({
@@ -78,19 +78,33 @@ export default function NewBookingPage() {
   const { data: mySubscriptions } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: subscriptionPlans } = useQuery({ queryKey: ["subscription-plans-for-booking"], queryFn: () => subscriptionApi.plans(true) });
 
-  // The vehicle this booking will actually use — matches an existing vehicle
-  // by plate if one exists, otherwise this is a not-yet-created vehicle (the
-  // create-mutation below creates it at submit time). Subscription
-  // eligibility (below) is locked to one specific vehicle, so it needs this
-  // resolved id, not just "any active subscription with services left".
-  const resolvedVehicleId = vehicles?.find((v) => v.registration_number.toUpperCase() === carNumber.toUpperCase())?.id;
-  const eligibleSubscriptions = (mySubscriptions || []).filter(
-    (s) => s.effective_status === "active" && s.remaining_service_count > 0 && !!resolvedVehicleId && s.vehicle_id === resolvedVehicleId
-  );
-  // Every currently-usable subscription, independent of whatever vehicle is
-  // selected in the wizard below — the quick-book shortcut picks its own
-  // vehicle (whichever one the subscription is locked to), so it isn't
-  // gated on `resolvedVehicleId` the way the in-wizard picker above is.
+  // Slots are generated per service center, and which center applies is
+  // only knowable once we have an address — resolved by pincode the same
+  // way the backend's own routing does at booking-creation time (an exact
+  // nearest-by-coordinates match can differ in rare edge cases, but the
+  // backend's own resolution at submit time is always the authoritative
+  // one regardless of what's shown here).
+  const { data: matchedCenters } = useQuery({
+    queryKey: ["center-lookup", pincode],
+    queryFn: () => serviceCenterApi.lookupByPincode(pincode),
+    enabled: pincode.length >= 6,
+  });
+  const serviceCenterId = matchedCenters?.[0]?.id;
+
+  // Subscription eligibility is by vehicle TYPE now (plan.vehicle_types),
+  // not one locked-in vehicle — matches whatever type is currently
+  // selected for this booking, same rule the backend enforces at
+  // plan_consumption time.
+  const eligibleSubscriptions = (mySubscriptions || []).filter((s) => {
+    if (s.effective_status !== "active" || s.remaining_service_count <= 0) return false;
+    const plan = subscriptionPlans?.find((p) => p.id === s.plan_id);
+    return !plan?.vehicle_types?.length || plan.vehicle_types.includes(vehicleType);
+  });
+  // Every currently-usable subscription, independent of whatever vehicle
+  // type is selected in the wizard below — the quick-book shortcut lets the
+  // customer pick which of their matching-type vehicles to use, so it
+  // isn't gated on the wizard's current selection the way the picker
+  // above is.
   const allUsableSubscriptions = (mySubscriptions || []).filter((s) => s.effective_status === "active" && s.remaining_service_count > 0);
 
   useEffect(() => {
@@ -170,32 +184,6 @@ export default function NewBookingPage() {
   // whenever subscription_id is present, ignoring any coupon.
   const total = subscriptionId ? 0 : Math.max(subtotal - couponDiscount, 0);
 
-  // Client-side mirror of the server's scheduling rules — catches obvious mistakes
-  // immediately, but the backend re-validates authoritatively regardless.
-  //
-  // IST-anchored: every instant below is built from an explicit "+05:30"
-  // offset string, so the comparison is correct regardless of the viewer's
-  // browser timezone (the backend's now_ist()/to_ist() are always IST —
-  // comparing against browser-local Date arithmetic here would silently
-  // disagree with the backend for any non-IST browser). Date.now() is
-  // always a true UTC epoch value, so it needs no conversion.
-  useEffect(() => {
-    setTimeError("");
-    if (!policy || !date || !time) return;
-    const requestedMs = new Date(`${date}T${time}:00+05:30`).getTime();
-    const minAllowedMs = Date.now() + policy.min_lead_minutes * 60000;
-    if (requestedMs < minAllowedMs) {
-      setTimeError(`Please choose a time at least ${policy.min_lead_minutes} minutes from now.`);
-      return;
-    }
-    const windowStartMs = new Date(`${date}T${policy.operating_start}:00+05:30`).getTime();
-    const windowEndMs = new Date(`${date}T${policy.operating_end}:00+05:30`).getTime();
-    const requestedEndMs = requestedMs + totalDuration * 60000;
-    if (requestedMs < windowStartMs || requestedEndMs > windowEndMs) {
-      setTimeError(`Please choose a time between ${policy.operating_start} and ${policy.operating_end} that leaves room for a ${totalDuration}-minute service.`);
-    }
-  }, [policy, date, time, totalDuration]);
-
   const createMutation = useMutation({
     mutationFn: async () => {
       let vehicleId = vehicles?.find((v) => v.registration_number.toUpperCase() === carNumber.toUpperCase())?.id;
@@ -233,7 +221,7 @@ export default function NewBookingPage() {
         service_ids: selectedCombo ? undefined : serviceIds,
         combo_id: selectedCombo ? selectedCombo.id : undefined,
         scheduled_date: date,
-        scheduled_slot: time,
+        scheduled_slot: slot,
         subscription_id: subscriptionId || undefined,
         coupon_code: !subscriptionId && couponDiscount > 0 ? couponCode : undefined,
         customer_notes: notes || undefined,
@@ -243,7 +231,10 @@ export default function NewBookingPage() {
     },
     onSuccess: (booking) => {
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-      navigate(`/app/bookings/${booking.id}`);
+      // A fixed, opaque, single-purpose token (not the raw booking id) so
+      // the confirmation page can't be reached by guessing or bookmarking
+      // a URL — see PurchaseConfirmationModel / ThankYouPage.
+      navigate(`/thank-you?token=${booking.confirmation_token}`);
     },
     onError: (err) => setSubmitError(getErrorMessage(err)),
   });
@@ -271,9 +262,8 @@ export default function NewBookingPage() {
   };
 
   // Tapping a saved vehicle fills the plate/model/type fields exactly as
-  // stored, guaranteeing `resolvedVehicleId` above matches it — typing the
-  // plate by hand (the only option before this) silently broke subscription
-  // matching on the smallest typo, with no indication why.
+  // stored — setting the correct vehicleType is what actually drives
+  // subscription eligibility now (see eligibleSubscriptions above).
   const selectVehicle = (v: NonNullable<typeof vehicles>[number]) => {
     setVehicleType(v.vehicle_type);
     setCarNumber(v.registration_number);
@@ -287,10 +277,9 @@ export default function NewBookingPage() {
   // what made subscription-booking look like it didn't exist at all.
   const subscriptionHint = (() => {
     if (!mySubscriptions?.length || eligibleSubscriptions.length) return null;
-    if (!resolvedVehicleId) return "You have a subscription, but it's tied to a specific saved vehicle — pick that vehicle above (rather than typing a new plate) to use it here.";
-    const forThisVehicle = mySubscriptions.some((s) => s.vehicle_id === resolvedVehicleId);
-    if (!forThisVehicle) return "Your subscription is registered to a different vehicle — select that vehicle above to pay with it.";
-    return "Your subscription for this vehicle is expired or has no washes left.";
+    const usable = mySubscriptions.filter((s) => s.effective_status === "active" && s.remaining_service_count > 0);
+    if (!usable.length) return "Your subscription is expired or has no washes left.";
+    return "Your subscription doesn't cover this vehicle's type — switch to a matching vehicle above to pay with it.";
   })();
 
   const applyCoupon = async () => {
@@ -308,12 +297,10 @@ export default function NewBookingPage() {
 
   const hasSelection = selectedServices.length > 0 || !!selectedCombo;
   const stepValid = [
-    !!carNumber && hasSelection && !!date && !!time && !timeError,
-    !!addressLine && !!city && !!state && !!pincode,
+    !!carNumber && hasSelection,
+    !!addressLine && !!city && !!state && !!pincode && !!date && !!slot,
     true,
   ][step];
-
-  const todayStr = todayIST();
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -328,7 +315,6 @@ export default function NewBookingPage() {
         vehicles={vehicles}
         addresses={addresses}
         services={services}
-        policy={policy}
       />
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[220px_1fr_320px]">
@@ -468,26 +454,6 @@ export default function NewBookingPage() {
                   </div>
                 )}
               </div>
-
-              <div className="border-t border-gray-100 pt-5">
-                <p className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">When should we come?</p>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Input label="Select Date" type="date" min={todayStr} value={date} onChange={(e) => setDate(e.target.value)} required />
-                  {policy && (
-                    <Input
-                      label="Select Time"
-                      type="time"
-                      min={policy.operating_start}
-                      max={policy.operating_end}
-                      value={time}
-                      onChange={(e) => setTime(e.target.value)}
-                      hint={`Available ${policy.operating_start}–${policy.operating_end}, ${policy.min_lead_minutes}+ min from now`}
-                      required
-                    />
-                  )}
-                </div>
-                {timeError && <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-error)]"><Clock className="h-3 w-3" /> {timeError}</p>}
-              </div>
             </div>
           )}
 
@@ -559,6 +525,21 @@ export default function NewBookingPage() {
                 <Input label="City" value={city} onChange={(e) => setCity(e.target.value)} required />
                 <Input label="State" value={state} onChange={(e) => setState(e.target.value)} required />
                 <Input label="Pincode" value={pincode} onChange={(e) => setPincode(e.target.value)} required />
+              </div>
+
+              <div className="border-t border-gray-100 pt-5">
+                <p className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">When should we come?</p>
+                {pincode.length >= 6 && !serviceCenterId ? (
+                  <p className="text-sm text-[var(--color-error)]">Doorstep service isn't available in this area yet.</p>
+                ) : (
+                  <SlotPicker
+                    serviceCenterId={serviceCenterId}
+                    date={date}
+                    onDateChange={setDate}
+                    value={slot}
+                    onChange={setSlot}
+                  />
+                )}
               </div>
 
               <Input label="Notes (Optional)" placeholder="Any special instructions?" value={notes} onChange={(e) => setNotes(e.target.value)} />
@@ -671,11 +652,28 @@ export default function NewBookingPage() {
                 Continue
               </Button>
             ) : (
-              <Button isLoading={createMutation.isPending} onClick={() => createMutation.mutate()}>
+              <Button
+                isLoading={createMutation.isPending}
+                onClick={() => {
+                  // Checked client-side, BEFORE this multi-step mutation
+                  // starts creating a vehicle/address — retrying mid-flow
+                  // after a server-side 403 would risk re-creating a
+                  // vehicle/address that already succeeded on the first
+                  // attempt. Pre-empting here means the OTP gate never
+                  // interrupts a partially-completed submission.
+                  if (!user?.phone_verified) {
+                    setVerifyOpen(true);
+                    return;
+                  }
+                  createMutation.mutate();
+                }}
+              >
                 <CheckCircle2 className="h-4 w-4" /> Confirm Booking
               </Button>
             )}
           </div>
+
+          <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); createMutation.mutate(); }} />
         </Card>
 
         <Card className="h-fit p-6 lg:sticky lg:top-24">
@@ -697,8 +695,8 @@ export default function NewBookingPage() {
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Time</span>
-              <span className="font-medium text-[var(--color-text-primary)]">{time || "—"}</span>
+              <span className="text-[var(--color-text-secondary)]">Slot</span>
+              <span className="font-mono-num font-medium text-[var(--color-text-primary)]">{slot || "—"}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--color-text-secondary)]">Duration</span>

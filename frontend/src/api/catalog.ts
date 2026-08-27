@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { BookingPolicy, Category, ComboOffer, HomepageConfig, Service, ServiceCenter, VehicleTypeOption } from "../types";
+import type { BookingPolicy, Category, ComboOffer, HomepageConfig, Service, ServiceCenter, SlotAvailability, VehicleTypeOption } from "../types";
 
 export const catalogApi = {
   categories: (activeOnly = true) =>
@@ -33,6 +33,12 @@ export const homepageConfigApi = {
 export const serviceCenterApi = {
   lookupByPincode: (pincode: string) =>
     apiClient.get<ApiSuccess<ServiceCenter[]>>("/service-centers/lookup", { params: { pincode } }).then((r) => r.data.data),
+  // Never exposes raw capacity — see SlotAvailability. Short refetchInterval
+  // recommended at call sites since capacity can change while the picker
+  // is open (real-time availability = polling + an authoritative re-check
+  // at submit time, not a websocket push).
+  availableSlots: (centerId: string, date: string) =>
+    apiClient.get<ApiSuccess<SlotAvailability[]>>(`/service-centers/${centerId}/slots`, { params: { date } }).then((r) => r.data.data),
 };
 
 export const contentApi = {

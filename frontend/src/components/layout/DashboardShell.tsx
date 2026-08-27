@@ -7,6 +7,7 @@ import { notificationApi } from "../../api/engagement";
 import { useToast, type ToastTone } from "../../context/ToastContext";
 import { notificationTargetPath } from "../../lib/notifications";
 import { playNotificationChime } from "../../lib/notificationSound";
+import { useLiveChannel } from "../../lib/socket";
 import type { Notification } from "../../types";
 
 export interface NavItem {
@@ -49,20 +50,27 @@ export function DashboardShell({
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
 
+  const notifQueryKey = ["notifications", "unread"];
   const { data: notifData } = useQuery({
-    queryKey: ["notifications", "unread"],
+    queryKey: notifQueryKey,
     // Wide enough that a realistic burst (the reminder sweep can flag
     // several different bookings in one pass, or the tab was backgrounded
     // across a few poll ticks) never exceeds it — the "last seen" watermark
     // below advances past everything it fetched, so anything beyond this
     // page size would get silently marked seen without ever toasting.
     queryFn: () => notificationApi.list({ page: 1, page_size: 20 }),
-    refetchInterval: 7000,
+    // Live-pushed over the "user:{id}" WebSocket channel below — this is
+    // now just the fallback for while the socket is reconnecting.
+    refetchInterval: 30000,
     // Keep polling while the tab is in the background/unfocused — otherwise
     // React Query pauses the interval and a manager who's switched to
     // another tab would never actually get notified of anything until they
     // click back in, defeating the point of a system-level alert.
     refetchIntervalInBackground: true,
+  });
+
+  useLiveChannel(user ? `user:${user.id}` : null, () => {
+    queryClient.invalidateQueries({ queryKey: notifQueryKey });
   });
 
   // Ask once, quietly, on mount — works in most browsers. Safari (and some

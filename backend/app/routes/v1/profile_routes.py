@@ -6,6 +6,7 @@ from app.core.dependencies import CurrentUser, get_current_user, get_db
 from app.schemas.profile_schema import (
     AddressCreateRequest,
     AddressUpdateRequest,
+    RegistrationCheckRequest,
     VehicleCreateRequest,
     VehicleUpdateRequest,
 )
@@ -17,6 +18,18 @@ address_router = APIRouter(prefix="/addresses", tags=["Addresses"])
 @vehicle_router.get("")
 async def list_vehicles(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await VehicleController(db).list(current_user)
+
+
+@vehicle_router.post("/check-registration")
+async def check_vehicle_registration(
+    payload: RegistrationCheckRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Pre-check before actually adding a vehicle — lets the frontend show
+    the "already registered with another account — Continue/Cancel"
+    confirmation before submitting."""
+    return await VehicleController(db).check_registration(current_user, payload)
 
 
 @vehicle_router.post("")

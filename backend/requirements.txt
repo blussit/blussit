@@ -10,3 +10,13 @@ python-multipart==0.0.9
 python-dotenv==1.0.1
 email-validator==2.2.0
 bcrypt==4.0.1
+
+# Test suite (backend/tests/) — run with: pytest
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# HTTP+WebSocket smoke testing against a real running dev server (not
+# used by the app itself) — websockets also ships as a uvicorn[standard]
+# extra, listed explicitly here since it's imported directly too.
+httpx==0.28.1
+websockets==17.0.1

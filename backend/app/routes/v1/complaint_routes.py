@@ -13,7 +13,7 @@ from app.core.dependencies import (
     require_customer,
     require_manager_or_admin,
 )
-from app.schemas.complaint_schema import ComplaintCreateRequest, ComplaintUpdateRequest
+from app.schemas.complaint_schema import ComplaintCreateRequest, ComplaintReplyRequest, ComplaintUpdateRequest
 
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
 
@@ -48,3 +48,8 @@ async def list_all(status: Optional[str] = None, pagination: PaginationParams = 
 @router.put("/{complaint_id}", dependencies=[Depends(require_manager_or_admin)])
 async def update_complaint(complaint_id: str, payload: ComplaintUpdateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await ComplaintController(db).update(current_user, complaint_id, payload)
+
+
+@router.post("/{complaint_id}/reply", dependencies=[Depends(require_manager_or_admin)])
+async def reply_to_complaint(complaint_id: str, payload: ComplaintReplyRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await ComplaintController(db).reply(current_user, complaint_id, payload)

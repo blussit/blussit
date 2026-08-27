@@ -43,6 +43,15 @@ COMPUTED_INSTANT_KEYS = frozenset({
     # needs the same from_stored() treatment or it silently reproduces the
     # 5.5-hour display bug for restock timestamps.
     "last_restocked_at",
+    # BLUSSIT slot/capacity/timeline update — slot_start/slot_end are built
+    # via to_ist(...) at booking creation (see _resolve_slot_window),
+    # estimated_start_at via _resolve_estimated_start (also to_ist()-based),
+    # and assigned_at/manager_notified_at/closed_at/last_location_at are all
+    # now_ist() at write time — every one of them is aware-at-write-time and
+    # read back naive, exactly like heading_at/completed_at above.
+    "slot_start", "slot_end", "estimated_start_at",
+    "assigned_at", "manager_notified_at", "closed_at",
+    "last_location_at",
 })
 
 

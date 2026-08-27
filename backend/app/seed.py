@@ -137,6 +137,12 @@ async def seed() -> None:
                 "contact_email": "indore@doorstepvehiclecare.in",
                 "working_hours_start": "08:00",
                 "working_hours_end": "20:00",
+                # 3-hour admin slots (08-11, 11-14, 14-17, 17-20), 50/day
+                # split evenly across them by default — see
+                # app/utils/slots.py / BookingService._reserve_slot_capacity.
+                "slot_duration_minutes": 180,
+                "default_slot_capacity": 13,
+                "max_bookings_per_day": 50,
                 "is_active": True,
                 "is_deleted": False,
             }

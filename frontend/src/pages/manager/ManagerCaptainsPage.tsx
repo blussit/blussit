@@ -1,14 +1,18 @@
 import { useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Briefcase, Mail, Phone, Plus, Star, UserRound, UserX } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Briefcase, CalendarCheck, ChevronRight, Mail, Phone, Plus, Star, UserRound, UserX } from "lucide-react";
 import { adminUserApi, staffDirectoryApi } from "../../api/admin";
 import { bookingApi } from "../../api/booking";
 import { reviewApi } from "../../api/engagement";
 import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
+import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
-import { format } from "../../lib/date";
-import type { User } from "../../types";
+import { format, formatDateTime } from "../../lib/date";
+import type { Booking, Review, User } from "../../types";
+
+const ACTIVE_JOB_STATUSES = ["assigned", "captain_on_the_way", "service_started"];
 
 const emptyForm = { full_name: "", email: "", phone: "", password: "" };
 
@@ -32,6 +36,7 @@ export default function ManagerCaptainsPage() {
   const { user } = useAuth();
   const centerId = user?.service_center_id || "";
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
@@ -82,6 +87,18 @@ export default function ManagerCaptainsPage() {
   const captainBookings = (centerBookings?.data || [])
     .filter((b) => b.captain_id === detailFor?.id)
     .sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime());
+
+  // Keyed by booking_id so each booking row below can show its own review
+  // directly, rather than a separate disconnected reviews list — a manager
+  // looking at one booking shouldn't have to cross-reference two lists to
+  // see what the customer said about it.
+  const reviewsByBookingId = new Map((reviews || []).map((r) => [r.booking_id, r]));
+
+  const { data: attendance, isLoading: attendanceLoading } = useQuery({
+    queryKey: ["captain-attendance", detailFor?.id],
+    queryFn: () => staffDirectoryApi.attendance(detailFor!.id, { page: 1, page_size: 20 }),
+    enabled: !!detailFor,
+  });
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -174,8 +191,19 @@ export default function ManagerCaptainsPage() {
                   <Badge tone="neutral">
                     <Briefcase className="h-3 w-3" /> {perf?.total_jobs_completed ?? 0} completed
                   </Badge>
+                  {perf?.on_time_start_pct != null && (
+                    <Badge tone={perf.on_time_start_pct >= 80 ? "success" : "warning"}>{perf.on_time_start_pct}% on-time start</Badge>
+                  )}
+                  {!!perf?.delayed_jobs && <Badge tone="warning">{perf.delayed_jobs} delayed job(s)</Badge>}
+                  {!!perf?.repeat_complaints && <Badge tone="error">{perf.repeat_complaints} complaint(s)</Badge>}
                 </div>
                 {punctuality && <p className="mt-2 text-xs text-[var(--color-text-secondary)]">{punctuality}</p>}
+                {perf?.avg_service_minutes != null && (
+                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                    Avg service time: {perf.avg_service_minutes} min
+                    {perf.jobs_per_day != null ? ` · ${perf.jobs_per_day} jobs/day` : ""}
+                  </p>
+                )}
                 <p className="mt-3 text-xs font-medium text-[var(--color-primary)]">Click for full history →</p>
               </Card>
             );
@@ -250,8 +278,40 @@ export default function ManagerCaptainsPage() {
               </div>
             )}
 
+            {captainBookings.some((b) => ACTIVE_JOB_STATUSES.includes(b.status)) && (
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Live location</p>
+                <LiveCaptainMap captainId={live.id} initialLatitude={live.latitude} initialLongitude={live.longitude} initialCapturedAt={live.last_location_at} />
+              </div>
+            )}
+
             <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Booking history</p>
+              <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+                <CalendarCheck className="h-3.5 w-3.5" /> Attendance
+              </p>
+              {attendanceLoading ? (
+                <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
+              ) : !attendance?.data.length ? (
+                <p className="text-sm text-[var(--color-text-secondary)]">No check-ins recorded yet.</p>
+              ) : (
+                <div className="max-h-40 space-y-1.5 overflow-y-auto">
+                  {attendance.data.map((a) => (
+                    <div key={a.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 p-2.5 text-sm">
+                      <span className="font-medium text-[var(--color-text-primary)]">{format(a.attendance_date)}</span>
+                      <span className="text-xs text-[var(--color-text-secondary)]">
+                        In: {a.check_in_time ? formatDateTime(a.check_in_time).split(",")[1]?.trim() : "—"}
+                        {" · "}
+                        Out: {a.check_out_time ? formatDateTime(a.check_out_time).split(",")[1]?.trim() : "still on duty"}
+                      </span>
+                      <Badge tone={a.status === "present" ? "success" : "neutral"}>{a.status}</Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Bookings & reviews</p>
               {/* Counts come from the captain's own performance aggregation
                   (all-time, authoritative) rather than re-deriving them from
                   the itemized list below, which is capped to this center's
@@ -265,53 +325,14 @@ export default function ManagerCaptainsPage() {
                   ))}
                 </div>
               )}
-              {bookingsLoading ? (
+              {bookingsLoading || reviewsLoading ? (
                 <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
               ) : !captainBookings.length ? (
                 <p className="text-sm text-[var(--color-text-secondary)]">No bookings yet.</p>
               ) : (
-                <>
-                  <div className="max-h-60 space-y-2 overflow-y-auto">
-                    {captainBookings.map((b) => (
-                      <div key={b.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 p-3 text-sm">
-                        <div>
-                          <p className="font-mono-num font-medium text-[var(--color-text-primary)]">{b.booking_number}</p>
-                          <p className="text-xs text-[var(--color-text-secondary)]">
-                            {format(b.scheduled_date)} · {b.scheduled_slot}
-                            {b.customer_name ? ` · ${b.customer_name}` : ""}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono-num text-[var(--color-text-secondary)]">₹{b.total_amount}</span>
-                          <StatusBadge status={b.status} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Reviews</p>
-              {reviewsLoading ? (
-                <p className="text-sm text-[var(--color-text-secondary)]">Loading reviews…</p>
-              ) : !reviews?.length ? (
-                <p className="text-sm text-[var(--color-text-secondary)]">No reviews yet.</p>
-              ) : (
-                <div className="max-h-60 space-y-3 overflow-y-auto">
-                  {reviews.map((r) => (
-                    <div key={r.id} className="rounded-lg border border-gray-100 p-3">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-0.5">
-                          {Array.from({ length: 5 }).map((_, i) => (
-                            <Star key={i} className={`h-3.5 w-3.5 ${i < r.rating ? "fill-[var(--color-secondary)] text-[var(--color-secondary)]" : "text-gray-200"}`} />
-                          ))}
-                        </div>
-                        <span className="text-xs text-[var(--color-text-secondary)]">{format(r.created_at)}</span>
-                      </div>
-                      {r.comment && <p className="mt-1.5 text-sm text-[var(--color-text-primary)]">{r.comment}</p>}
-                    </div>
+                <div className="max-h-96 space-y-2 overflow-y-auto">
+                  {captainBookings.map((b) => (
+                    <BookingWithReview key={b.id} booking={b} review={reviewsByBookingId.get(b.id)} onOpen={() => navigate(`/manager/bookings?highlight=${b.id}`)} />
                   ))}
                 </div>
               )}
@@ -321,5 +342,43 @@ export default function ManagerCaptainsPage() {
         })()}
       </Modal>
     </div>
+  );
+}
+
+function BookingWithReview({ booking, review, onOpen }: { booking: Booking; review: Review | undefined; onOpen: () => void }) {
+  const rating = review ? review.captain_rating ?? review.rating ?? 0 : null;
+  const comment = review?.captain_comment ?? review?.comment;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="block w-full rounded-lg border border-gray-100 p-3 text-left text-sm transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-primary-light)]/30"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-mono-num font-medium text-[var(--color-text-primary)]">{booking.booking_number}</p>
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            {format(booking.scheduled_date)} · {booking.scheduled_slot}
+            {booking.customer_name ? ` · ${booking.customer_name}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="font-mono-num text-[var(--color-text-secondary)]">₹{booking.total_amount}</span>
+          <StatusBadge status={booking.status} />
+          <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
+        </div>
+      </div>
+      {review && rating != null && (
+        <div className="mt-2 border-t border-gray-100 pt-2">
+          <div className="flex items-center gap-0.5">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Star key={i} className={`h-3 w-3 ${i < rating ? "fill-[var(--color-secondary)] text-[var(--color-secondary)]" : "text-gray-200"}`} />
+            ))}
+            <span className="ml-1.5 text-xs text-[var(--color-text-secondary)]">Customer review</span>
+          </div>
+          {comment && <p className="mt-1 text-xs text-[var(--color-text-primary)]">{comment}</p>}
+        </div>
+      )}
+    </button>
   );
 }

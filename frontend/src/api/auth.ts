@@ -20,9 +20,25 @@ export const authApi = {
   changePassword: (payload: { current_password: string; new_password: string }) =>
     apiClient.post<ApiSuccess<null>>("/auth/change-password", payload).then((r) => r.data),
 
+  // The OTP itself is never in this response — it's sent over WhatsApp
+  // only (see backend AuthController.forgot_password).
   forgotPassword: (identifier: string) =>
-    apiClient.post<ApiSuccess<{ otp_sent: boolean; debug_otp: string }>>("/auth/forgot-password", { identifier }).then((r) => r.data.data),
+    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/forgot-password", { identifier }).then((r) => r.data.data),
 
   resetPassword: (payload: { identifier: string; otp: string; new_password: string }) =>
     apiClient.post<ApiSuccess<null>>("/auth/reset-password", payload).then((r) => r.data),
+
+  // Phone verification gate (a logged-in customer's first self-service
+  // booking/subscription) — always the caller's own phone.
+  requestPhoneVerification: () =>
+    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/verify-phone/request").then((r) => r.data.data),
+
+  confirmPhoneVerification: (otp: string) =>
+    apiClient.post<ApiSuccess<User>>("/auth/verify-phone/confirm", { otp }).then((r) => r.data.data),
+
+  // Manager/admin resets a customer's forgotten password — the generated
+  // temp password is sent straight to the customer's WhatsApp and is
+  // never included in this response (see backend docstring).
+  resetCustomerPassword: (customerId: string) =>
+    apiClient.post<ApiSuccess<null>>(`/auth/customers/${customerId}/reset-password`).then((r) => r.data),
 };

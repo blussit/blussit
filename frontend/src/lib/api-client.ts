@@ -102,3 +102,13 @@ export function getErrorMessage(error: unknown): string {
   }
   return "Something went wrong";
 }
+
+/** Machine-readable error_code from a failed API call (e.g.
+ * "PHONE_NOT_VERIFIED") — lets a caller branch on a specific failure
+ * reason instead of just displaying getErrorMessage()'s text. */
+export function getErrorCode(error: unknown): string | undefined {
+  if (axios.isAxiosError(error)) {
+    return (error.response?.data as ApiError | undefined)?.error_code;
+  }
+  return undefined;
+}

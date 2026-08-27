@@ -1,17 +1,22 @@
 from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.core.authz import ensure_own_center
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, PhoneNotVerifiedException
+from app.core.ws_manager import manager as ws_manager
 from app.models.enums import BookingStatus, NotificationType, PaymentMethod, PaymentStatus
 from app.repositories.address_repository import AddressRepository
 from app.repositories.booking_repository import BookingRepository, BookingStatusHistoryRepository
 from app.repositories.catalog_repository import ComboOfferRepository, ServiceRepository
 from app.repositories.inventory_repository import InventoryRepository
 from app.repositories.service_center_repository import ServiceCenterRepository
+from app.repositories.slot_capacity_repository import DailyCapacityRepository, SlotCapacityRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
+from app.utils.slots import generate_slots
+from app.utils.text import normalize_plate
 from app.schemas.booking_schema import (
     BookingAssignCaptainRequest,
     BookingCancelRequest,
@@ -26,6 +31,7 @@ from app.schemas.booking_schema import (
     VerifyVehicleRequest,
 )
 from app.services.booking_policy_service import BookingPolicyService
+from app.services.capacity_policy_service import CapacityPolicyService
 from app.services.coupon_service import CouponService
 from app.services.notification_service import NotificationService
 from app.services.pricing_service import PricingService
@@ -61,13 +67,45 @@ LATE_START_NUDGE_MINUTES = 5  # nudge both captain and manager this often once t
 ARRIVAL_STAGE_EXEMPT_FLAGS = frozenset({"captain_delay", "captain_late_start"})
 COMPLETION_EXEMPT_FLAGS = frozenset({"service_overrun", "captain_late_start"})
 
+# The single canonical map of every status transition this service actually
+# performs anywhere below — audited directly against each transition
+# method's own inline guard (assign_captain, reassign_captain,
+# captain_cancel, start_heading, capture_before_photo,
+# capture_after_photo_and_complete, cancel_booking, reschedule_booking) so
+# this table is provably accurate, not aspirational. Includes the two
+# self-loops that a naive "linear pipeline" table would miss: ASSIGNED ->
+# ASSIGNED (reassign_captain swaps the captain without changing status) and
+# RESCHEDULED -> RESCHEDULED (a rescheduled-but-not-yet-reassigned booking
+# can be rescheduled again). _ensure_transition_allowed() below consults
+# this as a defense-in-depth assertion inside every transition method, in
+# addition to (not instead of) that method's own specific, user-facing
+# error message — so this catches any FUTURE drift without changing any
+# current behavior or wording today.
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    BookingStatus.PENDING.value: {BookingStatus.ASSIGNED.value, BookingStatus.CANCELLED.value},
-    BookingStatus.ASSIGNED.value: {BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.CANCELLED.value, BookingStatus.RESCHEDULED.value},
-    BookingStatus.CAPTAIN_ON_THE_WAY.value: {BookingStatus.SERVICE_STARTED.value, BookingStatus.CANCELLED.value},
-    BookingStatus.SERVICE_STARTED.value: {BookingStatus.COMPLETED.value},
-    BookingStatus.RESCHEDULED.value: {BookingStatus.ASSIGNED.value, BookingStatus.PENDING.value, BookingStatus.CANCELLED.value},
+    BookingStatus.PENDING.value: {BookingStatus.ASSIGNED.value, BookingStatus.CANCELLED.value, BookingStatus.RESCHEDULED.value},
+    BookingStatus.ASSIGNED.value: {
+        BookingStatus.ASSIGNED.value,
+        BookingStatus.CAPTAIN_ON_THE_WAY.value,
+        BookingStatus.PENDING.value,
+        BookingStatus.CANCELLED.value,
+        BookingStatus.RESCHEDULED.value,
+    },
+    BookingStatus.CAPTAIN_ON_THE_WAY.value: {BookingStatus.SERVICE_STARTED.value, BookingStatus.PENDING.value, BookingStatus.CANCELLED.value},
+    BookingStatus.SERVICE_STARTED.value: {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value},
+    BookingStatus.RESCHEDULED.value: {BookingStatus.ASSIGNED.value, BookingStatus.RESCHEDULED.value, BookingStatus.CANCELLED.value},
 }
+
+
+def _ensure_transition_allowed(current_status: str, new_status: str) -> None:
+    """Defense-in-depth assertion consulted by every transition method
+    below, on top of (never instead of) that method's own specific guard —
+    see _ALLOWED_TRANSITIONS' docstring. A mismatch here means either this
+    table drifted from reality or a new code path forgot to update it;
+    either way it's a bug worth surfacing loudly rather than silently
+    allowing an unmodeled state jump."""
+    allowed = _ALLOWED_TRANSITIONS.get(current_status, set())
+    if new_status not in allowed:
+        raise BadRequestException(f"Invalid booking state transition: {current_status} -> {new_status}")
 
 
 def _slot_start_datetime(scheduled_date: datetime, scheduled_slot: str) -> datetime:
@@ -77,19 +115,108 @@ def _slot_start_datetime(scheduled_date: datetime, scheduled_slot: str) -> datet
     return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
-def _find_window_overlap(new_start: datetime, new_end: datetime, buffer: timedelta, existing: list[dict]) -> dict | None:
+def _booking_window(booking: dict) -> tuple[datetime, datetime]:
+    """The window to use for overlap/conflict math. Prefers the booking's
+    own stored slot_start/slot_end (set at creation from the admin slot
+    config — a real, timezone-aware-at-write-time instant, so it's read
+    back via from_stored(), same category as heading_at/completed_at/etc.)
+    and falls back to the legacy exact-time-string derivation for any
+    booking created before that field existed."""
+    if booking.get("slot_start") and booking.get("slot_end"):
+        return from_stored(booking["slot_start"]), from_stored(booking["slot_end"])
+    start = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+    return start, start + timedelta(minutes=booking.get("duration_minutes", 60))
+
+
+def _captain_booking_window(booking: dict) -> tuple[datetime, datetime]:
+    """An EXISTING booking's window for captain-conflict purposes
+    specifically: its own estimated_start_at + duration_minutes (the actual
+    per-job slice of time a captain is occupied), NOT the shared
+    customer-facing admin slot bucket (_booking_window) — several bookings
+    legitimately share one bucket for the same captain at different
+    estimated_start_at values, and comparing against the whole shared
+    bucket would make that impossible (every booking in the same slot
+    would always look like a conflict). Falls back to the legacy
+    exact-time derivation for a booking assigned before estimated_start_at
+    existed."""
+    duration = booking.get("duration_minutes", 60)
+    if booking.get("estimated_start_at"):
+        start = from_stored(booking["estimated_start_at"])
+    else:
+        start = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+    return start, start + timedelta(minutes=duration)
+
+
+def _find_window_overlap(new_start: datetime, new_end: datetime, buffer: timedelta, existing: list[dict], window_fn=_booking_window) -> dict | None:
     """Shared by _captain_conflict and _customer_conflict — returns the
-    first existing booking whose [start, end] window (padded by `buffer`
-    on both sides) overlaps [new_start, new_end]. The buffer is applied
-    ONCE as the minimum required gap, not independently to both windows
-    (see _captain_conflict's docstring for why that distinction matters)."""
+    first existing booking whose window (padded by `buffer` on both sides)
+    overlaps [new_start, new_end]. The buffer is applied ONCE as the
+    minimum required gap, not independently to both windows (see
+    _captain_conflict's docstring for why that distinction matters).
+    window_fn resolves each EXISTING booking's own window — defaults to
+    the shared admin-slot-bucket resolver (_booking_window, correct for
+    _customer_conflict's "two of my own bookings can't overlap" check);
+    _captain_conflict passes _captain_booking_window instead, since a
+    captain's conflicts are about their own per-job timing, not the bucket."""
     for booking in existing:
-        existing_duration = booking.get("duration_minutes", 60)
-        existing_start = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
-        existing_end = existing_start + timedelta(minutes=existing_duration)
+        existing_start, existing_end = window_fn(booking)
         if new_start < existing_end + buffer and existing_start < new_end + buffer:
             return booking
     return None
+
+
+def _hhmm_to_dt(base: datetime, hhmm: str) -> datetime:
+    """base at 00:00 (its own date/tz) plus the given HH:MM offset — added
+    via timedelta rather than .replace(hour=...) so an edge-case "24:00"
+    slot boundary (midnight of the next day) never raises instead of
+    silently being mishandled."""
+    hour, minute = [int(p) for p in hhmm.split(":")]
+    midnight = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + timedelta(hours=hour, minutes=minute)
+
+
+def _resolve_slot_window(service_center: dict, scheduled_date: datetime, slot_key: str, policy: dict) -> tuple[datetime, datetime]:
+    """Regenerates the admin slot list for this center+date and returns the
+    (start, end) IST instants for slot_key — the exact same derivation the
+    customer availability endpoint uses (see BookingService.available_slots),
+    so the two can never disagree. Raises if slot_key isn't a real,
+    currently-generated slot for this center's own working hours/duration."""
+    duration = service_center.get("slot_duration_minutes") or policy["slot_duration_minutes"]
+    slots = generate_slots(service_center.get("working_hours_start", "08:00"), service_center.get("working_hours_end", "20:00"), duration)
+    match = next((s for s in slots if s["key"] == slot_key), None)
+    if not match:
+        raise BadRequestException("That slot isn't available at this service center — pick a valid slot.")
+    base = to_ist(scheduled_date)
+    return _hhmm_to_dt(base, match["start"]), _hhmm_to_dt(base, match["end"])
+
+
+def _resolve_estimated_start(booking: dict, requested: datetime | None) -> datetime:
+    """The actual instant a captain is expected to start THIS booking —
+    defaults to the booking's own slot_start (the common case: most
+    assignments don't need finer scheduling than "sometime in this slot"),
+    or an explicit manager-chosen instant validated to fall within
+    [slot_start, slot_end]. Falls back to the legacy exact-time derivation
+    for a pre-migration booking with no slot_start/slot_end at all."""
+    slot_start, slot_end = _booking_window(booking)
+    if requested is None:
+        return slot_start
+    # A manager-chosen estimated_start_at is a user-entered wall-clock pick
+    # (same category as scheduled_date), not a computed instant — normalize
+    # via to_ist() the same way, in case it arrives naive (no explicit
+    # timezone in the request) rather than crashing on an aware/naive
+    # comparison.
+    requested = to_ist(requested)
+    if not (slot_start <= requested <= slot_end):
+        raise BadRequestException("The estimated start time must fall within this booking's slot window.")
+    return requested
+
+
+def _slot_cutoff_passed(slot_end: datetime, policy: dict) -> bool:
+    """A slot remains bookable until slot_booking_cutoff_minutes before its
+    OWN end — derived per-slot from its real end time, never a hardcoded
+    minute value. This single check also naturally covers an entirely past
+    date/slot (its end is necessarily further in the past too)."""
+    return now_ist() > slot_end - timedelta(minutes=policy["slot_booking_cutoff_minutes"])
 
 
 def format_slot_start_12h(scheduled_slot: str) -> str:
@@ -147,9 +274,14 @@ def _ensure_schedulable(booking: dict, policy: dict) -> None:
     whose scheduled window has already fully passed (same "fully expired"
     threshold the captain-not-reached sweep uses) — that would just create
     an assignment against a time that's already gone. They have to
-    reschedule it to a real, future time first, or cancel it outright."""
-    duration = booking.get("duration_minutes", 60)
-    slot_end = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"]) + timedelta(minutes=duration)
+    reschedule it to a real, future time first, or cancel it outright.
+
+    Uses the booking's own admin-slot end (_booking_window — the 09:00-12:00
+    style window, falling back to the legacy exact-time+duration derivation
+    for pre-slot bookings), NOT duration_minutes alone — a booking is still
+    perfectly assignable well after its ~40-minute service duration would
+    have elapsed, as long as it's still within its 3-hour admin slot."""
+    _, slot_end = _booking_window(booking)
     window_end = slot_end + timedelta(minutes=policy.get("late_start_grace_minutes", 30))
     if now_ist() > window_end:
         raise BadRequestException(
@@ -167,10 +299,6 @@ def _redact_financials(booking: dict, actor_role: str) -> dict:
     return booking
 
 
-def _normalize_plate(value: str) -> str:
-    return "".join(ch for ch in value.upper() if ch.isalnum())
-
-
 class BookingService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
@@ -181,6 +309,8 @@ class BookingService:
         self.service_repo = ServiceRepository(db)
         self.combo_repo = ComboOfferRepository(db)
         self.center_repo = ServiceCenterRepository(db)
+        self.slot_capacity_repo = SlotCapacityRepository(db)
+        self.daily_capacity_repo = DailyCapacityRepository(db)
         self.user_repo = UserRepository(db)
         self.inventory_repo = InventoryRepository(db)
         self.coupon_service = CouponService(db)
@@ -189,8 +319,9 @@ class BookingService:
         self.pricing_service = PricingService(db)
         self.wallet_service = WalletService(db)
         self.policy_service = BookingPolicyService(db)
+        self.capacity_policy_service = CapacityPolicyService(db)
 
-    async def create_booking(self, customer_id: str, payload: BookingCreateRequest) -> dict:
+    async def create_booking(self, customer_id: str, payload: BookingCreateRequest, _skip_verification_gate: bool = False) -> dict:
         vehicle = await self.vehicle_repo.find_by_id(payload.vehicle_id)
         if not vehicle or vehicle["owner_id"] != customer_id:
             raise NotFoundException("Vehicle not found")
@@ -202,6 +333,15 @@ class BookingService:
         customer = await self.user_repo.find_by_id(customer_id)
         if not customer:
             raise NotFoundException("Customer not found")
+        # Phone verification gate: a customer must complete an OTP
+        # (POST /auth/verify-phone/request + /confirm) before their FIRST
+        # self-service booking; once phone_verified is set it's permanent,
+        # so every booking after that skips this. _skip_verification_gate
+        # is set only by create_booking_for_customer (a manager/admin
+        # booking on the customer's behalf) — staff-initiated bookings are
+        # never gated on the customer's own verification status.
+        if not _skip_verification_gate and not customer.get("phone_verified"):
+            raise PhoneNotVerifiedException()
 
         # Resolve what's actually being purchased: either a combo bundle (its own
         # price, expands to the services inside it) or an explicit list of services.
@@ -226,21 +366,27 @@ class BookingService:
         duration_minutes = sum(s.get("duration_minutes", 30) for s in services) or 30
 
         policy = await self.policy_service.get_policy()
-        self._validate_scheduling(payload.scheduled_date, payload.scheduled_slot, duration_minutes, policy)
-        self_conflict = await self._customer_conflict(customer_id, payload.scheduled_date, payload.scheduled_slot, duration_minutes, None)
+        # Service center must be known BEFORE slot validation — slots are
+        # generated from the CENTER's own working hours/slot duration, not
+        # a global policy window (see _resolve_slot_window).
+        service_center, distance_km = await self._resolve_service_center(address)
+        date_str = to_ist(payload.scheduled_date).strftime("%Y-%m-%d")
+        slot_start, slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
+        if _slot_cutoff_passed(slot_end, policy):
+            raise BadRequestException("This slot is no longer available to book — please pick another slot.")
+
+        self_conflict = await self._customer_conflict(customer_id, slot_start, slot_end, None)
         if self_conflict:
             raise BadRequestException(
                 f"You already have booking {self_conflict['booking_number']} scheduled around this time — "
                 "pick a different time or manage that booking first."
             )
 
-        service_center, distance_km = await self._resolve_service_center(address)
-
         # First-time-offer eligibility is checked against the WHOLE platform, not
         # just this customer's account — the same car plate or phone number
         # having any prior non-cancelled booking (under any account) disqualifies
         # it. This is what stops "new phone number, same car" discount abuse.
-        registration_number = _normalize_plate(vehicle["registration_number"])
+        registration_number = normalize_plate(vehicle["registration_number"])
         phone = customer.get("phone")
         vehicle_seen_before = await self.repo.exists_for_registration(registration_number, FRAUD_CHECK_EXCLUDED_STATUSES)
         phone_seen_before = bool(phone) and await self.repo.exists_for_phone(phone, FRAUD_CHECK_EXCLUDED_STATUSES)
@@ -277,6 +423,7 @@ class BookingService:
         primary_service = services[0] if services else None
         split = await self.pricing_service.calculate_split(subtotal, distance_km, primary_service)
 
+        manager_id = service_center.get("manager_id")
         booking_doc = {
             "booking_number": self.repo.generate_booking_number(),
             "customer_id": customer_id,
@@ -287,6 +434,8 @@ class BookingService:
             "subscription_id": payload.subscription_id,
             "scheduled_date": payload.scheduled_date,
             "scheduled_slot": payload.scheduled_slot,
+            "slot_start": slot_start,
+            "slot_end": slot_end,
             "duration_minutes": duration_minutes,
             "status": BookingStatus.PENDING.value,
             "awaiting_assignment_since": now_ist(),
@@ -312,8 +461,31 @@ class BookingService:
             "captain_service_pay": split["captain_service_pay"],
             "captain_earning": split["captain_earning"],
             "platform_earning": split["platform_earning"],
+            # Set here (not via a follow-up write) since the actual notify()
+            # call happens synchronously right after the transaction below —
+            # this timestamp and that call are effectively the same instant.
+            "manager_notified_at": now_ist() if manager_id else None,
         }
-        created = await self.repo.create(booking_doc)
+
+        # Everything above this point is read-only/pure computation — safe
+        # to have run before entering the transaction. From here, exactly
+        # two writes happen atomically: reserve this slot's (and the day's,
+        # if configured) capacity, then insert the booking that consumes
+        # it. If anything else fails after the reservation but before the
+        # insert commits, MongoDB rolls the reservation back automatically —
+        # no manual compensation needed for that path (see
+        # _reserve_slot_capacity's docstring for the one exception, the
+        # daily-cap-after-slot-cap case, which self-corrects even outside
+        # a transaction).
+        async def _do_create(session):
+            await self._reserve_slot_capacity(session, service_center, date_str, payload.scheduled_slot)
+            return await self.repo.create(booking_doc, session=session)
+
+        try:
+            async with await self.db.client.start_session() as session:
+                created = await session.with_transaction(_do_create)
+        except DuplicateKeyError:
+            raise BadRequestException("You already have a booking for this vehicle in this slot.")
         booking_id = str(created["_id"])
 
         if subscription_consumption is not None:
@@ -346,6 +518,8 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
             )
+        await self._broadcast_booking_changed(created)
+        await self._broadcast_slots_changed(str(service_center["_id"]), date_str)
         return serialize_doc(created)
 
     async def create_booking_for_customer(self, actor_id: str, payload: ManagerBookingCreateRequest) -> dict:
@@ -381,7 +555,9 @@ class BookingService:
             alternate_contact_name=payload.alternate_contact_name,
             alternate_contact_phone=payload.alternate_contact_phone,
         )
-        result = await self.create_booking(payload.customer_id, booking_request)
+        # Staff-initiated — never gated on the customer's own phone
+        # verification (see create_booking's _skip_verification_gate).
+        result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True)
         await self._record_history(
             result["id"], BookingStatus.PENDING, actor_id, f"Booking created by staff on behalf of customer {payload.customer_id}"
         )
@@ -410,33 +586,6 @@ class BookingService:
         await self.flag_issue(booking_id, "captain_reported_risk", note_text)
         await self._record_history(booking_id, BookingStatus(booking["status"]), captain_id, f"Captain self-reported risk of delay: {note_text}")
         return serialize_doc(await self.repo.find_by_id(booking_id))
-
-    def _validate_scheduling(self, scheduled_date: datetime, scheduled_slot: str, duration_minutes: int, policy: dict) -> None:
-        """No past bookings, no last-minute bookings, and must fit inside the
-        admin-configured daily operating window — all enforced server-side so
-        a modified/bypassed frontend can't slip one through."""
-        try:
-            requested = _slot_start_datetime(scheduled_date, scheduled_slot)
-        except (ValueError, IndexError):
-            raise BadRequestException("Invalid time format — expected 24-hour HH:MM")
-
-        now = now_ist()
-        min_lead = timedelta(minutes=policy["min_lead_minutes"])
-        if requested < now + min_lead:
-            raise BadRequestException(
-                f"Please choose a time at least {policy['min_lead_minutes']} minutes from now."
-            )
-
-        op_start_h, op_start_m = [int(p) for p in policy["operating_start"].split(":")]
-        op_end_h, op_end_m = [int(p) for p in policy["operating_end"].split(":")]
-        window_start = requested.replace(hour=op_start_h, minute=op_start_m, second=0, microsecond=0)
-        window_end = requested.replace(hour=op_end_h, minute=op_end_m, second=0, microsecond=0)
-        requested_end = requested + timedelta(minutes=duration_minutes)
-        if requested < window_start or requested_end > window_end:
-            raise BadRequestException(
-                f"Please choose a time between {policy['operating_start']} and {policy['operating_end']} "
-                f"that leaves enough room for a {duration_minutes}-minute service."
-            )
 
     @staticmethod
     def _resolve_price(item: dict, vehicle_type: str, first_time_eligible: bool) -> float:
@@ -482,9 +631,8 @@ class BookingService:
     async def _captain_conflict(
         self,
         captain_id: str,
-        scheduled_date: datetime,
-        scheduled_slot: str,
-        duration_minutes: int,
+        new_start: datetime,
+        new_end: datetime,
         exclude_booking_id: str | None,
         policy: dict,
         session=None,
@@ -499,6 +647,13 @@ class BookingService:
         at 1:40 PM with a 15-minute buffer couldn't be booked again until
         2:10 PM instead of the intended 1:55 PM).
 
+        Callers pass the captain's actual (or trial) ESTIMATED_START_AT
+        window, never the coarse customer-facing slot_start/slot_end bucket
+        directly — several bookings can legitimately share one admin slot
+        for the same captain (e.g. a 9:00 job and a 10:30 job both inside a
+        09:00-12:00 slot); comparing against the shared bucket itself would
+        make that impossible by always looking like a conflict.
+
         Pass `session` when called from inside assign_captain/reassign_captain's
         transaction — that's what actually closes the double-booking race (two
         concurrent assignments both reading "no conflict" before either writes);
@@ -506,23 +661,25 @@ class BookingService:
         read-only and doesn't need transactional consistency), it behaves exactly
         as before."""
         buffer = timedelta(minutes=policy["captain_travel_buffer_minutes"])
-        new_start = _slot_start_datetime(scheduled_date, scheduled_slot)
-        new_end = new_start + timedelta(minutes=duration_minutes)
 
         existing = await self.repo.find_active_for_captain(captain_id, exclude_booking_id, session=session)
-        return _find_window_overlap(new_start, new_end, buffer, existing)
+        return _find_window_overlap(new_start, new_end, buffer, existing, window_fn=_captain_booking_window)
 
     async def _customer_conflict(
-        self, customer_id: str, scheduled_date: datetime, scheduled_slot: str, duration_minutes: int, exclude_booking_id: str | None
+        self, customer_id: str, new_start: datetime, new_end: datetime, exclude_booking_id: str | None
     ) -> dict | None:
         """Same overlap math as _captain_conflict, but against the
         customer's OWN other active bookings — nothing previously stopped a
         customer from booking (or rescheduling into) two overlapping slots
-        for themselves. No travel buffer here (that's a captain-schedule
-        concept, not a customer one) — a customer's two bookings just can't
-        literally overlap in time."""
-        new_start = _slot_start_datetime(scheduled_date, scheduled_slot)
-        new_end = new_start + timedelta(minutes=duration_minutes)
+        for themselves, e.g. a 9-12 slot at one service center and a
+        different center's overlapping slot the same morning. No travel
+        buffer here (that's a captain-schedule concept, not a customer
+        one) — a customer's two bookings just can't literally overlap in
+        time. Callers pass the NEW booking's already-resolved slot window
+        (see _resolve_slot_window) rather than a raw scheduled_slot string,
+        since that string is now an admin capacity-bucket key, not
+        something this method should re-derive an exact instant from
+        itself."""
         existing = await self.repo.find_active_for_customer(customer_id, exclude_booking_id)
         return _find_window_overlap(new_start, new_end, timedelta(0), existing)
 
@@ -549,6 +706,185 @@ class BookingService:
                 NotificationType.BOOKING,
                 str(booking["_id"]),
             )
+
+    async def available_slots(self, service_center_id: str, date_str: str) -> list[dict]:
+        """Customer-facing availability for one center/date — deliberately
+        never returns the raw total capacity (see the "status"/"remaining"
+        shape below), only ever the exact wording the UI needs. remaining
+        is populated ONLY when status is "low" (<=5 left) or "full" (0);
+        callers must never infer total capacity from any combination of
+        these fields."""
+        center = await self.center_repo.find_by_id(service_center_id)
+        if not center:
+            raise NotFoundException("Service center not found")
+        policy = await self.policy_service.get_policy()
+        duration = center.get("slot_duration_minutes") or policy["slot_duration_minutes"]
+        raw_slots = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
+
+        scheduled_date = datetime.strptime(date_str, "%Y-%m-%d")
+        results = []
+        for slot in raw_slots:
+            slot_start, slot_end = _resolve_slot_window(center, scheduled_date, slot["key"], policy)
+            cutoff_passed = _slot_cutoff_passed(slot_end, policy)
+            doc = await self.slot_capacity_repo.find_one({"service_center_id": service_center_id, "date": date_str, "slot_key": slot["key"]})
+            capacity = doc["capacity"] if doc else await self._default_slot_capacity(center, date_str, slot["key"])
+            booked = doc["booked_count"] if doc else 0
+            is_closed = bool(doc and doc.get("is_closed"))
+            remaining_actual = max(capacity - booked, 0)
+
+            if cutoff_passed or is_closed or remaining_actual <= 0:
+                status, remaining = "full", 0
+            elif remaining_actual <= 5:
+                status, remaining = "low", remaining_actual
+            else:
+                status, remaining = "available", None
+            results.append({"key": slot["key"], "start": slot["start"], "end": slot["end"], "status": status, "remaining": remaining})
+        return results
+
+    async def admin_slot_capacity(self, service_center_id: str, date_str: str) -> dict:
+        """Staff-facing capacity view for one center/date — unlike
+        available_slots (customer-facing, never leaks raw numbers), this
+        one exists specifically so a manager/admin CAN see capacity,
+        booked count, and remaining, per Section 2/22's admin visibility
+        requirement. Also creates each slot's capacity doc if it doesn't
+        exist yet, so what's shown here is exactly what a subsequent edit
+        via set_slot_capacity will act on."""
+        center = await self.center_repo.find_by_id(service_center_id)
+        if not center:
+            raise NotFoundException("Service center not found")
+        policy = await self.policy_service.get_policy()
+        duration = center.get("slot_duration_minutes") or policy["slot_duration_minutes"]
+        raw_slots = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
+
+        results = []
+        for slot in raw_slots:
+            default_capacity = await self._default_slot_capacity(center, date_str, slot["key"])
+            doc = await self.slot_capacity_repo.get_or_init(
+                {"service_center_id": service_center_id, "date": date_str, "slot_key": slot["key"]},
+                {"capacity": default_capacity, "booked_count": 0, "is_closed": False},
+            )
+            results.append({
+                "key": slot["key"],
+                "start": slot["start"],
+                "end": slot["end"],
+                "capacity": doc["capacity"],
+                "booked_count": doc["booked_count"],
+                "remaining": max(doc["capacity"] - doc["booked_count"], 0),
+                "is_closed": doc.get("is_closed", False),
+            })
+
+        max_daily = await self._effective_daily_max(center, date_str)
+        daily = None
+        if max_daily:
+            day_doc = await self.daily_capacity_repo.get_or_init(
+                {"service_center_id": service_center_id, "date": date_str}, {"capacity": max_daily, "booked_count": 0}
+            )
+            daily = {"capacity": day_doc["capacity"], "booked_count": day_doc["booked_count"], "remaining": max(day_doc["capacity"] - day_doc["booked_count"], 0)}
+        return {"slots": results, "daily": daily}
+
+    async def set_slot_capacity(self, service_center_id: str, date_str: str, slot_key: str, capacity: int | None, is_closed: bool | None) -> dict:
+        """Admin/manager override for one specific (center, date, slot) —
+        increase/decrease capacity, or temporarily close/reopen it.
+        Immediately affects future reservations (BookingService.
+        _reserve_slot_capacity reads this same field live on every
+        attempt); never retroactively invalidates bookings already
+        holding a spot in this slot."""
+        center = await self.center_repo.find_by_id(service_center_id)
+        if not center:
+            raise NotFoundException("Service center not found")
+        filter_ = {"service_center_id": service_center_id, "date": date_str, "slot_key": slot_key}
+        default_capacity = await self._default_slot_capacity(center, date_str, slot_key)
+        await self.slot_capacity_repo.get_or_init(filter_, {"capacity": default_capacity, "booked_count": 0, "is_closed": False})
+        update: dict = {}
+        if capacity is not None:
+            if capacity < 0:
+                raise BadRequestException("Capacity can't be negative")
+            update["capacity"] = capacity
+            # Marks this exact (date, slot) as an explicit admin override so
+            # a later capacity-policy change never silently resyncs it back
+            # to the baseline — see CapacityPolicyService._resync_touched_date.
+            update["is_override"] = True
+        if is_closed is not None:
+            update["is_closed"] = is_closed
+        if not update:
+            raise BadRequestException("Nothing to update")
+        updated = await self.slot_capacity_repo.update_by_id(str((await self.slot_capacity_repo.find_one(filter_))["_id"]), update)
+        await self._broadcast_slots_changed(service_center_id, date_str)
+        return serialize_doc(updated)
+
+    async def _default_slot_capacity(self, service_center: dict, date_str: str, slot_key: str) -> int:
+        """What a not-yet-touched (date, slot) should start out with —
+        consults the center's effective-dated capacity policy first (see
+        CapacityPolicyService), and only falls back to the legacy flat
+        default_slot_capacity field (or unrestricted-in-practice, 999) for
+        a center that has never had a policy scheduled at all. Zero as the
+        ultimate fallback would make every never-configured slot look
+        fully booked the moment this feature ships, silently blocking
+        bookings a center never intended to block."""
+        policy = await self.capacity_policy_service.get_effective_policy(str(service_center["_id"]), date_str)
+        if slot_key in policy["slot_distribution"]:
+            return policy["slot_distribution"][slot_key]
+        return service_center.get("default_slot_capacity") or 999
+
+    async def _effective_daily_max(self, service_center: dict, date_str: str) -> int | None:
+        """Same resolution as _default_slot_capacity, for the optional
+        center-wide daily cap — the effective-dated policy's
+        max_bookings_per_day wins when a policy exists for this date,
+        otherwise the center's legacy flat max_bookings_per_day field (or
+        None, meaning no daily cap at all, only per-slot capacity)."""
+        policy = await self.capacity_policy_service.get_effective_policy(str(service_center["_id"]), date_str)
+        return policy["max_bookings_per_day"] or service_center.get("max_bookings_per_day")
+
+    async def _reserve_slot_capacity(self, session, service_center: dict, date_str: str, slot_key: str) -> None:
+        """Atomically reserves one spot in this slot (and, if the center
+        has a daily cap configured, one spot in the day too) — single
+        find_one_and_update per counter, no retry loop needed since the
+        whole success condition ("count < capacity") is expressible
+        directly in the filter (see BaseRepository.increment_if). Raises
+        BadRequestException if either is already at capacity or closed.
+        Call ONLY from inside create_booking's transaction (or
+        reschedule's "moving into a new slot" path) — never from
+        captain_cancel/reassign_captain, which don't change the slot."""
+        center_id = str(service_center["_id"])
+        slot_key_filter = {"service_center_id": center_id, "date": date_str, "slot_key": slot_key}
+        default_capacity = await self._default_slot_capacity(service_center, date_str, slot_key)
+        slot_doc = await self.slot_capacity_repo.get_or_init(
+            slot_key_filter, {"capacity": default_capacity, "booked_count": 0, "is_closed": False}, session=session
+        )
+        if slot_doc.get("is_closed"):
+            raise BadRequestException("This slot has been closed for booking — please pick another.")
+        reserved = await self.slot_capacity_repo.increment_if(
+            {**slot_key_filter, "is_closed": False}, {"booked_count": 1}, expr_guard=["$lt", "$booked_count", "$capacity"], session=session
+        )
+        if reserved is None:
+            raise BadRequestException("This slot just became fully booked — please pick another.")
+
+        max_daily = await self._effective_daily_max(service_center, date_str)
+        if max_daily:
+            day_filter = {"service_center_id": center_id, "date": date_str}
+            await self.daily_capacity_repo.get_or_init(day_filter, {"capacity": max_daily, "booked_count": 0}, session=session)
+            reserved_day = await self.daily_capacity_repo.increment_if(
+                day_filter, {"booked_count": 1}, expr_guard=["$lt", "$booked_count", "$capacity"], session=session
+            )
+            if reserved_day is None:
+                # Roll back the slot reservation we just took — the
+                # transaction as a whole is about to raise/abort anyway,
+                # but making the compensating decrement explicit here means
+                # the invariant holds even if this method is ever called
+                # outside a transaction in the future.
+                await self.slot_capacity_repo.increment_if(slot_key_filter, {"booked_count": -1}, session=session)
+                raise BadRequestException("This service center is fully booked for the day — please pick another date.")
+
+    async def _release_slot_capacity(self, service_center_id: str, date_str: str, slot_key: str, session=None) -> None:
+        """Reverses _reserve_slot_capacity — called on cancellation, or when
+        a reschedule moves a booking OUT of a slot it was holding. Guarded
+        at 0 (never goes negative); is_closed is irrelevant here since
+        closing only blocks NEW reservations, never invalidates a release
+        of a booking that already existed."""
+        slot_key_filter = {"service_center_id": service_center_id, "date": date_str, "slot_key": slot_key}
+        await self.slot_capacity_repo.increment_if(slot_key_filter, {"booked_count": -1}, expr_guard=["$gt", "$booked_count", 0], session=session)
+        day_filter = {"service_center_id": service_center_id, "date": date_str}
+        await self.daily_capacity_repo.increment_if(day_filter, {"booked_count": -1}, expr_guard=["$gt", "$booked_count", 0], session=session)
 
     async def _resolve_service_center(self, address: dict) -> tuple[dict, float]:
         if address.get("latitude") is not None and address.get("longitude") is not None:
@@ -707,6 +1043,7 @@ class BookingService:
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         if booking["status"] not in {BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value}:
             raise BadRequestException("Only pending bookings can be assigned to a captain")
+        _ensure_transition_allowed(booking["status"], BookingStatus.ASSIGNED.value)
 
         captain = await self.user_repo.find_by_id(payload.captain_id)
         if not captain or captain["role"] != "captain":
@@ -748,15 +1085,26 @@ class BookingService:
             fresh = await self.repo.find_by_id(booking_id, session=session)
             if not fresh or fresh["status"] not in {BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value}:
                 raise BadRequestException("This booking is no longer available to assign — someone else may have just assigned it.")
+            estimated_start_at = _resolve_estimated_start(fresh, payload.estimated_start_at)
+            duration = fresh.get("duration_minutes", 60)
             conflict = await self._captain_conflict(
-                payload.captain_id, fresh["scheduled_date"], fresh["scheduled_slot"], fresh.get("duration_minutes", 60), None, policy, session=session
+                payload.captain_id, estimated_start_at, estimated_start_at + timedelta(minutes=duration), None, policy, session=session
             )
             if conflict:
                 raise BadRequestException(
                     f"This captain is already scheduled for booking {conflict['booking_number']} around this time "
                     f"(including travel buffer) — pick a different captain or time."
                 )
-            await self.repo.update_by_id(booking_id, {"captain_id": payload.captain_id, "status": BookingStatus.ASSIGNED.value}, session=session)
+            await self.repo.update_by_id(
+                booking_id,
+                {
+                    "captain_id": payload.captain_id,
+                    "status": BookingStatus.ASSIGNED.value,
+                    "estimated_start_at": estimated_start_at,
+                    "assigned_at": now_ist(),
+                },
+                session=session,
+            )
 
         async with await self.db.client.start_session() as session:
             await session.with_transaction(_do_assign)
@@ -765,6 +1113,7 @@ class BookingService:
         await self._record_history(booking_id, BookingStatus.ASSIGNED, assigned_by, f"Assigned to captain {captain['full_name']}")
         await self.notifications.notify(payload.captain_id, "New job assigned", f"You have a new booking {booking['booking_number']}.", NotificationType.BOOKING, booking_id)
         await self.notifications.notify(booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.", NotificationType.BOOKING, booking_id)
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
     async def reassign_captain(
@@ -776,6 +1125,7 @@ class BookingService:
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         if booking["status"] not in {BookingStatus.PENDING.value, BookingStatus.ASSIGNED.value}:
             raise BadRequestException("This booking cannot be reassigned in its current state")
+        _ensure_transition_allowed(booking["status"], BookingStatus.ASSIGNED.value)
 
         policy = await self.policy_service.get_policy()
         _ensure_schedulable(booking, policy)
@@ -802,11 +1152,12 @@ class BookingService:
             fresh = await self.repo.find_by_id(booking_id, session=session)
             if not fresh or fresh["status"] not in {BookingStatus.PENDING.value, BookingStatus.ASSIGNED.value}:
                 raise BadRequestException("This booking can no longer be reassigned — its state just changed.")
+            estimated_start_at = _resolve_estimated_start(fresh, payload.estimated_start_at)
+            duration = fresh.get("duration_minutes", 60)
             conflict = await self._captain_conflict(
                 payload.captain_id,
-                fresh["scheduled_date"],
-                fresh["scheduled_slot"],
-                fresh.get("duration_minutes", 60),
+                estimated_start_at,
+                estimated_start_at + timedelta(minutes=duration),
                 booking_id,
                 policy,
                 session=session,
@@ -821,6 +1172,8 @@ class BookingService:
                 {
                     "captain_id": payload.captain_id,
                     "status": BookingStatus.ASSIGNED.value,
+                    "estimated_start_at": estimated_start_at,
+                    "assigned_at": now_ist(),
                     "previous_captain_ids": previous,
                     "issue_flag": None,
                     "issue_resolved": True,
@@ -842,6 +1195,12 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
             )
+        await self._broadcast_booking_changed(updated)
+        if outgoing_captain_id:
+            # The outgoing captain no longer appears in `updated`, so the
+            # general broadcast above wouldn't reach them — their own jobs
+            # list still needs to know this one is gone.
+            await ws_manager.broadcast(f"user:{outgoing_captain_id}", {"type": "changed", "channel": f"user:{outgoing_captain_id}", "booking_id": booking_id})
         return serialize_doc(updated)
 
     async def captain_cancel(self, booking_id: str, payload: CaptainCancelRequest, captain_id: str) -> dict:
@@ -852,6 +1211,7 @@ class BookingService:
             raise ForbiddenException("You are not assigned to this booking")
         if booking["status"] not in {BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value}:
             raise BadRequestException("This booking can no longer be released")
+        _ensure_transition_allowed(booking["status"], BookingStatus.PENDING.value)
 
         previous = list(booking.get("previous_captain_ids", []))
         if captain_id not in previous:
@@ -882,6 +1242,8 @@ class BookingService:
             NotificationType.BOOKING,
             booking_id,
         )
+        await self._broadcast_booking_changed(updated)
+        await ws_manager.broadcast(f"user:{captain_id}", {"type": "changed", "channel": f"user:{captain_id}", "booking_id": booking_id})
         return serialize_doc(updated)
 
     async def start_heading(self, booking_id: str, payload: HeadingRequest, captain_id: str) -> dict:
@@ -895,10 +1257,19 @@ class BookingService:
         _ensure_no_open_issue(booking, exempt_flags=frozenset({"captain_not_started"}))
         if booking["status"] != BookingStatus.ASSIGNED.value:
             raise BadRequestException("This booking is not ready to start heading out")
+        _ensure_transition_allowed(booking["status"], BookingStatus.CAPTAIN_ON_THE_WAY.value)
 
         policy = await self.policy_service.get_policy()
         duration = booking.get("duration_minutes", 60)
-        slot_start = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        # Anchored at THIS booking's own estimated_start_at (set at
+        # assignment — see _resolve_estimated_start), not the coarse
+        # customer-facing admin slot (e.g. 09:00-12:00) — several bookings
+        # can share one slot for the same captain, each with its own
+        # estimated_start_at, so lateness has to be measured per-job, not
+        # against the whole shared window. Falls back to the legacy
+        # exact-time derivation for a booking assigned before this field
+        # existed.
+        slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
         slot_end = slot_start + timedelta(minutes=duration)
         window_start = slot_start - timedelta(minutes=START_WINDOW_MINUTES)
         late_grace_minutes = policy.get("late_start_grace_minutes", 30)
@@ -910,6 +1281,23 @@ class BookingService:
             raise BadRequestException(
                 f"Too early to start this booking. You can begin heading out {START_WINDOW_MINUTES} minutes before "
                 f"the scheduled time (in about {minutes_to_wait} more minutes)."
+            )
+
+        # A captain must NOT be able to just "start heading" on a booking
+        # whose window expired so long ago it's effectively abandoned — a
+        # penalty label alone (below) isn't a real safeguard for something
+        # that's been sitting for hours or days; the customer may no longer
+        # even be expecting it that day. Past this point the booking needs
+        # an actual manager decision (reschedule to a real new time, or
+        # reassign/cancel) before anyone can act on it again — see
+        # find_bookings_late_to_start/flag_late_to_start for the matching
+        # sweep-side flag that surfaces this in the manager queue.
+        lockout_hours = policy.get("captain_start_lockout_hours", 4)
+        lockout_at = window_end + timedelta(hours=lockout_hours)
+        if now > lockout_at:
+            raise BadRequestException(
+                "This booking's scheduled window expired too long ago to start now — a manager needs to reschedule "
+                "or reassign it first."
             )
 
         # Which stage the captain is starting in, and what it costs them —
@@ -970,6 +1358,7 @@ class BookingService:
                 await self.inventory_repo.adjust_quantity(item.inventory_item_id, -item.quantity)
 
         updated = await self.repo.update_by_id(booking_id, update_data)
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
         await self._record_history(
             booking_id,
             BookingStatus.CAPTAIN_ON_THE_WAY,
@@ -988,6 +1377,7 @@ class BookingService:
                     NotificationType.BOOKING,
                     booking_id,
                 )
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
     async def verify_vehicle(self, booking_id: str, payload: VerifyVehicleRequest, captain_id: str) -> dict:
@@ -1004,7 +1394,7 @@ class BookingService:
         if booking["status"] != BookingStatus.CAPTAIN_ON_THE_WAY.value:
             raise BadRequestException("Vehicle verification happens after you've started heading to the customer")
 
-        entered = _normalize_plate(payload.registration_number)
+        entered = normalize_plate(payload.registration_number)
         expected = booking.get("vehicle_registration_number") or ""
         if entered != expected:
             raise BadRequestException(
@@ -1028,6 +1418,7 @@ class BookingService:
             raise BadRequestException("Reach the customer's location before starting the service")
         if not booking.get("vehicle_verified"):
             raise BadRequestException("Verify the vehicle's registration number before starting the service")
+        _ensure_transition_allowed(booking["status"], BookingStatus.SERVICE_STARTED.value)
 
         now = now_ist()
         flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
@@ -1041,10 +1432,12 @@ class BookingService:
                 "service_started_at": now,
             },
         )
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
         await self._record_history(booking_id, BookingStatus.SERVICE_STARTED, captain_id, "Service started (before photo captured)")
         if flagged:
             await self._notify_location_flag(booking, "before", distance_m)
         await self.notifications.notify(booking["customer_id"], "Service started", "Your captain has started the service.", NotificationType.BOOKING, booking_id)
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
     async def capture_after_photo_and_complete(self, booking_id: str, payload: PhotoCaptureRequest, captain_id: str) -> dict:
@@ -1056,8 +1449,10 @@ class BookingService:
         _ensure_no_open_issue(booking, exempt_flags=COMPLETION_EXEMPT_FLAGS)
         if booking["status"] != BookingStatus.SERVICE_STARTED.value:
             raise BadRequestException("The service must be in progress before it can be completed")
+        _ensure_transition_allowed(booking["status"], BookingStatus.COMPLETED.value)
 
         now = now_ist()
+        policy = await self.policy_service.get_policy()
         flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
         update_data = {
             "status": BookingStatus.COMPLETED.value,
@@ -1065,18 +1460,27 @@ class BookingService:
             "after_photo_flagged": flagged,
             "after_photo_distance_m": distance_m,
             "completed_at": now,
+            "closed_at": now,
         }
 
-        # Wash-duration KPI capture, for the future analytics dashboard.
-        # booking["service_started_at"] just came back from Mongo naive,
-        # holding UTC-instant digits (same category as heading_at) — it MUST
-        # go through from_stored() before subtracting against the freshly
-        # computed aware-IST `now`, or this silently reproduces the exact
-        # 5.5-hour bug the from_stored()/to_ist() split exists to prevent, in
-        # a brand-new call site.
+        # Wash-duration KPI capture. booking["service_started_at"] just came
+        # back from Mongo naive, holding UTC-instant digits (same category
+        # as heading_at) — it MUST go through from_stored() before
+        # subtracting against the freshly computed aware-IST `now`, or this
+        # silently reproduces the exact 5.5-hour bug the from_stored()/
+        # to_ist() split exists to prevent, in a brand-new call site.
         if booking.get("service_started_at"):
             started_ist = from_stored(booking["service_started_at"])
-            update_data["actual_duration_minutes"] = max(0, round((now - started_ist).total_seconds() / 60))
+            actual_duration = max(0, round((now - started_ist).total_seconds() / 60))
+            update_data["actual_duration_minutes"] = actual_duration
+            # Finalizes what the sweep (find_bookings_service_overrunning)
+            # may have already flagged mid-flight, and gives KPI queries a
+            # persisted number instead of recomputing from raw timestamps
+            # every time. None (not 0) when not actually delayed.
+            expected = booking.get("duration_minutes", 60)
+            tolerance = policy.get("delay_tolerance_minutes", 20)
+            overrun = actual_duration - expected - tolerance
+            update_data["delay_minutes"] = overrun if overrun > 0 else None
 
         # Same reasoning as cancel_booking: a flag exists to prompt manager
         # action while the job is still live. The captain finishing it means
@@ -1116,6 +1520,7 @@ class BookingService:
                 update_data["payment_status"] = PaymentStatus.PAID.value
 
         updated = await self.repo.update_by_id(booking_id, update_data)
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
         await self._record_history(booking_id, BookingStatus.COMPLETED, captain_id, "Service completed (after photo captured)")
         if flagged:
             await self._notify_location_flag(booking, "after", distance_m)
@@ -1126,6 +1531,7 @@ class BookingService:
             NotificationType.BOOKING,
             booking_id,
         )
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
     async def cancel_booking(
@@ -1149,8 +1555,14 @@ class BookingService:
             ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         if booking["status"] in {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value}:
             raise BadRequestException("This booking can no longer be cancelled")
+        _ensure_transition_allowed(booking["status"], BookingStatus.CANCELLED.value)
 
-        cancel_data: dict = {"status": BookingStatus.CANCELLED.value, "cancellation_reason": payload.reason, "cancelled_by_role": actor_role}
+        cancel_data: dict = {
+            "status": BookingStatus.CANCELLED.value,
+            "cancellation_reason": payload.reason,
+            "cancelled_by_role": actor_role,
+            "closed_at": now_ist(),
+        }
         # A flagged issue is only meant to prompt manager action WHILE the
         # booking is still live — once it's cancelled there's nothing left to
         # act on. Auto-resolve rather than leave it looking like an open
@@ -1159,6 +1571,14 @@ class BookingService:
         if booking.get("issue_flag") and not booking.get("issue_resolved"):
             cancel_data["issue_resolved"] = True
         updated = await self.repo.update_by_id(booking_id, cancel_data)
+
+        # This slot is no longer held — free it up for someone else, using
+        # the booking's own snapshotted date/slot (not "now"), whether or
+        # not it ever had slot_start/slot_end set (a pre-migration booking
+        # simply has no matching capacity doc to decrement, which
+        # increment_if's guard handles as a harmless no-op).
+        date_str = to_ist(booking["scheduled_date"]).strftime("%Y-%m-%d")
+        await self._release_slot_capacity(booking["service_center_id"], date_str, booking["scheduled_slot"])
 
         # A cancelled booking never actually happened — whatever it charged
         # against a coupon's usage cap or a subscription's remaining quota
@@ -1174,6 +1594,8 @@ class BookingService:
         await self.notifications.notify(booking["customer_id"], "Booking cancelled", f"Booking {booking['booking_number']} has been cancelled.", NotificationType.BOOKING, booking_id)
         if booking.get("captain_id"):
             await self.notifications.notify(booking["captain_id"], "Booking cancelled", f"Booking {booking['booking_number']} was cancelled.", NotificationType.BOOKING, booking_id)
+        await self._broadcast_booking_changed(updated)
+        await self._broadcast_slots_changed(booking["service_center_id"], date_str)
         return serialize_doc(updated)
 
     async def reschedule_booking(
@@ -1206,25 +1628,38 @@ class BookingService:
                 "This booking's captain is already on the way or mid-service — cancel the booking or have the "
                 "captain release it before rescheduling."
             )
+        _ensure_transition_allowed(booking["status"], BookingStatus.RESCHEDULED.value)
 
         policy = await self.policy_service.get_policy()
-        duration = booking.get("duration_minutes", 60)
-        # Same server-side rules create_booking enforces (no past time, must
-        # fit the operating window) — reschedule must not be a backdoor
-        # around them just because it's editing an existing booking instead
-        # of creating a new one.
-        self._validate_scheduling(payload.scheduled_date, payload.scheduled_slot, duration, policy)
-        self_conflict = await self._customer_conflict(booking["customer_id"], payload.scheduled_date, payload.scheduled_slot, duration, booking_id)
+        service_center = await self.center_repo.find_by_id(booking["service_center_id"])
+        if not service_center:
+            raise NotFoundException("Service center not found")
+        # Same server-side rules create_booking enforces (a real,
+        # currently-bookable admin slot, not past cutoff) — reschedule must
+        # not be a backdoor around them just because it's editing an
+        # existing booking instead of creating a new one.
+        new_slot_start, new_slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
+        if _slot_cutoff_passed(new_slot_end, policy):
+            raise BadRequestException("This slot is no longer available to book — please pick another slot.")
+        self_conflict = await self._customer_conflict(booking["customer_id"], new_slot_start, new_slot_end, booking_id)
         if self_conflict:
             raise BadRequestException(
                 f"This customer already has booking {self_conflict['booking_number']} scheduled around this new time — "
                 "pick a different time."
             )
 
+        center_id = booking["service_center_id"]
+        old_date_str = to_ist(booking["scheduled_date"]).strftime("%Y-%m-%d")
+        new_date_str = to_ist(payload.scheduled_date).strftime("%Y-%m-%d")
+        same_slot = old_date_str == new_date_str and booking["scheduled_slot"] == payload.scheduled_slot
+
         had_captain = bool(booking.get("captain_id"))
         update_data: dict = {
             "scheduled_date": payload.scheduled_date,
             "scheduled_slot": payload.scheduled_slot,
+            "slot_start": new_slot_start,
+            "slot_end": new_slot_end,
+            "estimated_start_at": None,
             "status": BookingStatus.RESCHEDULED.value,
             "captain_id": None,
             "reminder_sent": False,
@@ -1257,7 +1692,24 @@ class BookingService:
                 }
             )
 
-        updated = await self.repo.update_by_id(booking_id, update_data)
+        # A reschedule that keeps the exact same center/date/slot never
+        # touches capacity at all (it already holds that reservation) — only
+        # an actual move needs to release the old slot and reserve the new
+        # one, in that order (reserve first, so a full new slot aborts the
+        # whole thing with the old reservation still intact, nothing
+        # changed) atomically with the booking update itself.
+        async def _do_reschedule(session):
+            if not same_slot:
+                await self._reserve_slot_capacity(session, service_center, new_date_str, payload.scheduled_slot)
+                await self._release_slot_capacity(center_id, old_date_str, booking["scheduled_slot"], session=session)
+            return await self.repo.update_by_id(booking_id, update_data, session=session)
+
+        try:
+            async with await self.db.client.start_session() as session:
+                updated = await session.with_transaction(_do_reschedule)
+        except DuplicateKeyError:
+            raise BadRequestException("This customer already has a booking for this vehicle in this slot.")
+
         await self._record_history(
             booking_id,
             BookingStatus.RESCHEDULED,
@@ -1280,6 +1732,10 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
             )
+        await self._broadcast_booking_changed(updated)
+        if not same_slot:
+            await self._broadcast_slots_changed(center_id, old_date_str)
+            await self._broadcast_slots_changed(center_id, new_date_str)
         return serialize_doc(updated)
 
     async def rebook(self, customer_id: str, booking_id: str, scheduled_date: datetime, scheduled_slot: str) -> dict:
@@ -1333,8 +1789,11 @@ class BookingService:
         now = now_ist()
         overdue = []
         for booking in candidates:
-            duration = booking.get("duration_minutes", 60)
-            slot_end = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"]) + timedelta(minutes=duration)
+            # No captain (and so no estimated_start_at) exists for these yet —
+            # the relevant "has this booking's whole window expired" boundary
+            # is the admin slot's own end (_booking_window), not a per-captain
+            # anchor that hasn't been set.
+            _, slot_end = _booking_window(booking)
             window_end = slot_end + timedelta(minutes=policy.get("late_start_grace_minutes", 30))
             if now > window_end:
                 overdue.append(booking)
@@ -1355,7 +1814,10 @@ class BookingService:
         threshold = timedelta(minutes=LATE_START_NUDGE_MINUTES)
         due = []
         for booking in candidates:
-            slot_start = _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+            # ASSIGNED means a captain (and estimated_start_at) exists —
+            # anchor to that, not the coarse shared slot, same reasoning as
+            # start_heading.
+            slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
             if now <= slot_start:
                 continue
             last_reminder = booking.get("late_start_reminder_sent_at")
@@ -1366,8 +1828,35 @@ class BookingService:
 
     async def flag_late_to_start(self, booking: dict) -> None:
         scheduled_time = format_slot_start_12h(booking["scheduled_slot"])
-        note = f"Booking {booking['booking_number']} was due to start at {scheduled_time} — the captain hasn't headed out yet."
         existing_flag = booking.get("issue_flag")
+
+        # Once a booking crosses the SAME lockout threshold start_heading
+        # itself enforces, nudging the captain to "start heading out now" is
+        # pointless — they literally can't anymore. Switch to a distinct
+        # flag that tells the manager this needs an actual decision
+        # (reschedule/reassign), not just a reminder — and notify the
+        # manager, not the captain, from this point on.
+        policy = await self.policy_service.get_policy()
+        duration = booking.get("duration_minutes", 60)
+        slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        slot_end = slot_start + timedelta(minutes=duration)
+        window_end = slot_end + timedelta(minutes=policy.get("late_start_grace_minutes", 30))
+        lockout_at = window_end + timedelta(hours=policy.get("captain_start_lockout_hours", 4))
+        is_locked_out = now_ist() > lockout_at
+
+        if is_locked_out:
+            note = (
+                f"Booking {booking['booking_number']} was due to start at {scheduled_time} and the captain never headed "
+                f"out — the window expired too long ago for them to start it now. Reschedule it to a new time, then "
+                f"assign a captain, or cancel it."
+            )
+            # Always (re)set here, even over an existing captain_not_started —
+            # this IS the more specific issue once locked out, superseding
+            # the earlier nudge rather than being blocked by it.
+            await self.flag_issue(str(booking["_id"]), "captain_missed_window", note)
+            return
+
+        note = f"Booking {booking['booking_number']} was due to start at {scheduled_time} — the captain hasn't headed out yet."
         # Don't clobber a different, still-open flag (e.g. the captain's own
         # report_risk) — only set/refresh captain_not_started when there
         # isn't a more specific issue already active.
@@ -1435,6 +1924,8 @@ class BookingService:
         'nudge the manager if it's taking unusual time' idea as the
         stuck-on-the-way sweep above, just for the actual service instead of
         the drive over."""
+        policy = await self.policy_service.get_policy()
+        tolerance = policy.get("delay_tolerance_minutes", SERVICE_OVERRUN_MINUTES)
         candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.SERVICE_STARTED.value, "issue_flag": None})
         now = now_ist()
         overrunning = []
@@ -1444,7 +1935,7 @@ class BookingService:
                 continue
             duration = booking.get("duration_minutes", 60)
             elapsed_minutes = (now - from_stored(started_at)).total_seconds() / 60
-            if elapsed_minutes > duration + SERVICE_OVERRUN_MINUTES:
+            if elapsed_minutes > duration + tolerance:
                 overrunning.append(booking)
         return overrunning
 
@@ -1464,6 +1955,13 @@ class BookingService:
                     NotificationType.BOOKING,
                     booking_id,
                 )
+            # The single hook every automated sweep in main.py's
+            # _reminder_loop goes through (captain_not_started,
+            # captain_not_reached, captain_delay, service_overrun) as well
+            # as the manual report_risk path — covers the manager queue's
+            # "Flagged issues" section with a live push for all of them at
+            # once, not just the manager-initiated actions above.
+            await self._broadcast_booking_changed(booking)
 
     async def notify_center_manager_for_booking(self, booking: dict, title: str, message: str) -> None:
         """Notifies the booking's service center manager without touching
@@ -1474,6 +1972,26 @@ class BookingService:
         if center and center.get("manager_id"):
             await self.notifications.notify(center["manager_id"], title, message, NotificationType.BOOKING, str(booking["_id"]))
 
+    async def update_priority(self, booking_id: str, priority: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> tuple[dict, str]:
+        """Manager/admin can set priority on any booking in their own
+        center; a captain may only set it on a booking currently assigned
+        to them (e.g. flagging something urgent they discovered on-site).
+        Customers can't reach this at all — no route exposes it to them.
+        Returns (updated_booking, old_priority) so the caller can audit
+        the actual before/after value."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if actor_role == "captain":
+            if booking.get("captain_id") != actor_id:
+                raise ForbiddenException("You can only update priority on your own assigned booking")
+        else:
+            ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        old_priority = booking.get("priority", "medium")
+        updated = await self.repo.update_by_id(booking_id, {"priority": priority})
+        await self._broadcast_booking_changed(updated)
+        return serialize_doc(updated), old_priority
+
     async def resolve_issue(self, booking_id: str, resolved_by: str, note: str, actor_role: str, actor_center_id: str | None) -> dict:
         booking = await self.repo.find_by_id(booking_id)
         if not booking:
@@ -1481,7 +1999,68 @@ class BookingService:
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         updated = await self.repo.update_by_id(booking_id, {"issue_flag": None, "issue_resolved": True})
         await self._record_history(booking_id, BookingStatus(booking["status"]), resolved_by, note)
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
+
+    async def update_captain_location(self, captain_id: str, latitude: float, longitude: float) -> None:
+        """Updates the captain's own user document with a real GPS
+        position. Originally called only from the three discrete moments
+        this service already captures live GPS (start_heading, before/after
+        photos); now ALSO called periodically while a captain has an active
+        job, from the dedicated ping endpoint (see
+        BookingController.ping_captain_location / ws_routes' "captain-location"
+        channel) — see UserModel.last_known_location's docstring for the
+        full history of what this is and isn't. Pushed live over the
+        "captain-location:{captain_id}" channel directly (not just a
+        "changed" ping) since the payload itself is small and safe to send
+        as-is — a manager/admin watching doesn't need a separate fetch."""
+        now = now_ist()
+        await self.user_repo.update_by_id(captain_id, {"last_known_location": {"latitude": latitude, "longitude": longitude}, "last_location_at": now})
+        await ws_manager.broadcast(
+            f"captain-location:{captain_id}",
+            {"type": "captain_location", "channel": f"captain-location:{captain_id}", "latitude": latitude, "longitude": longitude, "captured_at": now.isoformat()},
+        )
+
+    async def has_active_job(self, captain_id: str) -> bool:
+        """Whether this captain currently has a booking in one of the
+        "actively working" statuses — gates the location-ping endpoint so
+        this never becomes always-on background tracking, only tracking
+        tied to a real, current job (same restraint as the discrete-capture
+        design it's extending)."""
+        count = await self.repo.count({"captain_id": captain_id, "status": {"$in": list(ACTIVE_CAPTAIN_STATUSES)}})
+        return count > 0
+
+    async def _broadcast_booking_changed(self, booking: dict) -> None:
+        """Fired after every write that changes a booking's status,
+        assignment, or priority — a single "go refetch" ping (never the
+        payload itself, see ws_manager's module docstring for why) to every
+        channel that could plausibly be showing this booking right now:
+        the booking's own detail view, its center's manager queue, and the
+        customer's/captain's own lists."""
+        booking_id = str(booking.get("_id") or booking.get("id") or "")
+        if not booking_id:
+            return
+        payload = {"type": "changed", "booking_id": booking_id}
+        await ws_manager.broadcast(f"booking:{booking_id}", {**payload, "channel": f"booking:{booking_id}"})
+        center_id = booking.get("service_center_id")
+        if center_id:
+            await ws_manager.broadcast(f"center-bookings:{center_id}", {**payload, "channel": f"center-bookings:{center_id}"})
+        customer_id = booking.get("customer_id")
+        if customer_id:
+            await ws_manager.broadcast(f"user:{customer_id}", {**payload, "channel": f"user:{customer_id}"})
+        captain_id = booking.get("captain_id")
+        if captain_id:
+            await ws_manager.broadcast(f"user:{captain_id}", {**payload, "channel": f"user:{captain_id}"})
+
+    async def _broadcast_slots_changed(self, service_center_id: str, date_str: str) -> None:
+        """Fired after any write that changes a slot's booked_count,
+        capacity, or is_closed state — customer/manager slot pickers
+        subscribed to this exact (center, date) refetch immediately instead
+        of waiting out their polling interval."""
+        await ws_manager.broadcast(
+            f"slots:{service_center_id}:{date_str}",
+            {"type": "changed", "channel": f"slots:{service_center_id}:{date_str}", "service_center_id": service_center_id, "date": date_str},
+        )
 
     async def _record_history(self, booking_id: str, status: BookingStatus, changed_by: str | None, note: str | None) -> None:
         await self.history_repo.create(

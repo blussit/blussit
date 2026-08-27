@@ -2,9 +2,10 @@ from datetime import timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, PhoneNotVerifiedException
 from app.models.enums import BillingCycle, SubscriptionStatus
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
+from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.schemas.subscription_schema import (
     AssignSubscriptionRequest,
@@ -93,6 +94,7 @@ class UserSubscriptionService:
         self.repo = UserSubscriptionRepository(db)
         self.plan_repo = SubscriptionPlanRepository(db)
         self.vehicle_repo = VehicleRepository(db)
+        self.user_repo = UserRepository(db)
 
     async def list_my_subscriptions(self, customer_id: str) -> list[dict]:
         subs = await self.repo.list_for_customer(customer_id)
@@ -106,48 +108,44 @@ class UserSubscriptionService:
         return _with_effective_statuses(subs)
 
     async def subscribe(self, customer_id: str, payload: SubscribeRequest) -> dict:
-        return await self._create_subscription(customer_id, payload.plan_id, payload.vehicle_id, payload.auto_renew)
+        # Same phone-verification gate as a customer's first self-service
+        # booking (BookingService.create_booking) — a subscription is a
+        # real purchase too. assign() (manager/admin granting a plan) is
+        # a completely separate method and is never gated by this.
+        customer = await self.user_repo.find_by_id(customer_id)
+        if not customer:
+            raise NotFoundException("Customer not found")
+        if not customer.get("phone_verified"):
+            raise PhoneNotVerifiedException("Please verify your phone number with an OTP before purchasing a subscription.")
+        return await self._create_subscription(customer_id, payload.plan_id, payload.auto_renew)
 
     async def assign(self, payload: AssignSubscriptionRequest) -> dict:
         """Manager/admin granting a subscription to a customer directly —
         same validation as self-purchase, just with an explicit target
         customer instead of the caller themselves."""
-        return await self._create_subscription(payload.customer_id, payload.plan_id, payload.vehicle_id, payload.auto_renew)
+        return await self._create_subscription(payload.customer_id, payload.plan_id, payload.auto_renew)
 
-    async def _create_subscription(self, customer_id: str, plan_id: str, vehicle_id: str, auto_renew: bool) -> dict:
+    async def _create_subscription(self, customer_id: str, plan_id: str, auto_renew: bool) -> dict:
+        """Subscribing no longer names a vehicle at all — a subscription is
+        tied to the vehicle TYPE(S) its plan covers (plan.vehicle_types),
+        not one specific vehicle. Which vehicle actually gets used is
+        decided per-booking later (see plan_consumption), checked against
+        whatever vehicles the customer owns at that time — including ones
+        added after the subscription was purchased. This also means there's
+        no more "one active subscription per vehicle" guard to enforce
+        (that only made sense when a subscription pointed at one vehicle);
+        a customer can hold multiple concurrent subscriptions freely."""
         plan = await self.plan_repo.find_by_id(plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
 
-        vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
-        if not vehicle or vehicle["owner_id"] != customer_id:
-            raise NotFoundException("Vehicle not found")
-
-        # Empty plan.vehicle_types = every type eligible (backward-compatible
-        # default for plans that predate this restriction).
-        allowed_types = plan.get("vehicle_types") or []
-        if allowed_types and vehicle["vehicle_type"] not in allowed_types:
-            raise BadRequestException("This plan doesn't cover this vehicle's type — pick a different plan or vehicle.")
-
-        # One active (and not-yet-expired) subscription per vehicle at a
-        # time — a plain read-then-write check, not a hard atomic guard;
-        # subscription purchases aren't a realistic concurrent-race surface
-        # the way booking assignment or coupon redemption are.
-        existing = await self.repo.find_all_no_paginate({"vehicle_id": vehicle_id, "status": SubscriptionStatus.ACTIVE.value})
         now = now_ist()
-        still_active = [s for s in existing if s["end_date"].replace(tzinfo=timezone.utc) >= now]
-        if still_active:
-            blocking_plan = await self.plan_repo.find_by_id(still_active[0]["plan_id"])
-            plan_name = blocking_plan["name"] if blocking_plan else "another plan"
-            raise BadRequestException(f"This vehicle already has an active subscription ({plan_name}) — cancel or wait for it to expire first.")
-
         days = _CYCLE_DAYS.get(plan["billing_cycle"], 30)
         category_quotas = plan.get("category_quotas") or {}
         total = sum(category_quotas.values()) if category_quotas else plan["total_service_count"]
         doc = {
             "customer_id": customer_id,
             "plan_id": plan_id,
-            "vehicle_id": vehicle_id,
             "status": SubscriptionStatus.ACTIVE.value,
             "total_service_count": total,
             "remaining_service_count": total,
@@ -158,7 +156,12 @@ class UserSubscriptionService:
             "auto_renew": auto_renew,
         }
         created = await self.repo.create(doc)
-        return _with_effective_status(created)
+        result = _with_effective_status(created)
+        # Denormalized for callers that want to show/send the plan name
+        # without a second lookup (e.g. the purchase-confirmation ticket
+        # issued right after subscribe() — see UserSubscriptionController).
+        result["plan_name"] = plan.get("name")
+        return result
 
     async def get_plan(self, subscription_id: str) -> dict | None:
         """Returns the plan doc backing a subscription — used by booking
@@ -180,10 +183,20 @@ class UserSubscriptionService:
         belongs to has been durably created — see BookingService.create_booking
         for why the split matters (a booking-creation failure between
         planning and committing must never leave a subscription silently
-        decremented for a booking that doesn't exist)."""
+        decremented for a booking that doesn't exist).
+
+        Vehicle eligibility is checked by TYPE here, not by a specific
+        vehicle_id — the subscription itself no longer names one vehicle
+        (see UserSubscriptionModel.vehicle_id's docstring). Vehicle
+        ownership is already verified by create_booking before this is
+        called, so it isn't re-checked here."""
         sub = await self._get_active_subscription(subscription_id)
-        if sub["vehicle_id"] != vehicle_id:
-            raise BadRequestException("This subscription is linked to a different vehicle and can't be used for this booking.")
+        plan = await self.plan_repo.find_by_id(sub["plan_id"])
+        allowed_types = (plan or {}).get("vehicle_types") or []
+        if allowed_types:
+            vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
+            if not vehicle or vehicle["vehicle_type"] not in allowed_types:
+                raise BadRequestException("This subscription doesn't cover this vehicle's type and can't be used for this booking.")
         by_category = dict(sub.get("remaining_by_category") or {})
         if by_category:
             needed: dict[str, int] = {}
@@ -290,12 +303,10 @@ class UserSubscriptionService:
         if not new_plan or not new_plan.get("is_active"):
             raise NotFoundException("New plan not found or inactive")
 
-        # The vehicle doesn't change on upgrade — the new plan must still
-        # actually cover it.
-        vehicle = await self.vehicle_repo.find_by_id(sub["vehicle_id"])
-        new_allowed_types = new_plan.get("vehicle_types") or []
-        if vehicle and new_allowed_types and vehicle["vehicle_type"] not in new_allowed_types:
-            raise BadRequestException("The new plan doesn't cover this subscription's vehicle type.")
+        # No single vehicle to re-check against anymore — eligibility is
+        # by type, verified again per-booking at plan_consumption time
+        # whichever vehicle a given booking actually uses. Nothing to
+        # validate here beyond the plan itself being active.
 
         category_quotas = new_plan.get("category_quotas") or {}
         total = sum(category_quotas.values()) if category_quotas else new_plan["total_service_count"]
@@ -321,13 +332,6 @@ class UserSubscriptionService:
     async def list_all_for_admin(self, page: int, page_size: int):
         items, total = await self.repo.list_all(page, page_size)
         return _with_effective_statuses(items), total
-
-    async def has_active_for_vehicle(self, vehicle_id: str) -> bool:
-        """Used by VehicleService.delete to block removing a vehicle an
-        active, not-yet-expired subscription still depends on."""
-        existing = await self.repo.find_all_no_paginate({"vehicle_id": vehicle_id, "status": SubscriptionStatus.ACTIVE.value})
-        now = now_ist()
-        return any(s["end_date"].replace(tzinfo=timezone.utc) >= now for s in existing)
 
     async def _get_active_subscription(self, subscription_id: str) -> dict:
         sub = await self.repo.find_by_id(subscription_id)

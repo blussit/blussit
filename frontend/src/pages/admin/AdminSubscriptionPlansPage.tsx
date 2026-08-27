@@ -5,6 +5,7 @@ import { subscriptionApi } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { adminSubscriptionPlanApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { SubscriptionPlan } from "../../types";
 
@@ -37,6 +38,7 @@ function toNumberMap(input: Record<string, string>): Record<string, number> {
 
 export default function AdminSubscriptionPlansPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data, isLoading } = useQuery({ queryKey: ["admin-plans"], queryFn: () => subscriptionApi.plans(false) });
   const { data: categories } = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
@@ -215,8 +217,8 @@ export default function AdminSubscriptionPlansPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete "${p.name}"? This cannot be undone.`)) deleteMutation.mutate(p.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete "${p.name}"?`, message: "This cannot be undone.", tone: "danger" })) deleteMutation.mutate(p.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />

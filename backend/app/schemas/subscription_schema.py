@@ -43,9 +43,6 @@ class SubscriptionPlanUpdateRequest(BaseModel):
 
 class SubscribeRequest(BaseModel):
     plan_id: str
-    # Required — a subscription is always locked to one specific vehicle from
-    # creation (see UserSubscriptionModel.vehicle_id's docstring for why).
-    vehicle_id: str
     auto_renew: bool = False
 
 
@@ -54,7 +51,6 @@ class AssignSubscriptionRequest(BaseModel):
     shape as SubscribeRequest plus an explicit target customer."""
     customer_id: str
     plan_id: str
-    vehicle_id: str
     auto_renew: bool = False
 
 

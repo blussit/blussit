@@ -38,7 +38,13 @@ const statusToneMap: Record<string, Tone> = {
   closed: "neutral",
 };
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string | null | undefined }) {
+  // Defensive: a null/undefined/empty status (a legacy record from before a
+  // status field existed, a partially-loaded row, bad data) must render as
+  // "unknown" rather than throw — this component has no error boundary
+  // above it anywhere it's used, so an uncaught crash here white-screens
+  // the entire page, not just this one badge.
+  if (!status) return <Badge tone="neutral">Unknown</Badge>;
   const tone = statusToneMap[status] || "neutral";
   return <Badge tone={tone}>{status.replace(/_/g, " ")}</Badge>;
 }

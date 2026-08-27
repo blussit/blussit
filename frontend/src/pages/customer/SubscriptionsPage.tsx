@@ -1,25 +1,22 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { Gift } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { vehicleApi } from "../../api/profile";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
-import { Button, Card, EmptyState, Modal, PageLoader, Select, StatusBadge } from "../../components/ui";
+import { Button, Card, EmptyState, Modal, PageLoader, StatusBadge } from "../../components/ui";
+import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
+import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
 import type { SubscriptionPlan } from "../../types";
 
-// Vehicle-type overrides win when set (admin can price the same plan
-// differently by type — see AdminSubscriptionPlansPage), otherwise the flat
-// price/discounted_price applies to every vehicle. Same pattern as
-// NewBookingPage's priceFor for services.
-function planPriceFor(plan: SubscriptionPlan, vehicleType: string | undefined): number {
-  if (vehicleType && plan.vehicle_type_prices?.[vehicleType] != null) return plan.vehicle_type_prices[vehicleType];
-  return plan.discounted_price ?? plan.price;
-}
-
 export default function SubscriptionsPage() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
+  const [verifyOpen, setVerifyOpen] = useState(false);
   const { data: plans, isLoading: plansLoading } = useQuery({ queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) });
   const { data: mySubs, isLoading: subsLoading } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
@@ -27,9 +24,9 @@ export default function SubscriptionsPage() {
   const { data: servicesData } = useQuery({ queryKey: ["services-for-subscriptions"], queryFn: () => catalogApi.services({ page_size: 100 }) });
   const services = servicesData?.data || [];
   const serviceName = (id: string) => services.find((s) => s.id === id)?.name || id;
+  const typeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
 
   const [subscribingPlan, setSubscribingPlan] = useState<SubscriptionPlan | null>(null);
-  const [pickedVehicleId, setPickedVehicleId] = useState("");
   const [subscribeError, setSubscribeError] = useState("");
 
   const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
@@ -38,12 +35,15 @@ export default function SubscriptionsPage() {
   const invalidateSubs = () => queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
 
   const subscribeMutation = useMutation({
-    mutationFn: () => subscriptionApi.subscribe({ plan_id: subscribingPlan!.id, vehicle_id: pickedVehicleId }),
-    onSuccess: () => {
+    mutationFn: () => subscriptionApi.subscribe({ plan_id: subscribingPlan!.id }),
+    onSuccess: (sub) => {
       invalidateSubs();
+      const planName = sub.plan_name || subscribingPlan?.name;
       setSubscribingPlan(null);
-      setPickedVehicleId("");
       setSubscribeError("");
+      // Same opaque, single-purpose token approach as a booking — see
+      // PurchaseConfirmationModel / ThankYouPage.
+      navigate(`/thank-you?token=${sub.confirmation_token}${planName ? `&plan=${encodeURIComponent(planName)}` : ""}`);
     },
     onError: (err) => setSubscribeError(getErrorMessage(err)),
   });
@@ -63,21 +63,15 @@ export default function SubscriptionsPage() {
     onError: (err) => setUpgradeError(getErrorMessage(err)),
   });
 
-  const vehicleName = (id: string) => {
-    const v = vehicles?.find((v) => v.id === id);
-    return v ? `${v.brand} ${v.model} · ${v.registration_number}` : "—";
-  };
-
-  // Which of the customer's vehicles this plan can actually be bought for —
-  // matches the backend's own check in UserSubscriptionService._create_subscription.
+  // Which of the customer's owned vehicles this plan currently covers —
+  // informational only now (subscribing no longer requires picking one),
+  // shown so the customer can see what they can actually use it on.
   const eligibleVehiclesFor = (plan: SubscriptionPlan) =>
     (vehicles || []).filter((v) => !plan.vehicle_types?.length || plan.vehicle_types.includes(v.vehicle_type));
 
   const openSubscribe = (plan: SubscriptionPlan) => {
     setSubscribingPlan(plan);
     setSubscribeError("");
-    const eligible = eligibleVehiclesFor(plan);
-    setPickedVehicleId(eligible.find((v) => v.is_default)?.id || eligible[0]?.id || "");
   };
 
   const upgradeTargets = upgradingSub ? (plans || []).filter((p) => (plans?.find((cp) => cp.id === upgradingSub.planId)?.upgrade_to_plan_ids || []).includes(p.id)) : [];
@@ -107,7 +101,16 @@ export default function SubscriptionsPage() {
                     <h3 className="font-semibold text-[var(--color-text-primary)]">{plan?.name || "Subscription"}</h3>
                     <StatusBadge status={sub.effective_status} />
                   </div>
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{vehicleName(sub.vehicle_id)}</p>
+                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                    {plan?.vehicle_types?.length ? `Covers: ${plan.vehicle_types.map(typeName).join(", ")}` : "Covers: any vehicle type"}
+                  </p>
+                  {plan && (
+                    <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
+                      {eligibleVehiclesFor(plan).length
+                        ? `Usable on: ${eligibleVehiclesFor(plan).map((v) => `${v.brand} ${v.model} (${v.registration_number})`).join(", ")}`
+                        : "You don't currently own a matching vehicle — add one to use this plan."}
+                    </p>
+                  )}
                   <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
                     {sub.remaining_service_count} of {sub.total_service_count} services remaining
                   </p>
@@ -170,38 +173,33 @@ export default function SubscriptionsPage() {
       <Modal open={!!subscribingPlan} onClose={() => setSubscribingPlan(null)} title={`Subscribe — ${subscribingPlan?.name || ""}`}>
         <div className="space-y-4">
           <p className="text-sm text-[var(--color-text-secondary)]">
-            A subscription is tied to one specific vehicle for its whole duration — pick which one this plan is for.
+            This plan covers{" "}
+            {subscribingPlan?.vehicle_types?.length ? subscribingPlan.vehicle_types.map(typeName).join(", ") : "any vehicle type"} — use it
+            on any matching vehicle you own now or add later, no need to pick one now.
           </p>
-          {subscribingPlan && eligibleVehiclesFor(subscribingPlan).length === 0 ? (
-            <p className="text-sm text-[var(--color-error)]">
-              None of your vehicles match this plan's eligible types. Add a matching vehicle first.
+          {subscribingPlan && !eligibleVehiclesFor(subscribingPlan).length && (
+            <p className="text-sm text-[var(--color-warning)]">
+              You don't currently own a matching vehicle — you can still subscribe and use it once you add one.
             </p>
-          ) : (
-            <>
-              <Select label="Vehicle" value={pickedVehicleId} onChange={(e) => setPickedVehicleId(e.target.value)}>
-                {subscribingPlan &&
-                  eligibleVehiclesFor(subscribingPlan).map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.brand} {v.model} · {v.registration_number}
-                    </option>
-                  ))}
-              </Select>
-              {subscribingPlan && pickedVehicleId && (
-                <p className="text-sm text-[var(--color-text-primary)]">
-                  Price for this vehicle:{" "}
-                  <span className="font-mono-num font-bold">
-                    ₹{planPriceFor(subscribingPlan, vehicles?.find((v) => v.id === pickedVehicleId)?.vehicle_type)}
-                  </span>
-                </p>
-              )}
-            </>
           )}
           {subscribeError && <p className="text-sm text-[var(--color-error)]">{subscribeError}</p>}
-          <Button className="w-full" disabled={!pickedVehicleId} isLoading={subscribeMutation.isPending} onClick={() => subscribeMutation.mutate()}>
+          <Button
+            className="w-full"
+            isLoading={subscribeMutation.isPending}
+            onClick={() => {
+              if (!user?.phone_verified) {
+                setVerifyOpen(true);
+                return;
+              }
+              subscribeMutation.mutate();
+            }}
+          >
             Confirm subscription
           </Button>
         </div>
       </Modal>
+
+      <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); subscribeMutation.mutate(); }} />
 
       <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade subscription">
         <div className="space-y-3">

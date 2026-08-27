@@ -52,10 +52,13 @@ class BookingPolicyUpdateRequest(BaseModel):
     operating_start: Optional[str] = None
     operating_end: Optional[str] = None
     min_lead_minutes: Optional[int] = Field(default=None, ge=0)
-    slot_granularity_minutes: Optional[int] = Field(default=None, ge=5)
+    slot_duration_minutes: Optional[int] = Field(default=None, ge=5)
+    slot_booking_cutoff_minutes: Optional[int] = Field(default=None, ge=0)
+    delay_tolerance_minutes: Optional[int] = Field(default=None, ge=0)
     captain_travel_buffer_minutes: Optional[int] = Field(default=None, ge=0)
     photo_geofence_radius_m: Optional[int] = Field(default=None, ge=10)
     late_start_grace_minutes: Optional[int] = Field(default=None, ge=0)
+    captain_start_lockout_hours: Optional[int] = Field(default=None, ge=1)
     wallet_gating_enabled: Optional[bool] = None
 
 

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { IndianRupee, Percent, ShoppingBag, Users } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertTriangle, CheckCircle2, Clock, Gauge, IndianRupee, Percent, ShoppingBag, Star, Users, XCircle } from "lucide-react";
 import { analyticsApi } from "../../api/admin";
 import { Card, CardBody, CardHeader, PageLoader } from "../../components/ui";
 
@@ -9,7 +10,24 @@ export default function AdminDashboardPage() {
 
   if (isLoading || !data) return <PageLoader />;
 
-  const stats = [
+  // Section 14/15: the most important operational KPIs first — what's
+  // happening right now, not every possible metric at once. Each card is
+  // also a drill-down entry point (Section 15) into wherever that number
+  // is actually explained, rather than a dead-end tile.
+  const operationalStats = [
+    { label: "Total bookings", value: String(data.total_bookings), icon: ShoppingBag, to: "/admin/bookings" },
+    { label: "Completed", value: String(data.completed_bookings), icon: CheckCircle2, tone: "success" as const, to: "/admin/bookings" },
+    { label: "Pending", value: String(data.pending_bookings), icon: Clock, tone: "warning" as const, to: "/admin/bookings" },
+    { label: "Cancelled", value: String(data.cancelled_bookings), icon: XCircle, tone: "neutral" as const, to: "/admin/bookings" },
+    { label: "Delayed", value: String(data.delayed_bookings), icon: AlertTriangle, tone: (data.delayed_bookings as number) > 0 ? ("error" as const) : ("neutral" as const), to: "/admin/bookings" },
+    { label: "Today's capacity used", value: data.capacity_utilization_pct != null ? `${data.capacity_utilization_pct}%` : "—", icon: Gauge, to: "/admin/service-centers" },
+    { label: "Avg service time", value: data.avg_service_minutes != null ? `${data.avg_service_minutes} min` : "—", icon: Clock, to: "/admin/bookings" },
+    { label: "Avg travel time", value: data.avg_travel_minutes != null ? `${data.avg_travel_minutes} min` : "—", icon: Clock, to: "/admin/bookings" },
+    { label: "Avg completion time", value: data.avg_completion_minutes != null ? `${data.avg_completion_minutes} min` : "—", icon: Clock, to: "/admin/bookings" },
+    { label: "Avg customer rating", value: data.avg_rating != null ? `${data.avg_rating} ★` : "—", icon: Star, to: "/admin/reviews" },
+  ];
+
+  const businessStats = [
     { label: "Total revenue", value: `₹${data.total_revenue}`, icon: IndianRupee },
     { label: "Today's orders", value: String(data.todays_orders), icon: ShoppingBag },
     { label: "Active customers", value: String(data.active_customers), icon: Users },
@@ -22,23 +40,27 @@ export default function AdminDashboardPage() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Analytics dashboard</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Business performance at a glance.</p>
+        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+          Operational health at a glance. <Link to="/admin/bookings" className="text-[var(--color-primary)] hover:underline">Drill into a service center →</Link>
+        </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((s) => (
-          <Card key={s.label}>
-            <CardBody className="flex items-center gap-4">
-              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)]">
-                <s.icon className="h-5 w-5" />
-              </span>
-              <div>
-                <p className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{s.value}</p>
-                <p className="text-sm text-[var(--color-text-secondary)]">{s.label}</p>
-              </div>
-            </CardBody>
-          </Card>
-        ))}
+      <div>
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Operations today</p>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+          {operationalStats.map((s) => (
+            <StatCard key={s.label} {...s} />
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Business</p>
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          {businessStats.map((s) => (
+            <StatCard key={s.label} {...s} />
+          ))}
+        </div>
       </div>
 
       <Card>
@@ -90,4 +112,41 @@ export default function AdminDashboardPage() {
       </div>
     </div>
   );
+}
+
+function StatCard({
+  label,
+  value,
+  icon: Icon,
+  tone,
+  to,
+}: {
+  label: string;
+  value: string;
+  icon: typeof IndianRupee;
+  tone?: "success" | "warning" | "error" | "neutral";
+  /** When set, the whole card is a drill-down link (Section 15) instead of
+   * a dead-end number. */
+  to?: string;
+}) {
+  const toneClass = tone === "success" ? "text-[var(--color-success)]" : tone === "warning" ? "text-amber-600" : tone === "error" ? "text-[var(--color-error)]" : "text-[var(--color-text-primary)]";
+  const body = (
+    <CardBody className="flex items-center gap-3 p-4">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+        <Icon className="h-4.5 w-4.5" />
+      </span>
+      <div className="min-w-0">
+        <p className={`font-mono-num text-xl font-bold ${toneClass}`}>{value}</p>
+        <p className="truncate text-xs text-[var(--color-text-secondary)]">{label}</p>
+      </div>
+    </CardBody>
+  );
+  if (to) {
+    return (
+      <Link to={to}>
+        <Card className="cursor-pointer transition-shadow hover:shadow-[var(--shadow-lifted)]">{body}</Card>
+      </Link>
+    );
+  }
+  return <Card>{body}</Card>;
 }

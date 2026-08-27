@@ -5,6 +5,7 @@ from app.controllers.auth_controller import AuthController
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin, require_manager_or_admin
 from app.schemas.user_schema import (
     ChangePasswordRequest,
+    ConfirmPhoneVerificationRequest,
     ForgotPasswordRequest,
     LoginRequest,
     ManagerCreateCustomerRequest,
@@ -87,3 +88,32 @@ async def create_customer(
     phone/walk-in booking) with a temp password — see
     UserModel.must_change_password."""
     return await AuthController(db).create_customer(current_user, payload)
+
+
+@router.post("/verify-phone/request")
+async def request_phone_verification(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Sends an OTP to the LOGGED-IN customer's own phone — the gate a
+    first-time self-service booking/subscription blocks on until
+    completed (PhoneNotVerifiedException). Always the caller's own phone;
+    never takes a target identifier."""
+    return await AuthController(db).request_phone_verification(current_user)
+
+
+@router.post("/verify-phone/confirm")
+async def confirm_phone_verification(
+    payload: ConfirmPhoneVerificationRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return await AuthController(db).confirm_phone_verification(current_user, payload)
+
+
+@router.post("/customers/{customer_id}/reset-password", dependencies=[Depends(require_manager_or_admin)])
+async def staff_reset_customer_password(
+    customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Manager/admin resets a customer's forgotten password on their
+    behalf — the generated temp password is sent straight to the
+    customer's WhatsApp and is never included in this response, so it's
+    never visible to the manager triggering it."""
+    return await AuthController(db).staff_reset_customer_password(current_user, customer_id)

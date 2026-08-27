@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.enums import PaymentMethod
+from app.models.enums import BookingPriority, PaymentMethod
 from app.schemas.profile_schema import AddressCreateRequest, VehicleCreateRequest
 
 
@@ -70,6 +70,12 @@ class BookingCancelRequest(BaseModel):
 
 class BookingAssignCaptainRequest(BaseModel):
     captain_id: str
+    # Optional finer-grained start time within the booking's admin slot
+    # window (e.g. 9:00 or 10:30 inside a 09:00-12:00 slot) — lets a
+    # manager put more than one booking on the same captain within one
+    # shared slot without them looking like a schedule conflict. Defaults
+    # to the slot's own start if omitted.
+    estimated_start_at: Optional[datetime] = None
 
 
 class EquipmentUsedInput(BaseModel):
@@ -84,6 +90,13 @@ class HeadingRequest(BaseModel):
     latitude: float
     longitude: float
     equipment_used: list[EquipmentUsedInput] = []
+
+
+class CaptainLocationPingRequest(BaseModel):
+    """Periodic location update while a captain has an active job — see
+    BookingService.update_captain_location / has_active_job."""
+    latitude: float
+    longitude: float
 
 
 class PhotoCaptureRequest(BaseModel):
@@ -101,6 +114,7 @@ class CaptainCancelRequest(BaseModel):
 
 class ReassignCaptainRequest(BaseModel):
     captain_id: str
+    estimated_start_at: Optional[datetime] = None
 
 
 class VerifyVehicleRequest(BaseModel):
@@ -113,3 +127,7 @@ class ResolveIssueRequest(BaseModel):
     # Required, same as BookingCancelRequest.reason — a manager must state
     # why an issue is being dismissed, not just click it away silently.
     note: str = Field(min_length=3, max_length=300)
+
+
+class PriorityUpdateRequest(BaseModel):
+    priority: BookingPriority

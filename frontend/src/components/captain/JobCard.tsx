@@ -1,4 +1,4 @@
-import { AlertTriangle, BadgeCheck, CarFront, CheckCircle2, MapPin, Navigation, Phone, Sparkles, XCircle } from "lucide-react";
+import { AlertTriangle, BadgeCheck, CarFront, CheckCircle2, Flag, MapPin, Navigation, Phone, Sparkles, XCircle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Button, Card, StatusBadge } from "../ui";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
@@ -32,6 +32,7 @@ export function JobCard({
   onAction,
   onCancel,
   onReportRisk,
+  onMarkUrgent,
 }: {
   job: Booking;
   action: JobAction | null;
@@ -44,6 +45,7 @@ export function JobCard({
   onAction: (kind: JobAction["kind"]) => void;
   onCancel: () => void;
   onReportRisk: () => void;
+  onMarkUrgent: () => void;
 }) {
   // Cached across every JobCard on the page (same react-query key) — one
   // network fetch, not one per card.
@@ -75,6 +77,22 @@ export function JobCard({
         </div>
         <div className="flex flex-col items-end gap-1.5">
           <StatusBadge status={job.status} />
+          {job.priority === "high" ? (
+            <Badge tone="error">
+              <Flag className="h-3 w-3" /> High priority
+            </Badge>
+          ) : (
+            job.status !== "completed" &&
+            job.status !== "cancelled" && (
+              <button
+                type="button"
+                onClick={onMarkUrgent}
+                className="flex items-center gap-1 text-[10px] font-medium text-[var(--color-text-secondary)] underline hover:text-[var(--color-text-primary)]"
+              >
+                <Flag className="h-3 w-3" /> Mark urgent
+              </button>
+            )
+          )}
           {isFlagged && (
             <Badge tone="warning">
               <AlertTriangle className="h-3 w-3" /> {ISSUE_LABELS[job.issue_flag!] || job.issue_flag}

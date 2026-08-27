@@ -38,6 +38,14 @@ class VerifyOtpRequest(BaseModel):
     otp: str = Field(min_length=4, max_length=6)
 
 
+class ConfirmPhoneVerificationRequest(BaseModel):
+    """Used by the LOGGED-IN user's own phone-verification step (gates
+    their first self-service booking/subscription) — no identifier field,
+    since it always verifies current_user's own phone, never an arbitrary
+    one someone else typed in."""
+    otp: str = Field(min_length=4, max_length=6)
+
+
 class ForgotPasswordRequest(BaseModel):
     identifier: str
 
@@ -107,6 +115,7 @@ class UserPublic(BaseModel):
     profile_image: Optional[str] = None
     service_center_id: Optional[str] = None
     must_change_password: bool = False
+    phone_verified: bool = False
     created_at: datetime
 
     @classmethod
@@ -121,6 +130,7 @@ class UserPublic(BaseModel):
             profile_image=doc.get("profile_image"),
             service_center_id=doc.get("service_center_id"),
             must_change_password=doc.get("must_change_password", False),
+            phone_verified=doc.get("phone_verified", False),
             # created_at is a computed timestamp (aware at write time) — Mongo
             # hands it back naive-holding-UTC-digits, so it must go through
             # from_stored() here too. This bypasses serialize_doc entirely

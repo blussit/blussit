@@ -4,7 +4,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.models.base import BusinessRecordBase
-from app.models.enums import BookingStatus, PaymentMethod, PaymentStatus
+from app.models.enums import BookingPriority, BookingStatus, PaymentMethod, PaymentStatus
 
 
 class GeoPoint(BaseModel):
@@ -44,9 +44,35 @@ class BookingModel(BusinessRecordBase):
     subscription_consumption: Optional[dict] = None
 
     scheduled_date: datetime
+    # The admin-generated slot's key, e.g. "09:00-12:00" (see
+    # app/utils/slots.py) for new bookings. Historical bookings created
+    # before slots existed may hold a plain "HH:MM" exact-time string —
+    # _slot_start_datetime() in booking_service.py already handles both
+    # (splits on "-", takes the first half), so no backfill of this
+    # column itself is needed.
     scheduled_slot: str
+    # Denormalized snapshot of the CUSTOMER-FACING capacity bucket's own
+    # start/end, set once at creation from the admin slot config — this is
+    # a shared window many customers can book into, NOT a specific
+    # captain's expected start time. Never use these two for per-captain
+    # conflict/lateness math; see estimated_start_at below for that.
+    slot_start: Optional[datetime] = None
+    slot_end: Optional[datetime] = None
+    # The actual expected instant THIS booking's captain starts THIS job —
+    # set at assign_captain/reassign_captain time (defaults to slot_start
+    # if the manager doesn't pick a finer time within the slot window).
+    # This — not slot_start — is what _captain_conflict/_ensure_schedulable/
+    # start_heading's lateness math key off of, because multiple bookings
+    # legitimately share the same slot_start/slot_end bucket and must be
+    # distinguishable for one captain's schedule.
+    estimated_start_at: Optional[datetime] = None
+    priority: BookingPriority = BookingPriority.MEDIUM
     duration_minutes: int = 60  # planned/estimated, summed from service durations at creation
     actual_duration_minutes: Optional[int] = None  # actual before-photo -> after-photo elapsed time, set on completion
+    # How many minutes actual_duration_minutes ran past
+    # (duration_minutes + policy delay_tolerance_minutes), computed and
+    # stored at completion. None if not delayed (or not yet completed).
+    delay_minutes: Optional[int] = None
 
     # When this booking most recently entered a "needs a captain" state (set
     # at creation, reset on reschedule) — drives the repeating "still
@@ -128,9 +154,39 @@ class BookingModel(BusinessRecordBase):
 
     is_rated: bool = False
 
+    # Operational timeline additions — the rest of the timeline is already
+    # covered by existing fields above (heading_at = heading,
+    # vehicle_verified_at = arrived, service_started_at, completed_at).
+    assigned_at: Optional[datetime] = None
+    manager_notified_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None  # set on completion or cancellation
+
 
 class BookingStatusHistoryModel(BusinessRecordBase):
     booking_id: str
     status: BookingStatus
     changed_by: Optional[str] = None
     note: Optional[str] = None
+
+
+class SlotCapacityModel(BusinessRecordBase):
+    """One document per (service_center_id, date, slot_key) — the atomic
+    reservation counter for a single admin-generated booking slot on a
+    single calendar date. See BookingService._reserve_slot_capacity /
+    _release_slot_capacity, built on BaseRepository.get_or_init/increment_if."""
+    service_center_id: str
+    date: str  # "YYYY-MM-DD"
+    slot_key: str  # e.g. "09:00-12:00"
+    capacity: int
+    booked_count: int = 0
+    is_closed: bool = False  # admin override — blocks NEW reservations only
+
+
+class DailyCapacityModel(BusinessRecordBase):
+    """One document per (service_center_id, date) — the optional
+    center-wide daily cap, layered on top of per-slot capacity. Only
+    consulted when the center has max_bookings_per_day configured."""
+    service_center_id: str
+    date: str  # "YYYY-MM-DD"
+    capacity: int
+    booked_count: int = 0

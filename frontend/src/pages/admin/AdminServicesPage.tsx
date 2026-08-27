@@ -1,11 +1,24 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Power, Trash2 } from "lucide-react";
+import { Pencil, Plus, Power, Star, Trash2 } from "lucide-react";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
-import { adminCatalogApi } from "../../api/admin";
+import { adminCatalogApi, analyticsApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { useConfirm } from "../../context/ConfirmContext";
 import type { Service, VehicleType } from "../../types";
+
+function Stat({ label, value, tone, icon }: { label: string; value: number | string; tone?: "error"; icon?: ReactNode }) {
+  return (
+    <div className="rounded-xl bg-gray-50 p-3">
+      <p className="text-xs text-[var(--color-text-secondary)]">{label}</p>
+      <p className={`mt-0.5 flex items-center gap-1 font-mono-num text-lg font-bold ${tone === "error" ? "text-[var(--color-error)]" : "text-[var(--color-text-primary)]"}`}>
+        {icon}
+        {value}
+      </p>
+    </div>
+  );
+}
 
 const emptyForm = {
   category_id: "",
@@ -30,15 +43,19 @@ function toNumberMap(input: Record<string, string>): Record<string, number> {
 
 export default function AdminServicesPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data: categories } = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
   const { data: services, isLoading } = useQuery({ queryKey: ["admin-services"], queryFn: () => catalogApi.services({ page_size: 50 }) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
   const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
 
+  const { data: breakdown } = useQuery({ queryKey: ["service-breakdown"], queryFn: () => analyticsApi.serviceBreakdown() });
+
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
+  const [statsFor, setStatsFor] = useState<Service | null>(null);
 
   const [catOpen, setCatOpen] = useState(false);
   const [catName, setCatName] = useState("");
@@ -150,6 +167,7 @@ export default function AdminServicesPage() {
         isLoading={isLoading}
         data={services?.data || []}
         emptyTitle="No services yet"
+        onRowClick={(s) => setStatsFor(s)}
         columns={[
           { header: "Name", accessor: (s) => s.name },
           { header: "Price", accessor: (s) => <span className="font-mono-num">₹{s.discounted_price ?? s.price}</span> },
@@ -159,7 +177,7 @@ export default function AdminServicesPage() {
           {
             header: "",
             accessor: (s) => (
-              <div className="flex gap-2">
+              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
                 <Button size="sm" variant="outline" onClick={() => openEdit(s)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
@@ -170,8 +188,8 @@ export default function AdminServicesPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete "${s.name}"?`)) deleteMutation.mutate(s.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete "${s.name}"?`, tone: "danger" })) deleteMutation.mutate(s.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -181,6 +199,30 @@ export default function AdminServicesPage() {
           },
         ]}
       />
+
+      <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${statsFor.name} — bookings` : ""}>
+        {statsFor && (() => {
+          const s = breakdown?.find((b) => b.service_id === statsFor.id);
+          if (!s) return <p className="text-sm text-[var(--color-text-secondary)]">No bookings have included this service yet.</p>;
+          return (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <Stat label="Total bookings" value={s.total_bookings} />
+                <Stat label="Completed" value={s.completed_bookings} />
+                <Stat label="Delayed jobs" value={s.delayed_count} tone={s.delayed_count > 0 ? "error" : undefined} />
+                <Stat label="Avg rating" value={s.avg_rating != null ? s.avg_rating.toFixed(1) : "—"} icon={<Star className="h-3.5 w-3.5 fill-[var(--color-secondary)] text-[var(--color-secondary)]" />} />
+                <Stat label="Avg actual duration" value={s.avg_actual_minutes != null ? `${s.avg_actual_minutes} min` : "—"} />
+                <Stat label="Avg expected duration" value={s.avg_expected_minutes != null ? `${s.avg_expected_minutes} min` : "—"} />
+                <Stat label="Avg travel time" value={s.avg_travel_minutes != null ? `${s.avg_travel_minutes} min` : "—"} />
+                <Stat label="Avg total job time" value={s.avg_total_minutes != null ? `${s.avg_total_minutes} min` : "—"} />
+              </div>
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                Duration figures are per booking that included this service — a booking with multiple services counts toward each of them.
+              </p>
+            </div>
+          );
+        })()}
+      </Modal>
 
       <Modal open={catOpen} onClose={() => setCatOpen(false)} title="Add category">
         <form

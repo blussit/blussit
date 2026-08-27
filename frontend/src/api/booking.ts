@@ -51,6 +51,18 @@ export interface EligibleCaptain {
   full_name: string;
   eligible: boolean;
   reason?: string | null;
+  // From the captain's last known GPS position — either a discrete capture
+  // (heading-out, before/after photo) or, while they have an active job, a
+  // periodic location ping (see the "captain-location:{id}" WebSocket
+  // channel / staffDirectoryApi.pingLocation) refreshing it every ~25s.
+  // null if they have no capture yet, or the booking's address has no
+  // coordinates to compare against.
+  distance_km?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  last_location_at?: string | null;
+  is_on_job?: boolean;
+  current_job_count?: number;
 }
 
 export const bookingApi = {
@@ -103,6 +115,9 @@ export const bookingApi = {
 
   resolveIssue: (id: string, note?: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/resolve-issue`, { note }).then((r) => r.data.data),
+
+  updatePriority: (id: string, priority: "high" | "medium" | "low") =>
+    apiClient.patch<ApiSuccess<Booking>>(`/bookings/${id}/priority`, { priority }).then((r) => r.data.data),
 
   captureBeforePhoto: (id: string, payload: PhotoCapturePayload) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/before-photo`, payload).then((r) => r.data.data),

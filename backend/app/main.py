@@ -28,6 +28,7 @@ from app.routes.v1 import (
     homepage_config_routes,
     pricing_routes,
     profile_routes,
+    purchase_confirmation_routes,
     review_routes,
     service_center_routes,
     staff_directory_routes,
@@ -37,6 +38,7 @@ from app.routes.v1 import (
     user_routes,
     vehicle_type_routes,
     wallet_routes,
+    ws_routes,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -244,3 +246,5 @@ app.include_router(vehicle_type_routes.router, prefix=api_prefix)
 app.include_router(pricing_routes.router, prefix=api_prefix)
 app.include_router(booking_policy_routes.router, prefix=api_prefix)
 app.include_router(homepage_config_routes.router, prefix=api_prefix)
+app.include_router(ws_routes.router, prefix=api_prefix)
+app.include_router(purchase_confirmation_routes.router, prefix=api_prefix)

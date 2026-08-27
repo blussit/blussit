@@ -22,6 +22,9 @@ class ServiceCenterCreateRequest(BaseModel):
     contact_email: Optional[str] = None
     working_hours_start: str = "08:00"
     working_hours_end: str = "20:00"
+    slot_duration_minutes: Optional[int] = None
+    max_bookings_per_day: Optional[int] = None
+    default_slot_capacity: Optional[int] = None
 
 
 class ServiceCenterUpdateRequest(BaseModel):
@@ -32,4 +35,7 @@ class ServiceCenterUpdateRequest(BaseModel):
     contact_email: Optional[str] = None
     working_hours_start: Optional[str] = None
     working_hours_end: Optional[str] = None
+    slot_duration_minutes: Optional[int] = None
+    max_bookings_per_day: Optional[int] = None
+    default_slot_capacity: Optional[int] = None
     is_active: Optional[bool] = None

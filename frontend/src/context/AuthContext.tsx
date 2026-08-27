@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { authApi } from "../api/auth";
 import { tokenStorage } from "../lib/api-client";
+import { liveSocket } from "../lib/socket";
 import type { User } from "../types";
 
 interface AuthContextValue {
@@ -57,6 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = () => {
     tokenStorage.clear();
+    liveSocket.disconnect();
     setUser(null);
     window.location.href = "/";
   };

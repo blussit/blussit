@@ -1,21 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Calendar, Check, CheckCircle2, Clock, MapPin, Phone, Search, UserPlus } from "lucide-react";
+import { Calendar, Check, CheckCircle2, KeyRound, MapPin, Phone, Search, UserPlus } from "lucide-react";
 import { crmApi } from "../../api/crm";
 import { adminServiceCenterApi, adminUserApi } from "../../api/admin";
-import { catalogApi, comboOfferApi, bookingPolicyApi, vehicleTypeApi } from "../../api/catalog";
+import { authApi } from "../../api/auth";
+import { catalogApi, comboOfferApi, serviceCenterApi, vehicleTypeApi } from "../../api/catalog";
 import { subscriptionApi } from "../../api/engagement";
 import { bookingApi, type ManagerCreateBookingPayload } from "../../api/booking";
 import { Button, Card, Input, Modal, Select } from "../../components/ui";
 import { MapPicker, type ResolvedAddress } from "../../components/shared/MapPicker";
 import { SubscriptionPicker } from "../../components/shared/SubscriptionPicker";
+import { SlotPicker } from "../../components/shared/SlotPicker";
+import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
-import { todayIST } from "../../lib/date";
 import type { Address, ComboOffer, Service, User, Vehicle, VehicleType } from "../../types";
 
-const STEPS = ["Find customer", "Service & time", "Vehicle & address", "Confirm"];
+const STEPS = ["Find customer", "Service", "Vehicle, address & time", "Confirm"];
 const PAYMENT_METHODS = [
   { value: "cash", label: "Cash" },
   { value: "online", label: "Online" },
@@ -32,13 +34,13 @@ function randomTempPassword(): string {
 export default function ManagerNewBookingPage() {
   const navigate = useNavigate();
   const toast = useToast();
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
 
   // Assign-a-plan (step 0, once a customer is found)
   const [assignOpen, setAssignOpen] = useState(false);
   const [assignPlanId, setAssignPlanId] = useState("");
-  const [assignVehicleId, setAssignVehicleId] = useState("");
   const [assignError, setAssignError] = useState("");
 
   // Step 0 — customer
@@ -53,12 +55,13 @@ export default function ManagerNewBookingPage() {
   const [tempPassword, setTempPassword] = useState(randomTempPassword());
   const [customerError, setCustomerError] = useState("");
 
-  // Step 1 — service & time
+  // Step 1 — service
   const [serviceIds, setServiceIds] = useState<string[]>([]);
   const [comboId, setComboId] = useState<string | null>(null);
+  // Step 2 — vehicle, address & time (date/slot depend on the address, so
+  // they live here, not with service selection)
   const [date, setDate] = useState("");
-  const [time, setTime] = useState("");
-  const [timeError, setTimeError] = useState("");
+  const [slot, setSlot] = useState("");
 
   // Step 2 — vehicle & address
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
@@ -82,7 +85,6 @@ export default function ManagerNewBookingPage() {
   const [notes, setNotes] = useState("");
   const [submitError, setSubmitError] = useState("");
 
-  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
   const { data: servicesData, isLoading: servicesLoading } = useQuery({
     queryKey: ["services-for-booking"],
     queryFn: () => catalogApi.services({ page_size: 50 }),
@@ -95,24 +97,32 @@ export default function ManagerNewBookingPage() {
     queryFn: () => subscriptionApi.forCustomer(customer!.id),
     enabled: !!customer,
   });
-  // Only meaningful once an EXISTING vehicle is picked in step 2 — a
-  // brand-new vehicle can't have a subscription linked to it yet.
-  const eligibleSubscriptions = (customerSubscriptions || []).filter(
-    (s) => s.effective_status === "active" && s.remaining_service_count > 0 && !!selectedVehicleId && s.vehicle_id === selectedVehicleId
-  );
+  // Subscription eligibility is by vehicle TYPE now (plan.vehicle_types),
+  // not one locked vehicle — matches whichever vehicle is currently
+  // selected/entered for this booking (existing or a new one being added).
+  const selectedVehicleType = selectedVehicleId ? customerVehicles.find((v) => v.id === selectedVehicleId)?.vehicle_type : vehicleType;
+  const eligibleSubscriptions = (customerSubscriptions || []).filter((s) => {
+    if (s.effective_status !== "active" || s.remaining_service_count <= 0) return false;
+    const plan = subscriptionPlans?.find((p) => p.id === s.plan_id);
+    return !plan?.vehicle_types?.length || (!!selectedVehicleType && plan.vehicle_types.includes(selectedVehicleType));
+  });
 
-  const assignPlan = subscriptionPlans?.find((p) => p.id === assignPlanId) || null;
-  const assignEligibleVehicles = (customerVehicles || []).filter(
-    (v) => !assignPlan?.vehicle_types?.length || assignPlan.vehicle_types.includes(v.vehicle_type)
-  );
+  // Slots are generated per service center, resolved from whichever
+  // address (saved or newly entered) is currently picked.
+  const resolvedPincode = selectedAddressId ? customerAddresses.find((a) => a.id === selectedAddressId)?.pincode || "" : pincode;
+  const { data: matchedCenters } = useQuery({
+    queryKey: ["center-lookup", resolvedPincode],
+    queryFn: () => serviceCenterApi.lookupByPincode(resolvedPincode),
+    enabled: resolvedPincode.length >= 6,
+  });
+  const serviceCenterId = matchedCenters?.[0]?.id;
 
   const assignSubMutation = useMutation({
-    mutationFn: () => subscriptionApi.assign({ customer_id: customer!.id, plan_id: assignPlanId, vehicle_id: assignVehicleId }),
+    mutationFn: () => subscriptionApi.assign({ customer_id: customer!.id, plan_id: assignPlanId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["customer-subscriptions", customer?.id] });
       setAssignOpen(false);
       setAssignPlanId("");
-      setAssignVehicleId("");
       setAssignError("");
     },
     onError: (err) => setAssignError(getErrorMessage(err)),
@@ -171,25 +181,16 @@ export default function ManagerNewBookingPage() {
     onError: (err) => setCustomerError(getErrorMessage(err)),
   });
 
-  // Mirrors NewBookingPage.tsx's client-side check — IST-anchored so it
-  // agrees with the backend's authoritative validation regardless of the
-  // manager's browser timezone. Backend still re-validates regardless.
-  useMemo(() => {
-    setTimeError("");
-    if (!policy || !date || !time) return "";
-    const requestedMs = new Date(`${date}T${time}:00+05:30`).getTime();
-    const minAllowedMs = Date.now() + policy.min_lead_minutes * 60000;
-    if (requestedMs < minAllowedMs) {
-      setTimeError(`Please choose a time at least ${policy.min_lead_minutes} minutes from now.`);
-      return "";
-    }
-    const windowStartMs = new Date(`${date}T${policy.operating_start}:00+05:30`).getTime();
-    const windowEndMs = new Date(`${date}T${policy.operating_end}:00+05:30`).getTime();
-    if (requestedMs < windowStartMs || requestedMs + totalDuration * 60000 > windowEndMs) {
-      setTimeError(`Please choose a time between ${policy.operating_start} and ${policy.operating_end} that leaves room for a ${totalDuration}-minute service.`);
-    }
-    return "";
-  }, [policy, date, time, totalDuration]);
+  // "Forgot password" for an EXISTING customer who called in — deliberately
+  // never sees the generated password itself: it's sent straight to the
+  // customer's own WhatsApp by the backend (AuthService.
+  // staff_reset_customer_password), this mutation's response has no
+  // password field to display even if we wanted to.
+  const resetPasswordMutation = useMutation({
+    mutationFn: () => authApi.resetCustomerPassword(customer!.id),
+    onSuccess: () => toast.push({ tone: "success", title: "Reset sent", message: "A new temporary password was sent to the customer's WhatsApp." }),
+    onError: (err) => toast.push({ tone: "error", title: "Couldn't reset password", message: getErrorMessage(err) }),
+  });
 
   const toggleService = (id: string) => {
     setComboId(null);
@@ -216,7 +217,7 @@ export default function ManagerNewBookingPage() {
         service_ids: selectedCombo ? undefined : serviceIds,
         combo_id: selectedCombo ? selectedCombo.id : undefined,
         scheduled_date: date,
-        scheduled_slot: time,
+        scheduled_slot: slot,
         payment_method: paymentMethod,
         subscription_id: subscriptionId || undefined,
         customer_notes: notes || undefined,
@@ -234,7 +235,11 @@ export default function ManagerNewBookingPage() {
       } catch {
         // Non-critical — the booking itself already succeeded either way.
       }
-      navigate(`/manager/bookings/${booking.id}`);
+      // /manager/bookings/:id isn't a real route (booking detail is a
+      // drawer on the queue page, not its own page) — ?highlight jumps
+      // the queue straight to this booking, same convention the queue's
+      // own internal links already use.
+      navigate(`/manager/bookings?highlight=${booking.id}`);
     },
     onError: (err) => setSubmitError(getErrorMessage(err)),
   });
@@ -244,8 +249,8 @@ export default function ManagerNewBookingPage() {
   const hasAddress = !!selectedAddressId || (!!addressLine && !!city && !!state && !!pincode);
   const stepValid = [
     !!customer,
-    hasSelection && !!date && !!time && !timeError,
-    hasVehicle && hasAddress,
+    hasSelection,
+    hasVehicle && hasAddress && !!date && !!slot,
     true,
   ][step];
 
@@ -294,10 +299,31 @@ export default function ManagerNewBookingPage() {
 
               {customer && (
                 <Card className="border-2 border-[var(--color-success)] bg-green-50/50 p-4">
-                  <p className="font-semibold text-[var(--color-text-primary)]">{customer.full_name}</p>
-                  <p className="mt-0.5 flex items-center gap-1.5 text-sm text-[var(--color-text-secondary)]">
-                    <Phone className="h-3.5 w-3.5" /> {customer.phone}
-                  </p>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-semibold text-[var(--color-text-primary)]">{customer.full_name}</p>
+                      <p className="mt-0.5 flex items-center gap-1.5 text-sm text-[var(--color-text-secondary)]">
+                        <Phone className="h-3.5 w-3.5" /> {customer.phone}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      isLoading={resetPasswordMutation.isPending}
+                      onClick={async () => {
+                        if (
+                          await confirm({
+                            title: "Reset this customer's password?",
+                            message: "A new temporary password will be sent directly to their WhatsApp — you won't see it.",
+                          })
+                        )
+                          resetPasswordMutation.mutate();
+                      }}
+                    >
+                      <KeyRound className="h-3.5 w-3.5" /> Forgot password?
+                    </Button>
+                  </div>
                   <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
                     {customerVehicles.length} saved vehicle{customerVehicles.length === 1 ? "" : "s"} · {customerAddresses.length} saved address{customerAddresses.length === 1 ? "" : "es"}
                   </p>
@@ -308,11 +334,11 @@ export default function ManagerNewBookingPage() {
                       <div className="space-y-1.5">
                         {customerSubscriptions.map((s) => {
                           const plan = subscriptionPlans?.find((p) => p.id === s.plan_id);
-                          const vehicle = customerVehicles.find((v) => v.id === s.vehicle_id);
+                          const coversLabel = plan?.vehicle_types?.length ? `${plan.vehicle_types.length} vehicle type(s)` : "any vehicle type";
                           return (
                             <p key={s.id} className="text-xs text-[var(--color-text-secondary)]">
                               {plan?.name || "Plan"} — {s.remaining_service_count}/{s.total_service_count} left ·{" "}
-                              {vehicle ? `${vehicle.brand} ${vehicle.model}` : "vehicle"} ·{" "}
+                              covers {coversLabel} ·{" "}
                               <span className={s.effective_status === "active" ? "text-[var(--color-success)]" : ""}>{s.effective_status}</span>
                             </p>
                           );
@@ -422,23 +448,6 @@ export default function ManagerNewBookingPage() {
                   </div>
                 )}
               </div>
-
-              <Input label="Select Date" type="date" min={todayIST()} value={date} onChange={(e) => setDate(e.target.value)} required />
-              {policy && (
-                <div>
-                  <Input
-                    label="Select Time"
-                    type="time"
-                    min={policy.operating_start}
-                    max={policy.operating_end}
-                    value={time}
-                    onChange={(e) => setTime(e.target.value)}
-                    hint={`Available ${policy.operating_start}–${policy.operating_end}, at least ${policy.min_lead_minutes} min from now`}
-                    required
-                  />
-                  {timeError && <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-error)]"><Clock className="h-3 w-3" /> {timeError}</p>}
-                </div>
-              )}
             </div>
           )}
 
@@ -528,6 +537,15 @@ export default function ManagerNewBookingPage() {
                       <Input label="Pincode" value={pincode} onChange={(e) => setPincode(e.target.value)} required />
                     </div>
                   </div>
+                )}
+              </div>
+
+              <div className="border-t border-gray-100 pt-5">
+                <p className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">When should we come?</p>
+                {resolvedPincode.length >= 6 && !serviceCenterId ? (
+                  <p className="text-sm text-[var(--color-error)]">Doorstep service isn't available in this area yet.</p>
+                ) : (
+                  <SlotPicker serviceCenterId={serviceCenterId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} />
                 )}
               </div>
             </div>
@@ -635,8 +653,12 @@ export default function ManagerNewBookingPage() {
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Time</span>
-              <span className="font-medium text-[var(--color-text-primary)]">{time || "—"}</span>
+              <span className="text-[var(--color-text-secondary)]">Slot</span>
+              <span className="font-mono-num font-medium text-[var(--color-text-primary)]">{slot || "—"}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[var(--color-text-secondary)]">Duration</span>
+              <span className="font-medium text-[var(--color-text-primary)]">{totalDuration} min</span>
             </div>
             <div className="flex justify-between border-t border-gray-100 pt-3 text-base">
               <span className="font-semibold text-[var(--color-text-primary)]">Price</span>
@@ -656,23 +678,13 @@ export default function ManagerNewBookingPage() {
               </option>
             ))}
           </Select>
-          {assignPlanId && (
-            <Select label="Vehicle" value={assignVehicleId} onChange={(e) => setAssignVehicleId(e.target.value)}>
-              <option value="">Choose a vehicle</option>
-              {assignEligibleVehicles.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.brand} {v.model} · {v.registration_number}
-                </option>
-              ))}
-            </Select>
-          )}
-          {assignPlanId && assignEligibleVehicles.length === 0 && (
-            <p className="text-sm text-[var(--color-error)]">None of this customer's vehicles match this plan's eligible types.</p>
-          )}
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Covers whichever of the customer's vehicles match the plan's type — no need to pick one now.
+          </p>
           {assignError && <p className="text-sm text-[var(--color-error)]">{assignError}</p>}
           <Button
             className="w-full"
-            disabled={!assignPlanId || !assignVehicleId}
+            disabled={!assignPlanId}
             isLoading={assignSubMutation.isPending}
             onClick={() => assignSubMutation.mutate()}
           >

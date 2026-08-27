@@ -24,6 +24,7 @@ from app.schemas.booking_schema import (
     HeadingRequest,
     ManagerBookingCreateRequest,
     PhotoCaptureRequest,
+    PriorityUpdateRequest,
     ReassignCaptainRequest,
     ReportRiskRequest,
     ResolveIssueRequest,
@@ -143,6 +144,18 @@ async def resolve_issue(booking_id: str, payload: ResolveIssueRequest, current_u
     necessarily reassigning/rescheduling — e.g. the manager called the captain
     and confirmed things are fine."""
     return await BookingController(db).resolve_issue(current_user, booking_id, payload)
+
+
+@router.patch("/{booking_id}/priority")
+async def update_priority(
+    booking_id: str, payload: PriorityUpdateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Manager/admin can set this on any booking in their own center; a
+    captain only on their own assigned booking — enforced in the service
+    layer (see BookingService.update_priority), not here, since a customer
+    calling this correctly falls through to the same "not your center"
+    rejection everyone else's center-scoping already goes through."""
+    return await BookingController(db).update_priority(current_user, booking_id, payload)
 
 
 @router.post("/{booking_id}/before-photo", dependencies=[Depends(require_captain)])

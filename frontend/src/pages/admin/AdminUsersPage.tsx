@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
 import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { User, UserRole } from "../../types";
 
@@ -10,6 +11,7 @@ const emptyForm = { full_name: "", email: "", phone: "", password: "", role: "ca
 
 export default function AdminUsersPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const [role, setRole] = useState("");
   const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
@@ -96,8 +98,8 @@ export default function AdminUsersPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete ${u.full_name}? This cannot be undone.`)) deleteMutation.mutate(u.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete ${u.full_name}?`, message: "This cannot be undone.", tone: "danger" })) deleteMutation.mutate(u.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />

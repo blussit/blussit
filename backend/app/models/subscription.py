@@ -44,12 +44,15 @@ class SubscriptionPlanModel(BusinessRecordBase):
 class UserSubscriptionModel(BusinessRecordBase):
     customer_id: str
     plan_id: str
-    # Always set (enforced at creation, not Optional at the model level even
-    # though Mongo won't complain either way) — a subscription is locked to
-    # one specific vehicle from the moment it's created, which is what makes
-    # "this plan covers only my sedan" and "one active subscription per
-    # vehicle" mean anything. See UserSubscriptionService._create_subscription.
-    vehicle_id: str
+    # REVERSED from an earlier design: a subscription is no longer locked to
+    # one specific vehicle — it's locked to the VEHICLE TYPE(S) its plan
+    # covers (plan.vehicle_types). Any of the customer's owned vehicles of a
+    # matching type can use it; which vehicle a given booking actually uses
+    # is just a normal property of that booking (see
+    # UserSubscriptionService.plan_consumption). Kept (not removed) purely
+    # for old documents written under the earlier vehicle-locked design —
+    # no code reads it as authoritative anymore.
+    vehicle_id: Optional[str] = None
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE
     total_service_count: int = 0
     remaining_service_count: int = 0

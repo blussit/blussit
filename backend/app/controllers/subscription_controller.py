@@ -10,6 +10,7 @@ from app.schemas.subscription_schema import (
     UpgradeSubscriptionRequest,
 )
 from app.services.audit_service import AuditService
+from app.services.purchase_confirmation_service import PurchaseConfirmationService
 from app.services.subscription_service import SubscriptionPlanService, UserSubscriptionService
 
 
@@ -44,6 +45,7 @@ class UserSubscriptionController:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.service = UserSubscriptionService(db)
         self.audit = AuditService(db)
+        self.confirmations = PurchaseConfirmationService(db)
 
     async def list_mine(self, current_user: CurrentUser):
         return success(await self.service.list_my_subscriptions(current_user.id))
@@ -53,6 +55,10 @@ class UserSubscriptionController:
 
     async def subscribe(self, current_user: CurrentUser, payload: SubscribeRequest):
         result = await self.service.subscribe(current_user.id, payload)
+        await self.audit.log_action(current_user.id, current_user.role, "SUBSCRIBE", "user_subscriptions", result["id"], {"plan_id": payload.plan_id})
+        result["confirmation_token"] = await self.confirmations.issue(
+            "subscription", result["id"], current_user.id, {"plan_name": result.get("plan_name")}
+        )
         return success(result, "Subscribed successfully")
 
     async def assign(self, current_user: CurrentUser, payload: AssignSubscriptionRequest):
@@ -64,10 +70,14 @@ class UserSubscriptionController:
 
     async def cancel(self, current_user: CurrentUser, subscription_id: str):
         result = await self.service.cancel(current_user.id, subscription_id)
+        await self.audit.log_action(current_user.id, current_user.role, "CANCEL_SUBSCRIPTION", "user_subscriptions", subscription_id, None)
         return success(result, "Subscription cancelled")
 
     async def upgrade(self, current_user: CurrentUser, subscription_id: str, payload: UpgradeSubscriptionRequest):
         result = await self.service.upgrade(current_user.id, subscription_id, payload.new_plan_id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "UPGRADE_SUBSCRIPTION", "user_subscriptions", subscription_id, {"new_plan_id": payload.new_plan_id}
+        )
         return success(result, "Subscription upgraded")
 
     async def list_all_for_admin(self, pagination: PaginationParams):

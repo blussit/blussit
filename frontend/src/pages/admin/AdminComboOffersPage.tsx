@@ -4,6 +4,7 @@ import { Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { catalogApi } from "../../api/catalog";
 import { adminComboOfferApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { ComboOffer } from "../../types";
 
@@ -17,6 +18,7 @@ const emptyForm = {
 
 export default function AdminComboOffersPage() {
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
   const { data: servicesData } = useQuery({ queryKey: ["admin-services-for-combo"], queryFn: () => catalogApi.services({ page_size: 100 }) });
   const { data: combos, isLoading } = useQuery({ queryKey: ["admin-combos"], queryFn: () => adminComboOfferApi.list() });
 
@@ -124,8 +126,8 @@ export default function AdminComboOffersPage() {
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
-                  onClick={() => {
-                    if (confirm(`Delete "${c.name}"?`)) deleteMutation.mutate(c.id);
+                  onClick={async () => {
+                    if (await confirm({ title: `Delete "${c.name}"?`, tone: "danger" })) deleteMutation.mutate(c.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
