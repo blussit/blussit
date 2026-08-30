@@ -41,6 +41,13 @@ export const serviceCenterApi = {
     apiClient.get<ApiSuccess<SlotAvailability[]>>(`/service-centers/${centerId}/slots`, { params: { date } }).then((r) => r.data.data),
 };
 
+export const coverageLeadPublicApi = {
+  // Public by design — fires exactly when a visitor's area fails the
+  // coverage check, before any account exists (see backend route docstring).
+  capture: (payload: { name: string; phone: string; pincode: string; city_area?: string; service_interest?: string }) =>
+    apiClient.post<ApiSuccess<null>>("/coverage-leads", payload).then((r) => r.data),
+};
+
 export const contentApi = {
   faqs: () => apiClient.get<ApiSuccess<{ id: string; question: string; answer: string }[]>>("/faqs").then((r) => r.data.data),
   testimonials: () =>

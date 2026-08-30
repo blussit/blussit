@@ -43,6 +43,10 @@ COMPUTED_INSTANT_KEYS = frozenset({
     # needs the same from_stored() treatment or it silently reproduces the
     # 5.5-hour display bug for restock timestamps.
     "last_restocked_at",
+    # Coverage leads (uncovered-area demand capture) — written with
+    # datetime.now(timezone.utc) in CoverageLeadService.capture, read back
+    # naive like every other computed instant.
+    "last_requested_at",
     # BLUSSIT slot/capacity/timeline update — slot_start/slot_end are built
     # via to_ist(...) at booking creation (see _resolve_slot_window),
     # estimated_start_at via _resolve_estimated_start (also to_ist()-based),

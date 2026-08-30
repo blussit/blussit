@@ -235,6 +235,8 @@ export interface Booking {
   // POST /bookings (not on any other booking read) — the opaque ticket
   // /thank-you redeems (see PurchaseConfirmationModel).
   confirmation_token?: string;
+  // Booking channel: "app" | "whatsapp" | "staff" — display metadata only.
+  source?: string;
   vehicle_id: string;
   address_id: string;
   service_center_id: string;

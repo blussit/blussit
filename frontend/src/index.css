@@ -3,16 +3,16 @@
 @theme {
   /* CleanRide brand — dark navy/ink header & CTAs with an amber accent,
      matching the approved Figma (doorstep car-wash, "CLEANRIDE" wordmark) */
-  --color-primary: #10172A;
-  --color-primary-dark: #060A14;
-  --color-primary-light: #EEF1F8;
-  --color-secondary: #F5A623;
-  --color-secondary-light: #FFF6E5;
-  --color-accent: #F5A623;
-  --color-accent-light: #FFF6E5;
-  --color-surface: #F8FAFC;
-  --color-text-primary: #10172A;
-  --color-text-secondary: #6B7280;
+  --color-primary: #0A0A0A;
+  --color-primary-dark: #000000;
+  --color-primary-light: #262626;
+  --color-secondary: #EAB308;
+  --color-secondary-light: #FEF9C3;
+  --color-accent: #EAB308;
+  --color-accent-light: #FEF9C3;
+  --color-surface: #F5F5F5;
+  --color-text-primary: #0A0A0A;
+  --color-text-secondary: #525252;
   --color-error: #DC2626;
   --color-warning: #F59E0B;
   --color-success: #16A34A;
@@ -73,6 +73,66 @@
       padding-inline: 2rem;
     }
   }
+
+  .glass-panel {
+    @apply bg-white/5 backdrop-blur-lg border border-white/10 shadow-[0_8px_32px_0_rgba(0,0,0,0.36)];
+  }
+  
+  .glass-panel-light {
+    @apply bg-white/80 backdrop-blur-xl border border-white shadow-xl shadow-neutral-200/50;
+  }
+
+  .text-glow-gold {
+    text-shadow: 0 0 20px rgba(240, 165, 0, 0.4);
+  }
+  
+  .glow-gold {
+    box-shadow: 0 0 20px rgba(240, 165, 0, 0.2);
+  }
+  
+  .glow-gold-hover:hover {
+    box-shadow: 0 0 30px rgba(240, 165, 0, 0.4);
+  }
+  
+  .bg-gradient-gold {
+    background: linear-gradient(135deg, #F0A500 0%, #d48c00 100%);
+  }
+  
+  .bg-gradient-dark {
+    background: linear-gradient(145deg, #111827 0%, #000000 100%);
+  }
+  
+  .mask-radial-fade {
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 100%);
+  }
+  
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 0 0 rgba(240, 165, 0, 0.4); }
+  70% { box-shadow: 0 0 0 15px rgba(240, 165, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(240, 165, 0, 0); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

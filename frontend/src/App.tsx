@@ -8,6 +8,9 @@ import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { ProtectedRoute, GuestOnlyRoute } from "./routes/ProtectedRoute";
 
 import LandingPage from "./pages/public/LandingPage";
+import ServicesPage from "./pages/public/ServicesPage";
+import PlansPage from "./pages/public/PlansPage";
+import BookPage from "./pages/public/BookPage";
 import LoginPage from "./pages/auth/LoginPage";
 import RegisterPage from "./pages/auth/RegisterPage";
 import ForgotPasswordPage from "./pages/auth/ForgotPasswordPage";
@@ -50,6 +53,7 @@ import AdminVehicleTypesPage from "./pages/admin/AdminVehicleTypesPage";
 import AdminComboOffersPage from "./pages/admin/AdminComboOffersPage";
 import AdminHomepageSettingsPage from "./pages/admin/AdminHomepageSettingsPage";
 import AdminContactMessagesPage from "./pages/admin/AdminContactMessagesPage";
+import AdminCoverageLeadsPage from "./pages/admin/AdminCoverageLeadsPage";
 import AdminPricingPage from "./pages/admin/AdminPricingPage";
 import AdminSubscriptionPlansPage from "./pages/admin/AdminSubscriptionPlansPage";
 import AdminCouponsPage from "./pages/admin/AdminCouponsPage";
@@ -75,6 +79,9 @@ export default function App() {
           <ConfirmDialog />
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/plans" element={<PlansPage />} />
+            <Route path="/book" element={<BookPage />} />
 
             <Route element={<GuestOnlyRoute />}>
               <Route path="/login" element={<LoginPage />} />
@@ -151,6 +158,7 @@ export default function App() {
                 <Route path="combo-offers" element={<AdminComboOffersPage />} />
                 <Route path="homepage" element={<AdminHomepageSettingsPage />} />
                 <Route path="contact-messages" element={<AdminContactMessagesPage />} />
+                <Route path="coverage-requests" element={<AdminCoverageLeadsPage />} />
                 <Route path="pricing" element={<AdminPricingPage />} />
                 <Route path="subscription-plans" element={<AdminSubscriptionPlansPage />} />
                 <Route path="coupons" element={<AdminCouponsPage />} />

@@ -18,6 +18,20 @@ import os
 
 os.environ["MONGO_DB_NAME"] = os.environ.get("TEST_MONGO_DB_NAME", "doorstep_vehicle_care_test")
 
+# CRITICAL: force the safe log-only WhatsApp provider for the entire test
+# run, regardless of what's in the real .env. Settings() reads the same
+# .env this dev server uses — once real WHATSAPP_ACCESS_TOKEN/PROVIDER
+# credentials are configured there (as they now are), an unguarded test
+# suite would send REAL WhatsApp messages to real phone numbers on every
+# run (test_manager_password_reset.py, test_phone_verification.py, etc.
+# all trigger sends). Must happen before any app.* import, same as
+# MONGO_DB_NAME above.
+os.environ["WHATSAPP_PROVIDER"] = "log"
+os.environ["WHATSAPP_ACCESS_TOKEN"] = ""
+os.environ["WHATSAPP_OTP_TEMPLATE_NAME"] = ""
+os.environ["SMS_PROVIDER"] = ""
+os.environ["OTP_CHANNEL"] = "whatsapp"
+
 import pytest
 import pytest_asyncio
 from bson import ObjectId

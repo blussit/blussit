@@ -221,6 +221,27 @@ export const crmApi = {
   customer360: (customerId: string) => apiClient.get<ApiSuccess<Record<string, unknown>>>(`/crm/customers/${customerId}`).then((r) => r.data.data),
 };
 
+export interface CoverageLead {
+  id: string;
+  name: string;
+  phone: string;
+  pincode: string;
+  city_area?: string | null;
+  service_interest?: string | null;
+  requests_count: number;
+  last_requested_at: string;
+  created_at: string;
+}
+
+export const coverageLeadApi = {
+  list: (params?: { page?: number; page_size?: number }) =>
+    apiClient.get<ApiPaginated<CoverageLead>>("/coverage-leads", { params }).then((r) => r.data),
+  summary: () =>
+    apiClient
+      .get<ApiSuccess<{ total_people: number; top_pincodes: { pincode: string; people: number; requests: number }[] }>>("/coverage-leads/summary")
+      .then((r) => r.data.data),
+};
+
 export const auditLogApi = {
   list: (params?: { module?: string; actor_id?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Record<string, unknown>>>("/audit-logs", { params }).then((r) => r.data),

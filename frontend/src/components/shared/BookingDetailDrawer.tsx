@@ -40,6 +40,8 @@ export function BookingDetailDrawer({
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={booking.status} />
             <PriorityBadge priority={booking.priority} />
+            {booking.source === "whatsapp" && <Badge tone="success">Booked via WhatsApp</Badge>}
+            {booking.source === "staff" && <Badge tone="neutral">Booked by staff</Badge>}
             {booking.issue_flag && !booking.issue_resolved && (
               <Badge tone="error">
                 <AlertTriangle className="h-3 w-3" /> {ISSUE_LABELS[booking.issue_flag] || booking.issue_flag}

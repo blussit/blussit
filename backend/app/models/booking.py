@@ -67,6 +67,10 @@ class BookingModel(BusinessRecordBase):
     # distinguishable for one captain's schedule.
     estimated_start_at: Optional[datetime] = None
     priority: BookingPriority = BookingPriority.MEDIUM
+    # Booking channel: "app" (customer self-service), "whatsapp" (the chat
+    # booking bot), "staff" (manager/admin on behalf). Metadata only — a
+    # booking behaves identically regardless of where it came from.
+    source: str = "app"
     duration_minutes: int = 60  # planned/estimated, summed from service durations at creation
     actual_duration_minutes: Optional[int] = None  # actual before-photo -> after-photo elapsed time, set on completion
     # How many minutes actual_duration_minutes ran past

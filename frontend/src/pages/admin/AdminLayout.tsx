@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   ListChecks,
   Mail,
+  MapPin,
   Megaphone,
   Package,
   Star,
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
   { label: "Complaints", to: "/admin/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/admin/reviews", icon: Star },
   { label: "Contact messages", to: "/admin/contact-messages", icon: Mail },
+  { label: "Coverage requests", to: "/admin/coverage-requests", icon: MapPin },
   { label: "Audit logs", to: "/admin/audit-logs", icon: FileClock },
   { label: "Profile", to: "/admin/profile", icon: User },
 ];

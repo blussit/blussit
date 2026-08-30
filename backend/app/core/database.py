@@ -160,5 +160,24 @@ async def create_indexes() -> None:
     await db.purchase_confirmations.create_index("token", unique=True)
     await db.purchase_confirmations.create_index("expires_at", expireAfterSeconds=0)
 
+    await db.sms_outbox.create_index("phone")
+    await db.sms_outbox.create_index("created_at")
+
     await db.whatsapp_outbox.create_index("phone")
+    await db.whatsapp_outbox.create_index("wamid", sparse=True)
     await db.whatsapp_outbox.create_index("created_at")
+
+    # WhatsApp booking bot — one conversation doc per sender, and a
+    # dedup ledger of processed webhook message ids (Meta redelivers on
+    # retry; a retried "Confirm" tap must not double-book). Unique index
+    # is what makes the insert-first dedup race-safe; TTL keeps the
+    # ledger from growing forever (Meta retries stop after 7 days, keep a
+    # comfortable margin over that).
+    # Coverage leads (uncovered-area demand capture) — the unique pair
+    # is what makes CoverageLeadService.capture's upsert-dedup race-safe.
+    await db.coverage_leads.create_index([("phone", 1), ("pincode", 1)], unique=True)
+    await db.coverage_leads.create_index("last_requested_at")
+
+    await db.whatsapp_conversations.create_index("wa_id", unique=True)
+    await db.whatsapp_message_dedup.create_index("wamid", unique=True)
+    await db.whatsapp_message_dedup.create_index("created_at", expireAfterSeconds=14 * 24 * 3600)

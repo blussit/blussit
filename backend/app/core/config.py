@@ -68,6 +68,53 @@ class Settings(BaseSettings):
     # scoped to the WABA rather than one phone number.
     WHATSAPP_BUSINESS_ACCOUNT_ID: str = ""
     WHATSAPP_API_VERSION: str = "v21.0"
+    # Once you've created and gotten Meta's approval for a real
+    # "authentication"-category template (its body should have exactly one
+    # {{1}} placeholder for the code), set this and OTPs switch from plain
+    # text to that template automatically — WhatsAppService.send_otp picks
+    # it up with no other code change. Free text (the default, blank here)
+    # only reaches a recipient with an open 24h session, so a brand-new
+    # customer's very first OTP silently fails to send until this is set.
+    WHATSAPP_OTP_TEMPLATE_NAME: str = ""
+    WHATSAPP_OTP_TEMPLATE_LANGUAGE: str = "en_US"
+    # Utility templates for messages that must reach a recipient WITHOUT an
+    # open 24h session (same problem the OTP template solves, for the other
+    # message kinds this platform sends):
+    #   UPDATE:        body "{{1}}: {{2}}"  — {{1}} title, {{2}} message.
+    #                  Used by every NotificationService→WhatsApp bridge
+    #                  send (booking confirmations/updates to customers,
+    #                  operational alerts to managers/captains).
+    #   TEMP_PASSWORD: body with one {{1}} placeholder for the password.
+    # Blank = free-text fallback (delivered only inside an open session).
+    WHATSAPP_UPDATE_TEMPLATE_NAME: str = ""
+    WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME: str = ""
+    WHATSAPP_TEMPLATE_LANGUAGE: str = "en_US"
+    # Incoming webhook (customers booking directly over WhatsApp chat).
+    # VERIFY_TOKEN: any secret string — paste the same value into the Meta
+    # App Dashboard's webhook configuration; Meta echoes it back on the
+    # one-time GET verification handshake (see whatsapp_webhook_routes).
+    # APP_SECRET: the Meta app's App Secret — when set, every incoming
+    # POST's X-Hub-Signature-256 header is verified against it (HMAC of the
+    # raw body), so nobody but Meta can inject fake "incoming messages"
+    # that would drive the booking bot. Blank = signature check skipped
+    # (dev only; set it in production).
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = ""
+    WHATSAPP_APP_SECRET: str = ""
+
+    # SMS channel for OTPs/temp passwords — the bridge while WhatsApp's
+    # Authentication templates are blocked on business verification (and a
+    # permanent fallback after). Same provider-abstraction shape as
+    # WHATSAPP_PROVIDER: "" disables SMS entirely (default — WhatsApp-only,
+    # exactly today's behavior), "log" writes to the sms_outbox collection
+    # (dev/tests), "fast2sms" / "msg91" send for real once their key is set.
+    SMS_PROVIDER: str = ""
+    FAST2SMS_API_KEY: str = ""
+    MSG91_AUTH_KEY: str = ""
+    MSG91_OTP_TEMPLATE_ID: str = ""
+    # Which channel OTPs/temp passwords try FIRST ("whatsapp" | "sms") —
+    # whichever isn't first is the automatic fallback when the first send
+    # fails or isn't configured.
+    OTP_CHANNEL: str = "whatsapp"
 
     @property
     def cors_origins_list(self) -> List[str]:

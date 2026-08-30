@@ -15,6 +15,7 @@ from app.core.security import create_access_token, create_refresh_token, decode_
 from app.models.enums import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest, StaffCreateRequest, UserPublic
+from app.services.sms_service import SmsService
 from app.services.whatsapp_service import WhatsAppService
 
 
@@ -24,6 +25,24 @@ class AuthService:
         self.users = UserRepository(db)
         self.otp_store = db["otp_requests"]
         self.whatsapp = WhatsAppService(db)
+        self.sms = SmsService(db)
+
+    async def _deliver_otp(self, phone: str, otp: str, purpose: str) -> bool:
+        """OTP delivery with channel fallback: try settings.OTP_CHANNEL
+        first, then the other channel if the first fails or isn't
+        configured. SMS disabled (the default) degrades to exactly the
+        old WhatsApp-only behavior."""
+        from app.core.config import settings
+
+        order = ["sms", "whatsapp"] if settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
+        for channel in order:
+            if channel == "whatsapp":
+                if await self.whatsapp.send_otp(phone, otp, purpose):
+                    return True
+            elif channel == "sms" and self.sms.enabled:
+                if await self.sms.send_otp(phone, otp):
+                    return True
+        return False
 
     async def register_customer(self, payload: RegisterRequest) -> dict:
         if payload.email and await self.users.find_by_email(payload.email):
@@ -171,7 +190,7 @@ class AuthService:
             },
             upsert=True,
         )
-        sent = await self.whatsapp.send_otp(phone, otp, purpose)
+        sent = await self._deliver_otp(phone, otp, purpose)
         if not sent:
             raise BadRequestException("Couldn't send the verification code — please try again in a moment.")
 
@@ -244,9 +263,22 @@ class AuthService:
 
         temp_password = "".join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=10))
         await self.users.update_by_id(customer_id, {"password_hash": hash_password(temp_password), "must_change_password": True})
-        sent = await self.whatsapp.send_temp_password(phone, temp_password)
+        # Same channel-order fallback as OTPs (note: Fast2SMS's DLT-exempt
+        # route can't carry free text, so its send_temp_password returns
+        # False and WhatsApp handles it — MSG91-with-template or WhatsApp
+        # are the real carriers for this one).
+        from app.core.config import settings as _settings
+        order = ["sms", "whatsapp"] if _settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
+        sent = False
+        for channel in order:
+            if channel == "whatsapp":
+                sent = await self.whatsapp.send_temp_password(phone, temp_password)
+            elif channel == "sms" and self.sms.enabled:
+                sent = await self.sms.send_temp_password(phone, temp_password)
+            if sent:
+                break
         if not sent:
-            raise BadRequestException("Password was reset, but the WhatsApp message couldn't be sent — ask the customer to use 'Forgot password' instead.")
+            raise BadRequestException("Password was reset, but the message couldn't be sent — ask the customer to use 'Forgot password' instead.")
 
     def _issue_tokens(self, user: dict) -> dict:
         access_token = create_access_token(

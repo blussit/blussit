@@ -21,6 +21,7 @@ from app.routes.v1 import (
     complaint_routes,
     content_routes,
     coupon_routes,
+    coverage_lead_routes,
     crm_routes,
     inventory_routes,
     notification_routes,
@@ -38,6 +39,7 @@ from app.routes.v1 import (
     user_routes,
     vehicle_type_routes,
     wallet_routes,
+    whatsapp_webhook_routes,
     ws_routes,
 )
 
@@ -248,3 +250,5 @@ app.include_router(booking_policy_routes.router, prefix=api_prefix)
 app.include_router(homepage_config_routes.router, prefix=api_prefix)
 app.include_router(ws_routes.router, prefix=api_prefix)
 app.include_router(purchase_confirmation_routes.router, prefix=api_prefix)
+app.include_router(whatsapp_webhook_routes.router, prefix=api_prefix)
+app.include_router(coverage_lead_routes.router, prefix=api_prefix)

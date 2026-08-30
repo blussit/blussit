@@ -321,7 +321,7 @@ class BookingService:
         self.policy_service = BookingPolicyService(db)
         self.capacity_policy_service = CapacityPolicyService(db)
 
-    async def create_booking(self, customer_id: str, payload: BookingCreateRequest, _skip_verification_gate: bool = False) -> dict:
+    async def create_booking(self, customer_id: str, payload: BookingCreateRequest, _skip_verification_gate: bool = False, source: str = "app") -> dict:
         vehicle = await self.vehicle_repo.find_by_id(payload.vehicle_id)
         if not vehicle or vehicle["owner_id"] != customer_id:
             raise NotFoundException("Vehicle not found")
@@ -456,6 +456,13 @@ class BookingService:
             "alternate_contact_phone": payload.alternate_contact_phone,
             "vehicle_registration_number": registration_number,
             "customer_phone": phone,
+            # Which channel this booking came in through ("app" |
+            # "whatsapp" | "staff") — display/analytics metadata ONLY. It
+            # deliberately changes nothing about how the booking behaves:
+            # a WhatsApp booking IS a normal booking (same capacity
+            # reservation above, same manager queue, same slot policy),
+            # never a parallel second system.
+            "source": source,
             "distance_km": split["distance_km"],
             "captain_travel_pay": split["captain_travel_pay"],
             "captain_service_pay": split["captain_service_pay"],
@@ -557,7 +564,7 @@ class BookingService:
         )
         # Staff-initiated — never gated on the customer's own phone
         # verification (see create_booking's _skip_verification_gate).
-        result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True)
+        result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True, source="staff")
         await self._record_history(
             result["id"], BookingStatus.PENDING, actor_id, f"Booking created by staff on behalf of customer {payload.customer_id}"
         )

@@ -1,82 +1,124 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Menu, X, Sparkles } from "lucide-react";
-import { Button } from "../ui";
+import { Menu, X } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { roleHomePath } from "../../lib/roleHome";
 
 const navLinks = [
-  { label: "Home", href: "/#top" },
-  { label: "About Us", href: "/#about" },
-  { label: "Services", href: "/#services" },
+  { label: "Services", href: "/services" },
+  { label: "Plans", href: "/plans" },
+  { label: "Why BLUSSIT", href: "/#why" },
   { label: "How It Works", href: "/#how-it-works" },
-  { label: "Pricing", href: "/#plans" },
-  { label: "Contact Us", href: "/#contact" },
 ];
+
+function BlussitLogo() {
+  return (
+    <Link to="/" className="flex items-center gap-3 group">
+      <img 
+        src="/blussit-mark.png" 
+        alt="Blussit Mark" 
+        className="h-8 w-auto object-contain transition-transform duration-500 group-hover:rotate-12"
+      />
+      <img 
+        src="/blussit-logo.png" 
+        alt="Blussit Logo" 
+        className="h-6 w-auto object-contain hidden sm:block" 
+      />
+    </Link>
+  );
+}
 
 export function PublicNavbar() {
   const [open, setOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
 
-  return (
-    <header id="top" className="sticky top-0 z-40 border-b border-gray-100 bg-white/95 backdrop-blur-md">
-      <div className="container-page flex h-16 items-center justify-between">
-        <Link to="/" className="flex items-center gap-2.5">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--color-primary)] text-[var(--color-secondary)]">
-            <Sparkles className="h-5 w-5" />
-          </span>
-          <span className="leading-tight">
-            <span className="block font-display text-lg font-bold tracking-tight text-[var(--color-primary)]">CLEANRIDE</span>
-            <span className="block text-[9px] font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">
-              Car wash at your doorstep
-            </span>
-          </span>
-        </Link>
+  useEffect(() => {
+    const handleScroll = () => {
+      setScrolled(window.scrollY > 20);
+    };
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
 
-        <nav className="hidden items-center gap-7 lg:flex">
+  return (
+    <header 
+      id="top" 
+      className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${
+        scrolled 
+          ? "bg-white/90 backdrop-blur-md border-b border-black/5 shadow-sm py-3" 
+          : "bg-transparent border-b border-transparent py-5"
+      }`}
+    >
+      <div className="container-page flex items-center justify-between">
+        <BlussitLogo />
+
+        <nav className="hidden items-center gap-8 lg:flex">
           {navLinks.map((link) => (
-            <a key={link.label} href={link.href} className="text-sm font-medium text-gray-600 transition-colors hover:text-[var(--color-primary)]">
+            <a 
+              key={link.label} 
+              href={link.href} 
+              className="text-sm font-bold text-black/70 transition-all hover:text-black relative after:content-[''] after:absolute after:-bottom-1 after:left-0 after:h-[2px] after:w-0 after:bg-black after:transition-all hover:after:w-full"
+            >
               {link.label}
             </a>
           ))}
         </nav>
 
-        <div className="hidden items-center gap-3 lg:flex">
+        <div className="hidden items-center gap-6 lg:flex">
           {isAuthenticated ? (
-            <Button onClick={() => navigate(roleHomePath(user?.role))}>Go to dashboard</Button>
+            <button
+              onClick={() => navigate(roleHomePath(user?.role))}
+              className="rounded-full px-6 py-2.5 text-sm font-bold text-yellow-400 bg-black hover:bg-yellow-400 hover:text-black transition-all hover:-translate-y-0.5 shadow-md"
+            >
+              Dashboard
+            </button>
           ) : (
             <>
-              <Button variant="ghost" onClick={() => navigate("/login")}>
-                Log in
-              </Button>
-              <Button onClick={() => navigate("/register")}>Book Now</Button>
+              <button onClick={() => navigate("/login")} className="text-sm font-bold text-black/70 hover:text-yellow-500 transition-colors">
+                Login
+              </button>
+              <a 
+                href="/book" 
+                className="rounded-full px-6 py-2.5 text-sm font-bold text-yellow-400 bg-black hover:bg-yellow-400 hover:text-black transition-all hover:-translate-y-0.5 shadow-md"
+              >
+                Book a Service
+              </a>
             </>
           )}
         </div>
 
-        <button className="p-2 lg:hidden" onClick={() => setOpen((o) => !o)} aria-label="Toggle menu">
+        <button className="p-2 text-black lg:hidden" onClick={() => setOpen((o) => !o)} aria-label="Toggle menu">
           {open ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
         </button>
       </div>
 
       {open && (
-        <div className="border-t border-gray-100 bg-white px-5 py-4 lg:hidden">
-          <nav className="flex flex-col gap-3">
+        <div className="absolute top-full left-0 right-0 bg-white/95 backdrop-blur-xl border-b border-black/10 px-5 py-6 lg:hidden shadow-2xl">
+          <nav className="flex flex-col gap-4">
             {navLinks.map((link) => (
-              <a key={link.label} href={link.href} className="text-sm font-medium text-gray-700" onClick={() => setOpen(false)}>
+              <a key={link.label} href={link.href} className="text-lg font-bold text-black/90" onClick={() => setOpen(false)}>
                 {link.label}
               </a>
             ))}
-            <div className="mt-2 flex flex-col gap-2">
+            <div className="mt-4 flex flex-col gap-3 pt-4 border-t border-black/10">
               {isAuthenticated ? (
-                <Button onClick={() => navigate(roleHomePath(user?.role))}>Go to dashboard</Button>
+                <button onClick={() => navigate(roleHomePath(user?.role))} className="rounded-full px-5 py-3 text-sm font-bold text-yellow-400 bg-black hover:bg-yellow-400 hover:text-black transition-colors">
+                  Go to dashboard
+                </button>
               ) : (
                 <>
-                  <Button variant="outline" onClick={() => navigate("/login")}>
-                    Log in
-                  </Button>
-                  <Button onClick={() => navigate("/register")}>Book Now</Button>
+                  <button onClick={() => navigate("/login")} className="rounded-full border border-black/20 px-5 py-3 text-sm font-bold text-black hover:bg-black/5">
+                    Login
+                  </button>
+                  <a
+                    href="/book"
+                    onClick={() => setOpen(false)}
+                    className="rounded-full px-5 py-3 text-center text-sm font-bold text-yellow-400 bg-black hover:bg-yellow-400 hover:text-black transition-colors"
+                  >
+                    Book a Service
+                  </a>
                 </>
               )}
             </div>
