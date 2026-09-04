@@ -2,15 +2,16 @@ import { type CSSProperties } from "react";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
 import { useNavigate } from "react-router-dom";
+
 import {
   HowItWorksSection,
   LandingHero,
   PremiumBanner,
   ServicesHorizontalScroll,
   VideoReviewsScroll,
-  TrustStrip,
   WhyBlussit,
   OffersCarousel,
+
 } from "../../components/public/LandingSections";
 
 export default function LandingPage() {
@@ -25,16 +26,36 @@ export default function LandingPage() {
   } as CSSProperties;
 
   return (
-    <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
+    <div
+      className="min-h-screen bg-white text-black selection:bg-black selection:text-white"
+      style={themeScope}
+    >
       <PublicNavbar />
-      <OffersCarousel onBook={() => navigate("/book")} />
-      <LandingHero onBook={() => navigate("/book")} />
+
+      <LandingHero
+        onBook={() => navigate("/book")}
+      />
+
+      <OffersCarousel
+        onBook={() => navigate("/book")}
+      />
+
+      <ServicesHorizontalScroll
+        onBook={(id) =>
+          navigate(`/book?serviceId=${id || ""}`)
+        }
+      />
+
       <WhyBlussit />
-      <ServicesHorizontalScroll onBook={(id) => navigate(`/book?serviceId=${id || ""}`)} />
+
       <HowItWorksSection />
-      <PremiumBanner onBook={() => navigate("/book")} />
+
+      <PremiumBanner
+        onBook={() => navigate("/book")}
+      />
+
       <VideoReviewsScroll />
-      <TrustStrip />
+
       <PublicFooter />
     </div>
   );

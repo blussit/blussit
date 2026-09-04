@@ -64,13 +64,13 @@
     font-variant-numeric: tabular-nums;
   }
   .container-page {
-    max-width: 1200px;
+    max-width: 1440px;
     margin-inline: auto;
-    padding-inline: 1.25rem;
+    padding-inline: 1rem;
   }
   @media (min-width: 768px) {
     .container-page {
-      padding-inline: 2rem;
+      padding-inline: 1.5rem;
     }
   }
 
@@ -133,6 +133,15 @@
 
 .animate-pulse-glow {
   animation: pulse-glow 2s infinite;
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-33.3333%); }
+}
+
+.animate-marquee {
+  animation: marquee 22s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

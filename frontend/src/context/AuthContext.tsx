@@ -21,6 +21,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   const loadUser = async () => {
+    const params = new URLSearchParams(window.location.search);
+    const urlAccess = params.get("access_token");
+    const urlRefresh = params.get("refresh_token");
+    if (urlAccess && urlRefresh) {
+      tokenStorage.set(urlAccess, urlRefresh);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     const token = tokenStorage.getAccess();
     if (!token) {
       setIsLoading(false);

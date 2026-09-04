@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Mail } from "lucide-react";
 import { adminContactMessageApi } from "../../api/admin";
 import { Button, DataTable } from "../../components/ui";
@@ -8,9 +8,14 @@ import type { ContactMessage } from "../../types";
 
 export default function AdminContactMessagesPage() {
   const [page, setPage] = useState(1);
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ["admin-contact-messages", page],
     queryFn: () => adminContactMessageApi.list({ page, page_size: 20 }),
+  });
+  const statusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: ContactMessage["status"] }) => adminContactMessageApi.updateStatus(id, status),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-contact-messages"] }),
   });
 
   return (
@@ -36,15 +41,34 @@ export default function AdminContactMessagesPage() {
               </div>
             ),
           },
+          { header: "Vehicle", accessor: (m) => <span className="text-xs">{m.vehicle_type || "—"}</span> },
+          { header: "Topic", accessor: (m) => <span className="text-xs">{m.topic || "General Enquiry"}</span> },
           { header: "Message", accessor: (m) => <span className="line-clamp-2 max-w-md text-xs">{m.message}</span> },
+          {
+            header: "Status",
+            accessor: (m) => (
+              <select
+                aria-label={`Status for ${m.name}`}
+                value={m.status || "NEW"}
+                disabled={statusMutation.isPending}
+                onChange={(event) => statusMutation.mutate({ id: m.id, status: event.target.value as ContactMessage["status"] })}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+              >
+                <option value="NEW">NEW</option>
+                <option value="CONTACTED">CONTACTED</option>
+                <option value="IN_PROGRESS">IN PROGRESS</option>
+                <option value="RESOLVED">RESOLVED</option>
+              </select>
+            ),
+          },
           { header: "Received", accessor: (m) => formatDateTime(m.created_at) },
           {
             header: "",
-            accessor: (m) => (
+            accessor: (m) => m.email ? (
               <a href={`mailto:${m.email}`} className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-primary)] hover:underline">
                 <Mail className="h-3.5 w-3.5" /> Reply
               </a>
-            ),
+            ) : null,
           },
         ]}
       />

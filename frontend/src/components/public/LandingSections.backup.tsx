@@ -1243,106 +1243,6 @@ const SERVICE_CARDS = [
   },
 ];
 
-
-function MobileServicesCarousel({ services, onBook }: { services: any[]; onBook: (s: any) => void }) {
-  const [activeIndex, setActiveIndex] = useState(0);
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const container = e.currentTarget;
-    const scrollLeft = container.scrollLeft;
-    const itemWidth = container.clientWidth;
-    const newIndex = Math.round(scrollLeft / itemWidth);
-    if (newIndex !== activeIndex && newIndex >= 0 && newIndex < services.length) {
-      setActiveIndex(newIndex);
-    }
-  };
-
-  return (
-    <div className="sm:hidden block w-full mt-2 mb-4">
-      <div 
-        className="flex w-full overflow-x-auto snap-x snap-mandatory gap-4 pb-2 px-1 [&::-webkit-scrollbar]:hidden"
-        onScroll={handleScroll}
-        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-      >
-        {services.map((service, index) => {
-          const Icon = service.icon || ShieldCheck; // fallback
-          return (
-            <motion.button
-              key={service.id || `mobile-carousel-${service.title}-${index}`}
-              type="button"
-              disabled={!service.id}
-              onClick={() => service.id && onBook(service)}
-              className="group relative flex shrink-0 w-[88vw] max-w-[360px] snap-center flex-col overflow-hidden rounded-[20px] border border-[#E8E8E8] bg-white text-left shadow-[0_6px_24px_rgba(24,34,44,0.06)] disabled:cursor-default"
-            >
-              {/* Image Container */}
-              <div className="relative w-full aspect-[1.65/1]">
-                <div className="absolute inset-0 overflow-hidden bg-[#ECECEC]">
-                  <img
-                    src={service.image}
-                    alt={service.title}
-                    loading="lazy"
-                    className="h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.045]"
-                  />
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent opacity-80" />
-                </div>
-                
-                {/* Floating icon */}
-                <div className="absolute bottom-[-26px] left-1/2 z-30 flex h-[52px] w-[52px] -translate-x-1/2 items-center justify-center rounded-full border-[3.5px] border-white bg-[#FFF4CD] text-[#E8A900] shadow-[0_4px_12px_rgba(24,34,44,0.12)] transition-all duration-300 group-hover:scale-105 group-hover:bg-[#E8A900] group-hover:text-white">
-                  <Icon className="h-[24px] w-[24px]" strokeWidth={1.8} />
-                </div>
-              </div>
-
-              {/* Card content */}
-              <div className="flex flex-col px-5 pb-5 pt-[34px] text-left">
-                <h3 className="text-[20px] font-bold leading-[1.2] text-[#312D26]">
-                  {service.title}
-                </h3>
-                <p className="mt-2 min-h-[44px] text-[13px] font-medium leading-[1.45] text-[#6B6255]">
-                  {service.description}
-                </p>
-
-                <div className="mt-3 mb-4 h-px w-full bg-[#F0F0F0]" />
-
-                <div className="flex items-end justify-between">
-                  <div>
-                    <p className="text-[11px] font-medium text-[#746B5E]">
-                      Starting at
-                    </p>
-                    <p className="mt-0.5 text-[24px] font-black leading-none tracking-[-0.025em] text-[#312D26]">
-                      {service.price}
-                    </p>
-                  </div>
-                  
-                  <span className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#E8A900]/10 px-3 py-1.5 text-[12px] font-bold uppercase tracking-[0.05em] text-[#E8A900] transition-colors group-hover:bg-[#E8A900] group-hover:text-white">
-                    {service.id ? "Book Now" : "Soon"}
-                    {service.id && (
-                      <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
-                    )}
-                  </span>
-                </div>
-              </div>
-            </motion.button>
-          );
-        })}
-      </div>
-
-      {/* Dot Indicators */}
-      <div className="mt-3 flex justify-center gap-2">
-        {services.map((_, idx) => (
-          <div
-            key={idx}
-            className={`h-1.5 rounded-full transition-all duration-300 ${
-              activeIndex === idx
-                ? "w-6 bg-[#E8A900]"
-                : "w-1.5 bg-[#E8A900]/25"
-            }`}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export function ServicesHorizontalScroll({
   onBook,
 }: {
@@ -1358,45 +1258,47 @@ export function ServicesHorizontalScroll({
 
   const apiServices = servicesData?.data || [];
 
-  /* Use the same Figma cards on the dedicated /services page as well. */
-  const displayServices =
-    apiServices.length > 0
-      ? apiServices.map((service: any, index: number) => {
-          const fallback = SERVICE_CARDS[index % SERVICE_CARDS.length];
-          const rawPrice =
-            service?.price ??
-            service?.starting_price ??
-            service?.base_price ??
-            service?.amount ??
-            service?.startingPrice;
+  /*
+   * Keep the Figma section visible even while the API is loading.
+   * Previously the component returned an animate-pulse skeleton when
+   * servicesData was undefined, which could remain on screen if the API
+   * request was slow or failed. The Figma cards now render immediately
+   * and automatically use API values when they become available.
+   */
+  const displayServices = Array.from({ length: 6 }, (_, index) => {
+    const service = apiServices[index] as any;
+    const fallback = SERVICE_CARDS[index];
 
-          let price = fallback.price;
-          if (rawPrice !== undefined && rawPrice !== null && rawPrice !== "") {
-            const numericPrice = Number(rawPrice);
-            price = Number.isFinite(numericPrice)
-              ? `₹${numericPrice.toLocaleString("en-IN")}`
-              : String(rawPrice).startsWith("₹")
-                ? String(rawPrice)
-                : `₹${String(rawPrice)}`;
-          }
+    const rawPrice =
+      service?.price ??
+      service?.starting_price ??
+      service?.base_price ??
+      service?.amount ??
+      service?.startingPrice;
 
-          return {
-            ...service,
-            title: service?.name || fallback.title,
-            description: service?.description || fallback.description,
-            price,
-            image:
-              service?.image_url ||
-              service?.image ||
-              service?.thumbnail ||
-              IMG.services[index % IMG.services.length],
-            icon: fallback.icon,
-          };
-        })
-      : SERVICE_CARDS.map((service, index) => ({
-          ...service,
-          image: IMG.services[index % IMG.services.length],
-        }));
+    let price = fallback.price;
+    if (rawPrice !== undefined && rawPrice !== null && rawPrice !== "") {
+      const numericPrice = Number(rawPrice);
+      price = Number.isFinite(numericPrice)
+        ? `₹${numericPrice.toLocaleString("en-IN")}`
+        : String(rawPrice).startsWith("₹")
+          ? String(rawPrice)
+          : `₹${String(rawPrice)}`;
+    }
+
+    return {
+      id: service?.id,
+      title: service?.name || fallback.title,
+      description: service?.description || fallback.description,
+      price,
+      image:
+        service?.image_url ||
+        service?.image ||
+        service?.thumbnail ||
+        IMG.services[index % IMG.services.length],
+      icon: fallback.icon,
+    };
+  });
 
   return (
     <section
@@ -1465,11 +1367,8 @@ export function ServicesHorizontalScroll({
             </p>
           </div>
 
-          {/* Mobile Carousel */}
-          <MobileServicesCarousel services={displayServices} onBook={(s) => s.id && onBook(s.id)} />
-
-          {/* Desktop Grid (hidden on mobile) */}
-          <div className="hidden sm:grid sm:mt-5 sm:grid-cols-3 sm:gap-3 md:gap-3.5 lg:mt-6 lg:grid-cols-6 lg:gap-4">
+          {/* Service cards */}
+          <div className="mt-5 grid grid-cols-2 gap-2.5 sm:mt-5 sm:grid-cols-3 sm:gap-3 md:gap-3.5 lg:mt-6 lg:grid-cols-6 lg:gap-4">
             {displayServices.map((service, index) => {
               const Icon = service.icon;
 
@@ -1658,11 +1557,7 @@ export function ServicesGrid({
             </p>
           </div>
 
-          {/* Mobile Carousel */}
-          <MobileServicesCarousel services={displayServices} onBook={(s) => s.id && onBook({ serviceId: s.id })} />
-
-          {/* Desktop Grid (hidden on mobile) */}
-          <div className="hidden sm:grid sm:mt-7 sm:grid-cols-3 sm:gap-3 md:gap-4 lg:mt-8 lg:grid-cols-6 lg:gap-4">
+          <div className="mt-6 grid grid-cols-2 gap-2.5 sm:mt-7 sm:grid-cols-3 sm:gap-3 md:gap-4 lg:mt-8 lg:grid-cols-6 lg:gap-4">
             {displayServices.map((service: any, index: number) => {
               const Icon = service.icon || SERVICE_CARDS[index % SERVICE_CARDS.length].icon;
 

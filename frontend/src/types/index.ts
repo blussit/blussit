@@ -195,9 +195,13 @@ export interface ContactMessage {
   id: string;
   name: string;
   phone: string;
-  email: string;
+  email: string | null;
+  vehicle_type: string | null;
+  topic: string;
   message: string;
+  status: "NEW" | "CONTACTED" | "IN_PROGRESS" | "RESOLVED";
   created_at: string;
+  updated_at: string;
 }
 
 export type BookingStatus =

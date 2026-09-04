@@ -63,6 +63,7 @@ import AdminAuditLogsPage from "./pages/admin/AdminAuditLogsPage";
 
 import ProfilePage from "./pages/shared/ProfilePage";
 import NotificationsPage from "./pages/shared/NotificationsPage";
+import { GlobalReloadRedirect } from "./components/shared/GlobalReloadRedirect";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 30_000 } },
@@ -72,6 +73,7 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
+        <GlobalReloadRedirect />
         <AuthProvider>
         <ToastProvider>
         <ConfirmProvider>

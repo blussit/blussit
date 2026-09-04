@@ -21,6 +21,8 @@ export const adminHomepageConfigApi = {
 export const adminContactMessageApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<ContactMessage>>("/contact", { params }).then((r) => r.data),
+  updateStatus: (id: string, status: ContactMessage["status"]) =>
+    apiClient.patch<ApiSuccess<ContactMessage>>(`/contact/${id}/status`, { status }).then((r) => r.data.data),
 };
 
 export const adminComboOfferApi = {

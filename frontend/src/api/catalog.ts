@@ -60,6 +60,6 @@ export const contentApi = {
         "/public/stats"
       )
       .then((r) => r.data.data),
-  submitContactMessage: (payload: { name: string; phone: string; email: string; message: string }) =>
+  submitContactMessage: (payload: { name: string; phone: string; email?: string; vehicle_type?: string; topic?: string; message: string }) =>
     apiClient.post<ApiSuccess<Record<string, unknown>>>("/contact", payload).then((r) => r.data),
 };

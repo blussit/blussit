@@ -3,6 +3,7 @@ import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
 import { PlansSplit } from "../../components/public/LandingSections";
 
+
 export default function PlansPage() {
   const themeScope = {
     "--color-primary": "#000000",

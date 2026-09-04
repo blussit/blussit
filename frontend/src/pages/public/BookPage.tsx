@@ -24,19 +24,33 @@ export default function BookPage() {
   } as CSSProperties;
 
   return (
-    <div className="min-h-screen bg-white" style={themeScope}>
+    <div className="min-h-screen bg-[#fcfcfb]" style={themeScope}>
       <PublicNavbar />
-      <div className="pt-24 pb-12 bg-white">
-        <div className="container-page py-10">
-          <div className="mx-auto mb-10 max-w-2xl text-center">
-            <h1 className="font-display text-4xl font-black text-[#111] tracking-tight">Book a service</h1>
-            <p className="mt-4 text-lg text-neutral-500">
-              No account needed — just your name and WhatsApp number at the end. Already with us? Log in and it's even faster.
-            </p>
-          </div>
+      <main className="pb-12 pt-6 md:pt-8">
+        <div className="container-page">
+          <section className="relative mb-8 overflow-hidden rounded-[24px] border border-[#ebe5da] bg-[#faf8f5]">
+            <div className="flex flex-col md:flex-row">
+              <div className="flex flex-1 flex-col justify-center px-6 py-8 md:px-10 lg:px-12 lg:py-10">
+                <span className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-[#a17800]">Book a service</span>
+                <h1 className="mt-3 font-display text-3xl font-black tracking-tight text-neutral-900 md:text-4xl lg:text-[40px] lg:leading-[1.1]">
+                  Professional car care <br className="hidden md:block" />
+                  at your doorstep.
+                </h1>
+                <p className="mt-3 text-[15px] font-semibold text-neutral-700">Quick. Easy. Reliable.</p>
+                <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-neutral-500">
+                  No account needed — just your name and WhatsApp number at the end. Already with us? Log in and it's even faster.
+                </p>
+              </div>
+              <div className="relative hidden w-full md:block md:w-[45%] lg:w-[50%]">
+                <div className="absolute inset-0 bg-gradient-to-r from-[#faf8f5] to-transparent z-10" />
+                <img src="/hero-img.png" alt="Blussit car care" className="absolute inset-0 h-full w-full object-cover object-[72%_center]" />
+              </div>
+            </div>
+          </section>
+          
           <PublicBookingWizard preselect={preselect} />
         </div>
-      </div>
+      </main>
       <PublicFooter />
     </div>
   );
