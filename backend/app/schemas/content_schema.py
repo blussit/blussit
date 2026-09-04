@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -42,10 +42,18 @@ class SettingUpsertRequest(BaseModel):
 
 
 class ContactMessageCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    phone: str = Field(min_length=6, max_length=20)
-    email: EmailStr
-    message: str = Field(min_length=1, max_length=2000)
+    name: str = Field(min_length=2, max_length=120)
+    phone: str = Field(min_length=10, max_length=20, pattern=r"^(?:\+91[\s-]?)?[6-9]\d{9}$")
+    email: Optional[EmailStr] = None
+    vehicle_type: Optional[str] = Field(default=None, max_length=40)
+    # Defaults preserve the legacy landing-page form while the modal always
+    # explicitly sends one of the supported topics.
+    topic: str = Field(default="General Enquiry", min_length=2, max_length=80)
+    message: str = Field(min_length=10, max_length=2000)
+
+
+class ContactMessageStatusUpdateRequest(BaseModel):
+    status: Literal["NEW", "CONTACTED", "IN_PROGRESS", "RESOLVED"]
 
 
 class BookingPolicyUpdateRequest(BaseModel):

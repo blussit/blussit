@@ -5,6 +5,7 @@ from app.core.dependencies import CurrentUser, PaginationParams, get_current_use
 from app.core.responses import paginated, success
 from app.schemas.content_schema import (
     ContactMessageCreateRequest,
+    ContactMessageStatusUpdateRequest,
     FaqCreateRequest,
     FaqUpdateRequest,
     SettingUpsertRequest,
@@ -96,3 +97,8 @@ async def submit_contact_message(payload: ContactMessageCreateRequest, db: Async
 async def list_contact_messages(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
     items, total = await ContactMessageService(db).list_all(pagination.page, pagination.page_size)
     return paginated(items, pagination.page, pagination.page_size, total)
+
+
+@contact_router.patch("/{message_id}/status", dependencies=[Depends(require_admin)])
+async def update_contact_message_status(message_id: str, payload: ContactMessageStatusUpdateRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await ContactMessageService(db).update_status(message_id, payload.status), "Contact message status updated")

@@ -89,12 +89,18 @@ class ContactMessageService:
         self.repo = ContactMessageRepository(db)
 
     async def create(self, payload: ContactMessageCreateRequest) -> dict:
-        created = await self.repo.create(payload.model_dump())
+        created = await self.repo.create({**payload.model_dump(), "status": "NEW"})
         return serialize_doc(created)
 
     async def list_all(self, page: int, page_size: int):
         items, total = await self.repo.find_many(page=page, page_size=page_size)
         return serialize_list(items), total
+
+    async def update_status(self, message_id: str, status: str) -> dict:
+        updated = await self.repo.update_by_id(message_id, {"status": status})
+        if not updated:
+            raise NotFoundException("Contact message not found")
+        return serialize_doc(updated)
 
 
 class PublicStatsService:

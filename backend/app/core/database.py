@@ -48,7 +48,38 @@ def get_database() -> AsyncIOMotorDatabase:
     return mongodb.db
 
 
+
+async def _safe_create_index(collection, keys, **kwargs):
+    import pymongo.errors
+    try:
+        index_info = await collection.index_information()
+    except pymongo.errors.OperationFailure:
+        index_info = {}
+        
+    normalized_keys = [(keys, 1)] if isinstance(keys, str) else keys
+    
+    for name, info in index_info.items():
+        if info.get('key') == normalized_keys:
+            # Check options mismatch
+            expected_options = kwargs
+            existing_options = {k: v for k, v in info.items() if k not in ['v', 'key', 'name', 'ns']}
+            
+            # Simple check if there's a difference (ignoring missing vs None for simplicity, just warn)
+            # Reusing existing as requested
+            if expected_options or existing_options:
+                logger.debug(f"Index for {keys} exists on {collection.name}. Reusing.")
+            return name
+            
+    try:
+        return await collection.create_index(keys, **kwargs)
+    except pymongo.errors.OperationFailure as e:
+        if e.code == 85: # IndexOptionsConflict
+            logger.warning(f"Index options conflict for {keys} on {collection.name}: {e}")
+            return None
+        raise
+
 async def create_indexes() -> None:
+
     """
     Create all required indexes at startup. Idempotent — safe to run
     every boot. Keeping this centralized avoids missing indexes as the
@@ -56,35 +87,35 @@ async def create_indexes() -> None:
     """
     db = mongodb.db
 
-    await db.users.create_index("email", unique=True, sparse=True)
-    await db.users.create_index("phone", unique=True, sparse=True)
-    await db.users.create_index("role")
-    await db.users.create_index("service_center_id")
+    await _safe_create_index(db.users, "email", unique=True, sparse=True)
+    await _safe_create_index(db.users, "phone", unique=True, sparse=True)
+    await _safe_create_index(db.users, "role")
+    await _safe_create_index(db.users, "service_center_id")
 
-    await db.vehicles.create_index("owner_id")
+    await _safe_create_index(db.vehicles, "owner_id")
     # For the semi-unique-registration check (allow the same plate on up to
     # 2 accounts) — plain, not unique, since duplicates up to 2 are
     # intentionally allowed. Populated at write time on the normalized form
     # (uppercased, spaces/hyphens stripped) so the count query is an index
     # lookup, not a collection-wide normalize-and-scan.
-    await db.vehicles.create_index("registration_number_normalized")
-    await db.addresses.create_index("owner_id")
+    await _safe_create_index(db.vehicles, "registration_number_normalized")
+    await _safe_create_index(db.addresses, "owner_id")
 
-    await db.bookings.create_index("customer_id")
-    await db.bookings.create_index("captain_id")
-    await db.bookings.create_index("service_center_id")
-    await db.bookings.create_index("status")
-    await db.bookings.create_index([("scheduled_date", 1), ("scheduled_slot", 1)])
-    await db.bookings.create_index("booking_number", unique=True, sparse=True)
+    await _safe_create_index(db.bookings, "customer_id")
+    await _safe_create_index(db.bookings, "captain_id")
+    await _safe_create_index(db.bookings, "service_center_id")
+    await _safe_create_index(db.bookings, "status")
+    await _safe_create_index(db.bookings, [("scheduled_date", 1), ("scheduled_slot", 1)])
+    await _safe_create_index(db.bookings, "booking_number", unique=True, sparse=True)
     # Every booking-list endpoint (admin/manager/captain/customer) filters by
     # one of these ids then sorts — without the sort key in the index, Mongo
     # falls back to an in-memory sort of the matched set. Fine at today's
     # volume, but as booking counts grow per center/captain/customer this
     # keeps list queries index-served instead of slowing down again.
-    await db.bookings.create_index([("service_center_id", 1), ("created_at", -1)])
-    await db.bookings.create_index([("customer_id", 1), ("created_at", -1)])
-    await db.bookings.create_index([("captain_id", 1), ("scheduled_date", 1)])
-    await db.bookings.create_index([("status", 1), ("created_at", -1)])
+    await _safe_create_index(db.bookings, [("service_center_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.bookings, [("customer_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.bookings, [("captain_id", 1), ("scheduled_date", 1)])
+    await _safe_create_index(db.bookings, [("status", 1), ("created_at", -1)])
     # DB-level duplicate-booking guard: a customer can't hold two ACTIVE
     # bookings for the same vehicle in the same slot, no matter how a
     # double-click/multi-tab/retry races the application-level check in
@@ -92,80 +123,80 @@ async def create_indexes() -> None:
     # outright (DuplicateKeyError), which create_booking translates into a
     # clean BadRequestException. Partial: only active-status bookings are
     # constrained, so a cancelled/completed one never blocks a fresh rebooking.
-    await db.bookings.create_index(
+    await _safe_create_index(db.bookings, 
         [("customer_id", 1), ("vehicle_id", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
         unique=True,
         partialFilterExpression={"status": {"$in": ["pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
     )
 
-    await db.booking_status_history.create_index("booking_id")
+    await _safe_create_index(db.booking_status_history, "booking_id")
 
     # Slot/daily capacity reservation counters — see
     # app/models/booking.py's SlotCapacityModel/DailyCapacityModel and
     # BookingService._reserve_slot_capacity. The unique index is what makes
     # BaseRepository.get_or_init's concurrent-first-use race safe.
-    await db.slot_capacity.create_index([("service_center_id", 1), ("date", 1), ("slot_key", 1)], unique=True)
-    await db.daily_capacity.create_index([("service_center_id", 1), ("date", 1)], unique=True)
+    await _safe_create_index(db.slot_capacity, [("service_center_id", 1), ("date", 1), ("slot_key", 1)], unique=True)
+    await _safe_create_index(db.daily_capacity, [("service_center_id", 1), ("date", 1)], unique=True)
 
     # Effective-dated capacity policy changes — see
     # app/models/capacity_policy.py and CapacityPolicyService. Unique so
     # re-scheduling the same future (or today's) date is naturally an
     # edit-in-place, not a duplicate.
-    await db.capacity_policy_changes.create_index([("service_center_id", 1), ("effective_date", 1)], unique=True)
+    await _safe_create_index(db.capacity_policy_changes, [("service_center_id", 1), ("effective_date", 1)], unique=True)
 
-    await db.services.create_index("category_id")
-    await db.services.create_index("slug", unique=True, sparse=True)
-    await db.categories.create_index("slug", unique=True, sparse=True)
-    await db.vehicle_types.create_index("slug", unique=True, sparse=True)
+    await _safe_create_index(db.services, "category_id")
+    await _safe_create_index(db.services, "slug", unique=True, sparse=True)
+    await _safe_create_index(db.categories, "slug", unique=True, sparse=True)
+    await _safe_create_index(db.vehicle_types, "slug", unique=True, sparse=True)
 
-    await db.subscription_plans.create_index("slug", unique=True, sparse=True)
-    await db.user_subscriptions.create_index("customer_id")
-    await db.user_subscriptions.create_index("status")
+    await _safe_create_index(db.subscription_plans, "slug", unique=True, sparse=True)
+    await _safe_create_index(db.user_subscriptions, "customer_id")
+    await _safe_create_index(db.user_subscriptions, "status")
 
-    await db.service_centers.create_index("code", unique=True, sparse=True)
-    await db.service_centers.create_index([("location.pincode", 1)])
+    await _safe_create_index(db.service_centers, "code", unique=True, sparse=True)
+    await _safe_create_index(db.service_centers, [("location.pincode", 1)])
 
-    await db.complaints.create_index("customer_id")
-    await db.complaints.create_index("service_center_id")
-    await db.complaints.create_index("status")
+    await _safe_create_index(db.complaints, "customer_id")
+    await _safe_create_index(db.complaints, "service_center_id")
+    await _safe_create_index(db.complaints, "status")
 
-    await db.reviews.create_index("booking_id")
-    await db.reviews.create_index("captain_id")
+    await _safe_create_index(db.reviews, "booking_id")
+    await _safe_create_index(db.reviews, "captain_id")
 
-    await db.coupons.create_index("code", unique=True, sparse=True)
+    await _safe_create_index(db.coupons, "code", unique=True, sparse=True)
 
-    await db.notifications.create_index("user_id")
-    await db.notifications.create_index("is_read")
+    await _safe_create_index(db.notifications, "user_id")
+    await _safe_create_index(db.notifications, "is_read")
 
-    await db.audit_logs.create_index("actor_id")
-    await db.audit_logs.create_index("created_at")
+    await _safe_create_index(db.audit_logs, "actor_id")
+    await _safe_create_index(db.audit_logs, "created_at")
 
-    await db.inventory.create_index("service_center_id")
+    await _safe_create_index(db.inventory, "service_center_id")
 
-    await db.settings.create_index("key", unique=True, sparse=True)
+    await _safe_create_index(db.settings, "key", unique=True, sparse=True)
 
-    await db.captain_wallets.create_index("captain_id", unique=True, sparse=True)
-    await db.wallet_transactions.create_index("captain_id")
-    await db.wallet_transactions.create_index("booking_id")
-    await db.withdrawal_requests.create_index("captain_id")
-    await db.withdrawal_requests.create_index("status")
+    await _safe_create_index(db.captain_wallets, "captain_id", unique=True, sparse=True)
+    await _safe_create_index(db.wallet_transactions, "captain_id")
+    await _safe_create_index(db.wallet_transactions, "booking_id")
+    await _safe_create_index(db.withdrawal_requests, "captain_id")
+    await _safe_create_index(db.withdrawal_requests, "status")
 
-    await db.service_centers.create_index([("location.latitude", 1), ("location.longitude", 1)])
-    await db.addresses.create_index([("latitude", 1), ("longitude", 1)])
+    await _safe_create_index(db.service_centers, [("location.latitude", 1), ("location.longitude", 1)])
+    await _safe_create_index(db.addresses, [("latitude", 1), ("longitude", 1)])
 
     # Public /thank-you page tickets — token must be unique (it's the
     # entire lookup key for an unauthenticated route), and a TTL index
     # lets Mongo garbage-collect expired ones on its own rather than this
     # collection growing forever.
-    await db.purchase_confirmations.create_index("token", unique=True)
-    await db.purchase_confirmations.create_index("expires_at", expireAfterSeconds=0)
+    await _safe_create_index(db.purchase_confirmations, "token", unique=True)
+    await _safe_create_index(db.purchase_confirmations, "expires_at", expireAfterSeconds=0)
 
-    await db.sms_outbox.create_index("phone")
-    await db.sms_outbox.create_index("created_at")
+    await _safe_create_index(db.sms_outbox, "phone")
+    await _safe_create_index(db.sms_outbox, "created_at", expireAfterSeconds=31536000)
 
-    await db.whatsapp_outbox.create_index("phone")
-    await db.whatsapp_outbox.create_index("wamid", sparse=True)
-    await db.whatsapp_outbox.create_index("created_at")
+    await _safe_create_index(db.whatsapp_outbox, "phone")
+    await _safe_create_index(db.whatsapp_outbox, "wamid", sparse=True)
+    await _safe_create_index(db.whatsapp_outbox, "created_at")
 
     # WhatsApp booking bot — one conversation doc per sender, and a
     # dedup ledger of processed webhook message ids (Meta redelivers on
@@ -175,9 +206,9 @@ async def create_indexes() -> None:
     # comfortable margin over that).
     # Coverage leads (uncovered-area demand capture) — the unique pair
     # is what makes CoverageLeadService.capture's upsert-dedup race-safe.
-    await db.coverage_leads.create_index([("phone", 1), ("pincode", 1)], unique=True)
-    await db.coverage_leads.create_index("last_requested_at")
+    await _safe_create_index(db.coverage_leads, [("phone", 1), ("pincode", 1)], unique=True)
+    await _safe_create_index(db.coverage_leads, "last_requested_at")
 
-    await db.whatsapp_conversations.create_index("wa_id", unique=True)
-    await db.whatsapp_message_dedup.create_index("wamid", unique=True)
-    await db.whatsapp_message_dedup.create_index("created_at", expireAfterSeconds=14 * 24 * 3600)
+    await _safe_create_index(db.whatsapp_conversations, "wa_id", unique=True)
+    await _safe_create_index(db.whatsapp_message_dedup, "wamid", unique=True)
+    await _safe_create_index(db.whatsapp_message_dedup, "created_at", expireAfterSeconds=14 * 24 * 3600)

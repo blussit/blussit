@@ -23,7 +23,7 @@ Make sure MongoDB is running locally (or point `MONGO_URI` at your instance), th
 python -m app.seed
 
 # Run the API
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload 
 ```
 
 API docs: `http://localhost:8000/api/docs`
