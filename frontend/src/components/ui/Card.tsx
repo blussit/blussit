@@ -4,7 +4,10 @@ import { cn } from "../../lib/cn";
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("rounded-[var(--radius-card)] border border-gray-100 bg-white shadow-[var(--shadow-soft)]", className)}
+      // Border color is themeable: brand portals (customer/captain shells)
+      // set --color-card-border to a light yellow so boxes read on their
+      // white ground; everywhere else it falls back to gray-100.
+      className={cn("rounded-[var(--radius-card)] border border-[var(--color-card-border,#f3f4f6)] bg-white shadow-[var(--shadow-soft)]", className)}
       {...props}
     />
   );

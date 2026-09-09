@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class VehicleCreateRequest(BaseModel):
@@ -8,6 +8,18 @@ class VehicleCreateRequest(BaseModel):
     brand: str
     model: str
     registration_number: str = Field(min_length=3, max_length=20)
+
+    @field_validator("registration_number")
+    @classmethod
+    def _valid_indian_plate(cls, v: str) -> str:
+        from app.utils.vehicle_reg import validate_indian_registration
+
+        plate = validate_indian_registration(v)
+        if not plate:
+            raise ValueError(
+                "Enter a valid Indian registration number, e.g. MP09AB1234, DL1CXY9876 or 22BH1234AB"
+            )
+        return plate
     color: Optional[str] = None
     image: Optional[str] = None
     is_default: bool = False
@@ -28,6 +40,20 @@ class VehicleUpdateRequest(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     registration_number: Optional[str] = None
+
+    @field_validator("registration_number")
+    @classmethod
+    def _valid_indian_plate(cls, v):
+        if v is None:
+            return v
+        from app.utils.vehicle_reg import validate_indian_registration
+
+        plate = validate_indian_registration(v)
+        if not plate:
+            raise ValueError(
+                "Enter a valid Indian registration number, e.g. MP09AB1234, DL1CXY9876 or 22BH1234AB"
+            )
+        return plate
     color: Optional[str] = None
     image: Optional[str] = None
     is_default: Optional[bool] = None

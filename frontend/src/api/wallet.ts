@@ -13,8 +13,6 @@ export const walletApi = {
   captainWallet: (captainId: string) =>
     apiClient.get<ApiSuccess<CaptainWallet>>(`/wallet/captain/${captainId}`).then((r) => r.data.data),
 
-  topUp: (amount: number) => apiClient.post<ApiSuccess<CaptainWallet>>("/wallet/top-up", { amount }).then((r) => r.data.data),
-
   updateBankDetails: (payload: BankDetailsPayload) =>
     apiClient.put<ApiSuccess<CaptainWallet>>("/wallet/bank-details", payload).then((r) => r.data.data),
 

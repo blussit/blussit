@@ -92,10 +92,13 @@ class BaseRepository:
         if not ObjectId.is_valid(id):
             return None
         data["updated_at"] = datetime.now(timezone.utc)
-        await self.collection.update_one({"_id": self._oid(id)}, {"$set": data}, session=session)
+        # Soft-deleted docs are read-only tombstones — every READ helper
+        # already excludes them; a write slipping through returned a
+        # "successful" update on a document no list would ever show again.
+        await self.collection.update_one({"_id": self._oid(id), "is_deleted": {"$ne": True}}, {"$set": data}, session=session)
         return await self.find_by_id(id, session=session)
 
-    async def update_if(self, id: str, guard_filter: dict, data: dict) -> Optional[dict]:
+    async def update_if(self, id: str, guard_filter: dict, data: dict, session: Optional[AsyncIOMotorClientSession] = None) -> Optional[dict]:
         """Same as update_by_id, but the write only takes effect if
         guard_filter still matches the document AT THE MOMENT of the
         update — atomically, in one round trip. Returns None if it didn't
@@ -106,8 +109,8 @@ class BaseRepository:
         if not ObjectId.is_valid(id):
             return None
         data["updated_at"] = datetime.now(timezone.utc)
-        query = {"_id": self._oid(id), **guard_filter}
-        return await self.collection.find_one_and_update(query, {"$set": data}, return_document=ReturnDocument.AFTER)
+        query = {"_id": self._oid(id), "is_deleted": {"$ne": True}, **guard_filter}
+        return await self.collection.find_one_and_update(query, {"$set": data}, return_document=ReturnDocument.AFTER, session=session)
 
     async def get_or_init(self, filter: dict, defaults: dict, session: Optional[AsyncIOMotorClientSession] = None) -> dict:
         """Idempotent get-or-create: if no document matches `filter`, inserts
@@ -168,7 +171,7 @@ class BaseRepository:
         if not ObjectId.is_valid(id):
             return None
         await self.collection.update_one(
-            {"_id": self._oid(id)},
+            {"_id": self._oid(id), "is_deleted": {"$ne": True}},
             {"$push": {field: item}, "$set": {"updated_at": datetime.now(timezone.utc)}},
             session=session,
         )
@@ -207,7 +210,12 @@ class BaseRepository:
 
 
 def build_search_filter(search: Optional[str], fields: list[str]) -> dict:
-    """Builds a case-insensitive regex $or filter across multiple text fields."""
+    """Builds a case-insensitive regex $or filter across multiple text
+    fields. The search text is escaped — user input must never reach the
+    regex engine raw (ReDoS / unintended matches)."""
     if not search:
         return {}
-    return {"$or": [{field: {"$regex": search, "$options": "i"}} for field in fields]}
+    import re
+
+    escaped = re.escape(search.strip())
+    return {"$or": [{field: {"$regex": escaped, "$options": "i"}} for field in fields]}

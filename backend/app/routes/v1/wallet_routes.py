@@ -11,7 +11,7 @@ from app.core.dependencies import (
     require_captain,
     require_manager_or_admin,
 )
-from app.schemas.wallet_schema import BankDetailsRequest, TopUpRequest, WalletAdjustmentRequest, WithdrawalCreateRequest, WithdrawalReviewRequest
+from app.schemas.wallet_schema import BankDetailsRequest, WalletAdjustmentRequest, WithdrawalCreateRequest, WithdrawalReviewRequest
 
 router = APIRouter(prefix="/wallet", tags=["Captain Wallet"])
 
@@ -22,13 +22,15 @@ async def my_wallet(current_user: CurrentUser = Depends(get_current_user), db: A
 
 
 @router.get("/captain/{captain_id}", dependencies=[Depends(require_manager_or_admin)])
-async def captain_wallet(captain_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await WalletController(db).captain_wallet(captain_id)
+async def captain_wallet(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await WalletController(db).captain_wallet(current_user, captain_id)
 
 
-@router.post("/top-up", dependencies=[Depends(require_captain)])
-async def top_up(payload: TopUpRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await WalletController(db).top_up(current_user, payload)
+# NOTE: the captain self-top-up endpoint was REMOVED deliberately. There is
+# no payment gateway, so a "top-up" moved no real money — it let a captain
+# credit their own wallet with any number and then request a genuine cash
+# withdrawal against it. Cash handed to the manager is recorded through the
+# admin adjustment endpoint below (an audited, staff-side action) instead.
 
 
 @router.put("/bank-details", dependencies=[Depends(require_captain)])

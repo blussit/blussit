@@ -30,26 +30,38 @@ class InventoryService:
         items, total = await self.repo.list_for_center(service_center_id, page, page_size, low_stock_only)
         return serialize_list(items), total
 
-    async def create(self, payload: InventoryCreateRequest) -> dict:
+    async def create(self, payload: InventoryCreateRequest, actor_role: str, actor_center_id: str | None) -> dict:
+        # A manager stocks THEIR OWN center's shelf — never another store's.
+        ensure_own_center(actor_role, actor_center_id, payload.service_center_id)
         created = await self.repo.create(payload.model_dump())
         return serialize_doc(created)
 
-    async def update(self, item_id: str, payload: InventoryUpdateRequest) -> dict:
+    async def update(self, item_id: str, payload: InventoryUpdateRequest, actor_role: str, actor_center_id: str | None) -> dict:
+        await self._own_center_item(item_id, actor_role, actor_center_id)
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
         updated = await self.repo.update_by_id(item_id, data)
         if not updated:
             raise NotFoundException("Inventory item not found")
         return serialize_doc(updated)
 
-    async def adjust(self, item_id: str, payload: InventoryAdjustRequest) -> dict:
-        item = await self.repo.find_by_id(item_id)
-        if not item:
-            raise NotFoundException("Inventory item not found")
+    async def adjust(self, item_id: str, payload: InventoryAdjustRequest, actor_role: str, actor_center_id: str | None) -> dict:
+        item = await self._own_center_item(item_id, actor_role, actor_center_id)
         if item["quantity_available"] + payload.delta < 0:
             raise BadRequestException("Insufficient stock for this adjustment")
         updated = await self.repo.adjust_quantity(item_id, payload.delta)
         return serialize_doc(updated)
 
-    async def delete(self, item_id: str) -> None:
+    async def delete(self, item_id: str, actor_role: str, actor_center_id: str | None) -> None:
+        await self._own_center_item(item_id, actor_role, actor_center_id)
         if not await self.repo.soft_delete(item_id):
             raise NotFoundException("Inventory item not found")
+
+    async def _own_center_item(self, item_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """Every item mutation resolves the item first and center-scopes it —
+        these endpoints used to accept ANY item id from any manager, letting
+        one store wipe another store's stock ledger."""
+        item = await self.repo.find_by_id(item_id)
+        if not item:
+            raise NotFoundException("Inventory item not found")
+        ensure_own_center(actor_role, actor_center_id, item.get("service_center_id"))
+        return item

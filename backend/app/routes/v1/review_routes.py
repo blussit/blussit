@@ -2,7 +2,10 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.review_controller import ReviewController
+from app.core.authz import ensure_own_center
 from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_admin, require_customer, require_manager_or_admin
+from app.core.exceptions import NotFoundException
+from app.repositories.user_repository import UserRepository
 from app.schemas.review_schema import ReviewCreateRequest, ReviewUpdateRequest
 
 router = APIRouter(prefix="/reviews", tags=["Reviews"])
@@ -48,8 +51,14 @@ async def captain_rating_summary(captain_id: str, db: AsyncIOMotorDatabase = Dep
 
 
 @router.get("/captain/{captain_id}", dependencies=[Depends(require_manager_or_admin)])
-async def list_captain_reviews(captain_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Individual reviews for one captain — what a manager sees behind the aggregate rating."""
+async def list_captain_reviews(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Individual reviews for one captain — what a manager sees behind the
+    aggregate rating. Scoped to the manager's own team (the public summary
+    endpoint above stays open; individual review text does not)."""
+    captain = await UserRepository(db).find_by_id(captain_id)
+    if not captain or captain.get("role") != "captain":
+        raise NotFoundException("Captain not found")
+    ensure_own_center(current_user.role, current_user.service_center_id, captain.get("service_center_id"))
     return await ReviewController(db).list_for_captain(captain_id)
 
 

@@ -14,13 +14,13 @@ from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingCreateRequest
 from app.services.booking_service import BookingService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))

@@ -46,10 +46,13 @@ def verify_webhook_subscription(mode: str | None, token: str | None, challenge: 
 
 
 def verify_webhook_signature(raw_body: bytes, signature_header: str | None) -> bool:
-    """True if the payload authenticates (or signature checking is off
-    because no app secret is configured — dev mode)."""
+    """True if the payload authenticates. With no app secret configured
+    this FAILS CLOSED outside DEBUG: an unsigned webhook in production
+    would let anyone who learns the URL impersonate any customer by phone
+    number (list/cancel/create their bookings via the bot). Dev keeps the
+    old convenience of accepting unsigned payloads for local testing."""
     if not settings.WHATSAPP_APP_SECRET:
-        return True
+        return settings.DEBUG
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = hmac.new(settings.WHATSAPP_APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()

@@ -13,13 +13,13 @@ from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingAssignCaptainRequest, BookingCreateRequest, HeadingRequest
 from app.services.booking_service import BookingService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, working_hours_start="00:00", working_hours_end="23:59", slot_duration_minutes=180, default_slot_capacity=20)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
@@ -104,7 +104,11 @@ async def test_late_start_is_flagged_with_penalty(rig):
     from app.utils.timezone import now_ist
 
     far_past = now_ist() - timedelta(hours=2)
-    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": far_past}})
+    # assigned_at is backdated too — a fresh assignment to a past slot now
+    # earns the late-ASSIGNMENT grace instead (the booking was late, not
+    # the captain; see _effective_start_anchor), which is not this test's
+    # scenario.
+    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": far_past, "assigned_at": far_past - timedelta(hours=1)}})
 
     result = await bs.start_heading(booking["id"], HeadingRequest(latitude=22.7, longitude=75.8, equipment_used=[]), rig["captain_id"])
     assert result["captain_start_stage"] == "severely_late"
@@ -126,7 +130,9 @@ async def test_start_heading_blocked_once_window_missed_by_days(rig):
     from app.utils.timezone import now_ist
 
     days_past = now_ist() - timedelta(days=2)
-    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": days_past}})
+    # Backdate the assignment along with the slot (see the comment in
+    # test_late_start_is_flagged_with_penalty).
+    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": days_past, "assigned_at": days_past - timedelta(hours=1)}})
 
     with pytest.raises(BadRequestException, match="expired too long ago"):
         await bs.start_heading(booking["id"], HeadingRequest(latitude=22.7, longitude=75.8, equipment_used=[]), rig["captain_id"])
@@ -153,7 +159,9 @@ async def test_sweep_flags_missed_window_distinctly_once_locked_out(rig):
     from app.utils.timezone import now_ist
 
     days_past = now_ist() - timedelta(days=2)
-    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": days_past}})
+    # Backdate the assignment along with the slot (see the comment in
+    # test_late_start_is_flagged_with_penalty).
+    await rig["db"].bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"estimated_start_at": days_past, "assigned_at": days_past - timedelta(hours=1)}})
 
     fresh = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
     await bs.flag_late_to_start(fresh)

@@ -1,22 +1,24 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, ChevronLeft, Clock, MapPin, Navigation, Star } from "lucide-react";
+import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Phone, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
+import { useConfirm } from "../../context/ConfirmContext";
 import { Button, Card, CardBody, CardHeader, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useLiveChannel } from "../../lib/socket";
 import { formatDateTime } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
-import { ISSUE_LABELS } from "../../lib/constants";
+import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const confirm = useConfirm();
   const isCustomer = user?.role === "customer";
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
@@ -47,6 +49,22 @@ export default function BookingDetailPage() {
 
   const { data: myReviews } = useQuery({ queryKey: ["my-reviews"], queryFn: reviewApi.mine, enabled: isCustomer });
   const myReview = myReviews?.find((r) => r.booking_id === id);
+
+  // A completed-but-unrated booking opens the rating window by itself —
+  // the moment the customer lands here (from the list's "Rate" stars, a
+  // notification, or the wash finishing while they watch), the ask is
+  // right in front of them instead of buried behind a button. Once per
+  // visit: closing it doesn't re-trigger until the next page open, and it
+  // only fires after the reviews query resolves (myReviews !== undefined)
+  // so an already-rated booking never flashes the modal.
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current || !isCustomer) return;
+    if (booking?.status !== "completed" || myReviews === undefined || myReview) return;
+    autoOpenedRef.current = true;
+    openReview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booking?.status, myReviews]);
 
   const openReview = () => {
     setError("");
@@ -98,6 +116,22 @@ export default function BookingDetailPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  const payMutation = useMutation({
+    mutationFn: () =>
+      payWithRazorpay(
+        { purpose: "booking", booking_id: id as string },
+        { name: user?.full_name, email: user?.email, contact: user?.phone }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+    },
+    onError: (err) => {
+      if (err instanceof PaymentCancelled) return; // closed the modal — no error to show
+      setError(getErrorMessage(err));
+    },
+  });
+
   const deleteReviewMutation = useMutation({
     mutationFn: () => reviewApi.remove(myReview!.id),
     onSuccess: () => {
@@ -109,7 +143,25 @@ export default function BookingDetailPage() {
 
   if (isLoading || !booking) return <PageLoader />;
 
-  const canCancel = isCustomer && !["completed", "cancelled"].includes(booking.status);
+  // Cancellation policy phase 1 (mirrors the backend's enforcement):
+  // self-cancel only while the booking is still unassigned AND more than
+  // 4 hours before the slot. After that the button disappears — the hint
+  // below points at support instead.
+  const slotStartMs = (() => {
+    const d = new Date(booking.scheduled_date);
+    const [h, m] = (booking.scheduled_slot || "0:0").split("-")[0].split(":").map(Number);
+    d.setHours(h || 0, m || 0, 0, 0);
+    return d.getTime();
+  })();
+  const insideCancelLock = Date.now() > slotStartMs - 4 * 60 * 60 * 1000;
+  const unassigned = ["pending", "rescheduled"].includes(booking.status);
+  const canCancel = isCustomer && unassigned && !insideCancelLock;
+  const cancelLockHint =
+    isCustomer && !["completed", "cancelled"].includes(booking.status) && !canCancel
+      ? !unassigned
+        ? "A captain is on this booking — it can no longer be cancelled online."
+        : "Cancellations close 4 hours before your slot — message us on WhatsApp if you need help."
+      : null;
   // Mirrors the backend's reschedule guard — once a captain is on the way
   // or mid-service, rescheduling would pull the booking out from under
   // real, unfinished work with no notice; cancel or wait it out instead.
@@ -129,6 +181,44 @@ export default function BookingDetailPage() {
         </div>
         <StatusBadge status={booking.status} />
       </div>
+
+      {/* Who's coming to your door — the captain's public card, shown the
+          moment one is assigned (photo, staff id, phone). */}
+      {booking.captain_profile && booking.status !== "cancelled" && (
+        <Card className="border-[#F3E5B5]">
+          <CardBody className="flex items-center gap-4 !p-4">
+            {booking.captain_profile.photo_url ? (
+              <img src={booking.captain_profile.photo_url} alt={booking.captain_profile.full_name || "Captain"} className="h-14 w-14 shrink-0 rounded-full object-cover" />
+            ) : (
+              <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gray-100 font-display text-lg font-bold text-black">
+                {(booking.captain_profile.full_name || "C").trim().charAt(0).toUpperCase()}
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-black">Your captain</p>
+              <p className="flex flex-wrap items-center gap-1.5 font-semibold text-black">
+                {booking.captain_profile.full_name || "Captain"}
+                {booking.captain_profile.verified && (
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-green-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-green-700">
+                    <BadgeCheck className="h-2.5 w-2.5" /> Verified
+                  </span>
+                )}
+              </p>
+              {booking.captain_profile.employee_id && (
+                <p className="font-mono-num text-xs text-gray-400">ID {booking.captain_profile.employee_id}</p>
+              )}
+            </div>
+            {booking.captain_profile.phone && (
+              <a
+                href={`tel:${booking.captain_profile.phone}`}
+                className="flex shrink-0 items-center gap-1.5 rounded-xl bg-black px-3.5 py-2.5 text-sm font-bold text-white hover:opacity-90"
+              >
+                <Phone className="h-4 w-4" /> Call
+              </a>
+            )}
+          </CardBody>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -187,20 +277,11 @@ export default function BookingDetailPage() {
         </Card>
       )}
 
-      {booking.issue_flag && (
-        <Card className="border-2 border-[var(--color-warning)]">
-          <CardBody className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-warning)]" />
-            <div>
-              <p className="font-semibold text-[var(--color-text-primary)]">{ISSUE_LABELS[booking.issue_flag] || "Flagged for attention"}</p>
-              {booking.issue_notes && <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{booking.issue_notes}</p>}
-              {booking.issue_flagged_at && (
-                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Flagged {formatDateTime(booking.issue_flagged_at)}</p>
-              )}
-            </div>
-          </CardBody>
-        </Card>
-      )}
+      {/* Issue flags ("Captain started late", geofence alerts…) are
+          internal manager↔captain ops — the API redacts them for customer
+          responses (_CUSTOMER_HIDDEN_FIELDS) and no banner renders here.
+          The customer's window into progress is the transparency timeline
+          below, which shows what happened, not who got flagged. */}
 
       {/* Internal to manager/captain — the specific lateness stage and pay
           penalty are operational/financial detail, not something the
@@ -272,7 +353,7 @@ export default function BookingDetailPage() {
                 never shown to the customer or the captain themselves, only
                 to manager/admin (this page is shared across all three). */}
             {booking.captain_earning != null && (user?.role === "manager" || user?.role === "admin") && (
-              <div className="rounded-xl bg-[var(--color-surface)] p-4 text-sm">
+              <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-4 text-sm">
                 <div className="flex justify-between">
                   <span className="text-[var(--color-text-secondary)]">Captain's fee</span>
                   <span className="font-mono-num font-semibold">₹{booking.captain_earning}</span>
@@ -295,6 +376,24 @@ export default function BookingDetailPage() {
       {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
       <div className="flex flex-wrap gap-3">
+        {/* An online booking whose payment didn't go through (modal closed
+            mid-checkout, network blip) finishes it from here — same
+            server-verified Razorpay flow as at booking time. */}
+        {/* Founder rule: ANY unpaid booking can be paid online any time —
+            before, during or after the service — even one booked as cash
+            (paying flips it to online; the captain's app sees it as paid). */}
+        {isCustomer &&
+          booking.payment_status === "pending" &&
+          booking.status !== "cancelled" &&
+          booking.total_amount > 0 && (
+            <Button
+              isLoading={payMutation.isPending}
+              onClick={() => payMutation.mutate()}
+              className="bg-[#E8A900] hover:bg-[#D99A00]"
+            >
+              Pay ₹{booking.total_amount} online
+            </Button>
+          )}
         {canReschedule && (
           <Button variant="outline" onClick={() => setRescheduleOpen(true)}>
             Reschedule
@@ -305,6 +404,12 @@ export default function BookingDetailPage() {
             Cancel booking
           </Button>
         )}
+        {isCustomer && (
+          <Button variant="outline" onClick={() => navigate(`/app/support?booking=${booking.id}`)}>
+            <LifeBuoy className="h-4 w-4" /> Need help?
+          </Button>
+        )}
+        {cancelLockHint && <p className="w-full text-xs text-[var(--color-text-secondary)]">{cancelLockHint}</p>}
         {isCustomer && booking.status === "completed" && !myReview && (
           <Button variant="outline" onClick={openReview}>
             <Star className="h-4 w-4" /> Rate this service
@@ -315,7 +420,13 @@ export default function BookingDetailPage() {
             <Button variant="outline" onClick={openReview}>
               <Star className="h-4 w-4" /> Edit review
             </Button>
-            <Button variant="ghost" isLoading={deleteReviewMutation.isPending} onClick={() => deleteReviewMutation.mutate()}>
+            <Button
+              variant="ghost"
+              isLoading={deleteReviewMutation.isPending}
+              onClick={async () => {
+                if (await confirm({ title: "Delete your review?", message: "It can't be restored afterwards.", tone: "danger" })) deleteReviewMutation.mutate();
+              }}
+            >
               Delete review
             </Button>
           </>
@@ -335,6 +446,7 @@ export default function BookingDetailPage() {
             onChange={(e) => setCancelReason(e.target.value)}
             hint={!cancelReasonValid ? "At least 3 characters, so we know why." : undefined}
           />
+          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
             variant="danger"
             className="w-full"
@@ -353,6 +465,7 @@ export default function BookingDetailPage() {
             This clears the current captain — you'll need a new one assigned to the new time.
           </p>
           <SlotPicker serviceCenterId={booking.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
+          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
             className="w-full"
             disabled={!newDate || !newSlot}

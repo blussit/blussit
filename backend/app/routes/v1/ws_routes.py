@@ -19,7 +19,9 @@ used everywhere else, just carried differently for this one connection
 type. A token that fails to decode closes the connection immediately with
 code 4401, before any channel is ever accepted.
 """
+import asyncio
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -120,6 +122,25 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
     await websocket.send_json({"type": "connected"})
     subscribed: set[str] = set()
 
+    # A socket must not outlive its token: without this, one handshake
+    # stayed authorized forever — through token expiry, role changes, and
+    # account suspension. Closing at `exp` forces a reconnect with a fresh
+    # token (the frontend's socket client already auto-reconnects), which
+    # re-runs decode_token and re-authorizes every channel.
+    token_exp = payload.get("exp")
+    expiry_handle = None
+    if token_exp:
+        delay = max(1.0, token_exp - datetime.now(timezone.utc).timestamp())
+
+        async def _close_at_expiry() -> None:
+            await asyncio.sleep(delay)
+            try:
+                await websocket.close(code=4401)
+            except Exception:  # noqa: BLE001 — already closed is fine
+                pass
+
+        expiry_handle = asyncio.create_task(_close_at_expiry())
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -149,4 +170,6 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
     except Exception:
         logger.exception("WebSocket connection error")
     finally:
+        if expiry_handle:
+            expiry_handle.cancel()
         manager.unsubscribe_all(websocket)

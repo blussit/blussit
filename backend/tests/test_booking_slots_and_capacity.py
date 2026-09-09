@@ -12,8 +12,10 @@ from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingCancelRequest, BookingCreateRequest
 from app.services.booking_service import BookingService
 
+from app.utils.timezone import now_ist
+
 from tests.factories import (
-    get_foam_wash_service_id,
+    get_star_wash_service_id,
     get_hatchback_type_id,
     make_customer_with_vehicle,
     make_service_center,
@@ -25,7 +27,7 @@ async def rig(db, cleanup):
     """A dedicated 09:00-13:00, 3h-slot, 20-capacity center — isolated
     from any other test's bookings so capacity assertions are exact."""
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, working_hours_start="09:00", working_hours_end="13:00", slot_duration_minutes=180, default_slot_capacity=20)
     cleanup.append(("service_centers", {"_id": __import__("bson").ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
@@ -49,7 +51,7 @@ async def _book(db, cleanup, rig, tomorrow, slot_key="09:00-12:00"):
 @pytest.mark.asyncio
 async def test_slots_are_generated_from_center_hours_with_remainder(rig):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
     # 09:00-13:00 at 180min -> one full 09:00-12:00 slot, remainder 12:00-13:00
     assert [s["key"] for s in slots] == ["09:00-12:00", "12:00-13:00"]
@@ -60,7 +62,7 @@ async def test_availability_never_exposes_raw_capacity(rig, cleanup):
     """Section 3: total capacity must never appear in the response, at any
     fill level — not just hidden by the frontend."""
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
     slot = slots[0]
     assert slot["status"] == "available" and slot["remaining"] is None
@@ -75,7 +77,7 @@ async def test_low_and_full_wording_thresholds(rig, cleanup):
     5, and to "full" (remaining=0) once the slot is exhausted — exact
     thresholds, not approximate."""
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     for _ in range(15):  # 20 capacity - 15 = 5 remaining -> "low"
         await _book(rig["db"], cleanup, rig, tomorrow)
     slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
@@ -92,7 +94,7 @@ async def test_low_and_full_wording_thresholds(rig, cleanup):
 @pytest.mark.asyncio
 async def test_booking_a_full_slot_is_rejected(rig, cleanup):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     for _ in range(20):
         await _book(rig["db"], cleanup, rig, tomorrow)
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(rig["db"], rig["hatchback"])
@@ -113,7 +115,7 @@ async def test_concurrent_last_slot_race_never_overbooks(rig, cleanup):
     atomic increment_if guard must let exactly `capacity` through, never
     more, regardless of request ordering."""
     bs_db = rig["db"]
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     for _ in range(15):  # fill to 15/20, leaving exactly 5 spots for the race
         await _book(bs_db, cleanup, rig, tomorrow)
 
@@ -146,7 +148,7 @@ async def test_concurrent_last_slot_race_never_overbooks(rig, cleanup):
 @pytest.mark.asyncio
 async def test_cancel_releases_capacity(rig, cleanup):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     booking, customer_id, _, _ = await _book(rig["db"], cleanup, rig, tomorrow)
 
     doc = await rig["db"].slot_capacity.find_one({"service_center_id": rig["center_id"], "slot_key": "09:00-12:00"})

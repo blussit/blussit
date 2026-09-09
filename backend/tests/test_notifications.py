@@ -13,13 +13,13 @@ from bson import ObjectId
 from app.schemas.booking_schema import BookingAssignCaptainRequest, BookingCreateRequest, ReassignCaptainRequest
 from app.services.booking_service import BookingService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_manager, make_service_center
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_manager, make_service_center
 
 
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db)
     manager_id = await make_manager(db, center_id)
     await db.service_centers.update_one({"_id": ObjectId(center_id)}, {"$set": {"manager_id": manager_id}})

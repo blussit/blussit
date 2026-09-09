@@ -12,7 +12,9 @@ from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingCreateRequest
 from app.services.booking_service import BookingService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
+from app.utils.timezone import now_ist
+
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
@@ -21,7 +23,7 @@ async def rig(db, cleanup):
     or near-cutoff slot to exercise the rule against, regardless of what
     time this suite happens to run."""
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, working_hours_start="00:00", working_hours_end="23:59", slot_duration_minutes=180, default_slot_capacity=20)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
@@ -31,12 +33,19 @@ async def rig(db, cleanup):
 
 @pytest.mark.asyncio
 async def test_elapsed_or_near_cutoff_slot_shows_full_and_is_unbookable(rig, cleanup):
+    """A day that's fully in the past is rejected outright — availability
+    now refuses out-of-window dates (see _ensure_within_advance_window)
+    instead of rendering a page of all-"full" slots, and booking against
+    that day is equally refused."""
     bs = BookingService(rig["db"])
-    now = datetime.now(timezone.utc)
-    today_str = now.strftime("%Y-%m-%d")
-    slots_today = await bs.available_slots(rig["center_id"], today_str)
-    elapsed = [s for s in slots_today if s["status"] == "full"]
-    assert elapsed, "expected at least one already-elapsed/cutoff-passed slot earlier today"
+    now = now_ist().replace(tzinfo=None) - timedelta(days=1)
+    yesterday_str = now.strftime("%Y-%m-%d")
+    with pytest.raises(BadRequestException, match="already passed"):
+        await bs.available_slots(rig["center_id"], yesterday_str)
+
+    # A real slot key, taken from a bookable day of the same center.
+    tomorrow_str = (now_ist().replace(tzinfo=None) + timedelta(days=1)).strftime("%Y-%m-%d")
+    slot_key = (await bs.available_slots(rig["center_id"], tomorrow_str))[0]["key"]
 
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(rig["db"], rig["hatchback"])
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
@@ -47,7 +56,7 @@ async def test_elapsed_or_near_cutoff_slot_shows_full_and_is_unbookable(rig, cle
     with pytest.raises(BadRequestException):
         await bs.create_booking(
             customer_id,
-            BookingCreateRequest(vehicle_id=vehicle_id, address_id=address_id, service_ids=[rig["foam"]], scheduled_date=now, scheduled_slot=elapsed[0]["key"]),
+            BookingCreateRequest(vehicle_id=vehicle_id, address_id=address_id, service_ids=[rig["foam"]], scheduled_date=now, scheduled_slot=slot_key),
         )
 
 
@@ -67,7 +76,7 @@ async def test_future_slot_within_operating_hours_is_bookable(rig, cleanup):
     """Sanity: a slot that hasn't reached cutoff at all (tomorrow) is
     still perfectly bookable — the cutoff rule shouldn't over-fire."""
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(rig["db"], rig["hatchback"])
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     cleanup.append(("vehicles", {"owner_id": customer_id}))

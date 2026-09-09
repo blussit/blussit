@@ -12,6 +12,7 @@ from bson import ObjectId
 from app.core.config import settings
 from app.core.database import close_mongo_connection, connect_to_mongo, mongodb
 from app.core.security import hash_password
+from app.utils.text import slugify
 
 
 async def seed() -> None:
@@ -77,43 +78,83 @@ async def seed() -> None:
         category_ids[cat["slug"]] = str(result.inserted_id)
     print("Categories ready:", category_ids)
 
+    # --- Services -----------------------------------------------------
+    # The launch catalogue. Car prices step up ₹10 per vehicle type
+    # (hatchback → sedan → SUV → XUV 5-seater → XUV 7-seater) on both the
+    # selling price and the struck-through "actual" (original) price. Bike
+    # Wash is one product sold as 1–4 bike variants (variant_group); the two
+    # add-ons are optional extras offered on top of a main service.
+    # Re-running the seed refreshes catalogue fields on existing services
+    # (matched by slug) but leaves image / captain_fee / is_active alone.
+    bike_id = vehicle_type_ids["bike"]
+
+    def stepped(base: float) -> dict[str, float]:
+        return {vt_id: float(base + 10 * i) for i, vt_id in enumerate(car_type_ids)}
+
+    def car(name, price, original, minutes, includes, *, order, featured=True, addon=False):
+        return {
+            "category": "car-care", "name": name, "vehicle_types": car_type_ids,
+            "price": float(price), "original_price": float(original) if original else None,
+            # Add-ons are a flat charge; main services carry the ₹10 steps.
+            "vehicle_type_prices": {} if addon else stepped(price),
+            "vehicle_type_original_prices": stepped(original) if original and not addon else {},
+            "duration_minutes": minutes, "description": "\n".join(includes),
+            "is_featured": featured, "is_addon": addon, "variant_group": None, "variant_label": None,
+            "display_order": order,
+        }
+
+    def bike(name, price, minutes, includes, *, order, label=None, featured=False, addon=False):
+        return {
+            "category": "bike-care", "name": name, "vehicle_types": [bike_id],
+            "price": float(price), "original_price": None,
+            "vehicle_type_prices": {}, "vehicle_type_original_prices": {},
+            "duration_minutes": minutes, "description": "\n".join(includes),
+            "is_featured": featured, "is_addon": addon,
+            "variant_group": None if addon else "bike-wash", "variant_label": label,
+            "display_order": order,
+        }
+
+    star_wash_includes = ["Exterior foam wash", "Interior vacuum", "Dashboard polish"]
     services = [
-        {"category": "car-care", "name": "Exterior Wash", "price": 249, "duration_minutes": 30, "vehicle_types": car_type_ids},
-        {"category": "car-care", "name": "Foam Wash", "price": 349, "duration_minutes": 40, "vehicle_types": car_type_ids},
-        {"category": "car-care", "name": "Interior Cleaning", "price": 499, "duration_minutes": 60, "vehicle_types": car_type_ids},
-        {"category": "car-care", "name": "Vacuum Cleaning", "price": 199, "duration_minutes": 20, "vehicle_types": car_type_ids},
-        {"category": "car-care", "name": "Wax Polish", "price": 899, "duration_minutes": 90, "vehicle_types": car_type_ids},
-        {"category": "car-care", "name": "Dashboard Polish", "price": 299, "duration_minutes": 30, "vehicle_types": car_type_ids},
-        {"category": "bike-care", "name": "Bike Foam Wash", "price": 149, "duration_minutes": 20, "vehicle_types": [vehicle_type_ids["bike"]]},
-        {"category": "bike-care", "name": "Bike Water Wash", "price": 99, "duration_minutes": 15, "vehicle_types": [vehicle_type_ids["bike"]]},
-        {"category": "bike-care", "name": "Chain Cleaning", "price": 129, "duration_minutes": 20, "vehicle_types": [vehicle_type_ids["bike"]]},
+        car("Waterless Service", 319, 399, 45, ["Waterless exterior clean", "Interior vacuum", "Dashboard polish"], order=1),
+        car("Star Wash", 349, 449, 45, star_wash_includes, order=2),
+        car("Deep Cleaning", 699, 999, 90, ["Foam wash, vacuum & dashboard polish", "Seat cleaning", "Floor & mats cleaning", "Pedal & door (gate) cleaning"], order=3),
+        car("Jet Wash", 249, 299, 30, ["Exterior foam wash", "Tyre polish"], order=4),
+        # Standalone bike wash: ₹99 for one bike or the ₹159 two-bike combo.
+        # Each is its own variant so both prices stay editable in Admin →
+        # Services; more counts can be added there with the same variant group.
+        bike("Bike Wash", 99, 20, ["Bike foam wash"], order=5, label="1 bike", featured=True),
+        bike("Bike Wash (2 bikes)", 159, 35, ["Bike foam wash for 2 bikes"], order=6, label="2 bikes"),
+        # Add-ons: offered in the wizard once a main service is selected.
+        car("Exterior Polish", 200, None, 20, ["Normal exterior body polish"], order=10, featured=False, addon=True),
+        car("Extra Bike Wash", 60, None, 20, ["Foam wash for one bike, added to your car wash"], order=11, featured=False, addon=True),
+        bike("Bike Polish", 30, 10, ["Bike body polish"], order=12, addon=True),
     ]
     service_ids: dict[str, str] = {}
     for svc in services:
-        slug = svc["name"].lower().replace(" ", "-")
+        slug = slugify(svc["name"])
+        catalogue = {k: v for k, v in svc.items() if k != "category"}
+        catalogue["category_id"] = category_ids[svc["category"]]
+        catalogue["slug"] = slug
         existing = await db.services.find_one({"slug": slug})
         if existing:
+            await db.services.update_one({"_id": existing["_id"]}, {"$set": catalogue})
             service_ids[slug] = str(existing["_id"])
             continue
-        result = await db.services.insert_one(
-            {
-                "category_id": category_ids[svc["category"]],
-                "name": svc["name"],
-                "slug": slug,
-                "description": f"Professional {svc['name'].lower()} at your doorstep.",
-                "vehicle_types": svc["vehicle_types"],
-                "price": svc["price"],
-                "discounted_price": None,
-                "duration_minutes": svc["duration_minutes"],
-                "image": None,
-                "is_active": True,
-                "is_featured": svc["name"] in {"Foam Wash", "Interior Cleaning", "Bike Foam Wash"},
-                "display_order": 0,
-                "is_deleted": False,
-            }
-        )
+        catalogue.update({"discounted_price": None, "vehicle_type_discounted_prices": {}, "image": None, "is_active": True, "is_deleted": False})
+        result = await db.services.insert_one(catalogue)
         service_ids[slug] = str(result.inserted_id)
-    print("Services seeded.")
+
+    # Retire the pre-launch demo services (kept, not deleted, so old bookings
+    # still resolve their names).
+    legacy_slugs = [
+        "exterior-wash", "foam-wash", "interior-cleaning", "vacuum-cleaning", "wax-polish", "dashboard-polish",
+        "bike-foam-wash", "bike-water-wash", "chain-cleaning",
+        # 3–5 bike variants were dropped in favour of the two-bike combo only.
+        "bike-wash-3-bikes", "bike-wash-4-bikes", "bike-wash-5-bikes",
+    ]
+    retired = await db.services.update_many({"slug": {"$in": legacy_slugs}, "is_active": True}, {"$set": {"is_active": False}})
+    print(f"Services seeded ({len(services)} in catalogue, {retired.modified_count} legacy retired).")
 
     # --- Service Center -------------------------------------------------
     existing_center = await db.service_centers.find_one({"code": "IND-0001"})
@@ -207,7 +248,12 @@ async def seed() -> None:
     # the customer at booking time" (see BookingService._subscription_discount
     # for what happens if a customer books something else on it: a same-visit
     # "swap", charged the price difference, never free-for-anything).
-    foam_wash_id = service_ids.get("foam-wash")
+    star_wash_id = service_ids.get("star-wash")
+    # Plans created before the launch catalogue pointed at the retired Foam
+    # Wash — move them onto Star Wash so subscriptions keep working.
+    legacy_foam = await db.services.find_one({"slug": "foam-wash"})
+    if legacy_foam and star_wash_id:
+        await db.subscription_plans.update_many({"included_service_ids": str(legacy_foam["_id"])}, {"$set": {"included_service_ids.$": star_wash_id}})
     plans = [
         {"name": "Monthly Shine", "billing_cycle": "monthly", "price": 799, "total_service_count": 4},
         {"name": "Quarterly Shine", "billing_cycle": "quarterly", "price": 2199, "total_service_count": 12},
@@ -223,13 +269,13 @@ async def seed() -> None:
         doc = {
             "name": plan["name"],
             "slug": slug,
-            "description": f"{plan['total_service_count']}x Foam Wash included.",
+            "description": f"{plan['total_service_count']}x Star Wash at your doorstep.",
             "billing_cycle": plan["billing_cycle"],
             "price": plan["price"],
             "discounted_price": None,
             "vehicle_type_prices": {},
             "vehicle_type_discounted_prices": {},
-            "included_service_ids": [foam_wash_id] if foam_wash_id else [],
+            "included_service_ids": [star_wash_id] if star_wash_id else [],
             "total_service_count": plan["total_service_count"],
             "vehicle_types": [],  # unrestricted — every vehicle type eligible
             "upgrade_to_plan_ids": [],

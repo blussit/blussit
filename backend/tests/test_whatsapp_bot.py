@@ -27,7 +27,7 @@ from app.services.whatsapp_bot_service import WhatsAppBotService
 from app.utils.timezone import now_ist
 
 from tests.factories import (
-    get_foam_wash_service_id,
+    get_star_wash_service_id,
     get_hatchback_type_id,
     make_customer_with_vehicle,
     make_manager,
@@ -72,7 +72,7 @@ async def last_out(db, phone: str) -> dict:
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(
         db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=5
     )
@@ -182,9 +182,12 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     notif = await db.notifications.find_one({"user_id": rig["manager_id"], "reference_id": str(booking["_id"])})
     assert notif is not None
 
-    # The customer got a confirmation with the real booking number.
-    out = await last_out(db, phone)
-    assert booking["booking_number"] in out["message"]
+    # The customer got a confirmation with the real booking number,
+    # followed by the cash-or-online payment choice (the new final
+    # exchange since Razorpay payment links landed).
+    recent = await db.whatsapp_outbox.find({"phone": phone}, sort=[("_id", -1)]).to_list(length=2)
+    assert "How would you like to pay?" in recent[0]["message"]
+    assert booking["booking_number"] in recent[1]["message"]
 
 
 @pytest.mark.asyncio
@@ -333,3 +336,53 @@ async def test_delivery_status_webhook_marks_outbox_row(rig, db, cleanup):
     row = await db.whatsapp_outbox.find_one({"wamid": "wamid.TESTSTATUS01"})
     assert row["delivery_status"] == "failed"
     assert row["delivery_errors"][0]["code"] == 131047
+
+
+@pytest.mark.asyncio
+async def test_stateless_pay_buttons_send_link_or_cash_ack(db, cleanup, rig, monkeypatch):
+    """The post-confirmation payment buttons work statelessly: cash gets a
+    friendly ack; online flips the booking's method and drops a Razorpay
+    payment link (stubbed client — no external call) into the chat."""
+    from bson import ObjectId as _OID
+
+    from app.services import payment_service as ps
+    from app.services.whatsapp_bot_service import WhatsAppBotService
+
+    class _Links:
+        def create(self, payload):
+            return {"id": "plink_bot_test", "short_url": "https://rzp.io/l/bot-test", **payload}
+
+    class _Client:
+        payment_link = _Links()
+
+    monkeypatch.setattr(ps, "_razorpay_client", lambda: _Client())
+
+    wa_id, phone = "919333000111", "9333000111"
+    customer_id, _, _ = await make_customer_with_vehicle(db, rig["hatchback"])
+    cleanup.append(("users", {"_id": _OID(customer_id)}))
+    cleanup.append(("vehicles", {"owner_id": customer_id}))
+    cleanup.append(("addresses", {"owner_id": customer_id}))
+    cleanup.append(("whatsapp_conversations", {"wa_id": wa_id}))
+    cleanup.append(("whatsapp_outbox", {"phone": phone}))
+    cleanup.append(("whatsapp_message_dedup", {}))
+    cleanup.append(("payment_orders", {"customer_id": customer_id}))
+    await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
+
+    res = await db.bookings.insert_one({
+        "booking_number": "BK-WAPAY", "customer_id": customer_id, "service_center_id": rig["center_id"],
+        "status": "pending", "payment_method": "cash", "payment_status": "pending", "total_amount": 349.0,
+        "scheduled_date": now_ist().replace(tzinfo=None), "scheduled_slot": "09:00-12:00", "is_deleted": False,
+    })
+    booking_id = str(res.inserted_id)
+    cleanup.append(("bookings", {"_id": res.inserted_id}))
+
+    bot = WhatsAppBotService(db)
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"pay:cash:{booking_id}"))
+    out = await last_out(db, phone)
+    assert "cash" in out["message"].lower()
+
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"pay:online:{booking_id}"))
+    out = await last_out(db, phone)
+    assert "https://rzp.io/l/bot-test" in out["message"]
+    fresh = await db.bookings.find_one({"_id": res.inserted_id})
+    assert fresh["payment_method"] == "online" and fresh["payment_status"] == "pending"

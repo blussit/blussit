@@ -23,17 +23,20 @@ export function BookingFilterBar({
   searchPlaceholder?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-end gap-3">
-      <div className="min-w-[220px] flex-1">
+    // Mobile: a deliberate 2×2 grid — Search+Sort share the first row,
+    // From+To the second (flex-wrap used to stack them into four sloppy
+    // rows on a phone). Desktop keeps the one-line flex layout.
+    <div className="grid grid-cols-2 items-end gap-3 sm:flex sm:flex-wrap">
+      <div className="sm:min-w-[220px] sm:flex-1">
         <Input label="Search" placeholder={searchPlaceholder} value={search} onChange={(e) => onSearchChange(e.target.value)} />
       </div>
-      <div className="w-40">
+      <div className="sm:w-40">
         <Select label="Sort" value={sortOrder} onChange={(e) => onSortOrderChange(e.target.value as SortOrder)}>
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
         </Select>
       </div>
-      <div className="w-40">
+      <div className="sm:w-40">
         <Input
           label="From"
           type="date"
@@ -42,7 +45,7 @@ export function BookingFilterBar({
           onChange={(e) => onDateFromChange(e.target.value)}
         />
       </div>
-      <div className="w-40">
+      <div className="sm:w-40">
         <Input label="To" type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => onDateToChange(e.target.value)} />
       </div>
       {(dateFrom || dateTo) && (

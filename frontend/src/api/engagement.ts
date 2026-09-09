@@ -1,15 +1,42 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { Complaint, Notification, Review, SubscriptionPlan, UserSubscription } from "../types";
 
+/** One subscription row on the manager's center overview. */
+export interface CenterSubscriptionRow {
+  subscription_id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone?: string | null;
+  plan_id?: string | null;
+  plan_name: string;
+  status?: string | null;
+  vehicle_type?: string | null;
+  vehicle_type_name?: string | null;
+  purchased_price?: number | null;
+  remaining_service_count?: number | null;
+  total_service_count?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  days_left?: number | null;
+}
+
+export interface CenterSubscriptionOverview {
+  kpis: { total: number; active: number; expiring_soon: number; expired: number };
+  plan_breakdown: { plan_name: string; active_count: number }[];
+  rows: CenterSubscriptionRow[];
+}
+
 export const subscriptionApi = {
+  centerOverview: (centerId: string) =>
+    apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
   plans: (activeOnly = true) =>
     apiClient.get<ApiSuccess<SubscriptionPlan[]>>("/subscription-plans", { params: { active_only: activeOnly } }).then((r) => r.data.data),
   mySubscriptions: () => apiClient.get<ApiSuccess<UserSubscription[]>>("/subscriptions/my").then((r) => r.data.data),
   forCustomer: (customerId: string) =>
     apiClient.get<ApiSuccess<UserSubscription[]>>(`/subscriptions/customer/${customerId}`).then((r) => r.data.data),
-  assign: (payload: { customer_id: string; plan_id: string; auto_renew?: boolean }) =>
+  assign: (payload: { customer_id: string; plan_id: string; vehicle_type?: string; auto_renew?: boolean }) =>
     apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions/assign", payload).then((r) => r.data.data),
-  subscribe: (payload: { plan_id: string; auto_renew?: boolean }) =>
+  subscribe: (payload: { plan_id: string; vehicle_type?: string; auto_renew?: boolean }) =>
     apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions", payload).then((r) => r.data.data),
   cancel: (id: string) => apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/cancel`).then((r) => r.data.data),
   upgrade: (id: string, newPlanId: string) =>
@@ -29,8 +56,6 @@ export const couponApi = {
 };
 
 export const reviewApi = {
-  listPublic: (params?: { page?: number; page_size?: number }) =>
-    apiClient.get<ApiPaginated<Review>>("/reviews", { params }).then((r) => r.data),
   mine: () => apiClient.get<ApiSuccess<Review[]>>("/reviews/my").then((r) => r.data.data),
   create: (payload: { booking_id: string; captain_rating: number; captain_comment?: string; service_rating: number; service_comment?: string }) =>
     apiClient.post<ApiSuccess<Review>>("/reviews", payload).then((r) => r.data.data),

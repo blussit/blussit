@@ -19,6 +19,10 @@ interface ToastContextValue {
 
 const ToastContext = createContext<ToastContextValue | null>(null);
 
+/** Module-level escape hatch so non-React code (the global mutation error
+ * handler in App.tsx) can raise a toast. Wired up by ToastProvider. */
+export const toastBus: { emit: ((toast: Omit<Toast, "id">) => void) | null } = { emit: null };
+
 const DEFAULT_DURATION = 6000;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -44,6 +48,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     },
     [dismiss],
   );
+
+  toastBus.emit = push;
 
   return <ToastContext.Provider value={{ toasts, push, dismiss }}>{children}</ToastContext.Provider>;
 }

@@ -10,7 +10,7 @@ from app.core.exceptions import BadRequestException, NotFoundException
 from app.schemas.review_schema import ReviewCreateRequest, ReviewUpdateRequest
 from app.services.review_service import ReviewService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ async def completed_booking(db, cleanup):
     machine — already covered elsewhere) — real shape lifted from
     BookingModel's completed fields."""
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(db, hatchback)

@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = True
+    RATE_LIMIT_ENABLED: bool = True
+    # Set true ONLY when a trusted reverse proxy (Caddy/nginx) fronts the
+    # app AND is configured to overwrite X-Forwarded-For itself. When
+    # false (default), rate limiting keys off the socket peer address —
+    # honoring the header without a trusted proxy would let any client
+    # spoof a fresh "IP" per request and bypass every limit.
+    TRUST_PROXY_HEADERS: bool = False
 
     # Mongo
     MONGO_URI: str = "mongodb://localhost:27017"
@@ -25,7 +32,7 @@ class Settings(BaseSettings):
     # JWT
     JWT_SECRET_KEY: str = "change-this-super-secret-key-in-production"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # CORS
@@ -111,6 +118,39 @@ class Settings(BaseSettings):
     FAST2SMS_API_KEY: str = ""
     MSG91_AUTH_KEY: str = ""
     MSG91_OTP_TEMPLATE_ID: str = ""
+    # MSG91 OTP *widget* (verify.msg91.com) — the widget sends/verifies the
+    # OTP entirely on MSG91's side (SMS/WhatsApp/email channels), and the
+    # backend only validates the resulting access token via
+    # /api/v5/widget/verifyAccessToken. Both values come from the widget's
+    # page in the MSG91 dashboard; blank = widget disabled, classic
+    # backend-generated OTP flow is used.
+    MSG91_WIDGET_ID: str = ""
+    MSG91_TOKEN_AUTH: str = ""
+
+    # Razorpay Standard Checkout — KEY_ID is public by design (the browser
+    # needs it to open the checkout modal; we hand it out from the
+    # create-order response so the frontend needs no env of its own).
+    # KEY_SECRET signs orders and verifies payment signatures and must
+    # NEVER leave the backend. Blank = online payments disabled (the
+    # create-order endpoint refuses with a clear message; cash keeps
+    # working).
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    # Public https base of THIS backend (e.g. "https://api.blussit.com") —
+    # used as the payment-link callback target so the customer's browser
+    # lands back on our verified "payment received" page. Blank (dev):
+    # links are created without a callback and the reminder-loop's
+    # link-status sweep alone marks them paid.
+    PUBLIC_BASE_URL: str = ""
+
+    # Google: Maps (browser key is public-by-design, protected by key
+    # restrictions in Google Cloud console; server key used for Routes
+    # distance/ETA calls) + OAuth sign-in (ID-token flow — verification
+    # only needs the public CLIENT_ID; the secret is kept for any future
+    # code-flow use and never leaves the server).
+    GOOGLE_MAPS_BROWSER_KEY: str = ""
+    GOOGLE_MAPS_SERVER_KEY: str = ""
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
     # Which channel OTPs/temp passwords try FIRST ("whatsapp" | "sms") —
     # whichever isn't first is the automatic fallback when the first send
     # fails or isn't configured.

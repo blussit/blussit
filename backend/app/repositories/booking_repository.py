@@ -96,11 +96,20 @@ class BookingRepository(BaseRepository):
             sort_order=-1,
         )
 
-    @staticmethod
-    def generate_booking_number() -> str:
-        date_part = now_ist().strftime("%y%m%d")
-        rand_part = "".join(random.choices(string.digits, k=5))
-        return f"BK{date_part}{rand_part}"
+    async def generate_unique_booking_number(self) -> str:
+        # Sequential, human-friendly ids: BK0001, BK0002, ... (grows to
+        # BK10000+ naturally). The atomic $inc on the counters doc makes
+        # this safe under concurrent bookings — two simultaneous customers
+        # can never draw the same number.
+        from pymongo import ReturnDocument
+
+        doc = await self.db.counters.find_one_and_update(
+            {"_id": "booking_number"},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return f"BK{doc['seq']:04d}"
 
 
 class BookingStatusHistoryRepository(BaseRepository):

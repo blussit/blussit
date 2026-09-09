@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BadgeCheck, MapPin, ShieldAlert, Wrench } from "lucide-react";
+import { AlertTriangle, BadgeCheck, MapPin, ShieldAlert, SlidersHorizontal, Wrench } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { staffDirectoryApi } from "../../api/admin";
+import { bookingPolicyApi } from "../../api/catalog";
 import { getErrorMessage } from "../../lib/api-client";
-import { Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
+import { Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { PhotoCapture, type CapturedPhoto } from "../../components/shared/PhotoCapture";
-import { type JobAction } from "../../components/captain/JobCard";
+import { NowJobCard, type JobAction } from "../../components/captain/NowJobCard";
 import { JobRow } from "../../components/captain/JobRow";
+import { CollectPaymentModal } from "../../components/captain/CollectPaymentModal";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { useBookingFilters } from "../../lib/useBookingFilters";
@@ -41,7 +43,12 @@ export default function CaptainJobsPage() {
   const [riskNote, setRiskNote] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
+  const [collectFor, setCollectFor] = useState<Booking | null>(null);
   const [detailJob, setDetailJob] = useState<Booking | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // Per-job fee badges only make sense while the wallet system is on.
+  const { data: walletPolicy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
 
   const { data, isLoading } = useQuery({
     queryKey: ["my-jobs", status],
@@ -112,13 +119,41 @@ export default function CaptainJobsPage() {
   });
 
   const verifyMutation = useMutation({
-    mutationFn: ({ id, registration_number }: { id: string; registration_number: string }) => bookingApi.verifyVehicle(id, registration_number),
+    mutationFn: ({ id, registration_number, location }: { id: string; registration_number: string; location?: { latitude: number; longitude: number; accuracy_m?: number } }) =>
+      bookingApi.verifyVehicle(id, registration_number, location),
     onSuccess: () => {
       invalidate();
       closeModal();
     },
     onError: (e) => setActionError(getErrorMessage(e)),
   });
+
+  // "I've reached" carries GPS like every other step — blocking fix first,
+  // same pattern as confirmHeading below.
+  const confirmVerify = () => {
+    if (!activeJob) return;
+    const reg = regInput.trim();
+    if (!navigator.geolocation) {
+      setActionError("Geolocation isn't supported on this device.");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocating(false);
+        verifyMutation.mutate({
+          id: activeJob.id,
+          registration_number: reg,
+          location: { latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy_m: pos.coords.accuracy ?? undefined },
+        });
+      },
+      (err) => {
+        setLocating(false);
+        setActionError(err.message || "Couldn't get your location. Enable location access and try again.");
+      },
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  };
 
   const beforePhotoMutation = useMutation({
     mutationFn: ({ id, photo }: { id: string; photo: CapturedPhoto }) => bookingApi.captureBeforePhoto(id, photo),
@@ -133,7 +168,12 @@ export default function CaptainJobsPage() {
     mutationFn: ({ id, photo }: { id: string; photo: CapturedPhoto }) => bookingApi.captureAfterPhoto(id, photo),
     onSuccess: () => {
       invalidate();
+      const job = activeJob;
       closeModal();
+      // Wash done → straight into settlement (founder spec): cash tap or
+      // scan-to-pay QR. Skipped entirely when the customer already paid
+      // online — nothing to collect, nothing to show.
+      if (job && job.payment_status !== "paid" && job.total_amount > 0) setCollectFor({ ...job, status: "completed" });
     },
     onError: (e) => setActionError(getErrorMessage(e)),
   });
@@ -199,9 +239,15 @@ export default function CaptainJobsPage() {
     { label: "Completed", value: "completed" },
   ];
 
+  // A booking whose window expired long ago needs a MANAGER decision
+  // (reschedule/reassign) — the backend blocks every captain action on it
+  // (see start_heading's lockout), so offering the buttons here is a lie.
+  const needsManager = (job: Booking) => job.issue_flag === "captain_missed_window" && !job.issue_resolved;
+
   const actionFor = (job: Booking): JobAction | null => {
+    if (needsManager(job)) return null;
     if (job.status === "captain_on_the_way" && !job.vehicle_verified) {
-      return { label: "Verify vehicle registration", kind: "verify" };
+      return { label: "I've reached — verify vehicle", kind: "verify" };
     }
     const map: Partial<Record<BookingStatus, JobAction>> = {
       assigned: { label: "Start heading out", kind: "heading" },
@@ -245,40 +291,80 @@ export default function CaptainJobsPage() {
     setDateTo,
   } = useBookingFilters(statusVisible, status === "completed" ? "newest" : "oldest");
 
+  // The hero: whatever the captain is physically doing right now — an
+  // in-motion/in-progress job wins, then the next job he can actually ACT
+  // on (a missed-window zombie waiting on a manager must not sit on top
+  // of a live job as the "NOW" card), then whatever's left.
+  const nowJob = !status
+    ? visibleJobs.find((j) => j.status === "captain_on_the_way" || j.status === "service_started") ||
+      visibleJobs.find((j) => !needsManager(j)) ||
+      visibleJobs[0] ||
+      null
+    : null;
+  const restJobs = nowJob ? visibleJobs.filter((j) => j.id !== nowJob.id) : visibleJobs;
+
+  const rowProps = (job: Booking) => ({
+    job,
+    action: actionFor(job),
+    canCancel: !needsManager(job) && (job.status === "assigned" || job.status === "captain_on_the_way"),
+    canReportRisk: canReportRisk(job),
+    onAction: (kind: JobAction["kind"]) => (kind === "heading" ? openHeadingModal(job) : openActionModal(job, kind)),
+    onCancel: () => openActionModal(job, "cancel"),
+    onCollect:
+      job.status === "completed" && job.payment_status === "pending" && job.total_amount > 0
+        ? () => setCollectFor(job)
+        : undefined,
+    onReportRisk: () => openActionModal(job, "report-risk"),
+    onMarkUrgent: () => markUrgentMutation.mutate(job.id),
+  });
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Today's jobs</h1>
+        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Captain</p>
+        <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">Your jobs</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Heading out, vehicle verification, before-photo, and after-photo are all required in order — geo-tagged every step.
+          Head out → reach & verify → before-photo → after-photo. Every step is geo-tagged.
         </p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {filters.map((f) => (
-          <button
-            key={f.label}
-            onClick={() => setStatus(f.value)}
-            className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${
-              status === f.value ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
+      {/* One row: booking-type dropdown + the Filters toggle. The old
+          horizontally-scrolling status chips cut off on phones ("In
+          progres…"); a dropdown always shows the full choice. */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1">
+          <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+            {filters.map((f) => (
+              <option key={f.label} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <button
+          type="button"
+          onClick={() => setFiltersOpen((v) => !v)}
+          className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-sm font-semibold transition-colors ${
+            filtersOpen ? "border-[#E8A900] bg-[#FFF4CD] text-black" : "border-[#F3E5B5] bg-white text-gray-600 hover:border-[#E8A900]/50"
+          }`}
+        >
+          <SlidersHorizontal className="h-4 w-4" /> Filters
+        </button>
       </div>
 
-      <BookingFilterBar
-        search={search}
-        onSearchChange={setSearch}
-        sortOrder={sortOrder}
-        onSortOrderChange={setSortOrder}
-        dateFrom={dateFrom}
-        onDateFromChange={setDateFrom}
-        dateTo={dateTo}
-        onDateToChange={setDateTo}
-        searchPlaceholder="Booking # or customer name"
-      />
+      {filtersOpen && (
+        <BookingFilterBar
+          search={search}
+          onSearchChange={setSearch}
+          sortOrder={sortOrder}
+          onSortOrderChange={setSortOrder}
+          dateFrom={dateFrom}
+          onDateFromChange={setDateFrom}
+          dateTo={dateTo}
+          onDateToChange={setDateTo}
+          searchPlaceholder="Booking # or customer name"
+        />
+      )}
 
       {isLoading ? (
         <PageLoader />
@@ -289,22 +375,20 @@ export default function CaptainJobsPage() {
           description={status === "completed" ? "Jobs you've completed will show up here." : "New bookings assigned to you will appear here."}
         />
       ) : (
-        <Card className="overflow-hidden">
-          {visibleJobs.map((job: Booking) => (
-            <JobRow
-              key={job.id}
-              job={job}
-              action={actionFor(job)}
-              canCancel={job.status === "assigned" || job.status === "captain_on_the_way"}
-              canReportRisk={canReportRisk(job)}
-              onAction={(kind) => (kind === "heading" ? openHeadingModal(job) : openActionModal(job, kind))}
-              onCancel={() => openActionModal(job, "cancel")}
-              onReportRisk={() => openActionModal(job, "report-risk")}
-              onMarkUrgent={() => markUrgentMutation.mutate(job.id)}
-              onOpenDetails={() => setDetailJob(job)}
-            />
-          ))}
-        </Card>
+        <>
+          {nowJob && <NowJobCard {...rowProps(nowJob)} showEarnings={!!walletPolicy?.wallet_gating_enabled} />}
+
+          {!!restJobs.length && (
+            <div>
+              {nowJob && <p className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-text-secondary)]">{status ? "Jobs" : "Up next"}</p>}
+              <Card className="overflow-hidden">
+                {restJobs.map((job: Booking) => (
+                  <JobRow key={job.id} {...rowProps(job)} onOpenDetails={() => setDetailJob(job)} />
+                ))}
+              </Card>
+            </div>
+          )}
+        </>
       )}
 
       {/* Heading confirmation */}
@@ -324,7 +408,7 @@ export default function CaptainJobsPage() {
       </Modal>
 
       {/* Vehicle verification */}
-      <Modal open={modalKind === "verify"} onClose={closeModal} title="Verify vehicle on arrival">
+      <Modal open={modalKind === "verify"} onClose={closeModal} title="I've reached — verify the vehicle">
         <div className="mb-3 flex items-start gap-2 rounded-lg bg-[var(--color-secondary-light)] px-3 py-2.5 text-xs text-[var(--color-text-secondary)]">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-secondary)]" />
           Type the plate you actually see on the car. If it doesn't match, do not proceed — release the job instead.
@@ -340,11 +424,12 @@ export default function CaptainJobsPage() {
         <Button
           className="mt-4 w-full"
           disabled={regInput.trim().length < 3}
-          isLoading={verifyMutation.isPending}
-          onClick={() => activeJob && verifyMutation.mutate({ id: activeJob.id, registration_number: regInput.trim() })}
+          isLoading={locating || verifyMutation.isPending}
+          onClick={confirmVerify}
         >
-          <BadgeCheck className="h-4 w-4" /> Confirm this is the right vehicle
+          <BadgeCheck className="h-4 w-4" /> I've reached — confirm vehicle
         </Button>
+        <p className="mt-2 text-center text-[11px] text-[var(--color-text-secondary)]">Your location is captured with this step.</p>
       </Modal>
 
       {/* Before photo */}
@@ -358,6 +443,8 @@ export default function CaptainJobsPage() {
       </Modal>
 
       {/* After photo */}
+      <CollectPaymentModal booking={collectFor} onClose={() => setCollectFor(null)} />
+
       <Modal open={modalKind === "after"} onClose={closeModal} title="After-service photo">
         <PhotoCapture
           label="Take a photo of the vehicle after completing the service"

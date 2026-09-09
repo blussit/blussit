@@ -5,6 +5,8 @@ export interface CreateBookingPayload {
   vehicle_id: string;
   address_id: string;
   service_ids?: string[];
+  /** Per-unit add-on counts (service_id -> qty) — e.g. Extra Bike Wash ×3. */
+  service_quantities?: Record<string, number>;
   combo_id?: string;
   scheduled_date: string;
   scheduled_slot: string;
@@ -12,6 +14,7 @@ export interface CreateBookingPayload {
   coupon_code?: string;
   subscription_id?: string;
   customer_notes?: string;
+  hold_key?: string;
   alternate_contact_name?: string;
   alternate_contact_phone?: string;
 }
@@ -35,6 +38,7 @@ export interface ManagerCreateBookingPayload {
   address_id?: string;
   new_address?: Partial<Address>;
   service_ids?: string[];
+  service_quantities?: Record<string, number>;
   combo_id?: string;
   scheduled_date: string;
   scheduled_slot: string;
@@ -42,6 +46,7 @@ export interface ManagerCreateBookingPayload {
   coupon_code?: string;
   subscription_id?: string;
   customer_notes?: string;
+  hold_key?: string;
   alternate_contact_name?: string;
   alternate_contact_phone?: string;
 }
@@ -63,6 +68,12 @@ export interface EligibleCaptain {
   last_location_at?: string | null;
   is_on_job?: boolean;
   current_job_count?: number;
+  // Road distance/ETA (Routes API, traffic-aware) computed server-side for
+  // located captains — the dispatcher-facing number; distance_km above is
+  // the straight-line fallback.
+  road_km?: number | null;
+  eta_minutes?: number | null;
+  eta_source?: string | null;
 }
 
 export const bookingApi = {
@@ -110,8 +121,10 @@ export const bookingApi = {
   startHeading: (id: string, payload: HeadingPayload) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/heading`, payload).then((r) => r.data.data),
 
-  verifyVehicle: (id: string, registration_number: string) =>
-    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/verify-vehicle`, { registration_number }).then((r) => r.data.data),
+  // "I've reached" + plate check in one press — carries the device GPS so
+  // the backend can geofence-check the arrival like it does the photos.
+  verifyVehicle: (id: string, registration_number: string, location?: { latitude: number; longitude: number; accuracy_m?: number }) =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/verify-vehicle`, { registration_number, ...location }).then((r) => r.data.data),
 
   resolveIssue: (id: string, note?: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/resolve-issue`, { note }).then((r) => r.data.data),
@@ -133,4 +146,15 @@ export const bookingApi = {
 
   eligibleCaptains: (id: string) =>
     apiClient.get<ApiSuccess<EligibleCaptain[]>>(`/bookings/${id}/eligible-captains`).then((r) => r.data.data),
+};
+
+export type TravelStatus = {
+  status: string;
+  store_to_customer: { km: number; minutes: number | null; source: string } | null;
+  captain_to_customer: { km: number; minutes: number | null; source: string; captain_name: string | null; location_updated_at: string | null } | null;
+};
+
+export const travelStatusApi = {
+  get: (bookingId: string) =>
+    apiClient.get<ApiSuccess<TravelStatus>>(`/bookings/${bookingId}/travel-status`).then((r) => r.data.data),
 };

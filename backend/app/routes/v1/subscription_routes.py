@@ -53,9 +53,28 @@ async def list_customer_subscriptions(customer_id: str, db: AsyncIOMotorDatabase
     return await UserSubscriptionController(db).list_for_customer(customer_id)
 
 
+@subscription_router.get("/center/{service_center_id}/overview", dependencies=[Depends(require_manager_or_admin)])
+async def center_subscription_overview(
+    service_center_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """KPIs + rows for the manager's Subscribers page: every subscription
+    held by a customer this center has served — active / expiring-in-14-days
+    / expired counts, per-plan breakdown, and one detail row each."""
+    return await UserSubscriptionController(db).center_overview(current_user, service_center_id)
+
+
 @subscription_router.post("", dependencies=[Depends(require_customer)])
 async def subscribe(payload: SubscribeRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await UserSubscriptionController(db).subscribe(current_user, payload)
+    """Founder rule: subscription purchases are ONLINE-PAYMENT ONLY. This
+    endpoint used to create the subscription directly (i.e., for free);
+    it now refuses, and the only self-service path is
+    POST /payments/create-order + /payments/verify, which creates the
+    subscription AFTER the Razorpay signature checks out. Kept (not
+    deleted) so old clients get a clear message instead of a 404. Staff
+    granting a plan uses POST /subscriptions/assign as before."""
+    from app.core.exceptions import BadRequestException
+
+    raise BadRequestException("Subscriptions are purchased with online payment — please complete the payment step.")
 
 
 @subscription_router.post("/assign", dependencies=[Depends(require_manager_or_admin)])

@@ -105,17 +105,18 @@ class LogWhatsAppProvider(WhatsAppProvider):
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
 
-    async def send(self, phone: str, message: str) -> bool:
+    async def send(self, phone: str, message: str, extra: dict | None = None) -> bool:
         logger.info("WHATSAPP [log provider] -> %s: %s", phone, message)
         await self.db.whatsapp_outbox.insert_one({
             "phone": phone,
             "message": message,
             "provider": "log",
             "created_at": datetime.now(timezone.utc),
+            **(extra or {}),
         })
         return True
 
-    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str]) -> bool:
+    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str], extra: dict | None = None) -> bool:
         message = f"[template:{template_name}/{language_code}] " + ", ".join(body_params)
         logger.info("WHATSAPP [log provider, template] -> %s: %s", phone, message)
         await self.db.whatsapp_outbox.insert_one({
@@ -124,8 +125,26 @@ class LogWhatsAppProvider(WhatsAppProvider):
             "template_name": template_name,
             "provider": "log",
             "created_at": datetime.now(timezone.utc),
+            **(extra or {}),
         })
         return True
+
+    async def send_media(self, phone: str, media_type: str, media_id: str, caption: str = "", filename: str = "", extra: dict | None = None) -> bool:
+        await self.db.whatsapp_outbox.insert_one({
+            "phone": phone,
+            "message": caption or f"[{media_type}]",
+            "media_type": media_type,
+            "media_id": media_id,
+            "filename": filename or None,
+            "provider": "log",
+            "created_at": datetime.now(timezone.utc),
+            **(extra or {}),
+        })
+        return True
+
+    async def upload_media(self, content: bytes, mime_type: str, filename: str = "upload") -> str | None:
+        # Dev/test stand-in: no real store, but the send flow stays testable.
+        return f"log-media-{datetime.now(timezone.utc).timestamp():.0f}"
 
     async def send_interactive_list(self, phone: str, body: str, button: str, rows: list[dict]) -> bool:
         rows = _normalize_rows(rows)
@@ -177,16 +196,16 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         self.phone_number_id = phone_number_id
         self.api_version = api_version
 
-    async def send(self, phone: str, message: str) -> bool:
+    async def send(self, phone: str, message: str, extra: dict | None = None) -> bool:
         body = {
             "messaging_product": "whatsapp",
             "to": _to_e164_digits(phone),
             "type": "text",
             "text": {"body": message},
         }
-        return await self._post(phone, message, body)
+        return await self._post(phone, message, body, extra=extra)
 
-    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str]) -> bool:
+    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str], extra: dict | None = None) -> bool:
         # Meta rejects template parameters containing newlines, tabs, or
         # 4+ consecutive spaces (error 132000) — flatten every param so a
         # multi-line notification text can never silently kill the send.
@@ -201,7 +220,7 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
                 "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}] if params else [],
             },
         }
-        return await self._post(phone, f"[template:{template_name}] {', '.join(params)}", body, template_name=template_name)
+        return await self._post(phone, f"[template:{template_name}] {', '.join(params)}", body, template_name=template_name, extra=extra)
 
     async def send_interactive_list(self, phone: str, body: str, button: str, rows: list[dict]) -> bool:
         rows = _normalize_rows(rows)
@@ -244,7 +263,86 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         }
         return await self._post(phone, f"[location_request] {body}", payload)
 
-    async def _post(self, phone: str, log_message: str, body: dict, template_name: str | None = None) -> bool:
+
+    # -- CRM extensions: media + template management ---------------------
+    async def send_media(self, phone: str, media_type: str, media_id: str, caption: str = "", filename: str = "", extra: dict | None = None) -> bool:
+        if media_type not in ("image", "document", "video", "audio"):
+            return False
+        media_obj: dict = {"id": media_id}
+        if caption and media_type in ("image", "document", "video"):
+            media_obj["caption"] = caption
+        if filename and media_type == "document":
+            media_obj["filename"] = filename
+        body = {"messaging_product": "whatsapp", "to": _to_e164_digits(phone), "type": media_type, media_type: media_obj}
+        merged = {"media_type": media_type, "media_id": media_id, **({"filename": filename} if filename else {}), **(extra or {})}
+        return await self._post(phone, caption or f"[{media_type}]", body, extra=merged)
+
+    async def upload_media(self, content: bytes, mime_type: str, filename: str = "upload") -> str | None:
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/media"
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.access_token}"},
+                    data={"messaging_product": "whatsapp"},
+                    files={"file": (filename, content, mime_type)},
+                )
+            if r.status_code < 300:
+                return r.json().get("id")
+            logger.error("WhatsApp media upload failed (%s): %s", r.status_code, r.text[:300])
+        except httpx.HTTPError as exc:
+            logger.error("WhatsApp media upload raised %s", exc)
+        return None
+
+    async def fetch_media(self, media_id: str) -> tuple[bytes, str] | None:
+        """Two-step Meta download: resolve the (short-lived, token-gated)
+        CDN URL, then fetch the bytes with the same token. The raw URL is
+        never handed to the frontend — this proxy is the only exposure."""
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                meta = await client.get(f"https://graph.facebook.com/{self.api_version}/{media_id}", headers=headers)
+                if meta.status_code >= 300:
+                    return None
+                info = meta.json()
+                blob = await client.get(info.get("url", ""), headers=headers)
+                if blob.status_code >= 300:
+                    return None
+                return blob.content, info.get("mime_type", "application/octet-stream")
+        except httpx.HTTPError as exc:
+            logger.error("WhatsApp media fetch raised %s for %s", exc, media_id)
+            return None
+
+    async def list_templates(self) -> list[dict] | None:
+        if not settings.WHATSAPP_BUSINESS_ACCOUNT_ID:
+            return None
+        url = f"https://graph.facebook.com/{self.api_version}/{settings.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(url, headers={"Authorization": f"Bearer {self.access_token}"},
+                                     params={"fields": "name,status,category,language,components,rejected_reason,quality_score", "limit": 100})
+            if r.status_code < 300:
+                return r.json().get("data", [])
+            logger.error("WhatsApp template list failed (%s): %s", r.status_code, r.text[:300])
+        except httpx.HTTPError as exc:
+            logger.error("WhatsApp template list raised %s", exc)
+        return None
+
+    async def create_template(self, payload: dict) -> dict:
+        if not settings.WHATSAPP_BUSINESS_ACCOUNT_ID:
+            return {"error": "WHATSAPP_BUSINESS_ACCOUNT_ID not configured"}
+        url = f"https://graph.facebook.com/{self.api_version}/{settings.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(url, headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}, json=payload)
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text[:300]}
+            if r.status_code < 300:
+                return body
+            return {"error": (body.get("error") or {}).get("error_user_msg") or (body.get("error") or {}).get("message") or r.text[:200]}
+        except httpx.HTTPError as exc:
+            return {"error": str(exc)}
+
+    async def _post(self, phone: str, log_message: str, body: dict, template_name: str | None = None, extra: dict | None = None) -> bool:
         url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
         headers = {"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}
         outbox_doc = {
@@ -255,6 +353,8 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         }
         if template_name:
             outbox_doc["template_name"] = template_name
+        if extra:
+            outbox_doc.update(extra)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(url, json=body, headers=headers)
@@ -335,9 +435,9 @@ class WhatsAppService:
         # that's messaged the business account), and is the safe default
         # until a real "authentication"-category template is approved.
         if settings.WHATSAPP_OTP_TEMPLATE_NAME:
-            return await self.provider.send_template(phone, settings.WHATSAPP_OTP_TEMPLATE_NAME, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code])
+            return await self.provider.send_template(phone, settings.WHATSAPP_OTP_TEMPLATE_NAME, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code], extra={"kind": "otp"})
         label = {"verification": "verify your phone", "password_reset": "reset your password"}.get(purpose, "verify your phone")
-        return await self.provider.send(phone, f"Your CleanRide code to {label} is {code}. It expires in 10 minutes. Do not share this code with anyone.")
+        return await self.provider.send(phone, f"Your Blussit code to {label} is {code}. It expires in 10 minutes. Do not share this code with anyone.", extra={"kind": "otp"})
 
     async def send_temp_password(self, phone: str, temp_password: str) -> bool:
         # Template first (reaches a recipient with no open session — the
@@ -345,12 +445,13 @@ class WhatsAppService:
         # can't log in); free text only as the unconfigured fallback.
         if settings.WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME:
             return await self.provider.send_template(
-                phone, settings.WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME, settings.WHATSAPP_TEMPLATE_LANGUAGE, [temp_password]
+                phone, settings.WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME, settings.WHATSAPP_TEMPLATE_LANGUAGE, [temp_password], extra={"kind": "temp_password"}
             )
         return await self.provider.send(
             phone,
-            f"Your CleanRide account password has been reset by our team. Temporary password: {temp_password}\n"
+            f"Your Blussit account password has been reset by our team. Temporary password: {temp_password}\n"
             "Please log in and change it right away. If you didn't request this, contact support immediately.",
+            extra={"kind": "temp_password"},
         )
 
     async def send_generic(self, phone: str, title: str, message: str) -> bool:
@@ -362,9 +463,9 @@ class WhatsAppService:
         # dropped. Template body must be "{{1}}: {{2}}".
         if settings.WHATSAPP_UPDATE_TEMPLATE_NAME:
             return await self.provider.send_template(
-                phone, settings.WHATSAPP_UPDATE_TEMPLATE_NAME, settings.WHATSAPP_TEMPLATE_LANGUAGE, [title, message]
+                phone, settings.WHATSAPP_UPDATE_TEMPLATE_NAME, settings.WHATSAPP_TEMPLATE_LANGUAGE, [title, message], extra={"kind": "notify"}
             )
-        return await self.provider.send(phone, f"{title}: {message}")
+        return await self.provider.send(phone, f"{title}: {message}", extra={"kind": "notify"})
 
     # Plain passthroughs used by the WhatsApp booking bot (see
     # whatsapp_bot_service.py) — kept on this wrapper so the bot, like
@@ -380,3 +481,28 @@ class WhatsAppService:
 
     async def send_location_request(self, phone: str, body: str) -> bool:
         return await self.provider.send_location_request(phone, body)
+
+    # -- CRM passthroughs (agent-attributed sends, media, templates) -----
+    async def send_agent_text(self, phone: str, message: str, agent_id: str) -> bool:
+        return await self.provider.send(phone, message, extra={"kind": "agent", "agent_id": agent_id})
+
+    async def send_agent_template(self, phone: str, template_name: str, language: str, params: list[str], agent_id: str) -> bool:
+        return await self.provider.send_template(phone, template_name, language, params, extra={"kind": "agent", "agent_id": agent_id})
+
+    async def send_agent_media(self, phone: str, media_type: str, media_id: str, caption: str, filename: str, agent_id: str) -> bool:
+        return await self.provider.send_media(phone, media_type, media_id, caption, filename, extra={"kind": "agent", "agent_id": agent_id})
+
+    async def send_event_template(self, phone: str, template_name: str, params: list[str]) -> bool:
+        return await self.provider.send_template(phone, template_name, settings.WHATSAPP_TEMPLATE_LANGUAGE, params, extra={"kind": "event"})
+
+    async def upload_media(self, content: bytes, mime_type: str, filename: str) -> str | None:
+        return await self.provider.upload_media(content, mime_type, filename)
+
+    async def fetch_media(self, media_id: str) -> tuple[bytes, str] | None:
+        return await self.provider.fetch_media(media_id)
+
+    async def list_templates(self) -> list[dict] | None:
+        return await self.provider.list_templates()
+
+    async def create_template(self, payload: dict) -> dict:
+        return await self.provider.create_template(payload)

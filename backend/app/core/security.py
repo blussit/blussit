@@ -50,8 +50,10 @@ def create_access_token(subject: str, role: str, extra_claims: dict[str, Any] | 
     return create_token(subject, role, TokenType.ACCESS, extra_claims)
 
 
-def create_refresh_token(subject: str, role: str) -> str:
-    return create_token(subject, role, TokenType.REFRESH)
+def create_refresh_token(subject: str, role: str, token_version: int = 0) -> str:
+    # tv lets a password change (or forced logout) invalidate every
+    # refresh token issued before it — see AuthService.refresh.
+    return create_token(subject, role, TokenType.REFRESH, {"tv": token_version})
 
 
 def decode_token(token: str) -> dict[str, Any]:

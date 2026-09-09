@@ -28,11 +28,17 @@ class MongoDB:
 mongodb = MongoDB()
 
 
-async def connect_to_mongo() -> None:
+async def connect_to_mongo(build_indexes: bool = True) -> None:
+    """`build_indexes=False` lets the app defer the ~74 index round-trips
+    (and any genuine first-boot index BUILDS) to a background task so the
+    health check answers immediately — a platform health probe killing the
+    container mid-index-build was a real deployment failure mode. Tests and
+    scripts keep the synchronous default."""
     logger.info("Connecting to MongoDB at %s", _redact_uri(settings.MONGO_URI))
     mongodb.client = AsyncIOMotorClient(settings.MONGO_URI)
     mongodb.db = mongodb.client[settings.MONGO_DB_NAME]
-    await create_indexes()
+    if build_indexes:
+        await create_indexes()
     logger.info("MongoDB connection established.")
 
 
@@ -82,6 +88,15 @@ async def create_indexes() -> None:
     # volume, but as booking counts grow per center/captain/customer this
     # keeps list queries index-served instead of slowing down again.
     await db.bookings.create_index([("service_center_id", 1), ("created_at", -1)])
+
+    # GPS breadcrumb trail (see CaptainLocationModel) — short-lived by
+    # design: rows self-expire after 30 days via the TTL index.
+    await db.captain_locations.create_index([("captain_id", 1), ("at", 1)])
+    await db.captain_locations.create_index("at", expireAfterSeconds=30 * 24 * 3600)
+
+    # Captain staff ids are unique across the platform (sparse — customers
+    # and managers never carry one).
+    await db.users.create_index("employee_id", unique=True, sparse=True)
     await db.bookings.create_index([("customer_id", 1), ("created_at", -1)])
     await db.bookings.create_index([("captain_id", 1), ("scheduled_date", 1)])
     await db.bookings.create_index([("status", 1), ("created_at", -1)])
@@ -131,22 +146,120 @@ async def create_indexes() -> None:
 
     await db.reviews.create_index("booking_id")
     await db.reviews.create_index("captain_id")
+    # Race guards: one live review per booking, one attendance row per
+    # captain per day. Graceful on legacy duplicates — the index build
+    # fails, we log, the service-level guards still apply; clean the dupes
+    # and the next boot gets the index.
+    for build in (
+        lambda: db.reviews.create_index(
+            "booking_id", unique=True, name="uniq_live_review_per_booking",
+            partialFilterExpression={"is_deleted": {"$eq": False}},
+        ),
+        lambda: db.attendance.create_index(
+            [("captain_id", 1), ("attendance_date", 1)], unique=True, name="uniq_attendance_per_day",
+        ),
+    ):
+        try:
+            await build()
+        except Exception as exc:  # duplicate legacy data — degrade, don't die
+            logger.warning("Unique index build skipped: %s", exc)
 
     await db.coupons.create_index("code", unique=True, sparse=True)
 
     await db.notifications.create_index("user_id")
     await db.notifications.create_index("is_read")
+    # The bell polls this exact shape every 30s for every logged-in user —
+    # the single hottest read in the app.
+    await db.notifications.create_index([("user_id", 1), ("is_read", 1), ("created_at", -1)])
 
-    await db.audit_logs.create_index("actor_id")
+    await db.audit_logs.create_index([("actor_id", 1), ("created_at", -1)])
+    await db.audit_logs.create_index([("module", 1), ("created_at", -1)])
     await db.audit_logs.create_index("created_at")
+
+    # Hot-path gap pack (these queries ran as full collection scans):
+    # first-time-offer fraud checks on EVERY booking price...
+    await db.bookings.create_index("vehicle_registration_number", sparse=True)
+    await db.bookings.create_index("customer_phone", sparse=True)
+    # ...vehicle/address delete guards...
+    await db.bookings.create_index("vehicle_id")
+    await db.bookings.create_index("address_id")
+    # ...pincode dispatch (multikey on the array actually queried)...
+    await db.service_centers.create_index("location.service_pincodes")
+    # ...coupon per-user usage caps, leave listings, review lookups,
+    # complaint→captain KPI joins, wallet statements.
+    await db.coupon_usages.create_index([("coupon_id", 1), ("user_id", 1)])
+    await db.leave_requests.create_index([("captain_id", 1), ("created_at", -1)])
+    await db.leave_requests.create_index("status")
+    await db.reviews.create_index("customer_id")
+    await db.reviews.create_index([("is_published", 1), ("created_at", -1)])
+    await db.complaints.create_index("booking_id")
+    await db.user_subscriptions.create_index([("customer_id", 1), ("status", 1)])
+    # OTP store: looked up by identifier on every request/verify, and rows
+    # self-delete at their own expiry instant (TTL 0 on expires_at).
+    await db.otp_requests.create_index("identifier")
+    await db.otp_requests.create_index("expires_at", expireAfterSeconds=0)
 
     await db.inventory.create_index("service_center_id")
 
     await db.settings.create_index("key", unique=True, sparse=True)
 
     await db.captain_wallets.create_index("captain_id", unique=True, sparse=True)
+    # Slot holds (theater-seat model): one hold per holder per slot; the
+    # sweeper scans by expiry. Deliberately NOT a TTL index — held_count
+    # must be decremented in the same breath as the delete, which only the
+    # sweeper can do.
+    await db.slot_holds.create_index(
+        [("service_center_id", 1), ("date", 1), ("slot_key", 1), ("holder_id", 1)], unique=True
+    )
+    await db.slot_holds.create_index("expires_at")
+    # Service zones: polygon coverage checks via $geoIntersects.
+    await db.service_zones.create_index([("polygon", "2dsphere")])
+    await db.service_zones.create_index("service_center_id")
+    # M6 (AUDIT.md): bounded growth for ephemeral rows. In-app notifications
+    # expire after 90 days, SMS logs after a year. WhatsApp inbox/outbox and
+    # audit logs are deliberately NOT expired — chat history is customer
+    # context and audit trails are business records.
+    async def _ensure_ttl(collection, field: str, seconds: int) -> None:
+        # A plain index on the same key may predate the TTL decision —
+        # Mongo refuses the option change, so drop-and-recreate once.
+        from pymongo.errors import OperationFailure
+
+        try:
+            await collection.create_index(field, expireAfterSeconds=seconds)
+        except OperationFailure:
+            await collection.drop_index(f"{field}_1")
+            await collection.create_index(field, expireAfterSeconds=seconds)
+
+    await _ensure_ttl(db.notifications, "created_at", 90 * 24 * 3600)
+    await _ensure_ttl(db.sms_outbox, "created_at", 365 * 24 * 3600)
+    # WhatsApp traffic logs were the fastest-growing unbounded collections
+    # (a row per message, both providers). One year of history is plenty
+    # for the CRM inbox and template analytics; older rows age out.
+    await _ensure_ttl(db.whatsapp_outbox, "created_at", 365 * 24 * 3600)
+    await _ensure_ttl(db.whatsapp_inbox, "created_at", 365 * 24 * 3600)
+    await db.wallet_transactions.create_index([("captain_id", 1), ("created_at", -1)])
     await db.wallet_transactions.create_index("captain_id")
     await db.wallet_transactions.create_index("booking_id")
+
+    # Razorpay orders/links — one doc per checkout attempt; the unique ids
+    # are what the atomic created->paid claims key on. PARTIAL uniqueness:
+    # a modal-checkout doc has no link id and a payment-link doc has no
+    # order id, so a plain unique index would collide on the nulls.
+    try:
+        # Migrate away from the short-lived plain unique index.
+        await db.payment_orders.drop_index("razorpay_order_id_1")
+    except Exception:
+        pass
+    await db.payment_orders.create_index(
+        "razorpay_order_id", unique=True, name="uniq_rzp_order",
+        partialFilterExpression={"razorpay_order_id": {"$exists": True}},
+    )
+    await db.payment_orders.create_index(
+        "razorpay_link_id", unique=True, name="uniq_rzp_link",
+        partialFilterExpression={"razorpay_link_id": {"$exists": True}},
+    )
+    await db.payment_orders.create_index([("customer_id", 1), ("created_at", -1)])
+    await db.payment_orders.create_index([("kind", 1), ("status", 1), ("created_at", -1)])
     await db.withdrawal_requests.create_index("captain_id")
     await db.withdrawal_requests.create_index("status")
 
@@ -161,11 +274,11 @@ async def create_indexes() -> None:
     await db.purchase_confirmations.create_index("expires_at", expireAfterSeconds=0)
 
     await db.sms_outbox.create_index("phone")
-    await db.sms_outbox.create_index("created_at")
 
     await db.whatsapp_outbox.create_index("phone")
     await db.whatsapp_outbox.create_index("wamid", sparse=True)
-    await db.whatsapp_outbox.create_index("created_at")
+    # created_at index carries the 365d TTL (see _ensure_ttl above) — do
+    # not also create a plain one, the name would conflict.
 
     # WhatsApp booking bot — one conversation doc per sender, and a
     # dedup ledger of processed webhook message ids (Meta redelivers on
@@ -181,3 +294,9 @@ async def create_indexes() -> None:
     await db.whatsapp_conversations.create_index("wa_id", unique=True)
     await db.whatsapp_message_dedup.create_index("wamid", unique=True)
     await db.whatsapp_message_dedup.create_index("created_at", expireAfterSeconds=14 * 24 * 3600)
+    # WhatsApp CRM: inbound message store + template cache
+    await db.whatsapp_inbox.create_index([("wa_id", 1), ("created_at", -1)])
+    # created_at index carries the 365d TTL (see _ensure_ttl above).
+    await db.whatsapp_templates.create_index("name", unique=True)
+    await db.whatsapp_conversations.create_index([("last_message_at", -1)])
+

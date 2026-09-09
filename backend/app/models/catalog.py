@@ -29,6 +29,21 @@ class ServiceModel(BusinessRecordBase):
     # `discounted_price` above.
     vehicle_type_prices: dict[str, float] = {}
     vehicle_type_discounted_prices: dict[str, float] = {}
+    # The struck-through "actual"/MRP price shown beside `price` on the
+    # website. Display only — BookingService never charges it.
+    original_price: Optional[float] = None
+    vehicle_type_original_prices: dict[str, float] = {}
+    # Optional extra sold only on top of a main service (exterior polish
+    # +₹200, bike polish +₹30). Hidden from the landing cards; the booking
+    # wizard offers it after a main service is picked. Priced like any
+    # service, so bookings/pricing need no special case.
+    is_addon: bool = False
+    # Sibling variants of one product — Bike Wash for 1/2/3/4 bikes are four
+    # services sharing variant_group="bike-wash" with labels "1 bike"…"4
+    # bikes". The website shows one card and lets the customer pick a
+    # variant; the booking simply carries the chosen variant's id.
+    variant_group: Optional[str] = None
+    variant_label: Optional[str] = None
     captain_fee: Optional[float] = None
     duration_minutes: int = 30
     image: Optional[str] = None

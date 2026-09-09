@@ -90,11 +90,15 @@ export function CaptainPicker({
                       : `~${Math.round(perf.avg_heading_punctuality_minutes)} min late on average`}
                   </span>
                 )}
-                {eligible?.distance_km != null && (
+                {eligible?.eta_minutes != null ? (
+                  <span className="flex items-center gap-1 font-medium text-[var(--color-primary)]">
+                    <MapPin className="h-3 w-3" /> ~{eligible.eta_minutes} min ride · {eligible.road_km ?? eligible.distance_km} km (last known)
+                  </span>
+                ) : eligible?.distance_km != null ? (
                   <span className="flex items-center gap-1">
                     <MapPin className="h-3 w-3" /> ~{eligible.distance_km} km from customer (last known)
                   </span>
-                )}
+                ) : null}
               </div>
               {isIneligible && eligible?.reason && (
                 <span className="flex items-center gap-1 text-xs font-medium text-[var(--color-error)]">

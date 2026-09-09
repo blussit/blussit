@@ -101,10 +101,16 @@ class ComplaintService:
             results.append(doc)
         return results
 
-    async def update(self, complaint_id: str, payload: ComplaintUpdateRequest, resolved_by: str) -> dict:
+    async def update(self, complaint_id: str, payload: ComplaintUpdateRequest, resolved_by: str,
+                     actor_role: str = "admin", actor_center_id: str | None = None) -> dict:
         complaint = await self.repo.find_by_id(complaint_id)
         if not complaint:
             raise NotFoundException("Complaint not found")
+        # Same center-scoping as add_reply below — a manager may only touch
+        # complaints routed to THEIR center (this method used to skip it,
+        # letting any manager resolve any center's complaints).
+        if complaint.get("service_center_id"):
+            ensure_own_center(actor_role, actor_center_id, complaint["service_center_id"])
 
         data = {k: v.value if hasattr(v, "value") else v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
         if data.get("status") == ComplaintStatus.RESOLVED.value:
@@ -131,7 +137,14 @@ class ComplaintService:
         complaint = await self.repo.find_by_id(complaint_id)
         if not complaint:
             raise NotFoundException("Complaint not found")
-        if complaint.get("service_center_id"):
+        if actor_role == "customer":
+            # Support is a CONVERSATION now — the customer can answer their
+            # own thread (only their own; 404-not-403 so a guessed id
+            # confirms nothing), but never change its status.
+            if complaint.get("customer_id") != actor_id:
+                raise NotFoundException("Complaint not found")
+            status = None
+        elif complaint.get("service_center_id"):
             ensure_own_center(actor_role, actor_center_id, complaint["service_center_id"])
 
         reply = {"author_id": actor_id, "author_role": actor_role, "message": message, "created_at": datetime.now(timezone.utc)}
@@ -145,11 +158,23 @@ class ComplaintService:
         if update_data:
             updated = await self.repo.update_by_id(complaint_id, update_data)
 
-        await self.notifications.notify(
-            complaint["customer_id"],
-            "Complaint update",
-            f"Your complaint '{complaint['subject']}' has a new update.",
-            NotificationType.COMPLAINT,
-            complaint_id,
-        )
+        if actor_role == "customer":
+            # Tell the serving center's manager, not the customer themselves.
+            center = await self.center_repo.find_by_id(complaint["service_center_id"]) if complaint.get("service_center_id") else None
+            if center and center.get("manager_id"):
+                await self.notifications.notify(
+                    center["manager_id"],
+                    "Customer replied on a complaint",
+                    f"'{complaint['subject']}': {message[:120]}",
+                    NotificationType.COMPLAINT,
+                    complaint_id,
+                )
+        else:
+            await self.notifications.notify(
+                complaint["customer_id"],
+                "Complaint update",
+                f"Your complaint '{complaint['subject']}' has a new update.",
+                NotificationType.COMPLAINT,
+                complaint_id,
+            )
         return serialize_doc(updated)

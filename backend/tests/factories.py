@@ -82,6 +82,7 @@ async def make_customer(db, *, name: str | None = None, phone_verified: bool = T
         "role": "customer",
         "status": "active",
         "phone_verified": phone_verified,
+        "phone_verified_at": now if phone_verified else None,
         "is_deleted": False,
         # UserPublic.from_doc (used by AuthService.login/_issue_tokens)
         # requires created_at — real accounts always have it via
@@ -181,9 +182,10 @@ async def get_suv_type_id(db) -> str:
     return str(doc["_id"])
 
 
-async def get_foam_wash_service_id(db) -> str:
-    doc = await db.services.find_one({"slug": "foam-wash"})
-    assert doc, "seed() should have created the 'foam-wash' service"
+async def get_star_wash_service_id(db) -> str:
+    """The default car service the seed creates (foam wash + vacuum + dashboard)."""
+    doc = await db.services.find_one({"slug": "star-wash"})
+    assert doc, "seed() should have created the 'star-wash' service"
     return str(doc["_id"])
 
 
@@ -193,7 +195,14 @@ async def get_any_active_plan(db) -> str:
     return str(doc["_id"])
 
 
-async def make_subscription_plan(db, *, vehicle_types: list[str], included_service_ids: list[str] | None = None, total_service_count: int = 4) -> str:
+async def make_subscription_plan(
+    db,
+    *,
+    vehicle_types: list[str],
+    included_service_ids: list[str] | None = None,
+    total_service_count: int = 4,
+    vehicle_type_prices: dict[str, float] | None = None,
+) -> str:
     """seed()'s own demo plans are all deliberately unrestricted
     (vehicle_types=[] — "every vehicle type eligible"), so any test that
     needs to exercise a REAL vehicle-type restriction needs its own plan,
@@ -206,7 +215,7 @@ async def make_subscription_plan(db, *, vehicle_types: list[str], included_servi
         "billing_cycle": "monthly",
         "price": 499.0,
         "discounted_price": None,
-        "vehicle_type_prices": {},
+        "vehicle_type_prices": vehicle_type_prices or {},
         "vehicle_type_discounted_prices": {},
         "included_service_ids": included_service_ids or [],
         "category_quotas": {},

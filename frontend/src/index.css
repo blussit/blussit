@@ -5,7 +5,9 @@
      matching the approved Figma (doorstep car-wash, "CLEANRIDE" wordmark) */
   --color-primary: #0A0A0A;
   --color-primary-dark: #000000;
-  --color-primary-light: #262626;
+  /* Light tint for selected/active/highlight surfaces — always paired with
+     primary-coloured text or a primary border, so it must stay light. */
+  --color-primary-light: #F3F3F3;
   --color-secondary: #EAB308;
   --color-secondary-light: #FEF9C3;
   --color-accent: #EAB308;
@@ -13,6 +15,15 @@
   --color-surface: #F5F5F5;
   --color-text-primary: #0A0A0A;
   --color-text-secondary: #525252;
+  /* Warm-white page surfaces below the hero (matches the pre-launch site),
+     with a slightly deeper tint for alternating bands and a warm hairline. */
+  --color-cream: #FFFCF5;
+  --color-cream-deep: #FFF7EA;
+  --color-cream-line: #EAE2D3;
+  --color-cream-line-soft: #F1EADD;
+  /* Brand gold — used sparingly (Book buttons, duration pills, plan CTAs). */
+  --color-gold: #E8A900;
+  --color-gold-dark: #D99A00;
   --color-error: #DC2626;
   --color-warning: #F59E0B;
   --color-success: #16A34A;
@@ -64,13 +75,13 @@
     font-variant-numeric: tabular-nums;
   }
   .container-page {
-    max-width: 1200px;
+    max-width: 1440px;
     margin-inline: auto;
-    padding-inline: 1.25rem;
+    padding-inline: 1rem;
   }
   @media (min-width: 768px) {
     .container-page {
-      padding-inline: 2rem;
+      padding-inline: 1.5rem;
     }
   }
 
@@ -135,6 +146,15 @@
   animation: pulse-glow 2s infinite;
 }
 
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-33.3333%); }
+}
+
+.animate-marquee {
+  animation: marquee 22s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -142,4 +162,22 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Gaussian gold glow under every gold CTA (buttons/links styled
+   bg-[#E8A900]) — a soft blurred halo that gives the flat gold pill real
+   depth on the white ground. Unlayered on purpose so it wins over any
+   Tailwind shadow utility a call site already carries; the attribute
+   selector matches the literal arbitrary-value class in the markup. */
+button[class*="bg-[#E8A900]"],
+a[class*="bg-[#E8A900]"] {
+  box-shadow:
+    0 12px 30px -8px rgba(232, 169, 0, 0.55),
+    0 3px 10px rgba(232, 169, 0, 0.22);
+}
+button[class*="bg-[#E8A900]"]:hover:not(:disabled),
+a[class*="bg-[#E8A900]"]:hover {
+  box-shadow:
+    0 16px 38px -8px rgba(232, 169, 0, 0.65),
+    0 4px 14px rgba(232, 169, 0, 0.3);
 }

@@ -32,8 +32,10 @@ export function ProtectedRoute({ allowedRoles }: { allowedRoles: UserRole[] }) {
 }
 
 export function GuestOnlyRoute() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, user } = useAuth();
   if (isLoading) return <PageLoader />;
-  if (isAuthenticated) return <Navigate to="/app" replace />;
+  // Role-aware: a logged-in manager clicking "Login" used to bounce
+  // /login → /app → (customer-only guard) → the landing page.
+  if (isAuthenticated) return <Navigate to={ROLE_BASE_PATH[user?.role ?? "customer"] ?? "/app"} replace />;
   return <Outlet />;
 }

@@ -52,3 +52,54 @@ async def service_breakdown(
     """Section 17 — per service KPI breakdown, same scoping rule as above."""
     center_id = current_user.service_center_id if current_user.role == "manager" else service_center_id
     return success(await AnalyticsService(db).service_breakdown(center_id))
+
+
+# --------------------------------------------------------------------------
+# Management KPI engine (admin dashboard analytics tabs). One generic route
+# per section keeps the surface small; every section takes the same period
+# arguments and computes its own previous-period comparison.
+# --------------------------------------------------------------------------
+from app.services.kpi_service import KpiService, resolve_period  # noqa: E402
+
+_KPI_SECTIONS = ("overview", "business", "customers", "captains", "financial", "marketing", "operations", "areas")
+
+
+@router.get("/kpis/{section}", dependencies=[Depends(require_admin)])
+async def kpi_section(
+    section: str,
+    period: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    from app.core.exceptions import BadRequestException
+
+    if section not in _KPI_SECTIONS:
+        raise BadRequestException(f"Unknown KPI section '{section}'")
+    s, e, ps, pe = resolve_period(period, start, end)
+    return success(await getattr(KpiService(db), section)(s, e, ps, pe))
+
+
+@router.get("/business-settings", dependencies=[Depends(require_admin)])
+async def get_business_settings(db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await KpiService(db).get_settings())
+
+
+@router.put("/business-settings")
+async def update_business_settings(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    from app.core.dependencies import require_admin as _  # role enforced below
+    from app.core.exceptions import ForbiddenException
+    from app.services.audit_service import AuditService
+
+    if current_user.role != "admin":
+        raise ForbiddenException("Admin only")
+    updated = await KpiService(db).update_settings(payload)
+    await AuditService(db).log_action(
+        current_user.id, current_user.role, "UPDATE_BUSINESS_SETTINGS", "analytics", "singleton",
+        {"fields": sorted(payload.keys())},
+    )
+    return success(updated, message="Business settings updated")

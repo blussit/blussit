@@ -19,7 +19,6 @@ export const vehicleTypeApi = {
 export const comboOfferApi = {
   list: (activeOnly = false) =>
     apiClient.get<ApiSuccess<ComboOffer[]>>("/combo-offers", { params: { active_only: activeOnly } }).then((r) => r.data.data),
-  get: (id: string) => apiClient.get<ApiSuccess<ComboOffer>>(`/combo-offers/${id}`).then((r) => r.data.data),
 };
 
 export const bookingPolicyApi = {
@@ -62,4 +61,42 @@ export const contentApi = {
       .then((r) => r.data.data),
   submitContactMessage: (payload: { name: string; phone: string; email: string; message: string }) =>
     apiClient.post<ApiSuccess<Record<string, unknown>>>("/contact", payload).then((r) => r.data),
+};
+
+// ---- Slot holds (theater-seat model) --------------------------------------
+/** Stable per-browser holder key; the backend converts the hold into the
+ * booking when the same key is sent as hold_key at create time. */
+export function getSlotHolderKey(): string {
+  const KEY = "dvc_slot_holder";
+  try {
+    let k = sessionStorage.getItem(KEY);
+    if (!k) {
+      k = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+      sessionStorage.setItem(KEY, k);
+    }
+    return k;
+  } catch {
+    return "anon-" + Math.random().toString(36).slice(2, 14);
+  }
+}
+
+export const slotHoldApi = {
+  hold: (service_center_id: string, date: string, slot_key: string) =>
+    apiClient
+      .post<ApiSuccess<{ held: boolean; renewed: boolean; expires_at: string; hold_seconds: number }>>("/bookings/hold", {
+        service_center_id, date, slot_key, holder_key: getSlotHolderKey(),
+      })
+      .then((r) => r.data.data),
+  release: (service_center_id: string, date: string, slot_key: string) =>
+    apiClient.post("/bookings/hold/release", { service_center_id, date, slot_key, holder_key: getSlotHolderKey() }).catch(() => undefined),
+};
+
+export const coverageApi = {
+  check: (payload: { latitude?: number; longitude?: number; pincode?: string }) =>
+    apiClient
+      .post<ApiSuccess<{ covered: boolean; center: { id: string; name: string; city: string | null; state: string | null } | null; distance_km?: number }>>(
+        "/service-zones/coverage-check",
+        payload,
+      )
+      .then((r) => r.data.data),
 };

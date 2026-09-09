@@ -1,10 +1,15 @@
+import logging
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.exceptions import NotFoundException
 from app.models.enums import NotificationType
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.user_repository import UserRepository
 from app.services.whatsapp_service import WhatsAppService
 from app.utils.serializers import serialize_doc, serialize_list
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationService:
@@ -18,7 +23,16 @@ class NotificationService:
         self.user_repo = UserRepository(db)
         self.whatsapp = WhatsAppService(db)
 
-    async def notify(self, user_id: str, title: str, message: str, notification_type: NotificationType = NotificationType.SYSTEM, reference_id: str | None = None) -> None:
+    async def notify(
+        self,
+        user_id: str,
+        title: str,
+        message: str,
+        notification_type: NotificationType = NotificationType.SYSTEM,
+        reference_id: str | None = None,
+        wa_event: str | None = None,
+        wa_params: list[str] | None = None,
+    ) -> None:
         await self.repo.create(
             {
                 "user_id": user_id,
@@ -36,7 +50,31 @@ class NotificationService:
             # the caller's actual business action (a booking/complaint
             # update that already succeeded shouldn't roll back or error
             # out just because the WhatsApp ping failed).
-            await self.whatsapp.send_generic(phone, title, message)
+            #
+            # Automation engine: call sites that name a wa_event get the
+            # dedicated per-event template (blussit_booking_confirmed,
+            # blussit_captain_assigned, ...) as soon as Meta approves it;
+            # until then — or if the event send fails — the generic update
+            # template carries the same information, so nothing goes dark
+            # while templates sit in review.
+            sent = False
+            if wa_event and wa_params is not None:
+                try:
+                    from app.services.whatsapp_crm_service import WhatsAppCrmService
+
+                    tpl = await WhatsAppCrmService(self.user_repo.db).event_template_if_ready(wa_event)
+                    if tpl:
+                        sent = await self.whatsapp.send_event_template(phone, tpl["name"], wa_params)
+                except Exception:  # noqa: BLE001 — automation must never block the fallback
+                    logger.exception("WhatsApp event-template send failed (event=%s, user=%s) — falling back to generic", wa_event, user_id)
+                    sent = False
+            if not sent:
+                delivered = await self.whatsapp.send_generic(phone, title, message)
+                if not delivered:
+                    # Still best-effort, but LOUD — expired Meta credentials
+                    # used to silently stop every customer message while the
+                    # in-app rows kept the dashboards looking healthy.
+                    logger.warning("WhatsApp send failed (user=%s, title=%r) — message delivered in-app only", user_id, title)
 
     async def list_for_user(self, user_id: str, page: int, page_size: int, unread_only: bool = False):
         items, total = await self.repo.list_for_user(user_id, page, page_size, unread_only)
@@ -46,7 +84,12 @@ class NotificationService:
         return await self.repo.unread_count(user_id)
 
     async def mark_read(self, user_id: str, notification_id: str) -> dict:
-        updated = await self.repo.update_by_id(notification_id, {"is_read": True})
+        # Owner-scoped: a notification id belonging to someone else is a
+        # 404, never a read-and-return of their document (that was a real
+        # IDOR — any user could read anyone's alerts by id).
+        updated = await self.repo.mark_read_for_user(notification_id, user_id)
+        if not updated:
+            raise NotFoundException("Notification not found")
         return serialize_doc(updated)
 
     async def mark_all_read(self, user_id: str) -> None:

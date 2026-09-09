@@ -1,21 +1,12 @@
 import { type CSSProperties } from "react";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
-import { ServicesGrid } from "../../components/public/LandingSections";
-import { useNavigate } from "react-router-dom";
-import type { WizardPreselect } from "../../components/public/PublicBookingWizard";
+import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 
 export default function ServicesPage() {
-  const navigate = useNavigate();
-
-  const bookWith = (p: WizardPreselect) => {
-    navigate(`/book?serviceId=${p.serviceId || ""}`);
-  };
-
   const themeScope = {
     "--color-primary": "#000000",
     "--color-primary-dark": "#000000",
-    "--color-primary-light": "#1A1A1A",
     "--color-secondary": "#FACC15",
     "--color-accent": "#FACC15",
   } as CSSProperties;
@@ -23,9 +14,11 @@ export default function ServicesPage() {
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
       <PublicNavbar />
-      <div className="pt-24 pb-12">
-        <ServicesGrid onBook={bookWith} />
-      </div>
+      <ServicesShowcase
+        id="all-services"
+        title="All services"
+        subtitle="Every service, with what's included and the price you pay. We come to your doorstep."
+      />
       <PublicFooter />
     </div>
   );

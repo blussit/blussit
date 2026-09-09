@@ -15,6 +15,10 @@ import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { planPriceFor, subscriptionCoversType } from "../../lib/planTier";
+import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
+import { QtyStepper } from "../../components/shared/QtyStepper";
+import { PLATE_FORMAT_HINT, validateIndianPlate } from "../../lib/validators";
 import type { Address, ComboOffer, Service, User, Vehicle, VehicleType } from "../../types";
 
 const STEPS = ["Find customer", "Service", "Vehicle, address & time", "Confirm"];
@@ -41,6 +45,9 @@ export default function ManagerNewBookingPage() {
   // Assign-a-plan (step 0, once a customer is found)
   const [assignOpen, setAssignOpen] = useState(false);
   const [assignPlanId, setAssignPlanId] = useState("");
+  // The tier the plan is granted at — same meaning as a customer purchase:
+  // price for that vehicle type, redeemable on that type or smaller.
+  const [assignTypeId, setAssignTypeId] = useState("");
   const [assignError, setAssignError] = useState("");
 
   // Step 0 — customer
@@ -57,15 +64,23 @@ export default function ManagerNewBookingPage() {
 
   // Step 1 — service
   const [serviceIds, setServiceIds] = useState<string[]>([]);
+  // Per-unit add-on counts (Extra Bike Wash ×N, Bike Polish ×N) — kept in
+  // lockstep with serviceIds by the handlers below; sent as-is to the API.
+  const [serviceQty, setServiceQty] = useState<Record<string, number>>({});
   const [comboId, setComboId] = useState<string | null>(null);
   // Step 2 — vehicle, address & time (date/slot depend on the address, so
   // they live here, not with service selection)
   const [date, setDate] = useState("");
   const [slot, setSlot] = useState("");
 
-  // Step 2 — vehicle & address
+  // Step 2 — vehicle & address. "New" is an explicit choice (its own chip),
+  // not the implicit absence of a selection — with saved chips present
+  // there was previously no visible way to add a new vehicle/address on
+  // the customer's behalf.
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+  const [newVehicleOpen, setNewVehicleOpen] = useState(false);
+  const [newAddressOpen, setNewAddressOpen] = useState(false);
   const [vehicleType, setVehicleType] = useState<VehicleType>("");
   const [brand, setBrand] = useState("");
   const [model, setModel] = useState("");
@@ -81,6 +96,7 @@ export default function ManagerNewBookingPage() {
 
   // Step 3 — confirm
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [couponCode, setCouponCode] = useState("");
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [submitError, setSubmitError] = useState("");
@@ -97,14 +113,15 @@ export default function ManagerNewBookingPage() {
     queryFn: () => subscriptionApi.forCustomer(customer!.id),
     enabled: !!customer,
   });
-  // Subscription eligibility is by vehicle TYPE now (plan.vehicle_types),
-  // not one locked vehicle — matches whichever vehicle is currently
-  // selected/entered for this booking (existing or a new one being added).
+  // Subscription eligibility is by vehicle TYPE: the plan must cover the
+  // selected type AND the purchased tier must allow it (bought for one
+  // type = that type or cheaper only) — same rules the backend enforces
+  // at plan_consumption time.
   const selectedVehicleType = selectedVehicleId ? customerVehicles.find((v) => v.id === selectedVehicleId)?.vehicle_type : vehicleType;
   const eligibleSubscriptions = (customerSubscriptions || []).filter((s) => {
     if (s.effective_status !== "active" || s.remaining_service_count <= 0) return false;
     const plan = subscriptionPlans?.find((p) => p.id === s.plan_id);
-    return !plan?.vehicle_types?.length || (!!selectedVehicleType && plan.vehicle_types.includes(selectedVehicleType));
+    return !!selectedVehicleType && subscriptionCoversType(s, plan, selectedVehicleType);
   });
 
   // Slots are generated per service center, resolved from whichever
@@ -118,11 +135,12 @@ export default function ManagerNewBookingPage() {
   const serviceCenterId = matchedCenters?.[0]?.id;
 
   const assignSubMutation = useMutation({
-    mutationFn: () => subscriptionApi.assign({ customer_id: customer!.id, plan_id: assignPlanId }),
+    mutationFn: () => subscriptionApi.assign({ customer_id: customer!.id, plan_id: assignPlanId, vehicle_type: assignTypeId || undefined }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["customer-subscriptions", customer?.id] });
       setAssignOpen(false);
       setAssignPlanId("");
+      setAssignTypeId("");
       setAssignError("");
     },
     onError: (err) => setAssignError(getErrorMessage(err)),
@@ -138,24 +156,44 @@ export default function ManagerNewBookingPage() {
   const selectedServices = services.filter((s) => serviceIds.includes(s.id));
   const selectedCombo = combos?.find((c) => c.id === comboId) || null;
 
+  // Same catalogue rules as the customer wizard (lib/serviceMix.ts, which
+  // mirrors the server's _validate_service_mix): base services collapsed by
+  // variant group, add-ons matched to the vehicle's class, one −/+ counter
+  // for bikes, polish capped at the bikes in the booking.
+  const bikeIds = useMemo(() => bikeTypeIds(vehicleTypes), [vehicleTypes]);
+  const bookingIsBike = bikeIds.has(vehicleType);
+  const groups = useMemo(() => baseGroups(services, vehicleType), [services, vehicleType]);
+  const kit = useMemo(() => addonKit(services, vehicleType, bikeIds), [services, vehicleType, bikeIds]);
+  const selectedBase = selectedServices.find((s) => !s.is_addon) || null;
+  const selectedGroup = selectedBase ? groups.find((g) => g.variants.some((v) => v.id === selectedBase.id)) || null : null;
+  const bikeCount = bookingIsBike && selectedBase ? variantCount(selectedBase) : 0;
+  const extraBikes = kit.addBike && serviceIds.includes(kit.addBike.id) ? serviceQty[kit.addBike.id] || 1 : 0;
+  const polishCount = kit.bikePolish && serviceIds.includes(kit.bikePolish.id) ? serviceQty[kit.bikePolish.id] || 1 : 0;
+  const bikesInBooking = bookingIsBike ? bikeCount + extraBikes : extraBikes;
+  const qtyOf = (id: string) => serviceQty[id] || 1;
+
   const subtotal = useMemo(() => {
     if (selectedCombo) return priceFor(selectedCombo, vehicleType);
-    return selectedServices.reduce((sum, s) => sum + priceFor(s, vehicleType), 0);
-  }, [selectedServices, selectedCombo, vehicleType]);
+    return selectedServices.reduce((sum, s) => sum + priceFor(s, vehicleType) * (serviceQty[s.id] || 1), 0);
+  }, [selectedServices, selectedCombo, vehicleType, serviceQty]);
 
   const totalDuration = useMemo(() => {
     if (selectedCombo) {
       const included = services.filter((s) => selectedCombo.service_ids.includes(s.id));
       return included.reduce((sum, s) => sum + s.duration_minutes, 0) || 60;
     }
-    return selectedServices.reduce((sum, s) => sum + s.duration_minutes, 0) || 60;
-  }, [selectedServices, selectedCombo, services]);
+    return selectedServices.reduce((sum, s) => sum + s.duration_minutes * (serviceQty[s.id] || 1), 0) || 60;
+  }, [selectedServices, selectedCombo, services, serviceQty]);
 
   const searchMutation = useMutation({
     mutationFn: () => crmApi.searchCustomerByPhone(phone.trim()),
     onSuccess: async (found) => {
       setSearchedPhone(phone.trim());
       setCustomerError("");
+      setNewVehicleOpen(false);
+      setNewAddressOpen(false);
+      setSelectedVehicleId(null);
+      setSelectedAddressId(null);
       if (found) {
         setCustomer(found);
         setIsNewCustomer(false);
@@ -192,12 +230,49 @@ export default function ManagerNewBookingPage() {
     onError: (err) => toast.push({ tone: "error", title: "Couldn't reset password", message: getErrorMessage(err) }),
   });
 
-  const toggleService = (id: string) => {
-    setComboId(null);
-    setServiceIds((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
-  };
-  const selectCombo = (id: string) => {
+  // Same handlers as the customer wizard: one main service (variant group)
+  // at a time, contextual add-ons, per-bike quantities.
+  const clearServices = () => {
     setServiceIds([]);
+    setServiceQty({});
+  };
+  const pickGroup = (g: BaseGroup) => {
+    setComboId(null);
+    setServiceQty({});
+    setServiceIds(selectedGroup?.key === g.key ? [] : [g.primary.id]);
+  };
+  const toggleSimpleAddon = (id: string) => {
+    setComboId(null);
+    setServiceIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const setExtraBikes = (n: number) => {
+    if (!kit.addBike) return;
+    const id = kit.addBike.id;
+    n = Math.max(0, Math.min(10, n));
+    setServiceIds((prev) => (n > 0 ? (prev.includes(id) ? prev : [...prev, id]) : prev.filter((x) => x !== id)));
+    setServiceQty((prev) => {
+      const next = { ...prev };
+      if (n > 0) next[id] = n;
+      else delete next[id];
+      return next;
+    });
+    const totalBikes = bookingIsBike ? bikeCount + n : n;
+    if (kit.bikePolish && polishCount > totalBikes) setPolishRaw(totalBikes);
+  };
+  const setPolishRaw = (n: number) => {
+    if (!kit.bikePolish) return;
+    const id = kit.bikePolish.id;
+    setServiceIds((prev) => (n > 0 ? (prev.includes(id) ? prev : [...prev, id]) : prev.filter((x) => x !== id)));
+    setServiceQty((prev) => {
+      const next = { ...prev };
+      if (n > 0) next[id] = n;
+      else delete next[id];
+      return next;
+    });
+  };
+  const setPolish = (n: number) => setPolishRaw(Math.max(0, Math.min(bikesInBooking, n)));
+  const selectCombo = (id: string) => {
+    clearServices();
     setComboId((prev) => (prev === id ? null : id));
   };
 
@@ -215,10 +290,12 @@ export default function ManagerNewBookingPage() {
           ? undefined
           : { line1: addressLine, landmark: landmark || undefined, city, state, pincode, latitude: addressLat ?? undefined, longitude: addressLng ?? undefined },
         service_ids: selectedCombo ? undefined : serviceIds,
+        service_quantities: selectedCombo || !Object.keys(serviceQty).length ? undefined : serviceQty,
         combo_id: selectedCombo ? selectedCombo.id : undefined,
         scheduled_date: date,
         scheduled_slot: slot,
         payment_method: paymentMethod,
+        coupon_code: subscriptionId ? undefined : couponCode.trim() || undefined,
         subscription_id: subscriptionId || undefined,
         customer_notes: notes || undefined,
       };
@@ -245,8 +322,14 @@ export default function ManagerNewBookingPage() {
   });
 
   const hasSelection = selectedServices.length > 0 || !!selectedCombo;
-  const hasVehicle = !!selectedVehicleId || (!!brand && !!model && !!regNumber);
-  const hasAddress = !!selectedAddressId || (!!addressLine && !!city && !!state && !!pincode);
+  // New-entry fields only count when the new-entry form is actually the
+  // active choice — leftover typed state behind a hidden form must not
+  // satisfy the step.
+  const hasVehicle =
+    !!selectedVehicleId ||
+    ((customerVehicles.length === 0 || newVehicleOpen) && !!brand && !!model && validateIndianPlate(regNumber) !== null);
+  const hasAddress =
+    !!selectedAddressId || ((customerAddresses.length === 0 || newAddressOpen) && !!addressLine && !!city && !!state && !!pincode);
   const stepValid = [
     !!customer,
     hasSelection,
@@ -396,7 +479,11 @@ export default function ManagerNewBookingPage() {
                   {(vehicleTypes || []).map((t) => (
                     <button
                       key={t.id}
-                      onClick={() => setVehicleType(t.id)}
+                      onClick={() => {
+                        // car vs bike changes what's bookable — start clean
+                        if (t.id !== vehicleType) clearServices();
+                        setVehicleType(t.id);
+                      }}
                       className={`rounded-full px-3.5 py-1.5 text-xs font-medium ${
                         vehicleType === t.id ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600"
                       }`}
@@ -425,27 +512,90 @@ export default function ManagerNewBookingPage() {
                   </>
                 )}
 
-                <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Choose service(s)</p>
+                <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Main service</p>
                 {servicesLoading ? (
                   <p className="text-sm text-[var(--color-text-secondary)]">Loading services…</p>
                 ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {services.map((s) => {
-                      const selected = serviceIds.includes(s.id);
-                      return (
-                        <button
-                          key={s.id}
-                          disabled={!!comboId}
-                          onClick={() => toggleService(s.id)}
-                          className={`rounded-full border px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-40 ${
-                            selected ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
-                          }`}
-                        >
-                          {s.name} · ₹{priceFor(s, vehicleType)}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      {groups.map((g) => {
+                        const selected = selectedGroup?.key === g.key;
+                        return (
+                          <button
+                            key={g.key}
+                            disabled={!!comboId}
+                            onClick={() => pickGroup(g)}
+                            className={`rounded-full border px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-40 ${
+                              selected ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
+                            }`}
+                          >
+                            {g.label} · {g.variants.length > 1 ? "from " : ""}₹{priceFor(g.primary, vehicleType)}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Bike bookings: one −/+ counter, priced base + extras. */}
+                    {selectedBase && bookingIsBike && (
+                      <div className="mt-3 flex items-center justify-between rounded-xl border border-gray-100 bg-[var(--color-surface)] p-3">
+                        <div>
+                          <p className="text-xs font-medium text-[var(--color-text-primary)]">How many bikes?</p>
+                          <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
+                            {kit.addBike
+                              ? `First bike ₹${priceFor(selectedBase, vehicleType)}, ₹${priceFor(kit.addBike, vehicleType)} each additional`
+                              : `₹${priceFor(selectedBase, vehicleType)} per bike`}
+                          </p>
+                        </div>
+                        <QtyStepper value={bikesInBooking} min={1} max={10} onChange={(n) => setExtraBikes(Math.max(0, n - bikeCount))} />
+                      </div>
+                    )}
+
+                    {/* Add-ons — only the ones valid for what's selected */}
+                    {selectedBase && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) && (
+                      <div className="mt-4">
+                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Add-ons</p>
+                        <div className="space-y-2.5">
+                          {kit.simple.map((s) => {
+                            const on = serviceIds.includes(s.id);
+                            return (
+                              <button
+                                key={s.id}
+                                onClick={() => toggleSimpleAddon(s.id)}
+                                className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-sm transition-colors ${
+                                  on ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
+                                }`}
+                              >
+                                <span className="font-medium text-[var(--color-text-primary)]">+ {s.name}</span>
+                                <span className="font-mono-num text-[var(--color-text-primary)]">₹{priceFor(s, vehicleType)}</span>
+                              </button>
+                            );
+                          })}
+
+                          {!bookingIsBike && kit.addBike && (
+                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
+                              <div>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType)} per bike, washed at the same doorstep</p>
+                              </div>
+                              <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
+                            </div>
+                          )}
+
+                          {kit.bikePolish && bikesInBooking > 0 && (
+                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
+                              <div>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">
+                                  ₹{priceFor(kit.bikePolish, vehicleType)} per bike · up to {bikesInBooking} bike{bikesInBooking > 1 ? "s" : ""}
+                                </p>
+                              </div>
+                              <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -460,22 +610,49 @@ export default function ManagerNewBookingPage() {
                     {customerVehicles.map((v) => (
                       <button
                         key={v.id}
-                        onClick={() => setSelectedVehicleId((prev) => (prev === v.id ? null : v.id))}
-                        className={`rounded-xl border px-3.5 py-2 text-left text-sm ${
-                          selectedVehicleId === v.id ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
+                        onClick={() => {
+                          setSelectedVehicleId((prev) => (prev === v.id ? null : v.id));
+                          setNewVehicleOpen(false);
+                          // The real vehicle's type is what the backend will
+                          // price against — realign the step-1 pricing type,
+                          // and restart the service pick if the CLASS flips
+                          // (a car service can't ride on a bike booking).
+                          if (v.vehicle_type !== vehicleType) {
+                            if (bikeIds.has(v.vehicle_type) !== bikeIds.has(vehicleType)) clearServices();
+                            setVehicleType(v.vehicle_type);
+                          }
+                        }}
+                        className={`max-w-full truncate rounded-xl border px-3.5 py-2 text-left text-sm ${
+                          selectedVehicleId === v.id ? "border-2 border-black bg-[var(--color-primary-light)] font-medium" : "border-gray-200 hover:border-gray-300"
                         }`}
                       >
                         {v.brand} {v.model} · {v.registration_number}
                       </button>
                     ))}
+                    <button
+                      onClick={() => {
+                        setSelectedVehicleId(null);
+                        setNewVehicleOpen((o) => !o);
+                      }}
+                      className={`rounded-xl border border-dashed px-3.5 py-2 text-sm font-medium ${
+                        newVehicleOpen && !selectedVehicleId
+                          ? "border-2 border-solid border-black bg-[var(--color-primary-light)]"
+                          : "border-gray-300 text-[var(--color-text-secondary)] hover:border-gray-400"
+                      }`}
+                    >
+                      + New vehicle
+                    </button>
                   </div>
                 )}
-                {!selectedVehicleId && (
+                {!selectedVehicleId && (customerVehicles.length === 0 || newVehicleOpen) && (
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <Input label="Brand" value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Maruti" />
                     <Input label="Model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="Swift" />
-                    <Input label="Registration number" value={regNumber} onChange={(e) => setRegNumber(e.target.value.toUpperCase())} placeholder="MP09XX1234" />
+                    <Input label="Registration number" value={regNumber} onChange={(e) => setRegNumber(e.target.value.toUpperCase())} placeholder="MP09XX1234" hint={regNumber && !validateIndianPlate(regNumber) ? PLATE_FORMAT_HINT : undefined} />
                   </div>
+                )}
+                {!selectedVehicleId && customerVehicles.length > 0 && !newVehicleOpen && (
+                  <p className="text-xs text-[var(--color-text-secondary)]">Pick a saved vehicle, or "+ New vehicle" to add one to the customer's account.</p>
                 )}
               </div>
 
@@ -486,17 +663,36 @@ export default function ManagerNewBookingPage() {
                     {customerAddresses.map((a) => (
                       <button
                         key={a.id}
-                        onClick={() => setSelectedAddressId((prev) => (prev === a.id ? null : a.id))}
-                        className={`rounded-xl border px-3.5 py-2 text-left text-sm ${
-                          selectedAddressId === a.id ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
+                        onClick={() => {
+                          setSelectedAddressId((prev) => (prev === a.id ? null : a.id));
+                          setNewAddressOpen(false);
+                        }}
+                        className={`max-w-full truncate rounded-xl border px-3.5 py-2 text-left text-sm ${
+                          selectedAddressId === a.id ? "border-2 border-black bg-[var(--color-primary-light)] font-medium" : "border-gray-200 hover:border-gray-300"
                         }`}
                       >
                         {a.label}: {a.line1}, {a.city}
                       </button>
                     ))}
+                    <button
+                      onClick={() => {
+                        setSelectedAddressId(null);
+                        setNewAddressOpen((o) => !o);
+                      }}
+                      className={`rounded-xl border border-dashed px-3.5 py-2 text-sm font-medium ${
+                        newAddressOpen && !selectedAddressId
+                          ? "border-2 border-solid border-black bg-[var(--color-primary-light)]"
+                          : "border-gray-300 text-[var(--color-text-secondary)] hover:border-gray-400"
+                      }`}
+                    >
+                      + New address
+                    </button>
                   </div>
                 )}
-                {!selectedAddressId && (
+                {!selectedAddressId && customerAddresses.length > 0 && !newAddressOpen && (
+                  <p className="text-xs text-[var(--color-text-secondary)]">Pick a saved address, or "+ New address" to add one — it's saved to the customer's account for next time.</p>
+                )}
+                {!selectedAddressId && (customerAddresses.length === 0 || newAddressOpen) && (
                   <div className="space-y-3">
                     <Input label="Address line" value={addressLine} onChange={(e) => setAddressLine(e.target.value)} required />
                     <Input label="Landmark (optional)" value={landmark} onChange={(e) => setLandmark(e.target.value)} />
@@ -562,8 +758,11 @@ export default function ManagerNewBookingPage() {
                 ) : (
                   selectedServices.map((s) => (
                     <div key={s.id} className="flex justify-between text-sm">
-                      <span className="text-[var(--color-text-secondary)]">{s.name}</span>
-                      <span className="font-mono-num text-[var(--color-text-primary)]">₹{priceFor(s, vehicleType)}</span>
+                      <span className="text-[var(--color-text-secondary)]">
+                        {s.name}
+                        {qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : ""}
+                      </span>
+                      <span className="font-mono-num text-[var(--color-text-primary)]">₹{priceFor(s, vehicleType) * qtyOf(s.id)}</span>
                     </div>
                   ))
                 )}
@@ -602,6 +801,17 @@ export default function ManagerNewBookingPage() {
                       </button>
                     ))}
                   </div>
+                  {/* Phone-in customers quote coupon codes too — the
+                    payload always supported it; the input didn't exist. */}
+                  {!subscriptionId && (
+                    <Input
+                      className="mt-3"
+                      label="Coupon code (optional)"
+                      value={couponCode}
+                      onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                      placeholder="e.g. WELCOME50"
+                    />
+                  )}
                 </div>
               )}
 
@@ -643,7 +853,7 @@ export default function ManagerNewBookingPage() {
             <div className="flex justify-between">
               <span className="text-[var(--color-text-secondary)]">Service</span>
               <span className="text-right font-medium text-[var(--color-text-primary)]">
-                {selectedCombo ? selectedCombo.name : selectedServices.length ? selectedServices.map((s) => s.name).join(", ") : "—"}
+                {selectedCombo ? selectedCombo.name : selectedServices.length ? selectedServices.map((s) => (qtyOf(s.id) > 1 ? `${s.name} ×${qtyOf(s.id)}` : s.name)).join(", ") : "—"}
               </span>
             </div>
             <div className="flex justify-between">
@@ -670,7 +880,7 @@ export default function ManagerNewBookingPage() {
 
       <Modal open={assignOpen} onClose={() => setAssignOpen(false)} title="Assign a subscription">
         <div className="space-y-4">
-          <Select label="Plan" value={assignPlanId} onChange={(e) => setAssignPlanId(e.target.value)}>
+          <Select label="Plan" value={assignPlanId} onChange={(e) => { setAssignPlanId(e.target.value); setAssignTypeId(""); }}>
             <option value="">Choose a plan</option>
             {(subscriptionPlans || []).map((p) => (
               <option key={p.id} value={p.id}>
@@ -678,8 +888,26 @@ export default function ManagerNewBookingPage() {
               </option>
             ))}
           </Select>
+          {(() => {
+            const plan = subscriptionPlans?.find((p) => p.id === assignPlanId);
+            if (!plan) return null;
+            const candidateTypes = plan.vehicle_types?.length
+              ? plan.vehicle_types
+              : (vehicleTypes || []).filter((t) => t.is_active !== false).map((t) => t.id);
+            if (!candidateTypes.length) return null;
+            return (
+              <Select label="Vehicle type (tier)" value={assignTypeId} onChange={(e) => setAssignTypeId(e.target.value)}>
+                <option value="">Choose the vehicle type it's sold for</option>
+                {candidateTypes.map((id) => (
+                  <option key={id} value={id}>
+                    {vehicleTypes?.find((t) => t.id === id)?.name || id} — ₹{planPriceFor(plan, id)}
+                  </option>
+                ))}
+              </Select>
+            );
+          })()}
           <p className="text-xs text-[var(--color-text-secondary)]">
-            Covers whichever of the customer's vehicles match the plan's type — no need to pick one now.
+            Priced for the chosen vehicle type — redeemable on that type or a smaller one, never bigger.
           </p>
           {assignError && <p className="text-sm text-[var(--color-error)]">{assignError}</p>}
           <Button

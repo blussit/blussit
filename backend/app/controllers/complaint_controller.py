@@ -31,7 +31,10 @@ class ComplaintController:
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def update(self, current_user: CurrentUser, complaint_id: str, payload: ComplaintUpdateRequest):
-        result = await self.service.update(complaint_id, payload, current_user.id)
+        result = await self.service.update(
+            complaint_id, payload, current_user.id,
+            actor_role=current_user.role, actor_center_id=current_user.service_center_id,
+        )
         await self.audit.log_action(
             current_user.id, current_user.role, "UPDATE_COMPLAINT", "complaints", complaint_id,
             {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None},

@@ -10,7 +10,7 @@ from app.core.dependencies import (
     require_captain,
     require_manager_or_admin,
 )
-from app.schemas.staff_ops_schema import CheckInRequest, LeaveRequestCreate, LeaveReviewRequest
+from app.schemas.staff_ops_schema import CheckInRequest, CheckOutRequest, LeaveRequestCreate, LeaveReviewRequest
 
 attendance_router = APIRouter(prefix="/attendance", tags=["Attendance"], dependencies=[Depends(require_captain)])
 leave_router = APIRouter(prefix="/leave-requests", tags=["Leave Requests"])
@@ -22,8 +22,12 @@ async def check_in(payload: CheckInRequest, current_user: CurrentUser = Depends(
 
 
 @attendance_router.post("/check-out")
-async def check_out(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await AttendanceController(db).check_out(current_user)
+async def check_out(
+    payload: CheckOutRequest | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return await AttendanceController(db).check_out(current_user, payload)
 
 
 @attendance_router.get("/my")

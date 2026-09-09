@@ -1,10 +1,6 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
-
-
-class TopUpRequest(BaseModel):
-    amount: float = Field(gt=0)
 
 
 class WithdrawalCreateRequest(BaseModel):
@@ -12,7 +8,9 @@ class WithdrawalCreateRequest(BaseModel):
 
 
 class WithdrawalReviewRequest(BaseModel):
-    status: str  # approved | rejected | paid
+    # Literal, not a bare str: a typo'd/case-variant status ("Approved")
+    # used to be written verbatim while silently skipping the debit.
+    status: Literal["approved", "rejected", "paid"]
     review_note: Optional[str] = None
 
 

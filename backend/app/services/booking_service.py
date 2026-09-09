@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -9,6 +10,7 @@ from app.core.ws_manager import manager as ws_manager
 from app.models.enums import BookingStatus, NotificationType, PaymentMethod, PaymentStatus
 from app.repositories.address_repository import AddressRepository
 from app.repositories.booking_repository import BookingRepository, BookingStatusHistoryRepository
+from app.repositories.captain_location_repository import CaptainLocationRepository
 from app.repositories.catalog_repository import ComboOfferRepository, ServiceRepository
 from app.repositories.inventory_repository import InventoryRepository
 from app.repositories.service_center_repository import ServiceCenterRepository
@@ -45,6 +47,16 @@ from app.utils.serializers import serialize_doc, serialize_list
 START_WINDOW_MINUTES = 30
 ACTIVE_CAPTAIN_STATUSES = {BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value}
 FRAUD_CHECK_EXCLUDED_STATUSES = [BookingStatus.CANCELLED.value]
+# CANCELLATION POLICY, phase 1 (the only part enforced in code today):
+# customers can self-cancel only while the booking is still unassigned AND
+# more than this many hours before the slot starts. Inside the window (or
+# once a captain is assigned) the customer-facing cancel path is closed —
+# staff can still cancel on their behalf. The published policy's charge
+# tiers (₹50 / ₹80 / ₹100, prepaid-only for repeat offenders) are
+# documented on the public cancellation-policy page but NOT charged yet.
+CUSTOMER_CANCEL_LOCK_HOURS = 4
+# Per-unit add-on quantity ceiling — nobody books 50 bike washes at a door.
+MAX_ADDON_QTY = 10
 # How captain lateness affects their payout for this job — see start_heading().
 # Starting within the slot's own window (or up to 30 min early) costs nothing;
 # starting inside the grace period after the slot costs a slice of the service
@@ -219,6 +231,40 @@ def _slot_cutoff_passed(slot_end: datetime, policy: dict) -> bool:
     return now_ist() > slot_end - timedelta(minutes=policy["slot_booking_cutoff_minutes"])
 
 
+def _effective_start_anchor(booking: dict, slot_start: datetime, policy: dict) -> datetime:
+    """The moment a captain's lateness is measured from. Normally the
+    booking's own anchor (estimated_start_at / slot start) — but when the
+    captain was only ASSIGNED near or after that time (last-minute booking:
+    customer books at 6:30 inside a 4-7 slot, manager assigns 6:35), he
+    cannot be late for a time that predates him having the job. The late
+    clock then starts late_assignment_grace_minutes (default 15) after the
+    assignment instead. max() means the grace can only ever EXTEND the
+    deadline for genuinely late assignments — a captain assigned the day
+    before keeps the normal slot anchor."""
+    assigned_at = booking.get("assigned_at")
+    if not assigned_at:
+        return slot_start
+    grace = timedelta(minutes=policy.get("late_assignment_grace_minutes", 15))
+    return max(slot_start, from_stored(assigned_at) + grace)
+
+
+def _ensure_within_advance_window(scheduled_date: datetime, policy: dict) -> None:
+    """Bookings (and slot holds) are only accepted from today IST through
+    max_advance_days-1 days out — a 7-day policy means today + the next 6
+    days. Applied at EVERY scheduling entry point (create, manager
+    on-behalf create, reschedule, guest slot hold, slot availability), so
+    no path is a backdoor around the window."""
+    max_days = int(policy.get("max_advance_days", 7))
+    today = now_ist().date()
+    target = to_ist(scheduled_date).date() if scheduled_date.tzinfo else scheduled_date.date()
+    if target < today:
+        raise BadRequestException("That date has already passed — please pick a new date.")
+    if target > today + timedelta(days=max_days - 1):
+        raise BadRequestException(
+            f"Bookings open up to {max_days} days in advance — please pick a date within the next {max_days} days."
+        )
+
+
 def format_slot_start_12h(scheduled_slot: str) -> str:
     """"17:00-17:30" -> "5:00 PM" — for human-facing messages (reminder
     notifications, etc.) that should state the actual time rather than a
@@ -238,11 +284,11 @@ def format_slot_start_12h(scheduled_slot: str) -> str:
 _CUSTOMER_HIDDEN_FIELDS = (
     "captain_earning", "platform_earning", "captain_travel_pay", "captain_service_pay", "wallet_settled",
     "captain_start_stage", "late_penalty_pct",
-    # issue_notes is written for staff — operational detail like "47 minutes
-    # after the scheduled slot time" or "reassign a captain or reschedule
-    # this booking". The customer still sees the generic issue_flag label
-    # (e.g. "Captain started late") via ISSUE_LABELS, just not this detail.
-    "issue_notes",
+    # The whole issue-flag machinery is internal ops (manager ↔ captain):
+    # "Captain started late", geofence flags, missed-window states. The
+    # customer must never see their captain publicly flagged (founder
+    # call) — they get the status + transparency timeline, nothing else.
+    "issue_flag", "issue_notes", "issue_flagged_at", "issue_resolved",
 )
 _CAPTAIN_HIDDEN_FIELDS = ("platform_earning",)
 
@@ -320,8 +366,113 @@ class BookingService:
         self.wallet_service = WalletService(db)
         self.policy_service = BookingPolicyService(db)
         self.capacity_policy_service = CapacityPolicyService(db)
+        self.location_repo = CaptainLocationRepository(db)
 
-    async def create_booking(self, customer_id: str, payload: BookingCreateRequest, _skip_verification_gate: bool = False, source: str = "app") -> dict:
+    _BIKE_WORD = re.compile(r"bike|scooter|two.?wheeler", re.IGNORECASE)
+
+    async def _validate_service_mix(self, services: list[dict], vehicle: dict, raw_quantities: dict) -> dict[str, int]:
+        """The catalogue's add-on/base/variant rules, enforced server-side so
+        no client (app, guest wizard, staff panel, WhatsApp bot) can compose
+        an impossible booking:
+
+          - at least one NON-add-on base service (an add-on never rides alone);
+          - one pick per variant_group (you can't take "2 bikes" AND "4 bikes");
+          - every service must fit the booking vehicle's class (car vs bike,
+            classified from the vehicle-type name) — with ONE deliberate combo
+            exception: a CAR booking that adds bikes via a car-class
+            bike-wash add-on (Extra Bike Wash, ₹60/bike) may also carry the
+            bike-class polish add-on for those bikes;
+          - quantities: only per-bike add-ons may repeat; bike polish can
+            never exceed the number of bikes actually in the booking
+            (variant label count on a bike booking, added-bike count on a
+            car booking).
+
+        Returns {service_id: qty>=1} for every selected service.
+        """
+        type_docs = await self.db.vehicle_types.find({}).to_list(length=None)
+        is_bike_type = {str(t["_id"]): bool(self._BIKE_WORD.search(t.get("name", ""))) for t in type_docs}
+        booking_is_bike = is_bike_type.get(vehicle["vehicle_type"], False)
+
+        def classes_of(svc: dict) -> set[str]:
+            ids = svc.get("vehicle_types") or []
+            if not ids:
+                return {"car", "bike"}  # unrestricted service
+            return {"bike" if is_bike_type.get(i) else "car" for i in ids}
+
+        def is_addon(svc: dict) -> bool:
+            return bool(svc.get("is_addon"))
+
+        # The "add a bike" line (an add-on with "bike" in its name, no
+        # "polish") — its quantity IS the number of extra bikes joining the
+        # booking. Valid on BOTH classes: a car wash adds bikes at ₹60
+        # each, and a bike wash counts bikes as base + N extras (₹99 +
+        # ₹60 per additional bike — the UI's single −/+ counter).
+        def adds_bikes(svc: dict) -> bool:
+            name = svc.get("name", "")
+            return is_addon(svc) and bool(self._BIKE_WORD.search(name)) and "polish" not in name.lower()
+
+        def is_bike_polish(svc: dict) -> bool:
+            return is_addon(svc) and classes_of(svc) == {"bike"} and "polish" in svc.get("name", "").lower()
+
+        if not any(not is_addon(s) for s in services):
+            raise BadRequestException("Add-on services can only be booked along with a main service — pick a wash first.")
+
+        seen_groups: set[str] = set()
+        for s in services:
+            group = s.get("variant_group")
+            if group:
+                if group in seen_groups:
+                    raise BadRequestException(f"Pick just one option for {s['name'].split('(')[0].strip()}.")
+                seen_groups.add(group)
+
+        # Normalize quantities first — bike-count math below depends on them.
+        quantities: dict[str, int] = {}
+        for s in services:
+            sid = str(s["_id"])
+            qty = int(raw_quantities.get(sid, 1) or 1)
+            per_unit = adds_bikes(s) or is_bike_polish(s)
+            if qty < 1 or qty > MAX_ADDON_QTY or (qty > 1 and not per_unit):
+                raise BadRequestException(f"Invalid quantity for {s['name']}.")
+            quantities[sid] = qty
+
+        # How many bikes are in this booking? Extra-bike add-ons count on
+        # BOTH classes; on a bike booking they stack on the base wash's
+        # variant count (normally 1 — the −/+ counter books base + extras).
+        extra_bikes = sum(quantities[str(s["_id"])] for s in services if adds_bikes(s))
+        if booking_is_bike:
+            bike_count = 1
+            for s in services:
+                if not is_addon(s) and s.get("variant_label"):
+                    m = re.search(r"\d+", s["variant_label"])
+                    if m:
+                        bike_count = int(m.group())
+            bike_count += extra_bikes
+        else:
+            bike_count = extra_bikes
+
+        booking_class = "bike" if booking_is_bike else "car"
+        for s in services:
+            svc_classes = classes_of(s)
+            if booking_class in svc_classes:
+                continue
+            if adds_bikes(s):
+                continue  # the add-a-bike line rides on both classes
+            if not booking_is_bike and is_bike_polish(s) and bike_count > 0:
+                continue  # the combo exception: polish for the added bikes
+            raise BadRequestException(
+                f"{s['name']} isn't available for this vehicle"
+                + (" — add a bike to the booking first." if is_bike_polish(s) else ".")
+            )
+
+        for s in services:
+            if is_bike_polish(s) and quantities[str(s["_id"])] > bike_count:
+                raise BadRequestException(
+                    f"Bike polish is per bike — this booking has {bike_count} bike{'s' if bike_count != 1 else ''}."
+                )
+
+        return quantities
+
+    async def create_booking(self, customer_id: str, payload: BookingCreateRequest, _skip_verification_gate: bool = False, source: str = "app", _allow_pinless: bool = False) -> dict:
         vehicle = await self.vehicle_repo.find_by_id(payload.vehicle_id)
         if not vehicle or vehicle["owner_id"] != customer_id:
             raise NotFoundException("Vehicle not found")
@@ -335,12 +486,14 @@ class BookingService:
             raise NotFoundException("Customer not found")
         # Phone verification gate: a customer must complete an OTP
         # (POST /auth/verify-phone/request + /confirm) before their FIRST
-        # self-service booking; once phone_verified is set it's permanent,
+        # self-service booking; verification now EXPIRES after 90 days
         # so every booking after that skips this. _skip_verification_gate
         # is set only by create_booking_for_customer (a manager/admin
         # booking on the customer's behalf) — staff-initiated bookings are
         # never gated on the customer's own verification status.
-        if not _skip_verification_gate and not customer.get("phone_verified"):
+        from app.services.auth_service import AuthService
+
+        if not _skip_verification_gate and not AuthService.phone_verification_fresh(customer):
             raise PhoneNotVerifiedException()
 
         # Resolve what's actually being purchased: either a combo bundle (its own
@@ -363,13 +516,21 @@ class BookingService:
                 raise NotFoundException(f"Service not found or inactive: {service_id}")
             services.append(service)
 
-        duration_minutes = sum(s.get("duration_minutes", 30) for s in services) or 30
+        # Add-on/base/variant rules + per-unit quantities — combos are
+        # admin-curated bundles and skip the mix rules by design.
+        if combo:
+            quantities = {str(s["_id"]): 1 for s in services}
+        else:
+            quantities = await self._validate_service_mix(services, vehicle, payload.service_quantities or {})
+
+        duration_minutes = sum(s.get("duration_minutes", 30) * quantities[str(s["_id"])] for s in services) or 30
 
         policy = await self.policy_service.get_policy()
         # Service center must be known BEFORE slot validation — slots are
         # generated from the CENTER's own working hours/slot duration, not
         # a global policy window (see _resolve_slot_window).
-        service_center, distance_km = await self._resolve_service_center(address)
+        service_center, distance_km = await self._resolve_service_center(address, allow_pinless=_allow_pinless)
+        _ensure_within_advance_window(payload.scheduled_date, policy)
         date_str = to_ist(payload.scheduled_date).strftime("%Y-%m-%d")
         slot_start, slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
         if _slot_cutoff_passed(slot_end, policy):
@@ -396,7 +557,7 @@ class BookingService:
         if combo:
             subtotal = self._resolve_price(combo, vehicle_type, first_time_eligible)
         else:
-            subtotal = sum(self._resolve_price(s, vehicle_type, first_time_eligible) for s in services)
+            subtotal = sum(self._resolve_price(s, vehicle_type, first_time_eligible) * quantities[str(s["_id"])] for s in services)
 
         discount_amount = 0.0
         payment_method = payload.payment_method
@@ -409,7 +570,12 @@ class BookingService:
             # durably created, so a failure in between (pricing split,
             # the insert itself, anything) can never leave a subscription
             # silently decremented for a booking that doesn't exist.
-            subscription_consumption = await self.subscription_service.plan_consumption(payload.subscription_id, payload.vehicle_id, services)
+            # customer_id here is the BOOKING's customer (also the target
+            # customer when a manager books on someone's behalf) — the
+            # subscription must belong to exactly that person.
+            subscription_consumption = await self.subscription_service.plan_consumption(
+                payload.subscription_id, payload.vehicle_id, services, customer_id
+            )
             payment_method = PaymentMethod.SUBSCRIPTION
             discount_amount = await self._subscription_discount(payload.subscription_id, services, vehicle_type, first_time_eligible)
         elif payload.coupon_code:
@@ -418,19 +584,40 @@ class BookingService:
             )
 
         tax_amount = 0.0
-        total_amount = round(subtotal - discount_amount + tax_amount, 2)
+        # A discount can legitimately be computed above the subtotal (e.g. a
+        # combo priced below the sum of its parts under a full-waive legacy
+        # plan) — clamp it, or the booking books a NEGATIVE total and the
+        # `total <= 0 → PAID` rule below marks it paid while poisoning every
+        # revenue aggregate downstream.
+        discount_amount = min(discount_amount, subtotal)
+        total_amount = round(max(0.0, subtotal - discount_amount) + tax_amount, 2)
 
         primary_service = services[0] if services else None
         split = await self.pricing_service.calculate_split(subtotal, distance_km, primary_service)
 
         manager_id = service_center.get("manager_id")
+        from app.services.route_service import road_distance_eta
+
+        _center_lat, _center_lng = self._center_coords(service_center)
+        _route = await road_distance_eta(
+            _center_lat, _center_lng,
+            address.get("latitude"), address.get("longitude"),
+        )
+        travel_estimate = {
+            "travel_distance_km": _route["km"] if _route else None,
+            "travel_eta_minutes": _route["minutes"] if _route else None,
+            "travel_estimate_source": _route["source"] if _route else None,
+        }
+
         booking_doc = {
-            "booking_number": self.repo.generate_booking_number(),
+            "booking_number": await self.repo.generate_unique_booking_number(),
             "customer_id": customer_id,
             "vehicle_id": payload.vehicle_id,
             "address_id": payload.address_id,
             "service_center_id": str(service_center["_id"]),
             "service_ids": service_ids,
+            # Only quantities above 1 are stored — {sid: 3} means "×3".
+            "service_quantities": {sid: q for sid, q in quantities.items() if q > 1},
             "subscription_id": payload.subscription_id,
             "scheduled_date": payload.scheduled_date,
             "scheduled_slot": payload.scheduled_slot,
@@ -463,6 +650,10 @@ class BookingService:
             # reservation above, same manager queue, same slot policy),
             # never a parallel second system.
             "source": source,
+            # Real-road distance + ETA (Routes API; haversine-marked
+            # fallback) — captain job card + KPI travel stats. Pricing
+            # keeps using distance_km below, unchanged.
+            **travel_estimate,
             "distance_km": split["distance_km"],
             "captain_travel_pay": split["captain_travel_pay"],
             "captain_service_pay": split["captain_service_pay"],
@@ -485,7 +676,10 @@ class BookingService:
         # daily-cap-after-slot-cap case, which self-corrects even outside
         # a transaction).
         async def _do_create(session):
-            await self._reserve_slot_capacity(session, service_center, date_str, payload.scheduled_slot)
+            await self._reserve_slot_capacity(
+                session, service_center, date_str, payload.scheduled_slot,
+                holder_ids=[customer_id, getattr(payload, "hold_key", None)],
+            )
             return await self.repo.create(booking_doc, session=session)
 
         try:
@@ -510,12 +704,15 @@ class BookingService:
             await self.coupon_service.record_usage(str(coupon["_id"]), customer_id, booking_id)
 
         await self._record_history(booking_id, BookingStatus.PENDING, customer_id, "Booking created")
+        wa_name, wa_services = await self._wa_ctx(created)
         await self.notifications.notify(
             customer_id,
             "Booking confirmed",
             f"Your booking {created['booking_number']} has been received and is pending assignment.",
             NotificationType.BOOKING,
             booking_id,
+            wa_event="booking_confirmed",
+            wa_params=[wa_name, wa_services, date_str, created.get("scheduled_slot", ""), created["booking_number"]],
         )
         if service_center.get("manager_id"):
             await self.notifications.notify(
@@ -552,6 +749,7 @@ class BookingService:
             vehicle_id=vehicle_id,
             address_id=address_id,
             service_ids=payload.service_ids,
+            service_quantities=payload.service_quantities or {},
             combo_id=payload.combo_id,
             scheduled_date=payload.scheduled_date,
             scheduled_slot=payload.scheduled_slot,
@@ -564,7 +762,7 @@ class BookingService:
         )
         # Staff-initiated — never gated on the customer's own phone
         # verification (see create_booking's _skip_verification_gate).
-        result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True, source="staff")
+        result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True, source="staff", _allow_pinless=True)
         await self._record_history(
             result["id"], BookingStatus.PENDING, actor_id, f"Booking created by staff on behalf of customer {payload.customer_id}"
         )
@@ -612,18 +810,25 @@ class BookingService:
 
         A plan with `included_service_ids` set names EXACTLY what it covers —
         admin decides that, not the customer at booking time. Any of those
-        services is fully free. Booking something else on the same
+        services is fully free. Booking a different MAIN service on the same
         subscription is a same-visit "swap": covered only up to the cheapest
         service the plan actually includes, the rest is a real charge (e.g. a
         plan covering a ₹399 Foam Wash can swap to a ₹799 Deep Clean for a
         ₹400 top-up, not for free) — never blocked outright, never free
-        either. Plans with no included_service_ids (legacy/unrestricted, sold
-        before this existed) keep the original behavior: fully waived,
-        whatever was picked."""
+        either. A CHEAPER swap is simply covered: it still consumes one full
+        visit and the gap is never credited back — the customer's call.
+
+        ADD-ONS are never covered by a plan (unless the admin explicitly put
+        one in included_service_ids): riding a bike wash (₹60/bike), polish,
+        etc. on a plan visit is always a real extra charge — mirrored by
+        plan_consumption, which likewise doesn't count add-ons against the
+        visit quota. This applies to legacy/unrestricted plans (no
+        included_service_ids) too: those waive any MAIN service picked, but
+        add-ons still cost money."""
         plan = await self.subscription_service.get_plan(subscription_id)
         included_ids = set((plan or {}).get("included_service_ids") or [])
         if not included_ids:
-            return sum(self._resolve_price(s, vehicle_type, first_time_eligible) for s in services)
+            return round(sum(self._resolve_price(s, vehicle_type, first_time_eligible) for s in services if not s.get("is_addon")), 2)
 
         included_docs = await self.service_repo.find_by_ids(list(included_ids))
         included_prices = [self._resolve_price(s, vehicle_type, first_time_eligible) for s in included_docs]
@@ -632,7 +837,12 @@ class BookingService:
         discount = 0.0
         for s in services:
             price = self._resolve_price(s, vehicle_type, first_time_eligible)
-            discount += price if str(s["_id"]) in included_ids else min(baseline, price)
+            if str(s["_id"]) in included_ids:
+                discount += price
+            elif s.get("is_addon"):
+                continue  # paid extra, always — see docstring
+            else:
+                discount += min(baseline, price)
         return round(discount, 2)
 
     async def _captain_conflict(
@@ -706,10 +916,15 @@ class BookingService:
     async def _notify_location_flag(self, booking: dict, stage: str, distance_m: float | None) -> None:
         center = await self.center_repo.find_by_id(booking["service_center_id"])
         if center and center.get("manager_id"):
+            what = (
+                "The captain pressed 'reached'"
+                if stage == "arrival"
+                else f"The {stage}-photo was captured"
+            )
             await self.notifications.notify(
                 center["manager_id"],
-                f"Location flagged on booking {booking['booking_number']}",
-                f"The {stage}-photo was captured {distance_m}m from the customer's address — worth a quick review.",
+                f"🚨 Location flagged — booking {booking['booking_number']}",
+                f"{what} {distance_m}m from the customer's address — worth a quick review.",
                 NotificationType.BOOKING,
                 str(booking["_id"]),
             )
@@ -728,16 +943,36 @@ class BookingService:
         duration = center.get("slot_duration_minutes") or policy["slot_duration_minutes"]
         raw_slots = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
 
-        scheduled_date = datetime.strptime(date_str, "%Y-%m-%d")
+        try:
+            scheduled_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise BadRequestException("Invalid date")
+        # Same window every booking path enforces — showing slots the
+        # submit would reject is just a broken promise to the customer.
+        _ensure_within_advance_window(scheduled_date, policy)
+        # Expired holds must never make a slot look busier than it is —
+        # sweep this center/date before computing (the reminder loop also
+        # sweeps globally as a backstop).
+        await self._sweep_holds({"service_center_id": service_center_id, "date": date_str})
+        # One query for the whole day's capacity docs — this endpoint is
+        # public and polled every 60s per open slot picker; a find per slot
+        # multiplied that traffic by ~12.
+        day_docs = {
+            d["slot_key"]: d
+            for d in await self.slot_capacity_repo.collection.find(
+                {"service_center_id": service_center_id, "date": date_str}
+            ).to_list(length=200)
+        }
         results = []
         for slot in raw_slots:
             slot_start, slot_end = _resolve_slot_window(center, scheduled_date, slot["key"], policy)
             cutoff_passed = _slot_cutoff_passed(slot_end, policy)
-            doc = await self.slot_capacity_repo.find_one({"service_center_id": service_center_id, "date": date_str, "slot_key": slot["key"]})
+            doc = day_docs.get(slot["key"])
             capacity = doc["capacity"] if doc else await self._default_slot_capacity(center, date_str, slot["key"])
             booked = doc["booked_count"] if doc else 0
+            held = (doc or {}).get("held_count", 0) or 0
             is_closed = bool(doc and doc.get("is_closed"))
-            remaining_actual = max(capacity - booked, 0)
+            remaining_actual = max(capacity - booked - held, 0)
 
             if cutoff_passed or is_closed or remaining_actual <= 0:
                 status, remaining = "full", 0
@@ -842,7 +1077,117 @@ class BookingService:
         policy = await self.capacity_policy_service.get_effective_policy(str(service_center["_id"]), date_str)
         return policy["max_bookings_per_day"] or service_center.get("max_bookings_per_day")
 
-    async def _reserve_slot_capacity(self, session, service_center: dict, date_str: str, slot_key: str) -> None:
+    # ------------------------------------------------------------------
+    # Slot holds — the theater-seat model (AUDIT.md M1). A hold claims one
+    # unit of a slot's capacity for HOLD_MINUTES while the customer walks
+    # the rest of the flow; every other customer (web AND WhatsApp) sees
+    # the slot shrink immediately. Confirming converts the hold into a
+    # booking; abandoning releases it; expiry is swept both by the
+    # reminder loop and opportunistically on every availability read.
+    # ------------------------------------------------------------------
+
+    HOLD_MINUTES = 5
+    _OCCUPIED_EXPR = {"$add": ["$booked_count", {"$ifNull": ["$held_count", 0]}]}
+
+    def _hold_filter(self, center_id: str, date_str: str, slot_key: str) -> dict:
+        return {"service_center_id": center_id, "date": date_str, "slot_key": slot_key}
+
+    async def _sweep_holds(self, extra_filter: dict | None = None) -> int:
+        """Releases expired holds (delete doc + decrement held_count) —
+        one at a time so a concurrent sweeper can never double-decrement:
+        only whoever actually deleted the doc decrements."""
+        query = {"expires_at": {"$lt": datetime.now(timezone.utc)}, **(extra_filter or {})}
+        released = 0
+        # Drain in batches until empty (bounded at 10 batches/pass as a
+        # safety valve) — a single capped batch meant a burst of >200
+        # expiring holds per minute never fully drained, leaving slots
+        # permanently over-reserved.
+        for _ in range(10):
+            batch = await self.db.slot_holds.find(query).limit(200).to_list(length=200)
+            if not batch:
+                break
+            for hold in batch:
+                result = await self.db.slot_holds.delete_one({"_id": hold["_id"]})
+                if result.deleted_count:
+                    await self.slot_capacity_repo.increment_if(
+                        self._hold_filter(hold["service_center_id"], hold["date"], hold["slot_key"]),
+                        {"held_count": -1},
+                        expr_guard=["$gt", {"$ifNull": ["$held_count", 0]}, 0],
+                    )
+                    released += 1
+            if len(batch) < 200:
+                break
+        return released
+
+    async def hold_slot(self, holder_id: str, service_center_id: str, date_str: str, slot_key: str) -> dict:
+        """Acquires (or renews) a temporary hold on one slot unit."""
+        from bson import ObjectId as _OID
+
+        if not _OID.is_valid(service_center_id):
+            raise NotFoundException("Service center not found")
+        center = await self.center_repo.find_by_id(service_center_id)
+        if not center:
+            raise NotFoundException("Service center not found")
+        # This endpoint is unauthenticated by design (guests hold slots
+        # while filling the wizard) — so the date and slot key MUST be
+        # validated against the center's real generated slots. Accepting
+        # arbitrary strings minted junk slot_capacity docs forever and let
+        # an attacker "hold" invented slots.
+        try:
+            parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise BadRequestException("Invalid date")
+        policy = await self.policy_service.get_policy()
+        _ensure_within_advance_window(parsed_date, policy)
+        _resolve_slot_window(center, parsed_date, slot_key, policy)  # raises on an invented key
+        slot_filter = self._hold_filter(service_center_id, date_str, slot_key)
+        await self._sweep_holds(slot_filter)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.HOLD_MINUTES)
+
+        # Renewal: the same holder re-picking their held slot just extends it.
+        renewed = await self.db.slot_holds.find_one_and_update(
+            {**slot_filter, "holder_id": holder_id}, {"$set": {"expires_at": expires_at}}
+        )
+        if renewed:
+            return {"held": True, "renewed": True, "expires_at": expires_at.isoformat(), "hold_seconds": self.HOLD_MINUTES * 60}
+
+        default_capacity = await self._default_slot_capacity(center, date_str, slot_key)
+        slot_doc = await self.slot_capacity_repo.get_or_init(
+            slot_filter, {"capacity": default_capacity, "booked_count": 0, "held_count": 0, "is_closed": False}
+        )
+        if slot_doc.get("is_closed"):
+            raise BadRequestException("This slot has been closed for booking — please pick another.")
+        claimed = await self.slot_capacity_repo.increment_if(
+            {**slot_filter, "is_closed": False},
+            {"held_count": 1},
+            expr_guard=["$lt", self._OCCUPIED_EXPR, "$capacity"],
+        )
+        if claimed is None:
+            raise BadRequestException("This slot just became fully booked — please pick another.")
+        try:
+            await self.db.slot_holds.insert_one({
+                **slot_filter, "holder_id": holder_id,
+                "created_at": datetime.now(timezone.utc), "expires_at": expires_at,
+            })
+        except DuplicateKeyError:
+            # Same holder double-tapped concurrently: give back the extra
+            # unit we just claimed and treat it as a renewal.
+            await self.slot_capacity_repo.increment_if(
+                slot_filter, {"held_count": -1}, expr_guard=["$gt", {"$ifNull": ["$held_count", 0]}, 0]
+            )
+            await self.db.slot_holds.update_one({**slot_filter, "holder_id": holder_id}, {"$set": {"expires_at": expires_at}})
+        return {"held": True, "renewed": False, "expires_at": expires_at.isoformat(), "hold_seconds": self.HOLD_MINUTES * 60}
+
+    async def release_hold(self, holder_id: str, service_center_id: str, date_str: str, slot_key: str) -> dict:
+        slot_filter = self._hold_filter(service_center_id, date_str, slot_key)
+        result = await self.db.slot_holds.delete_one({**slot_filter, "holder_id": holder_id})
+        if result.deleted_count:
+            await self.slot_capacity_repo.increment_if(
+                slot_filter, {"held_count": -1}, expr_guard=["$gt", {"$ifNull": ["$held_count", 0]}, 0]
+            )
+        return {"released": bool(result.deleted_count)}
+
+    async def _reserve_slot_capacity(self, session, service_center: dict, date_str: str, slot_key: str, holder_ids: list[str] | None = None) -> None:
         """Atomically reserves one spot in this slot (and, if the center
         has a daily cap configured, one spot in the day too) — single
         find_one_and_update per counter, no retry loop needed since the
@@ -860,10 +1205,37 @@ class BookingService:
         )
         if slot_doc.get("is_closed"):
             raise BadRequestException("This slot has been closed for booking — please pick another.")
-        reserved = await self.slot_capacity_repo.increment_if(
-            {**slot_key_filter, "is_closed": False}, {"booked_count": 1}, expr_guard=["$lt", "$booked_count", "$capacity"], session=session
-        )
+        # Consume the booker's own hold (if any) so it converts instead of
+        # blocking them; everyone else's holds count as occupied. A booker
+        # WITH a hold is guaranteed a seat by the hold invariant
+        # (booked + held <= capacity), so their guard is the plain
+        # booked < capacity; a booker without one must clear booked+held.
+        had_hold = False
+        if holder_ids:
+            deleted = await self.db.slot_holds.delete_one(
+                {**slot_key_filter, "holder_id": {"$in": [h for h in holder_ids if h]}}, session=session
+            )
+            had_hold = bool(deleted.deleted_count)
+        if had_hold:
+            reserved = await self.slot_capacity_repo.increment_if(
+                {**slot_key_filter, "is_closed": False},
+                {"booked_count": 1, "held_count": -1},
+                expr_guard=["$lt", "$booked_count", "$capacity"],
+                session=session,
+            )
+        else:
+            reserved = await self.slot_capacity_repo.increment_if(
+                {**slot_key_filter, "is_closed": False},
+                {"booked_count": 1},
+                expr_guard=["$lt", self._OCCUPIED_EXPR, "$capacity"],
+                session=session,
+            )
         if reserved is None:
+            if had_hold:
+                # The consumed hold's unit must not leak.
+                await self.slot_capacity_repo.increment_if(
+                    slot_key_filter, {"held_count": -1}, expr_guard=["$gt", {"$ifNull": ["$held_count", 0]}, 0], session=session
+                )
             raise BadRequestException("This slot just became fully booked — please pick another.")
 
         max_daily = await self._effective_daily_max(service_center, date_str)
@@ -893,9 +1265,48 @@ class BookingService:
         day_filter = {"service_center_id": service_center_id, "date": date_str}
         await self.daily_capacity_repo.increment_if(day_filter, {"booked_count": -1}, expr_guard=["$gt", "$booked_count", 0], session=session)
 
-    async def _resolve_service_center(self, address: dict) -> tuple[dict, float]:
-        if address.get("latitude") is not None and address.get("longitude") is not None:
-            match = await self.center_repo.find_nearest(address["latitude"], address["longitude"])
+    async def _resolve_service_center(self, address: dict, allow_pinless: bool = False) -> tuple[dict, float]:
+        from app.services.zone_service import ZoneService
+        from app.utils.geo import haversine_km
+
+        lat, lng = address.get("latitude"), address.get("longitude")
+
+        # Polygon zones are the authority WHEN they exist and the address
+        # has a real pin: the pin either falls inside a drawn zone or the
+        # area isn't served — a mistyped pincode can no longer smuggle an
+        # out-of-area booking in, and can no longer block an in-area one.
+        zones = ZoneService(self.db)
+        zoned = await zones.zones_exist()
+        # Once zones exist, a typed-only address (no pin) can't prove where
+        # it actually is — customer self-service REQUIRES the pin. Staff
+        # bookings (allow_pinless) keep the legacy pincode path for
+        # phone-in customers a manager vouches for.
+        if zoned and (lat is None or lng is None) and not allow_pinless:
+            raise BadRequestException(
+                "Please select your area from the suggestions or pin your location on the map — "
+                "typed addresses alone can't be verified against our service area. [PIN_REQUIRED]"
+            )
+        if lat is not None and lng is not None and zoned:
+            matches = await zones.zones_for_point(lat, lng)
+            if not matches:
+                raise BadRequestException("Doorstep service is not yet available at this exact location")
+            best: tuple[dict, float] | None = None
+            for zone in matches:
+                center = await self.center_repo.find_by_id(zone["service_center_id"])
+                if not center or not center.get("is_active", True):
+                    continue
+                c_lat, c_lng = self._center_coords(center)
+                distance = haversine_km(lat, lng, c_lat, c_lng) if c_lat is not None else 0.0
+                if best is None or distance < best[1]:
+                    best = (center, round(distance, 2))
+            if best:
+                return best
+            raise BadRequestException("Doorstep service is not yet available at this exact location")
+
+        # Legacy behavior (no zones drawn, or an address without a pin):
+        # nearest center by coordinates, else pincode match.
+        if lat is not None and lng is not None:
+            match = await self.center_repo.find_nearest(lat, lng)
             if match:
                 return match
 
@@ -922,7 +1333,11 @@ class BookingService:
 
     async def list_for_customer(self, customer_id: str, status: str | None, page: int, page_size: int):
         items, total = await self.repo.list_for_customer(customer_id, status, page, page_size)
-        return [_redact_financials(b, "customer") for b in serialize_list(items)], total
+        # Enriched exactly like the captain/staff lists (service_names,
+        # vehicle snapshot…) — the customer's own booking cards need the
+        # real service names, not a "Service" fallback.
+        enriched = await self._enrich_bookings(items)
+        return [_redact_financials(b, "customer") for b in enriched], total
 
     async def list_for_captain(self, captain_id: str, status: str | None, page: int, page_size: int):
         items, total = await self.repo.list_for_captain(captain_id, status, page, page_size)
@@ -941,6 +1356,7 @@ class BookingService:
         customer_ids = {b.get("customer_id") for b in bookings}
         vehicle_ids = {b.get("vehicle_id") for b in bookings}
         address_ids = {b.get("address_id") for b in bookings}
+        captain_ids = {b.get("captain_id") for b in bookings if b.get("captain_id")}
         service_ids: set[str] = set()
         combo_ids: set[str] = set()
         for b in bookings:
@@ -950,6 +1366,7 @@ class BookingService:
                 service_ids.update(b.get("service_ids") or [])
 
         customers = {str(u["_id"]): u for u in await self.user_repo.find_by_ids(list(customer_ids))}
+        captains = {str(u["_id"]): u for u in await self.user_repo.find_by_ids(list(captain_ids))} if captain_ids else {}
         vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))}
         addresses = {str(a["_id"]): a for a in await self.address_repo.find_by_ids(list(address_ids))}
         services = {str(s["_id"]): s for s in await self.service_repo.find_by_ids(list(service_ids))} if service_ids else {}
@@ -965,6 +1382,24 @@ class BookingService:
             doc["customer_name"] = customer.get("full_name") if customer else None
             # customer_phone is already snapshotted on the booking itself at
             # creation time — kept as-is, no lookup needed for it.
+            # The captain's public card, deliberately shared with the
+            # CUSTOMER once someone is assigned — photo, staff id and phone
+            # so they know exactly who is coming to their door. Only these
+            # five fields; never location, KYC numbers, or anything else
+            # from the captain's user doc.
+            captain = captains.get(booking.get("captain_id") or "")
+            kyc = (captain or {}).get("captain_kyc") or {}
+            doc["captain_profile"] = (
+                {
+                    "full_name": captain.get("full_name"),
+                    "phone": captain.get("phone"),
+                    "employee_id": captain.get("employee_id"),
+                    "photo_url": kyc.get("photo_url") or captain.get("profile_image"),
+                    "verified": kyc.get("status") == "verified",
+                }
+                if captain
+                else None
+            )
             doc["vehicle_snapshot"] = (
                 {
                     "vehicle_type": vehicle.get("vehicle_type"),
@@ -994,7 +1429,12 @@ class BookingService:
                 doc["service_names"] = None
             else:
                 doc["combo_name"] = None
-                doc["service_names"] = [services[sid]["name"] for sid in (booking.get("service_ids") or []) if sid in services] or None
+                qty_map = booking.get("service_quantities") or {}
+                doc["service_names"] = [
+                    services[sid]["name"] + (f" ×{qty_map[sid]}" if qty_map.get(sid, 1) > 1 else "")
+                    for sid in (booking.get("service_ids") or [])
+                    if sid in services
+                ] or None
             results.append(doc)
         return results
 
@@ -1057,6 +1497,13 @@ class BookingService:
             raise NotFoundException("Captain not found")
         if captain.get("status") != "active":
             raise BadRequestException("This captain's account isn't active and can't be assigned new bookings.")
+        # A booking is dispatched to ONE center; its captain must come from
+        # that same center — for admins too, since a cross-center assignment
+        # sends a captain to a job their own manager can't see and settles
+        # cash against the wrong store's books.
+        if captain.get("service_center_id") != booking.get("service_center_id"):
+            raise BadRequestException("This captain belongs to a different service center than the booking.")
+        await self._ensure_captain_not_on_leave(payload.captain_id, booking)
 
         policy = await self.policy_service.get_policy()
         _ensure_schedulable(booking, policy)
@@ -1119,7 +1566,13 @@ class BookingService:
         updated = await self.repo.find_by_id(booking_id)
         await self._record_history(booking_id, BookingStatus.ASSIGNED, assigned_by, f"Assigned to captain {captain['full_name']}")
         await self.notifications.notify(payload.captain_id, "New job assigned", f"You have a new booking {booking['booking_number']}.", NotificationType.BOOKING, booking_id)
-        await self.notifications.notify(booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.", NotificationType.BOOKING, booking_id)
+        wa_name, wa_services = await self._wa_ctx(booking)
+        await self.notifications.notify(
+            booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
+            NotificationType.BOOKING, booking_id,
+            wa_event="captain_assigned",
+            wa_params=[wa_name, captain.get("full_name", "Your captain"), wa_services, booking.get("scheduled_slot", "")],
+        )
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
@@ -1144,6 +1597,10 @@ class BookingService:
             raise NotFoundException("Captain not found")
         if captain.get("status") != "active":
             raise BadRequestException("This captain's account isn't active and can't be assigned new bookings.")
+        # Same center rule as assign_captain — see the comment there.
+        if captain.get("service_center_id") != booking.get("service_center_id"):
+            raise BadRequestException("This captain belongs to a different service center than the booking.")
+        await self._ensure_captain_not_on_leave(payload.captain_id, booking)
 
         outgoing_captain_id = booking.get("captain_id")
         previous = list(booking.get("previous_captain_ids", []))
@@ -1276,9 +1733,16 @@ class BookingService:
         # against the whole shared window. Falls back to the legacy
         # exact-time derivation for a booking assigned before this field
         # existed.
-        slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        raw_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        # Last-minute assignment: lateness (stages, penalties, lockout) is
+        # measured from _effective_start_anchor — a captain assigned at
+        # 6:35 into a 4-7 slot has 15 clean minutes to head out; only past
+        # that does the late/penalty machinery engage. The "too early"
+        # check below deliberately keeps the RAW anchor: heading out ahead
+        # of the real slot is unaffected by when assignment happened.
+        slot_start = _effective_start_anchor(booking, raw_start, policy)
         slot_end = slot_start + timedelta(minutes=duration)
-        window_start = slot_start - timedelta(minutes=START_WINDOW_MINUTES)
+        window_start = raw_start - timedelta(minutes=START_WINDOW_MINUTES)
         late_grace_minutes = policy.get("late_start_grace_minutes", 30)
         window_end = slot_end + timedelta(minutes=late_grace_minutes)
         now = now_ist()
@@ -1340,13 +1804,17 @@ class BookingService:
         }
 
         if penalty_pct > 0:
-            travel_pay = booking.get("captain_travel_pay") or 0
             service_pay = booking.get("captain_service_pay") or 0
-            penalty_amount = round(service_pay * penalty_pct / 100, 2)
-            new_service_pay = round(service_pay - penalty_amount, 2)
-            new_captain_earning = round(travel_pay + new_service_pay, 2)
-            update_data["captain_service_pay"] = new_service_pay
-            update_data["captain_earning"] = new_captain_earning
+            current_earning = booking.get("captain_earning") or 0
+            # The penalty comes OUT OF the stored earning and the platform
+            # gains exactly what the captain loses — conservation is the
+            # invariant. Recomputing from travel_pay + service_pay (the old
+            # code) broke on low-priced jobs where the split had CLAMPED
+            # earning below the sum of its parts: a "penalized" captain
+            # could end up paid MORE than before, on a job worth less.
+            penalty_amount = min(round(service_pay * penalty_pct / 100, 2), current_earning)
+            update_data["captain_service_pay"] = round(max(0.0, service_pay - penalty_amount), 2)
+            update_data["captain_earning"] = round(current_earning - penalty_amount, 2)
             update_data["platform_earning"] = round((booking.get("platform_earning") or 0) + penalty_amount, 2)
             # Distinct from "captain_delay" (the stuck-on-the-way sweep,
             # main.py) — this is specifically "started, but late", not
@@ -1354,25 +1822,42 @@ class BookingService:
             update_data["issue_flag"] = "captain_late_start"
             update_data["issue_notes"] = (
                 f"Captain started {'late' if stage == 'late' else 'very late'} — "
-                f"{int((now - slot_start).total_seconds() // 60)} minutes after the scheduled slot time."
+                f"{int((now - slot_start).total_seconds() // 60)} minutes past his start deadline."
             )
             update_data["issue_flagged_at"] = now
             update_data["issue_resolved"] = False
 
-        for item in payload.equipment_used:
-            inv = await self.inventory_repo.find_by_id(item.inventory_item_id)
-            if inv and inv["quantity_available"] >= item.quantity:
-                await self.inventory_repo.adjust_quantity(item.inventory_item_id, -item.quantity)
+        # CLAIM the transition atomically: exactly one "start heading" wins
+        # (a field-connection retry used to re-run the penalty math and
+        # re-deduct inventory). Everything with side effects happens only
+        # after this guarded write succeeds.
+        updated = await self.repo.update_if(
+            booking_id,
+            {"status": BookingStatus.ASSIGNED.value, "captain_id": captain_id},
+            update_data,
+        )
+        if updated is None:
+            raise BadRequestException("This booking is no longer waiting to be started — refresh your jobs list.")
 
-        updated = await self.repo.update_by_id(booking_id, update_data)
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
+        for item in payload.equipment_used:
+            # Guarded single-op decrement — the old check-then-act pair let
+            # two concurrent deductions drive stock negative.
+            await self.inventory_repo.collection.update_one(
+                {"_id": ObjectId(item.inventory_item_id), "quantity_available": {"$gte": item.quantity}},
+                {"$inc": {"quantity_available": -item.quantity}},
+            )
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="heading", booking_id=booking_id)
         await self._record_history(
             booking_id,
             BookingStatus.CAPTAIN_ON_THE_WAY,
             captain_id,
             f"Captain is heading to the customer ({stage.replace('_', ' ')})",
         )
-        await self.notifications.notify(booking["customer_id"], "Captain on the way", "Your captain has left for your location.", NotificationType.BOOKING, booking_id)
+        wa_name, _ = await self._wa_ctx(booking)
+        await self.notifications.notify(
+            booking["customer_id"], "Captain on the way", "Your captain has left for your location.",
+            NotificationType.BOOKING, booking_id, wa_event="captain_on_the_way", wa_params=[wa_name],
+        )
 
         if penalty_pct > 0:
             center = await self.center_repo.find_by_id(booking["service_center_id"])
@@ -1410,8 +1895,25 @@ class BookingService:
             )
 
         now = now_ist()
-        updated = await self.repo.update_by_id(booking_id, {"vehicle_verified": True, "vehicle_verified_at": now})
+        update_data: dict = {"vehicle_verified": True, "vehicle_verified_at": now}
+        flagged = False
+        distance_m: float | None = None
+        # This is also the "I've reached" press — the GPS it carries gets the
+        # same geofence treatment as the photos: flag + tell the manager,
+        # never block (service addresses aren't pinpoint-accurate).
+        if payload.latitude is not None and payload.longitude is not None:
+            flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
+            update_data.update({
+                "arrival_location": {"latitude": payload.latitude, "longitude": payload.longitude},
+                "arrival_flagged": flagged,
+                "arrival_distance_m": distance_m,
+            })
+        updated = await self.repo.update_by_id(booking_id, update_data)
+        if payload.latitude is not None and payload.longitude is not None:
+            await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="arrival", booking_id=booking_id)
         await self._record_history(booking_id, BookingStatus.CAPTAIN_ON_THE_WAY, captain_id, "Vehicle registration verified on arrival")
+        if flagged:
+            await self._notify_location_flag(booking, "arrival", distance_m)
         return serialize_doc(updated)
 
     async def capture_before_photo(self, booking_id: str, payload: PhotoCaptureRequest, captain_id: str) -> dict:
@@ -1439,7 +1941,7 @@ class BookingService:
                 "service_started_at": now,
             },
         )
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="before_photo", booking_id=booking_id)
         await self._record_history(booking_id, BookingStatus.SERVICE_STARTED, captain_id, "Service started (before photo captured)")
         if flagged:
             await self._notify_location_flag(booking, "before", distance_m)
@@ -1527,16 +2029,19 @@ class BookingService:
                 update_data["payment_status"] = PaymentStatus.PAID.value
 
         updated = await self.repo.update_by_id(booking_id, update_data)
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude)
+        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="after_photo", booking_id=booking_id)
         await self._record_history(booking_id, BookingStatus.COMPLETED, captain_id, "Service completed (after photo captured)")
         if flagged:
             await self._notify_location_flag(booking, "after", distance_m)
+        wa_name, _ = await self._wa_ctx(booking)
         await self.notifications.notify(
             booking["customer_id"],
             "Service completed",
             f"Booking {booking['booking_number']} is complete. Please rate your captain!",
             NotificationType.BOOKING,
             booking_id,
+            wa_event="service_completed",
+            wa_params=[wa_name],
         )
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
@@ -1562,6 +2067,19 @@ class BookingService:
             ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         if booking["status"] in {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value}:
             raise BadRequestException("This booking can no longer be cancelled")
+        if actor_role == "customer":
+            # CANCELLATION POLICY phase 1 (see CUSTOMER_CANCEL_LOCK_HOURS):
+            # self-cancel only while unassigned (pending/rescheduled) AND
+            # >4h before the slot. Staff cancelling on the customer's
+            # behalf is unaffected.
+            if booking["status"] not in {BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value}:
+                raise BadRequestException("A captain is already on this booking — it can no longer be cancelled online.")
+            slot_start, _slot_end = _booking_window(booking)
+            if now_ist() > slot_start - timedelta(hours=CUSTOMER_CANCEL_LOCK_HOURS):
+                raise BadRequestException(
+                    f"Cancellations close {CUSTOMER_CANCEL_LOCK_HOURS} hours before your slot. "
+                    "Please message us on WhatsApp and our team will help you with this booking."
+                )
         _ensure_transition_allowed(booking["status"], BookingStatus.CANCELLED.value)
 
         cancel_data: dict = {
@@ -1577,7 +2095,13 @@ class BookingService:
         # of what happened.
         if booking.get("issue_flag") and not booking.get("issue_resolved"):
             cancel_data["issue_resolved"] = True
-        updated = await self.repo.update_by_id(booking_id, cancel_data)
+        # Guarded on the exact status we validated: a concurrent duplicate
+        # cancel (double-click, retry) loses this write and stops HERE —
+        # before it can release the slot's capacity a second time (which
+        # silently overbooked the slot) or double-restore coupon/plan value.
+        updated = await self.repo.update_if(booking_id, {"status": booking["status"]}, cancel_data)
+        if updated is None:
+            raise BadRequestException("This booking just changed state — refresh and try again.")
 
         # This slot is no longer held — free it up for someone else, using
         # the booking's own snapshotted date/slot (not "now"), whether or
@@ -1642,9 +2166,11 @@ class BookingService:
         if not service_center:
             raise NotFoundException("Service center not found")
         # Same server-side rules create_booking enforces (a real,
-        # currently-bookable admin slot, not past cutoff) — reschedule must
-        # not be a backdoor around them just because it's editing an
-        # existing booking instead of creating a new one.
+        # currently-bookable admin slot, not past cutoff, within the
+        # advance-booking window) — reschedule must not be a backdoor
+        # around them just because it's editing an existing booking
+        # instead of creating a new one.
+        _ensure_within_advance_window(payload.scheduled_date, policy)
         new_slot_start, new_slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
         if _slot_cutoff_passed(new_slot_end, policy):
             raise BadRequestException("This slot is no longer available to book — please pick another slot.")
@@ -1709,7 +2235,19 @@ class BookingService:
             if not same_slot:
                 await self._reserve_slot_capacity(session, service_center, new_date_str, payload.scheduled_slot)
                 await self._release_slot_capacity(center_id, old_date_str, booking["scheduled_slot"], session=session)
-            return await self.repo.update_by_id(booking_id, update_data, session=session)
+            # Guarded on what we validated OUTSIDE the transaction — two
+            # concurrent reschedules of one booking used to both reserve a
+            # new slot and both release the same old one. The loser now
+            # aborts here and the transaction rolls its capacity ops back.
+            result = await self.repo.update_if(
+                booking_id,
+                {"status": booking["status"], "scheduled_slot": booking["scheduled_slot"]},
+                update_data,
+                session=session,
+            )
+            if result is None:
+                raise BadRequestException("This booking just changed — refresh and try rescheduling again.")
+            return result
 
         try:
             async with await self.db.client.start_session() as session:
@@ -1724,12 +2262,15 @@ class BookingService:
             "Rescheduled by customer" if actor_role == "customer" else f"Rescheduled by {actor_role}",
         )
         if actor_role != "customer":
+            wa_name, _ = await self._wa_ctx(booking)
             await self.notifications.notify(
                 booking["customer_id"],
                 "Booking rescheduled",
                 f"Booking {booking['booking_number']} has been moved to a new time — we'll confirm your captain shortly.",
                 NotificationType.BOOKING,
                 booking_id,
+                wa_event="reschedule_confirmation",
+                wa_params=[wa_name, new_date_str, payload.scheduled_slot, booking["booking_number"]],
             )
         if had_captain and booking.get("captain_id"):
             await self.notifications.notify(
@@ -1744,21 +2285,6 @@ class BookingService:
             await self._broadcast_slots_changed(center_id, old_date_str)
             await self._broadcast_slots_changed(center_id, new_date_str)
         return serialize_doc(updated)
-
-    async def rebook(self, customer_id: str, booking_id: str, scheduled_date: datetime, scheduled_slot: str) -> dict:
-        original = await self.repo.find_by_id(booking_id)
-        if not original or original["customer_id"] != customer_id:
-            raise NotFoundException("Original booking not found")
-
-        payload = BookingCreateRequest(
-            vehicle_id=original["vehicle_id"],
-            address_id=original["address_id"],
-            service_ids=original["service_ids"],
-            scheduled_date=scheduled_date,
-            scheduled_slot=scheduled_slot,
-            payment_method=PaymentMethod(original["payment_method"]) if original["payment_method"] != "subscription" else PaymentMethod.CASH,
-        )
-        return await self.create_booking(customer_id, payload)
 
     async def find_bookings_needing_reminder(self) -> list[dict]:
         candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value, "reminder_sent": {"$ne": True}})
@@ -1787,10 +2313,16 @@ class BookingService:
         silently offering 'assign a captain' for a time that's already gone
         (see the time-based gate in assign_captain)."""
         policy = await self.policy_service.get_policy()
+        # Query-side date window: only bookings whose slot day is recent
+        # enough to have JUST expired (7-day floor keeps resolved-then-idle
+        # zombies out of every pass) and not in the future (tomorrow's
+        # window can't have expired yet).
+        now_naive = now_ist().replace(tzinfo=None)
         candidates = await self.repo.find_all_no_paginate(
             {
                 "status": {"$in": [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]},
                 "issue_flag": None,
+                "scheduled_date": {"$gte": now_naive - timedelta(days=7), "$lte": now_naive + timedelta(days=1)},
             }
         )
         now = now_ist()
@@ -1818,14 +2350,17 @@ class BookingService:
         doesn't need since it only ever fires once."""
         candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value})
         now = now_ist()
+        policy = await self.policy_service.get_policy()
         threshold = timedelta(minutes=LATE_START_NUDGE_MINUTES)
         due = []
         for booking in candidates:
             # ASSIGNED means a captain (and estimated_start_at) exists —
             # anchor to that, not the coarse shared slot, same reasoning as
-            # start_heading.
+            # start_heading. Shifted forward for last-minute assignments
+            # (_effective_start_anchor): a captain handed the job at 6:35
+            # for a slot that began at 4 is not "late" at 6:36.
             slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
-            if now <= slot_start:
+            if now <= _effective_start_anchor(booking, slot_start, policy):
                 continue
             last_reminder = booking.get("late_start_reminder_sent_at")
             if last_reminder and now - from_stored(last_reminder) < threshold:
@@ -1845,7 +2380,11 @@ class BookingService:
         # manager, not the captain, from this point on.
         policy = await self.policy_service.get_policy()
         duration = booking.get("duration_minutes", 60)
-        slot_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        # Same late-assignment shift as the sweep and start_heading — the
+        # lockout countdown must not start before the captain even had the
+        # job.
+        raw_start = from_stored(booking["estimated_start_at"]) if booking.get("estimated_start_at") else _slot_start_datetime(booking["scheduled_date"], booking["scheduled_slot"])
+        slot_start = _effective_start_anchor(booking, raw_start, policy)
         slot_end = slot_start + timedelta(minutes=duration)
         window_end = slot_end + timedelta(minutes=policy.get("late_start_grace_minutes", 30))
         lockout_at = window_end + timedelta(hours=policy.get("captain_start_lockout_hours", 4))
@@ -1891,8 +2430,19 @@ class BookingService:
         manager gets reminded every UNASSIGNED_REMINDER_MINUTES, not just
         once — a booking scheduled for tomorrow evening still shouldn't sit
         untouched in the queue all day."""
+        # Time-bounded IN THE QUERY: an abandoned booking whose slot is days
+        # in the past is a zombie, not a nudge target — without this bound
+        # every such booking was re-fetched and re-parsed every 60s forever.
+        # Flagged bookings are excluded too (the manager already has a
+        # louder signal for those). scheduled_date is naive IST wall-clock.
+        floor = now_ist().replace(tzinfo=None) - timedelta(days=2)
         candidates = await self.repo.find_all_no_paginate(
-            {"status": {"$in": [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]}, "awaiting_assignment_since": {"$ne": None}}
+            {
+                "status": {"$in": [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]},
+                "awaiting_assignment_since": {"$ne": None},
+                "issue_flag": None,
+                "scheduled_date": {"$gte": floor},
+            }
         )
         now = now_ist()
         threshold = timedelta(minutes=UNASSIGNED_REMINDER_MINUTES)
@@ -1946,6 +2496,71 @@ class BookingService:
                 overrunning.append(booking)
         return overrunning
 
+    async def find_bookings_idle_after_arrival(self) -> list[dict]:
+        """Captain pressed "reached" (vehicle verified) but hasn't captured
+        the before-photo well past the tolerance — the classic side-job
+        window: he's AT the address, neighbours ask for a wash, the booked
+        car waits. Distance checks can't catch this (he's inside the
+        geofence); the clock can."""
+        policy = await self.policy_service.get_policy()
+        tolerance = policy.get("arrival_to_start_tolerance_minutes", 15)
+        candidates = await self.repo.find_all_no_paginate(
+            {"status": BookingStatus.CAPTAIN_ON_THE_WAY.value, "vehicle_verified": True, "issue_flag": None}
+        )
+        now = now_ist()
+        idle = []
+        for booking in candidates:
+            verified_at = booking.get("vehicle_verified_at")
+            if not verified_at or booking.get("service_started_at"):
+                continue
+            if (now - from_stored(verified_at)).total_seconds() / 60 > tolerance:
+                idle.append(booking)
+        return idle
+
+    async def find_bookings_captain_left_site(self) -> list[dict]:
+        """Mid-service walk-off: the wash is running (before-photo captured)
+        but the captain's latest live ping is far from the booking's address.
+        Only a FRESH ping counts (≤3 min old) — a stale position must never
+        flag someone whose phone just stopped pinging. Radius is 2× the
+        photo geofence so ordinary GPS wobble around the address never
+        fires."""
+        policy = await self.policy_service.get_policy()
+        radius_m = policy.get("photo_geofence_radius_m", 300) * 2
+        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.SERVICE_STARTED.value, "issue_flag": None})
+        if not candidates:
+            return []
+        # Batched lookups — this sweep runs every 60s; two find_by_id calls
+        # per in-progress booking was the loop's biggest query multiplier.
+        addresses = {
+            str(a["_id"]): a
+            for a in await self.address_repo.find_by_ids([b["address_id"] for b in candidates if b.get("address_id")])
+        }
+        captains = {
+            str(u["_id"]): u
+            for u in await self.user_repo.find_by_ids([b["captain_id"] for b in candidates if b.get("captain_id")])
+        }
+        now = now_ist()
+        away = []
+        for booking in candidates:
+            captain_id = booking.get("captain_id")
+            if not captain_id:
+                continue
+            address = addresses.get(booking.get("address_id") or "")
+            if not address or address.get("latitude") is None or address.get("longitude") is None:
+                continue
+            captain = captains.get(captain_id)
+            loc = (captain or {}).get("last_known_location") or {}
+            loc_at = (captain or {}).get("last_location_at")
+            if not loc or loc.get("latitude") is None or loc_at is None:
+                continue
+            if (now - from_stored(loc_at)).total_seconds() > 180:
+                continue  # stale — no verdict
+            distance_m = haversine_km(loc["latitude"], loc["longitude"], address["latitude"], address["longitude"]) * 1000
+            if distance_m > radius_m:
+                booking["_distance_from_site_m"] = round(distance_m)
+                away.append(booking)
+        return away
+
     async def flag_issue(self, booking_id: str, issue_flag: str, note: str) -> None:
         await self.repo.update_by_id(
             booking_id,
@@ -1957,7 +2572,7 @@ class BookingService:
             if center and center.get("manager_id"):
                 await self.notifications.notify(
                     center["manager_id"],
-                    f"Attention needed — booking {booking['booking_number']}",
+                    f"🚨 Urgent — booking {booking['booking_number']}",
                     note,
                     NotificationType.BOOKING,
                     booking_id,
@@ -2009,7 +2624,8 @@ class BookingService:
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
-    async def update_captain_location(self, captain_id: str, latitude: float, longitude: float) -> None:
+    async def update_captain_location(self, captain_id: str, latitude: float, longitude: float,
+                                      source: str = "ping", booking_id: str | None = None) -> None:
         """Updates the captain's own user document with a real GPS
         position. Originally called only from the three discrete moments
         this service already captures live GPS (start_heading, before/after
@@ -2020,13 +2636,35 @@ class BookingService:
         full history of what this is and isn't. Pushed live over the
         "captain-location:{captain_id}" channel directly (not just a
         "changed" ping) since the payload itself is small and safe to send
-        as-is — a manager/admin watching doesn't need a separate fetch."""
+        as-is — a manager/admin watching doesn't need a separate fetch.
+
+        Every call also appends a breadcrumb row to captain_locations (the
+        auditable trail behind the manager map — see CaptainLocationModel);
+        `source`/`booking_id` say which capture moment produced it."""
         now = now_ist()
         await self.user_repo.update_by_id(captain_id, {"last_known_location": {"latitude": latitude, "longitude": longitude}, "last_location_at": now})
+        await self.location_repo.record(captain_id, latitude, longitude, now, source=source, booking_id=booking_id)
         await ws_manager.broadcast(
             f"captain-location:{captain_id}",
             {"type": "captain_location", "channel": f"captain-location:{captain_id}", "latitude": latitude, "longitude": longitude, "captured_at": now.isoformat()},
         )
+
+    async def _ensure_captain_not_on_leave(self, captain_id: str, booking: dict) -> None:
+        """APPROVED leave finally MEANS something: a captain on leave for the
+        booking's date can't be assigned to it. Leave dates are stored as
+        ISO date strings, so plain string comparison is correct."""
+        date_key = to_ist(booking["scheduled_date"]).strftime("%Y-%m-%d")
+        on_leave = await self.db.leave_requests.find_one({
+            "captain_id": captain_id,
+            "status": "approved",
+            "start_date": {"$lte": date_key},
+            "end_date": {"$gte": date_key},
+            "is_deleted": {"$ne": True},
+        })
+        if on_leave:
+            raise BadRequestException(
+                f"This captain is on approved leave from {on_leave['start_date']} to {on_leave['end_date']} — pick someone else."
+            )
 
     async def has_active_job(self, captain_id: str) -> bool:
         """Whether this captain currently has a booking in one of the
@@ -2068,6 +2706,99 @@ class BookingService:
             f"slots:{service_center_id}:{date_str}",
             {"type": "changed", "channel": f"slots:{service_center_id}:{date_str}", "service_center_id": service_center_id, "date": date_str},
         )
+
+    @staticmethod
+    def _center_coords(center: dict | None) -> tuple[float | None, float | None]:
+        """Centers store coordinates under location.* (admin-created) or at
+        the top level (some fixtures) — accept both."""
+        if not center:
+            return None, None
+        loc = center.get("location") or {}
+        return (
+            center.get("latitude", loc.get("latitude")),
+            center.get("longitude", loc.get("longitude")),
+        )
+
+    async def travel_status(self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None = None) -> dict:
+        """Live distance/ETA picture for one booking:
+          - store -> customer (persisted at creation; computed lazily here
+            for older bookings that predate the field);
+          - captain -> customer (Routes API against the captain's last
+            pinged position) while a captain is assigned/en route — this
+            is what the customer's "your captain is ~12 min away" reads.
+        Authz mirrors get_booking: customers only their own, managers only
+        their center, the assigned captain, admin everything."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if actor_role == "customer" and booking["customer_id"] != actor_id:
+            raise NotFoundException("Booking not found")
+        if actor_role == "captain" and booking.get("captain_id") != actor_id:
+            raise NotFoundException("Booking not found")
+        if actor_role == "manager":
+            ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+
+        from app.services.route_service import road_distance_eta
+
+        address = await self.address_repo.find_by_id(booking["address_id"]) if booking.get("address_id") else None
+        dest_lat = (address or {}).get("latitude")
+        dest_lng = (address or {}).get("longitude")
+
+        # Store -> customer: persisted at creation; older bookings get it
+        # computed once here and written back.
+        store = {
+            "km": booking.get("travel_distance_km"),
+            "minutes": booking.get("travel_eta_minutes"),
+            "source": booking.get("travel_estimate_source"),
+        }
+        if store["km"] is None and dest_lat is not None:
+            center = await self.center_repo.find_by_id(booking["service_center_id"])
+            c_lat, c_lng = self._center_coords(center)
+            computed = await road_distance_eta(c_lat, c_lng, dest_lat, dest_lng)
+            if computed:
+                store = computed
+                await self.repo.update_by_id(booking_id, {
+                    "travel_distance_km": computed["km"],
+                    "travel_eta_minutes": computed["minutes"],
+                    "travel_estimate_source": computed["source"],
+                })
+
+        # Captain -> customer, only while it means something.
+        captain_leg = None
+        if booking.get("captain_id") and booking.get("status") in (
+            BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value,
+        ) and dest_lat is not None:
+            captain = await self.user_repo.find_by_id(booking["captain_id"])
+            loc = (captain or {}).get("last_known_location")
+            if loc:
+                leg = await road_distance_eta(loc.get("latitude"), loc.get("longitude"), dest_lat, dest_lng)
+                if leg:
+                    captain_leg = {
+                        **leg,
+                        "captain_name": (captain or {}).get("full_name"),
+                        "location_updated_at": from_stored(captain["last_location_at"]).isoformat() if captain.get("last_location_at") else None,
+                    }
+
+        return {
+            "status": booking.get("status"),
+            "store_to_customer": store if store.get("km") is not None else None,
+            "captain_to_customer": captain_leg,
+        }
+
+    async def _wa_ctx(self, booking: dict) -> tuple[str, str]:
+        """(customer first name, service names) for the per-event WhatsApp
+        templates — best-effort, never raises."""
+        try:
+            customer = await self.user_repo.find_by_id(booking["customer_id"])
+            name = ((customer or {}).get("full_name") or "there").split(" ")[0]
+            names = []
+            for sid in booking.get("service_ids") or []:
+                svc = await self.service_repo.find_by_id(sid)
+                if svc:
+                    names.append(svc.get("name", ""))
+            return name, ", ".join(n for n in names if n) or "Vehicle care"
+        except Exception:  # noqa: BLE001
+            return "there", "Vehicle care"
 
     async def _record_history(self, booking_id: str, status: BookingStatus, changed_by: str | None, note: str | None) -> None:
         await self.history_repo.create(

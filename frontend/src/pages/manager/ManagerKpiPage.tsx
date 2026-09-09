@@ -2,7 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AlertTriangle, CalendarClock, CheckCircle2, Clock, Gauge, Star, UserX, Users } from "lucide-react";
 import { analyticsApi } from "../../api/admin";
-import { Card, CardBody, PageLoader } from "../../components/ui";
+import { Card, CardBody, EmptyState, PageLoader } from "../../components/ui";
+import { CollectionsReportCard } from "../../components/shared/CollectionsReport";
+import { paymentApi } from "../../api/payment";
 import { useAuth } from "../../context/AuthContext";
 
 /**
@@ -17,6 +19,14 @@ export default function ManagerKpiPage() {
   const centerId = user?.service_center_id || "";
   const { data, isLoading } = useQuery({ queryKey: ["manager-kpi", centerId], queryFn: () => analyticsApi.managerSummary(centerId), enabled: !!centerId });
 
+  if (!centerId)
+    return (
+      <EmptyState
+        icon={Gauge}
+        title="No service center linked"
+        description="Your manager account isn't linked to a service center yet — ask an admin to assign one, then these KPIs light up."
+      />
+    );
   if (isLoading || !data) return <PageLoader />;
 
   // Section 15/20: each card is also a drill-down entry point, not a
@@ -100,6 +110,15 @@ export default function ManagerKpiPage() {
           .
         </div>
       )}
+
+      {/* Who collected what — the manager's acknowledgment ledger per
+          captain (cash vs online vs completed-but-uncollected). */}
+      <CollectionsReportCard
+        title="Collections by captain"
+        entityLabel="Captain"
+        queryKey={`center-collections-${centerId}`}
+        fetcher={(params) => paymentApi.centerCollections(centerId, params)}
+      />
     </div>
   );
 }

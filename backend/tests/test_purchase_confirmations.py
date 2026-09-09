@@ -17,7 +17,7 @@ from app.schemas.subscription_schema import SubscribeRequest
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 
 from tests.factories import (
-    get_foam_wash_service_id,
+    get_star_wash_service_id,
     get_hatchback_type_id,
     make_customer_with_vehicle,
     make_service_center,
@@ -65,7 +65,7 @@ async def test_redeem_returns_none_once_expired(db):
 @pytest.mark.asyncio
 async def test_a_real_booking_gets_a_redeemable_confirmation_token(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=10)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(db, hatchback)

@@ -6,14 +6,7 @@ import { ISSUE_LABELS } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 import { vehicleTypeApi } from "../../api/catalog";
 import type { Booking } from "../../types";
-import type { JobAction } from "./JobCard";
-
-const ACTION_BUTTON_VARIANT: Record<JobAction["kind"], "primary" | "info" | "secondary" | "success"> = {
-  heading: "primary",
-  verify: "info",
-  before: "secondary",
-  after: "success",
-};
+import { ACTION_BUTTON_VARIANT, type JobAction } from "./NowJobCard";
 
 /**
  * One row in the captain's job list — Section 8 of the BLUSSIT UX update:
@@ -31,6 +24,7 @@ export function JobRow({
   onReportRisk,
   onMarkUrgent,
   onOpenDetails,
+  onCollect,
 }: {
   job: Booking;
   action: JobAction | null;
@@ -41,6 +35,9 @@ export function JobRow({
   onReportRisk: () => void;
   onMarkUrgent: () => void;
   onOpenDetails: () => void;
+  /** Present only on a completed, still-unpaid job — opens the doorstep
+   * collect flow (cash tap / scan-to-pay QR). */
+  onCollect?: () => void;
 }) {
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
@@ -108,6 +105,16 @@ export function JobRow({
           <Button size="sm" variant={ACTION_BUTTON_VARIANT[action.kind]} onClick={() => onAction(action.kind)}>
             <CheckCircle2 className="h-3.5 w-3.5" /> {action.label}
           </Button>
+        )}
+        {onCollect && (
+          <Button size="sm" className="bg-[#E8A900] hover:bg-[#D99A00]" onClick={onCollect}>
+            Collect ₹{job.total_amount}
+          </Button>
+        )}
+        {job.status === "completed" && job.payment_status === "paid" && (
+          <Badge tone="success">
+            <CheckCircle2 className="h-3 w-3" /> Paid
+          </Badge>
         )}
         {canReportRisk && (
           <Button size="sm" variant="outline" title="Flag as running late" onClick={onReportRisk}>

@@ -54,6 +54,8 @@ Booking policy — the admin-configurable rules that keep scheduling honest:
 Stored in the `settings` collection under key "booking_policy", same
 pattern as PricingService's "pricing_config".
 """
+import time
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.repositories.content_repository import SettingRepository
@@ -64,16 +66,44 @@ DEFAULT_BOOKING_POLICY = {
     "min_lead_minutes": 10,
     "slot_duration_minutes": 180,
     "slot_booking_cutoff_minutes": 30,
+    # How far ahead a booking (or slot hold) is accepted, in days from today
+    # IST inclusive — 7 means today + the next 6 days. Capacity planning is
+    # done week-by-week; letting customers park bookings a month out just
+    # creates no-shows and blocks slots nobody can plan staffing for.
+    # Enforced uniformly (customer wizard, guest wizard, manager on-behalf
+    # bookings, reschedules, slot holds); admins can raise it here.
+    "max_advance_days": 7,
     "delay_tolerance_minutes": 20,
     "captain_travel_buffer_minutes": 15,
     "photo_geofence_radius_m": 300,
+    # How long a captain can sit between "I've reached" (vehicle verified)
+    # and the before-photo before the manager gets pinged — the
+    # reached-but-not-started gap is the classic side-job window.
+    "arrival_to_start_tolerance_minutes": 15,
     # How long past a slot's end a captain can still start before it's
     # considered "severely late" — mirrors the 30-minute pre-slot allowance
     # (START_WINDOW_MINUTES in booking_service.py) on the other side.
     "late_start_grace_minutes": 30,
+    # Last-minute assignments: when a captain is handed a booking NEAR or
+    # AFTER its scheduled start (customer books at 6:30 inside a 4-7 slot,
+    # manager assigns 6:35), he cannot be "late" for a time that predates
+    # him having the job — the booking was late, not the captain. His late
+    # clock starts this many minutes AFTER assignment instead (default 15,
+    # per the founder's rule: it's urgent, so 15 minutes to get moving).
+    # See _effective_start_anchor in booking_service.py.
+    "late_assignment_grace_minutes": 15,
     "captain_start_lockout_hours": 4,
     "wallet_gating_enabled": False,
 }
+
+
+# Tiny process-local read cache. The policy is read on every slot request
+# and 5+ times per reminder-loop pass but changes maybe once a month — a
+# 10-second TTL removes almost all of that traffic while any admin edit
+# (which busts the cache explicitly below) still shows up instantly on the
+# single worker this app deliberately runs as.
+_POLICY_CACHE: dict = {"value": None, "at": 0.0}
+_POLICY_CACHE_TTL_SECONDS = 10.0
 
 
 class BookingPolicyService:
@@ -81,14 +111,20 @@ class BookingPolicyService:
         self.settings_repo = SettingRepository(db)
 
     async def get_policy(self) -> dict:
+        now = time.monotonic()
+        if _POLICY_CACHE["value"] is not None and now - _POLICY_CACHE["at"] < _POLICY_CACHE_TTL_SECONDS:
+            return dict(_POLICY_CACHE["value"])
         setting = await self.settings_repo.get_by_key("booking_policy")
         policy = dict(DEFAULT_BOOKING_POLICY)
         if setting:
             policy.update(setting.get("value", {}))
+        _POLICY_CACHE["value"] = dict(policy)
+        _POLICY_CACHE["at"] = now
         return policy
 
     async def set_policy(self, updates: dict) -> dict:
         current = await self.get_policy()
         current.update({k: v for k, v in updates.items() if v is not None})
         await self.settings_repo.upsert("booking_policy", current, "Booking scheduling rules")
+        _POLICY_CACHE["value"] = None  # bust — next read refetches
         return current

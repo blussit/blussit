@@ -66,7 +66,7 @@ async def test_wrong_vehicle_type_consumption_is_rejected(rig):
     services = [{"id": sid, "category_id": None} for sid in plan.get("included_service_ids", [])] or [{"id": "any", "category_id": None}]
 
     with pytest.raises(BadRequestException):
-        await service.plan_consumption(sub["id"], suv_vehicle_id, services)
+        await service.plan_consumption(sub["id"], suv_vehicle_id, services, rig["customer_id"])
 
 
 @pytest.mark.asyncio

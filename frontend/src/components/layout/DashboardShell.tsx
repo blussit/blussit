@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
+import { MandatoryGates } from "../shared/MandatoryGates";
 import { Bell, BellOff, LogOut, Menu, Sparkles, User as UserIcon, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,6 +16,8 @@ export interface NavItem {
   to: string;
   icon: LucideIcon;
   end?: boolean;
+  /** Small red count pill after the label (e.g. unread WhatsApp chats). */
+  badge?: number;
 }
 
 function toastToneFor(notification: Notification): ToastTone {
@@ -25,14 +28,28 @@ function toastToneFor(notification: Notification): ToastTone {
 export function DashboardShell({
   navItems,
   portalLabel,
+  brand = false,
+  bottomNav,
+  centerMenu,
   children,
 }: {
   navItems: NavItem[];
   portalLabel: string;
+  /** Brand look (white surface, neutral hairline borders, black type, gold
+      reserved for CTAs/selection — used by the customer and captain portals;
+      staff portals keep the default theme. */
+  brand?: boolean;
+  /** Mobile app-style bottom tab bar (5 items; index 2 renders as the
+      raised gold action button). When set, the sidebar is desktop-only. */
+  bottomNav?: NavItem[];
+  /** Options shown in a bottom sheet when the raised center button is
+      tapped (instead of navigating directly). */
+  centerMenu?: { label: string; description: string; icon: LucideIcon; to: string }[];
   children: ReactNode;
 }) {
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [centerMenuOpen, setCenterMenuOpen] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -166,27 +183,59 @@ export function DashboardShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notifData, user]);
 
+  // Landing-theme scope: same palette the public pages use. primary stays
+  // BLACK (headings/buttons) with gold as the accent; primary-light stays a
+  // LIGHT tint — selected states are tint + dark text, never solid black.
+  const brandVars = brand
+    ? ({
+        // Settled after three user rounds: pure WHITE ground, BLACK type,
+        // gray icon tiles/labels — but box BOUNDARIES are light yellow
+        // (#F3E5B5, this var + the literal borders across customer/captain
+        // views), which the user explicitly asked to keep. Beyond borders,
+        // gold appears only where it means something: CTAs (bg-[#E8A900] +
+        // glow), selected chips (tint + black border), progress fills, and
+        // accents inside black panels. No cream page wash, no yellow tiles.
+        "--color-surface": "#FFFFFF",
+        "--color-card-border": "#F3E5B5",
+        "--color-primary": "#0A0A0A",
+        "--color-primary-dark": "#000000",
+        "--color-primary-light": "#FFF4CD",
+        "--color-secondary": "#E8A900",
+        "--color-secondary-light": "#FFF4CD",
+        "--color-accent": "#E8A900",
+        "--color-accent-light": "#FFF4CD",
+      } as React.CSSProperties)
+    : undefined;
+  const line = brand ? "border-[#F3E5B5]" : "border-gray-100";
+
   return (
-    <div className="min-h-screen bg-[var(--color-surface)]">
+    <div className="min-h-screen bg-[var(--color-surface)]" style={brandVars}>
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 transform flex-col border-r border-gray-100 bg-white transition-transform duration-200 md:translate-x-0 ${
-          sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
+        className={`fixed inset-y-0 left-0 z-40 w-64 transform flex-col border-r ${line} bg-white transition-transform duration-200 md:translate-x-0 ${
+          bottomNav ? "hidden md:flex" : "flex"
+        } ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
       >
-        <div className="flex h-16 shrink-0 items-center justify-between border-b border-gray-100 px-5">
-          <Link to="/" className="flex items-center gap-2 font-display text-base font-bold text-[var(--color-primary)]">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-primary)] text-[var(--color-secondary)]">
-              <Sparkles className="h-4 w-4" />
-            </span>
-            CLEANRIDE
-          </Link>
+        <div className={`flex h-16 shrink-0 items-center justify-between border-b ${line} px-5`}>
+          {brand ? (
+            <Link to="/" className="flex flex-col" aria-label="Blussit home">
+              <img src="/blussit-logo.png" alt="BLUSSIT" className="h-auto w-[118px] object-contain" />
+              <span className="mt-0.5 text-[7px] font-bold uppercase tracking-[0.22em] text-[#E8A900]">Clean Car. Clean Mind.</span>
+            </Link>
+          ) : (
+            <Link to="/" className="flex items-center gap-2 font-display text-base font-bold text-[var(--color-primary)]">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-primary)] text-[var(--color-secondary)]">
+                <Sparkles className="h-4 w-4" />
+              </span>
+              BLUSSIT
+            </Link>
+          )}
           <button className="md:hidden" onClick={() => setSidebarOpen(false)}>
             <X className="h-5 w-5" />
           </button>
         </div>
         <div className="shrink-0 px-5 py-3">
-          <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">{portalLabel}</span>
+          <span className={`text-xs font-semibold uppercase tracking-wide ${brand ? "text-gray-400" : "text-[var(--color-text-secondary)]"}`}>{portalLabel}</span>
         </div>
         {/* min-h-0 is required alongside flex-1 or overflow-y-auto silently
             does nothing inside a flex column — without it this <nav> just
@@ -202,13 +251,22 @@ export function DashboardShell({
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
                   isActive
-                    ? "bg-[var(--color-primary-light)] text-[var(--color-primary)]"
-                    : "text-gray-600 hover:bg-gray-50 hover:text-[var(--color-primary)]"
+                    ? brand
+                      ? "bg-gray-100 font-semibold text-black"
+                      : "bg-[var(--color-primary-light)] text-[var(--color-primary)]"
+                    : brand
+                      ? "text-gray-600 hover:bg-[#FAFAFA] hover:text-black"
+                      : "text-gray-600 hover:bg-gray-50 hover:text-[var(--color-primary)]"
                 }`
               }
             >
               <item.icon className="h-4.5 w-4.5" />
               {item.label}
+              {item.badge != null && item.badge > 0 && (
+                <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-[var(--color-error)] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                  {item.badge > 99 ? "99+" : item.badge}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>
@@ -227,10 +285,17 @@ export function DashboardShell({
 
       {/* Main content */}
       <div className="md:pl-64">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-gray-100 bg-white/90 px-5 backdrop-blur-md md:px-8">
-          <button className="md:hidden" onClick={() => setSidebarOpen(true)}>
-            <Menu className="h-5 w-5" />
-          </button>
+        <header className={`sticky top-0 z-20 flex h-16 items-center justify-between border-b ${line} bg-white/90 px-5 backdrop-blur-md md:px-8`}>
+          {bottomNav ? (
+            <Link to="/" className="flex flex-col md:hidden" aria-label="Blussit home">
+              <img src="/blussit-logo.png" alt="BLUSSIT" className="h-auto w-[104px] object-contain" />
+              <span className="mt-0.5 text-[6px] font-bold uppercase tracking-[0.22em] text-[#E8A900]">Clean Car. Clean Mind.</span>
+            </Link>
+          ) : (
+            <button className="md:hidden" onClick={() => setSidebarOpen(true)}>
+              <Menu className="h-5 w-5" />
+            </button>
+          )}
           <div className="hidden md:block" />
           <div className="flex items-center gap-4">
             <div className="group relative">
@@ -254,16 +319,90 @@ export function DashboardShell({
                 </div>
               )}
             </div>
-            <button onClick={() => navigate("profile")} className="flex items-center gap-2.5 rounded-full border border-gray-200 py-1 pl-1 pr-3">
-              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+            <button onClick={() => navigate("profile")} className={`flex items-center gap-2.5 rounded-full border py-1 pl-1 pr-3 ${brand ? "border-[#F3E5B5] hover:border-[#E8A900]/50" : "border-gray-200"}`}>
+              <span className={`flex h-7 w-7 items-center justify-center rounded-full ${brand ? "bg-gray-100 text-black" : "bg-[var(--color-primary-light)] text-[var(--color-primary)]"}`}>
                 <UserIcon className="h-4 w-4" />
               </span>
               <span className="hidden text-sm font-medium text-[var(--color-text-primary)] sm:block">{user?.full_name}</span>
             </button>
           </div>
         </header>
-        <main className="p-5 md:p-8">{children}</main>
+        <main className={`p-5 md:p-8 ${bottomNav ? "pb-28 md:pb-8" : ""}`}><MandatoryGates />
+          {children}</main>
       </div>
+
+      {/* Mobile app-style bottom tab bar (customer portal) */}
+      {bottomNav && (
+        <nav
+          className={`fixed inset-x-0 bottom-0 z-40 grid items-center border-t border-[#F3E5B5] bg-white px-1 pb-[max(0.6rem,env(safe-area-inset-bottom))] pt-2 md:hidden ${
+            { 3: "grid-cols-3", 4: "grid-cols-4" }[bottomNav.length] || "grid-cols-5"
+          }`}
+        >
+          {bottomNav.map((item, i) =>
+            // The raised gold center button exists only for portals that
+            // pass a centerMenu (the customer's "Book" sheet) — a plain
+            // 3/4-tab bar (captain) renders every item as a normal tab.
+            centerMenu && i === 2 ? (
+              <div key={item.to} className="flex items-center justify-center">
+                <button
+                  type="button"
+                  aria-label={item.label}
+                  onClick={() => setCenterMenuOpen(true)}
+                  className="-mt-7 flex h-[52px] w-[52px] items-center justify-center rounded-full border-4 border-white bg-[#E8A900] text-white shadow-[0_10px_22px_rgba(232,169,0,0.4)]"
+                >
+                  <item.icon className="h-6 w-6" strokeWidth={2.4} />
+                </button>
+              </div>
+            ) : (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  `flex flex-col items-center gap-0.5 py-1 text-[10px] ${
+                    isActive ? "font-bold text-black" : "font-medium text-gray-400"
+                  }`
+                }
+              >
+                <item.icon className="h-[21px] w-[21px]" />
+                {item.label}
+              </NavLink>
+            )
+          )}
+        </nav>
+      )}
+
+      {/* Bottom sheet for the center button's options */}
+      {centerMenu && centerMenuOpen && (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={() => setCenterMenuOpen(false)} />
+          <div className="absolute inset-x-0 bottom-0 rounded-t-3xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-[0_-12px_40px_rgba(0,0,0,0.18)]">
+            <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-gray-100" />
+            <p className="mb-3 font-display text-lg font-bold text-black">How do you want to book?</p>
+            <div className="space-y-2.5">
+              {centerMenu.map((opt) => (
+                <button
+                  key={opt.to}
+                  type="button"
+                  onClick={() => {
+                    setCenterMenuOpen(false);
+                    navigate(opt.to);
+                  }}
+                  className="flex w-full items-center gap-4 rounded-2xl border border-[#F3E5B5] p-4 text-left transition-colors hover:border-[#E8A900]/60 hover:bg-[#FAFAFA]"
+                >
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
+                    <opt.icon className="h-5 w-5" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-bold text-black">{opt.label}</span>
+                    <span className="block text-xs text-gray-400">{opt.description}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

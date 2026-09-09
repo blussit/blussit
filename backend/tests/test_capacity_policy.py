@@ -16,13 +16,15 @@ from app.schemas.booking_schema import BookingCreateRequest
 from app.services.booking_service import BookingService
 from app.services.capacity_policy_service import CapacityPolicyService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
+from app.utils.timezone import now_ist
+
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     # 09:00-21:00 at 3h -> exactly 4 slots: 09-12, 12-15, 15-18, 18-21.
     center_id = await make_service_center(db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=5)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
@@ -33,11 +35,11 @@ async def rig(db, cleanup):
 
 
 def _tomorrow() -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+    return (now_ist().replace(tzinfo=None) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def _in_days(n: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=n)).strftime("%Y-%m-%d")
+    return (now_ist().replace(tzinfo=None) + timedelta(days=n)).strftime("%Y-%m-%d")
 
 
 @pytest.mark.asyncio
@@ -83,7 +85,7 @@ async def test_negative_and_unknown_slot_rejected(rig):
 @pytest.mark.asyncio
 async def test_past_effective_date_rejected(rig):
     cps = CapacityPolicyService(rig["db"])
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (now_ist().replace(tzinfo=None) - timedelta(days=1)).strftime("%Y-%m-%d")
     with pytest.raises(BadRequestException, match="past"):
         await cps.schedule_change(rig["center_id"], yesterday, 40, None, "admin", "admin", None)
 
@@ -93,7 +95,7 @@ async def test_future_change_does_not_affect_today(rig):
     """The core effective-dating guarantee: scheduling a future change must
     never retroactively alter what's already active today."""
     cps = CapacityPolicyService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
     # No policy scheduled for today -> resolves to the center's legacy flat default (5).
     today_policy = await cps.get_effective_policy(rig["center_id"], today)
     assert today_policy["max_bookings_per_day"] is None  # no legacy max_bookings_per_day set on this test center
@@ -128,7 +130,7 @@ async def test_scheduled_change_editable_and_cancellable_before_active(rig):
 @pytest.mark.asyncio
 async def test_cannot_cancel_an_already_active_change(rig):
     cps = CapacityPolicyService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
     active = await cps.schedule_change(rig["center_id"], today, 40, None, "admin", "admin", None)
     with pytest.raises(BadRequestException, match="already active"):
         await cps.cancel_scheduled_change(rig["center_id"], active["id"], "admin", "admin", None)
@@ -140,7 +142,7 @@ async def test_apply_immediately_is_editable_same_day(rig):
     later the same day — re-running it updates the same record rather than
     erroring or creating a duplicate."""
     cps = CapacityPolicyService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
     first = await cps.schedule_change(rig["center_id"], today, 40, None, "admin", "admin", None)
     second = await cps.schedule_change(rig["center_id"], today, 45, None, "admin", "admin", None)
     assert first["id"] == second["id"]
@@ -150,7 +152,7 @@ async def test_apply_immediately_is_editable_same_day(rig):
 @pytest.mark.asyncio
 async def test_history_labels_active_scheduled_and_past(rig):
     cps = CapacityPolicyService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
     await cps.schedule_change(rig["center_id"], today, 40, None, "admin", "admin", None)
     await cps.schedule_change(rig["center_id"], _in_days(2), 50, None, "admin", "admin", None)
 
@@ -171,7 +173,7 @@ async def test_policy_change_resyncs_an_already_touched_date(rig):
     resync it right away."""
     cps = CapacityPolicyService(rig["db"])
     bs = BookingService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
 
     # Touch today's docs first, under the (as-yet-unconfigured) legacy default.
     before = await bs.admin_slot_capacity(rig["center_id"], today)
@@ -193,7 +195,7 @@ async def test_resync_preserves_booked_count_and_respects_manual_override(rig):
     baseline policy."""
     cps = CapacityPolicyService(rig["db"])
     bs = BookingService(rig["db"])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
 
     await bs.admin_slot_capacity(rig["center_id"], today)  # touch
     await rig["db"].slot_capacity.update_one(

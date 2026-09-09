@@ -31,6 +31,11 @@ const emptyForm = {
   captain_fee: undefined as number | undefined,
   vehicle_type_prices: {} as Record<string, string>,
   vehicle_type_discounted_prices: {} as Record<string, string>,
+  original_price: "",
+  vehicle_type_original_prices: {} as Record<string, string>,
+  is_addon: false,
+  variant_group: "",
+  variant_label: "",
 };
 
 function toNumberMap(input: Record<string, string>): Record<string, number> {
@@ -59,6 +64,7 @@ export default function AdminServicesPage() {
 
   const [catOpen, setCatOpen] = useState(false);
   const [catName, setCatName] = useState("");
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin-services"] });
   const closeModal = () => {
@@ -79,6 +85,11 @@ export default function AdminServicesPage() {
     captain_fee: form.captain_fee,
     vehicle_type_prices: toNumberMap(form.vehicle_type_prices),
     vehicle_type_discounted_prices: toNumberMap(form.vehicle_type_discounted_prices),
+    original_price: form.original_price ? Number(form.original_price) : undefined,
+    vehicle_type_original_prices: toNumberMap(form.vehicle_type_original_prices),
+    is_addon: form.is_addon,
+    variant_group: form.variant_group.trim() || undefined,
+    variant_label: form.variant_label.trim() || undefined,
   });
 
   const createServiceMutation = useMutation({
@@ -110,12 +121,20 @@ export default function AdminServicesPage() {
   });
 
   const createCategoryMutation = useMutation({
-    mutationFn: () => adminCatalogApi.createCategory({ name: catName }),
+    // Categories were create-only — renaming or removing one meant a DB
+    // edit. Same modal now edits; delete guarded by a confirm.
+    mutationFn: () => (editingCatId ? adminCatalogApi.updateCategory(editingCatId, { name: catName }) : adminCatalogApi.createCategory({ name: catName })),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-categories"] });
       setCatOpen(false);
       setCatName("");
+      setEditingCatId(null);
     },
+  });
+
+  const deleteCategoryMutation = useMutation({
+    mutationFn: (id: string) => adminCatalogApi.deleteCategory(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-categories"] }),
   });
 
   const toggleVehicleType = (vt: VehicleType) => {
@@ -131,6 +150,8 @@ export default function AdminServicesPage() {
     const discMap: Record<string, string> = {};
     for (const [k, v] of Object.entries(service.vehicle_type_prices || {})) priceMap[k] = String(v);
     for (const [k, v] of Object.entries(service.vehicle_type_discounted_prices || {})) discMap[k] = String(v);
+    const origMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(service.vehicle_type_original_prices || {})) origMap[k] = String(v);
     setForm({
       category_id: service.category_id,
       name: service.name,
@@ -142,6 +163,11 @@ export default function AdminServicesPage() {
       captain_fee: service.captain_fee ?? undefined,
       vehicle_type_prices: priceMap,
       vehicle_type_discounted_prices: discMap,
+      original_price: service.original_price != null ? String(service.original_price) : "",
+      vehicle_type_original_prices: origMap,
+      is_addon: !!service.is_addon,
+      variant_group: service.variant_group || "",
+      variant_label: service.variant_label || "",
     });
     setOpen(true);
   };
@@ -170,7 +196,17 @@ export default function AdminServicesPage() {
         onRowClick={(s) => setStatsFor(s)}
         columns={[
           { header: "Name", accessor: (s) => s.name },
-          { header: "Price", accessor: (s) => <span className="font-mono-num">₹{s.discounted_price ?? s.price}</span> },
+          {
+            header: "Price",
+            accessor: (s) => (
+              <span className="font-mono-num">
+                ₹{s.price}
+                {s.original_price != null && s.original_price > s.price && <span className="ml-1.5 text-xs text-gray-400 line-through">₹{s.original_price}</span>}
+                {s.is_addon && <span className="ml-1.5 text-xs text-[var(--color-text-secondary)]">add-on</span>}
+                {s.variant_label && <span className="ml-1.5 text-xs text-[var(--color-text-secondary)]">{s.variant_label}</span>}
+              </span>
+            ),
+          },
           { header: "Duration", accessor: (s) => `${s.duration_minutes} mins` },
           { header: "Vehicle types", accessor: (s) => (s.vehicle_types.length ? s.vehicle_types.map(vehicleTypeName).join(", ") : "All") },
           { header: "Status", accessor: (s) => <Badge tone={s.is_active ? "success" : "neutral"}>{s.is_active ? "Active" : "Inactive"}</Badge> },
@@ -224,7 +260,7 @@ export default function AdminServicesPage() {
         })()}
       </Modal>
 
-      <Modal open={catOpen} onClose={() => setCatOpen(false)} title="Add category">
+      <Modal open={catOpen} onClose={() => { setCatOpen(false); setEditingCatId(null); setCatName(""); }} title={editingCatId ? "Edit category" : "Add category"}>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -234,9 +270,36 @@ export default function AdminServicesPage() {
         >
           <Input label="Category name" value={catName} onChange={(e) => setCatName(e.target.value)} required />
           <Button type="submit" className="w-full" isLoading={createCategoryMutation.isPending}>
-            Add category
+            {editingCatId ? "Save changes" : "Add category"}
           </Button>
         </form>
+        {!!categories?.length && (
+          <div className="mt-5 border-t border-gray-100 pt-4">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Existing categories</p>
+            <div className="space-y-1.5">
+              {categories.map((c) => (
+                <div key={c.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2 text-sm">
+                  <span>{c.name}</span>
+                  <span className="flex gap-2">
+                    <button type="button" className="text-xs font-medium text-[var(--color-primary)] hover:underline" onClick={() => { setEditingCatId(c.id); setCatName(c.name); }}>
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-[var(--color-error)] hover:underline"
+                      onClick={async () => {
+                        if (await confirm({ title: `Delete "${c.name}"?`, message: "Services in it keep working but lose their category grouping.", tone: "danger" }))
+                          deleteCategoryMutation.mutate(c.id);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal open={open} onClose={closeModal} title={editing ? "Edit service" : "Add service"} maxWidth="max-w-xl">
@@ -257,9 +320,31 @@ export default function AdminServicesPage() {
             ))}
           </Select>
           <Input label="Service name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-          <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-          <div className="grid grid-cols-3 gap-3">
-            <Input label="Regular price (₹)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
+          <div className="w-full">
+            <label htmlFor="service-description" className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
+              What's included
+            </label>
+            <textarea
+              id="service-description"
+              rows={4}
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder={"One item per line, e.g.\nExterior foam wash\nTyre & rim cleaning\nWindow wipe"}
+              className="w-full rounded-xl border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-[var(--color-text-primary)] placeholder:text-gray-400 transition-colors focus:border-[var(--color-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+              One item per line shows as a checklist on the website's service card. A single sentence shows as plain text.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Input label="Selling price (₹)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
+            <Input
+              label="Actual price (₹)"
+              type="number"
+              hint="Shown struck through on the website; never charged"
+              value={form.original_price}
+              onChange={(e) => setForm({ ...form, original_price: e.target.value })}
+            />
             <Input
               label="First-time price (₹)"
               type="number"
@@ -282,6 +367,37 @@ export default function AdminServicesPage() {
             value={form.captain_fee ?? ""}
             onChange={(e) => setForm({ ...form, captain_fee: e.target.value === "" ? undefined : Number(e.target.value) })}
           />
+          <div className="rounded-xl border border-dashed border-gray-300 p-4">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                checked={form.is_addon}
+                onChange={(e) => setForm({ ...form, is_addon: e.target.checked })}
+              />
+              <span>
+                <span className="block text-sm font-medium text-[var(--color-text-primary)]">Add-on</span>
+                <span className="block text-xs text-[var(--color-text-secondary)]">
+                  Optional extra offered on top of a main service (e.g. Exterior Polish +₹200). Not shown as its own card on the website.
+                </span>
+              </span>
+            </label>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Input
+                label="Variant group"
+                placeholder="e.g. bike-wash"
+                hint="Services sharing a group show as one card with a chooser"
+                value={form.variant_group}
+                onChange={(e) => setForm({ ...form, variant_group: e.target.value })}
+              />
+              <Input
+                label="Variant label"
+                placeholder="e.g. 2 bikes"
+                value={form.variant_label}
+                onChange={(e) => setForm({ ...form, variant_label: e.target.value })}
+              />
+            </div>
+          </div>
           <div>
             <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Applicable vehicle types</p>
             <div className="flex flex-wrap gap-2">
@@ -306,11 +422,11 @@ export default function AdminServicesPage() {
               <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Per-vehicle-type pricing (optional)</p>
               <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
                 A hatchback wash and a luxury SUV wash aren't the same job — override the price for any type here; anything left
-                blank falls back to the regular/first-time price above.
+                blank falls back to the selling / first-time / actual price above. Columns: selling, first-time, actual.
               </p>
               <div className="space-y-2">
                 {form.vehicle_types.map((vt) => (
-                  <div key={vt} className="grid grid-cols-3 items-center gap-2">
+                  <div key={vt} className="grid grid-cols-4 items-center gap-2">
                     <span className="text-sm font-medium text-[var(--color-text-primary)]">{vehicleTypeName(vt)}</span>
                     <Input
                       placeholder={`₹${form.price || 0}`}
@@ -323,6 +439,12 @@ export default function AdminServicesPage() {
                       type="number"
                       value={form.vehicle_type_discounted_prices[vt] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_discounted_prices: { ...form.vehicle_type_discounted_prices, [vt]: e.target.value } })}
+                    />
+                    <Input
+                      placeholder={form.original_price ? `₹${form.original_price}` : "Actual"}
+                      type="number"
+                      value={form.vehicle_type_original_prices[vt] || ""}
+                      onChange={(e) => setForm({ ...form, vehicle_type_original_prices: { ...form.vehicle_type_original_prices, [vt]: e.target.value } })}
                     />
                   </div>
                 ))}

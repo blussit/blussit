@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Loader2, LocateFixed, MapPin, Search } from "lucide-react";
+import { ensureGoogleMaps, getLib, reverseGeocode as googleReverseGeocode } from "../../lib/googleMaps";
 
 // Leaflet's default marker icon references image paths that don't resolve
 // correctly through bundlers — pointing at the CDN copies sidesteps needing
@@ -51,7 +52,7 @@ async function reverseGeocode(lat: number, lng: number): Promise<ResolvedAddress
   }
 }
 
-export function MapPicker({
+function LeafletMapPicker({
   latitude,
   longitude,
   onChange,
@@ -254,4 +255,194 @@ export function MapPicker({
       </p>
     </div>
   );
+}
+
+
+/**
+ * Google-powered picker (same contract as the Leaflet fallback below it):
+ * real Google map tiles, Places Autocomplete search, and Google-grade
+ * reverse geocoding for the "Detected: ..." suggestion — the accuracy the
+ * OSM/Nominatim fallback can't reach in India.
+ */
+function GoogleMapPicker({
+  latitude,
+  longitude,
+  onChange,
+  onAddressResolved,
+  showUseMyLocation = false,
+}: {
+  latitude: number | null | undefined;
+  longitude: number | null | undefined;
+  onChange: (lat: number, lng: number) => void;
+  onAddressResolved?: (address: ResolvedAddress) => void;
+  showUseMyLocation?: boolean;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const objectsRef = useRef<{ map?: { setZoom: (z: number) => void; panTo: (p: unknown) => void; getZoom: () => number }; marker?: { position: unknown } }>({});
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState("");
+  const [resolving, setResolving] = useState(false);
+
+  const scheduleResolve = (lat: number, lng: number) => {
+    if (!onAddressResolved) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(async () => {
+      setResolving(true);
+      const picked = await googleReverseGeocode(lat, lng);
+      setResolving(false);
+      if (picked) {
+        onAddressResolved({
+          line1: [picked.road, picked.area].filter(Boolean).join(", ") || picked.formatted.split(",").slice(0, 2).join(","),
+          city: picked.city,
+          state: picked.state,
+          pincode: picked.pincode,
+        });
+      }
+    }, 400);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const mapsLib = await getLib("maps");
+      const markerLib = await getLib("marker");
+      if (cancelled || !containerRef.current || !mapsLib || !markerLib) return;
+      const start = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : { lat: 22.7196, lng: 75.8577 };
+      const map = new mapsLib.Map(containerRef.current, {
+        center: start,
+        zoom: latitude != null ? 16 : 12,
+        mapId: "blussit-picker",
+        disableDefaultUI: true,
+        zoomControl: true,
+        clickableIcons: false,
+      });
+      const marker = new markerLib.AdvancedMarkerElement({ map, position: start, gmpDraggable: true });
+      objectsRef.current = { map, marker };
+
+      const settle = (lat: number, lng: number) => {
+        marker.position = { lat, lng };
+        onChange(lat, lng);
+        scheduleResolve(lat, lng);
+      };
+      marker.addListener("dragend", () => {
+        const p = marker.position as unknown as { lat: number | (() => number); lng: number | (() => number) };
+        settle(typeof p.lat === "function" ? p.lat() : p.lat, typeof p.lng === "function" ? p.lng() : p.lng);
+      });
+      map.addListener("click", (e: { latLng: { lat: () => number; lng: () => number } }) => settle(e.latLng.lat(), e.latLng.lng()));
+
+      const placesLib = await getLib("places");
+      if (searchRef.current && placesLib?.Autocomplete) {
+        const auto = new placesLib.Autocomplete(searchRef.current, { componentRestrictions: { country: "in" }, fields: ["geometry"] });
+        auto.addListener("place_changed", () => {
+          const loc = auto.getPlace()?.geometry?.location;
+          if (loc) {
+            map.setZoom(17);
+            map.panTo({ lat: loc.lat(), lng: loc.lng() });
+            settle(loc.lat(), loc.lng());
+          }
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // External lat/lng changes (parent state) keep the pin in sync.
+  useEffect(() => {
+    const { map, marker } = objectsRef.current;
+    if (latitude == null || longitude == null || !map || !marker) return;
+    marker.position = { lat: latitude, lng: longitude };
+    map.panTo({ lat: latitude, lng: longitude });
+  }, [latitude, longitude]);
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      setLocateError("Geolocation isn't supported on this device.");
+      return;
+    }
+    setLocateError("");
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocating(false);
+        const { map, marker } = objectsRef.current;
+        if (map && marker) {
+          map.setZoom(17);
+          marker.position = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        }
+        onChange(pos.coords.latitude, pos.coords.longitude);
+        scheduleResolve(pos.coords.latitude, pos.coords.longitude);
+      },
+      (err) => {
+        setLocating(false);
+        setLocateError(err.message || "Couldn't get your location. Enable location access and try again.");
+      },
+      { enableHighAccuracy: true, timeout: 15000 },
+    );
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            ref={searchRef}
+            className="w-full rounded-xl border border-gray-300 py-2.5 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            placeholder="Search area, society or landmark…"
+          />
+        </div>
+        {showUseMyLocation && (
+          <button
+            type="button"
+            onClick={useMyLocation}
+            disabled={locating}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-gray-50 disabled:opacity-60"
+          >
+            {locating ? <Loader2 className="h-4 w-4 animate-spin" /> : <LocateFixed className="h-4 w-4 text-[var(--color-primary)]" />}
+            <span className="hidden sm:inline">Use my location</span>
+          </button>
+        )}
+      </div>
+      {locateError && <p className="text-xs text-[var(--color-error)]">{locateError}</p>}
+      <div ref={containerRef} className="h-64 w-full overflow-hidden rounded-xl border border-gray-200" />
+      <p className="text-xs text-[var(--color-text-secondary)]">
+        {resolving
+          ? "Finding this address…"
+          : latitude != null && longitude != null
+            ? `Pinned at ${latitude.toFixed(5)}, ${longitude.toFixed(5)} — drag the pin or click the map to adjust.`
+            : "Search, use your location, or click the map to drop a pin."}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Public picker: Google Maps when configured (accurate Indian addresses),
+ * the original Leaflet/OpenStreetMap picker as automatic fallback.
+ */
+export function MapPicker(props: {
+  latitude: number | null | undefined;
+  longitude: number | null | undefined;
+  onChange: (lat: number, lng: number) => void;
+  onAddressResolved?: (address: ResolvedAddress) => void;
+  showUseMyLocation?: boolean;
+}) {
+  const [googleOk, setGoogleOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    ensureGoogleMaps().then((ok) => !cancelled && setGoogleOk(ok));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (googleOk === null) {
+    return <div className="flex h-64 items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-sm text-[var(--color-text-secondary)]">Loading map…</div>;
+  }
+  return googleOk ? <GoogleMapPicker {...props} /> : <LeafletMapPicker {...props} />;
 }

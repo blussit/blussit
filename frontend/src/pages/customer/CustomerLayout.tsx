@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { CalendarPlus, Car, Gift, LayoutDashboard, LifeBuoy, ListChecks, MapPin, User } from "lucide-react";
+import { CalendarPlus, Car, Gift, Home, LayoutDashboard, LifeBuoy, ListChecks, MapPin, Plus, User } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 
 const navItems: NavItem[] = [
@@ -13,9 +13,24 @@ const navItems: NavItem[] = [
   { label: "Profile", to: "/app/profile", icon: User },
 ];
 
+// Mobile bottom tab bar — index 2 is the raised gold "Book" action.
+const bottomNav: NavItem[] = [
+  { label: "Home", to: "/app", icon: Home, end: true },
+  { label: "Bookings", to: "/app/bookings", icon: ListChecks },
+  { label: "Book", to: "/app/book", icon: Plus },
+  { label: "Support", to: "/app/support", icon: LifeBuoy },
+  { label: "Profile", to: "/app/profile", icon: User },
+];
+
+// Tapping the gold + asks HOW to book — with a plan or pay-per-wash.
+const centerMenu = [
+  { label: "Book with my plan", description: "Use your subscription washes — fastest way", icon: Gift, to: "/app/book?mode=plan" },
+  { label: "Normal booking", description: "Pick a service and pay per wash", icon: CalendarPlus, to: "/app/book" },
+];
+
 export default function CustomerLayout() {
   return (
-    <DashboardShell navItems={navItems} portalLabel="Customer">
+    <DashboardShell navItems={navItems} portalLabel="Customer" brand bottomNav={bottomNav} centerMenu={centerMenu}>
       <Outlet />
     </DashboardShell>
   );

@@ -18,7 +18,6 @@ export default function BookPage() {
   const themeScope = {
     "--color-primary": "#000000",
     "--color-primary-dark": "#000000",
-    "--color-primary-light": "#1A1A1A",
     "--color-secondary": "#FACC15",
     "--color-accent": "#FACC15",
   } as CSSProperties;
@@ -26,12 +25,12 @@ export default function BookPage() {
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
       <PublicNavbar />
-      <div className="pt-24 pb-12 bg-white">
-        <div className="container-page py-10">
-          <div className="mx-auto mb-10 max-w-2xl text-center">
-            <h1 className="font-display text-4xl font-black text-[#111] tracking-tight">Book a service</h1>
-            <p className="mt-4 text-lg text-neutral-500">
-              No account needed — just your name and WhatsApp number at the end. Already with us? Log in and it's even faster.
+      <div className="bg-cream pb-10 pt-6 sm:pb-12 sm:pt-12">
+        <div className="container-page">
+          <div className="mx-auto mb-5 max-w-2xl text-center sm:mb-8">
+            <h1 className="font-display text-[28px] font-black tracking-tight text-[#111] sm:text-4xl">Book a service</h1>
+            <p className="mt-2 text-[14px] text-neutral-500 sm:mt-3 sm:text-lg">
+              No account needed — just your name and WhatsApp number at the end.
             </p>
           </div>
           <PublicBookingWizard preselect={preselect} />

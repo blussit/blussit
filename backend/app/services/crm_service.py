@@ -35,7 +35,10 @@ class CRMService:
 
     async def get_customer_360(self, customer_id: str) -> dict:
         user = await self.user_repo.find_by_id(customer_id)
-        if not user:
+        # Customers only — same rule as find_customer_by_phone above. Without
+        # this, passing a STAFF user id here dumped that staff member's
+        # profile through a customer-CRM endpoint.
+        if not user or user.get("role") != UserRole.CUSTOMER.value:
             raise NotFoundException("Customer not found")
 
         bookings, _ = await self.booking_repo.list_for_customer(customer_id, None, 1, 50)

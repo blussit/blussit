@@ -50,6 +50,9 @@ async def update_complaint(complaint_id: str, payload: ComplaintUpdateRequest, c
     return await ComplaintController(db).update(current_user, complaint_id, payload)
 
 
-@router.post("/{complaint_id}/reply", dependencies=[Depends(require_manager_or_admin)])
+@router.post("/{complaint_id}/reply")
 async def reply_to_complaint(complaint_id: str, payload: ComplaintReplyRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Staff replies stay center-scoped; a CUSTOMER may reply on their own
+    thread too (ownership + no-status-change enforced in the service) —
+    support used to be one-way, readable but unanswerable."""
     return await ComplaintController(db).reply(current_user, complaint_id, payload)

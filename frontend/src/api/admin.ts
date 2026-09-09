@@ -1,4 +1,4 @@
-import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
+import { API_BASE_URL, apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
 import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption } from "../types";
 
@@ -37,7 +37,7 @@ export const adminUserApi = {
   update: (id: string, payload: Partial<User>) => apiClient.put<ApiSuccess<User>>(`/users/${id}`, payload).then((r) => r.data.data),
   suspend: (id: string) => apiClient.post<ApiSuccess<User>>(`/users/${id}/suspend`).then((r) => r.data.data),
   remove: (id: string) => apiClient.delete(`/users/${id}`).then((r) => r.data),
-  createStaff: (payload: { full_name: string; email?: string; phone?: string; password: string; role: string; service_center_id?: string }) =>
+  createStaff: (payload: { full_name: string; email?: string; phone?: string; password: string; role: string; service_center_id?: string; photo_url?: string }) =>
     apiClient.post<ApiSuccess<User>>("/auth/staff", payload).then((r) => r.data.data),
   // Manager/admin creating a customer on their behalf (e.g. a phone/walk-in
   // booking) — the account gets a temp password the customer must change on
@@ -165,6 +165,14 @@ export const staffDirectoryApi = {
   pingLocation: (latitude: number, longitude: number) => apiClient.post<ApiSuccess<null>>("/staff/captains/location", { latitude, longitude }).then((r) => r.data.data),
   attendance: (captainId: string, params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<AttendanceRecord>>(`/staff/captains/${captainId}/attendance`, { params }).then((r) => r.data),
+  // GPS breadcrumb trail (30-day TTL) for the manager map/audit view.
+  locationTrail: (captainId: string, since?: string) =>
+    apiClient
+      .get<ApiSuccess<{ latitude: number; longitude: number; source: string; booking_id?: string | null; at: string }[]>>(
+        `/staff/captains/${captainId}/locations`,
+        { params: since ? { since } : undefined }
+      )
+      .then((r) => r.data.data),
 };
 
 export interface ServiceCenterSummary {
@@ -245,4 +253,128 @@ export const coverageLeadApi = {
 export const auditLogApi = {
   list: (params?: { module?: string; actor_id?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Record<string, unknown>>>("/audit-logs", { params }).then((r) => r.data),
+};
+
+// ---- Management KPI engine (admin dashboard analytics tabs) --------------
+export type KpiPeriodParams = { period?: string; start?: string; end?: string };
+
+export const kpiApi = {
+  section: <T = Record<string, unknown>>(section: string, params: KpiPeriodParams) =>
+    apiClient.get<ApiSuccess<T>>(`/analytics/kpis/${section}`, { params }).then((r) => r.data.data),
+  getSettings: () => apiClient.get<ApiSuccess<BusinessSettings>>("/analytics/business-settings").then((r) => r.data.data),
+  updateSettings: (payload: Partial<BusinessSettings>) =>
+    apiClient.put<ApiSuccess<BusinessSettings>>("/analytics/business-settings", payload).then((r) => r.data.data),
+};
+
+export type MarketingEntry = {
+  date: string;
+  source: string;
+  campaign?: string;
+  spend: number;
+  leads?: number;
+  customers?: number;
+  revenue?: number;
+};
+
+export type BusinessSettings = {
+  variable_cost_per_wash: number;
+  fixed_cost_monthly: number;
+  kit_cost: number;
+  kits_count: number;
+  targets: {
+    washes_per_captain_per_day: number;
+    repeat_rate_pct: number;
+    capacity_utilisation_pct: number;
+    avg_rating: number;
+    cac: number;
+  };
+  marketing_entries: MarketingEntry[];
+};
+
+// ---- WhatsApp CRM ---------------------------------------------------------
+export type WaConversation = {
+  wa_id: string; phone: string; name: string; customer_id: string | null;
+  last_message_text: string | null; last_message_at: string | null; last_message_direction: "in" | "out" | null;
+  unread_count: number; crm_status: "open" | "pending" | "resolved";
+  assigned_to: string | null; assigned_to_name: string | null;
+  tags: string[]; bot_paused: boolean;
+  window: { active: boolean; expires_at: string | null };
+  has_active_booking: boolean;
+};
+
+export type WaMessage = {
+  id: string; direction: "in" | "out"; type: string; text: string;
+  media_type?: string | null; media_id?: string | null; mime_type?: string | null; filename?: string | null;
+  latitude?: number | null; longitude?: number | null; template_name?: string | null;
+  at: string | null; status: "SENT" | "DELIVERED" | "READ" | "FAILED" | null;
+  errors?: { code: number; title: string; message: string }[] | null;
+  automated: boolean; sender: string;
+};
+
+export type WaTemplate = {
+  name: string; status: string; category: string | null; language: string | null;
+  body: string; param_count: number; rejected_reason: string | null;
+  disabled: boolean; usage: number; synced_at: string | null;
+};
+
+export type WaContactProfile = {
+  conversation: WaConversation;
+  customer: { id: string; name: string; phone: string; email: string | null; status: string; created_at: string | null; phone_verified: boolean } | null;
+  vehicles: { brand: string | null; model: string | null; registration_number: string | null; type: string | null }[];
+  current_booking: { booking_number: string; id: string; services: string[]; date: string; slot: string; status: string; captain: string | null; amount: number } | null;
+  stats: { total_bookings: number; completed: number; cancelled: number; last_service: string | null; lifetime_value: number; avg_rating_given: number | null; is_repeat: boolean } | null;
+};
+
+export const whatsappCrmApi = {
+  conversations: (filter = "all", search = "") =>
+    apiClient.get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/conversations", { params: { filter, search } }).then((r) => r.data.data),
+  thread: (waId: string) =>
+    apiClient.get<ApiSuccess<{ conversation: WaConversation; messages: WaMessage[] }>>(`/whatsapp/crm/conversations/${waId}/messages`).then((r) => r.data.data),
+  markRead: (waId: string) => apiClient.post(`/whatsapp/crm/conversations/${waId}/read`),
+  sendText: (waId: string, text: string) => apiClient.post(`/whatsapp/crm/conversations/${waId}/send`, { text }),
+  sendTemplate: (waId: string, template_name: string, params: string[]) =>
+    apiClient.post(`/whatsapp/crm/conversations/${waId}/send-template`, { template_name, params }),
+  sendMedia: (waId: string, payload: { media_type: string; media_id: string; caption: string; filename: string }) =>
+    apiClient.post(`/whatsapp/crm/conversations/${waId}/send-media`, payload),
+  startConversation: (phone: string, template_name: string, params: string[]) =>
+    apiClient.post<ApiSuccess<{ wa_id: string }>>("/whatsapp/crm/conversations/start", { phone, template_name, params }).then((r) => r.data.data),
+  assign: (waId: string, user_id: string | null) => apiClient.post(`/whatsapp/crm/conversations/${waId}/assign`, { user_id }),
+  setStatus: (waId: string, status: string) => apiClient.post(`/whatsapp/crm/conversations/${waId}/status`, { status }),
+  setTags: (waId: string, tags: string[]) => apiClient.post(`/whatsapp/crm/conversations/${waId}/tags`, { tags }),
+  setBotPaused: (waId: string, paused: boolean) => apiClient.post(`/whatsapp/crm/conversations/${waId}/bot`, { paused }),
+  contactProfile: (waId: string) => apiClient.get<ApiSuccess<WaContactProfile>>(`/whatsapp/crm/contacts/${waId}`).then((r) => r.data.data),
+  contacts: (search = "") => apiClient.get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/contacts", { params: { search } }).then((r) => r.data.data),
+  agents: () => apiClient.get<ApiSuccess<{ id: string; name: string; role: string }[]>>("/whatsapp/crm/agents").then((r) => r.data.data),
+  badge: () => apiClient.get<ApiSuccess<{ unread_conversations: number }>>("/whatsapp/crm/badge").then((r) => r.data.data),
+  defaultTags: () => apiClient.get<ApiSuccess<{ tags: string[] }>>("/whatsapp/crm/tags").then((r) => r.data.data),
+  analytics: (days = 30) => apiClient.get<ApiSuccess<Record<string, never> & Record<string, unknown>>>("/whatsapp/crm/analytics", { params: { days } }).then((r) => r.data.data),
+  templates: () => apiClient.get<ApiSuccess<WaTemplate[]>>("/whatsapp/crm/templates").then((r) => r.data.data),
+  syncTemplates: () => apiClient.post<ApiSuccess<{ synced: number }>>("/whatsapp/crm/templates/sync").then((r) => r.data.data),
+  createTemplate: (payload: { name: string; category: string; language: string; body: string; button_text?: string; button_url?: string }) =>
+    apiClient.post("/whatsapp/crm/templates", payload),
+  setTemplateDisabled: (name: string, paused: boolean) => apiClient.patch(`/whatsapp/crm/templates/${name}/disabled`, { paused }),
+  uploadMedia: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post<ApiSuccess<{ media_id: string; media_type: string; filename: string; size: number }>>("/whatsapp/crm/media", form, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data.data);
+  },
+  mediaUrl: (mediaId: string) => `${API_BASE_URL}/whatsapp/crm/media/${mediaId}`,
+};
+
+// ---- Service zones (polygon coverage) -------------------------------------
+export type ServiceZone = {
+  id: string;
+  name: string;
+  service_center_id: string;
+  polygon: { type: "Polygon"; coordinates: number[][][] };
+  is_active: boolean;
+};
+
+export const zonesApi = {
+  list: () => apiClient.get<ApiSuccess<ServiceZone[]>>("/service-zones").then((r) => r.data.data),
+  create: (payload: { name: string; service_center_id: string; ring: number[][] }) =>
+    apiClient.post<ApiSuccess<ServiceZone>>("/service-zones", payload).then((r) => r.data.data),
+  update: (id: string, payload: { name?: string; ring?: number[][]; is_active?: boolean }) =>
+    apiClient.put<ApiSuccess<ServiceZone>>(`/service-zones/${id}`, payload).then((r) => r.data.data),
+  remove: (id: string) => apiClient.delete(`/service-zones/${id}`),
 };

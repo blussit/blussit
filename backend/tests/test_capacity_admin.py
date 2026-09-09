@@ -14,13 +14,15 @@ from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingCreateRequest
 from app.services.booking_service import BookingService
 
-from tests.factories import get_foam_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
+from app.utils.timezone import now_ist
+
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_customer_with_vehicle, make_service_center
 
 
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, default_slot_capacity=5)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
@@ -31,7 +33,7 @@ async def rig(db, cleanup):
 @pytest.mark.asyncio
 async def test_admin_view_shows_real_numbers_not_the_customer_wording(rig):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     admin_view = await bs.admin_slot_capacity(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
     slot = next(s for s in admin_view["slots"] if s["key"] == "09:00-12:00")
     assert slot["capacity"] == 5
@@ -42,7 +44,7 @@ async def test_admin_view_shows_real_numbers_not_the_customer_wording(rig):
 @pytest.mark.asyncio
 async def test_admin_can_increase_capacity_and_it_applies_immediately(rig, cleanup):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     date_str = tomorrow.strftime("%Y-%m-%d")
 
     # Fill the default capacity of 5.
@@ -68,7 +70,7 @@ async def test_admin_can_increase_capacity_and_it_applies_immediately(rig, clean
 @pytest.mark.asyncio
 async def test_admin_can_close_a_slot_blocking_new_bookings(rig, cleanup):
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     date_str = tomorrow.strftime("%Y-%m-%d")
 
     await bs.set_slot_capacity(rig["center_id"], date_str, "09:00-12:00", capacity=None, is_closed=True)
@@ -95,7 +97,7 @@ async def test_reducing_capacity_below_booked_count_does_not_break_existing_book
     """Section 24: capacity reduced after bookings already exist — those
     existing bookings must remain valid; only NEW bookings are blocked."""
     bs = BookingService(rig["db"])
-    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
     date_str = tomorrow.strftime("%Y-%m-%d")
 
     booked_ids = []

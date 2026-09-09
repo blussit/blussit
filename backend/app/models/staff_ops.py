@@ -11,6 +11,13 @@ class AttendanceModel(BusinessRecordBase):
     status: AttendanceStatus = AttendanceStatus.PRESENT
     check_in_time: str | None = None
     check_out_time: str | None = None
+    # Where the check-in/out physically happened ({"latitude","longitude"}).
+    # Informational only — captains may legitimately start their day
+    # anywhere (e.g. straight to the first booking), so there's deliberately
+    # no center geofence rule here; the manager just sees the pin.
+    check_in_location: dict | None = None
+    check_out_location: dict | None = None
+    worked_minutes: int | None = None  # computed at check-out
     notes: str | None = None
 
 

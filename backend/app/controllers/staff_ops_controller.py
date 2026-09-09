@@ -3,7 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.authz import ensure_own_center
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
-from app.schemas.staff_ops_schema import CheckInRequest, LeaveRequestCreate, LeaveReviewRequest
+from app.schemas.staff_ops_schema import CheckInRequest, CheckOutRequest, LeaveRequestCreate, LeaveReviewRequest
 from app.services.audit_service import AuditService
 from app.services.staff_ops_service import AttendanceService, LeaveService
 
@@ -15,8 +15,8 @@ class AttendanceController:
     async def check_in(self, current_user: CurrentUser, payload: CheckInRequest):
         return success(await self.service.check_in(current_user.id, payload), "Checked in successfully")
 
-    async def check_out(self, current_user: CurrentUser):
-        return success(await self.service.check_out(current_user.id), "Checked out successfully")
+    async def check_out(self, current_user: CurrentUser, payload: CheckOutRequest | None = None):
+        return success(await self.service.check_out(current_user.id, payload), "Checked out successfully")
 
     async def list_mine(self, current_user: CurrentUser, pagination: PaginationParams):
         items, total = await self.service.list_for_captain(current_user.id, pagination.page, pagination.page_size)
@@ -41,6 +41,9 @@ class LeaveController:
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def review(self, current_user: CurrentUser, leave_id: str, payload: LeaveReviewRequest):
-        result = await self.service.review(leave_id, payload, current_user.id)
+        result = await self.service.review(
+            leave_id, payload, current_user.id,
+            actor_role=current_user.role, actor_center_id=current_user.service_center_id,
+        )
         await self.audit.log_action(current_user.id, current_user.role, "REVIEW_LEAVE_REQUEST", "leave_requests", leave_id, {"status": payload.status})
         return success(result, "Leave request reviewed")

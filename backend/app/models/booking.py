@@ -107,8 +107,20 @@ class BookingModel(BusinessRecordBase):
     customer_phone: Optional[str] = None
     vehicle_verified: bool = False
     vehicle_verified_at: Optional[datetime] = None
+    # GPS captured when the captain presses "I've reached" (the vehicle
+    # verification step) — geofence-checked against the customer's address
+    # exactly like the before/after photos: flags, never blocks.
+    arrival_location: Optional[GeoPoint] = None
+    arrival_flagged: bool = False
+    arrival_distance_m: Optional[float] = None
 
     distance_km: Optional[float] = None
+    # Real-road distance/ETA snapshot from creation (Routes API, haversine
+    # fallback) — written since the travel-status feature, declared here so
+    # the model matches what's actually stored.
+    travel_distance_km: Optional[float] = None
+    travel_eta_minutes: Optional[float] = None
+    travel_estimate_source: Optional[str] = None
     captain_travel_pay: Optional[float] = None
     captain_service_pay: Optional[float] = None
     captain_earning: Optional[float] = None

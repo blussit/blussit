@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownCircle, ArrowUpCircle, Briefcase, IndianRupee, Landmark, PlusCircle, Star, TrendingUp, TriangleAlert, Wallet } from "lucide-react";
+import { ArrowDownCircle, ArrowUpCircle, Briefcase, IndianRupee, Landmark, Star, TrendingUp, TriangleAlert, Wallet } from "lucide-react";
 import { staffDirectoryApi } from "../../api/admin";
 import { bookingPolicyApi } from "../../api/catalog";
 import { walletApi } from "../../api/wallet";
@@ -13,12 +13,9 @@ export default function CaptainEarningsPage() {
   const queryClient = useQueryClient();
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [showBank, setShowBank] = useState(false);
-  const [showTopUp, setShowTopUp] = useState(false);
   const [amount, setAmount] = useState("");
-  const [topUpAmount, setTopUpAmount] = useState("");
   const [bank, setBank] = useState({ bank_account_number: "", bank_ifsc: "", bank_account_holder: "" });
   const [formError, setFormError] = useState<string | null>(null);
-  const [topUpError, setTopUpError] = useState<string | null>(null);
 
   const { data: performance, isLoading: perfLoading } = useQuery({ queryKey: ["my-performance"], queryFn: staffDirectoryApi.myPerformance });
   const { data: wallet, isLoading: walletLoading } = useQuery({ queryKey: ["my-wallet"], queryFn: walletApi.myWallet });
@@ -52,18 +49,6 @@ export default function CaptainEarningsPage() {
       setFormError(null);
     },
     onError: (e) => setFormError(getErrorMessage(e)),
-  });
-
-  const topUpMutation = useMutation({
-    mutationFn: (amt: number) => walletApi.topUp(amt),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
-      queryClient.invalidateQueries({ queryKey: ["my-wallet-transactions"] });
-      setShowTopUp(false);
-      setTopUpAmount("");
-      setTopUpError(null);
-    },
-    onError: (e) => setTopUpError(getErrorMessage(e)),
   });
 
   if (perfLoading || walletLoading || policyLoading || !performance) return <PageLoader />;
@@ -109,14 +94,11 @@ export default function CaptainEarningsPage() {
           {belowMinimum && (
             <div className="mt-4 flex items-center gap-2 rounded-lg bg-white/15 px-3 py-2 text-sm">
               <TriangleAlert className="h-4 w-4 shrink-0" />
-              Your balance is below the minimum — you won't be assigned new jobs until you top up.
+              Your balance is below the minimum — hand cash to your center manager to add balance; you won't get new jobs until then.
             </div>
           )}
         </div>
         <CardBody className="flex flex-wrap gap-3">
-          <Button onClick={() => setShowTopUp(true)}>
-            <PlusCircle className="h-4 w-4" /> Top up
-          </Button>
           <Button variant="outline" onClick={() => setShowWithdraw(true)}>
             <ArrowUpCircle className="h-4 w-4" /> Request withdrawal
           </Button>
@@ -210,30 +192,6 @@ export default function CaptainEarningsPage() {
           </div>
         </CardBody>
       </Card>
-
-      <Modal open={showTopUp} onClose={() => setShowTopUp(false)} title="Top up wallet">
-        <p className="text-sm text-[var(--color-text-secondary)]">
-          Records money you've paid in outside the app (e.g. handed to your center manager) — credits your wallet balance
-          immediately. This platform doesn't take online payments yet, so there's no card/UPI top-up here.
-        </p>
-        <Input
-          className="mt-3"
-          label="Amount (₹)"
-          type="number"
-          min={1}
-          value={topUpAmount}
-          onChange={(e) => setTopUpAmount(e.target.value)}
-        />
-        {topUpError && <p className="mt-2 text-sm text-[var(--color-error)]">{topUpError}</p>}
-        <Button
-          className="mt-4 w-full"
-          isLoading={topUpMutation.isPending}
-          disabled={!topUpAmount || Number(topUpAmount) <= 0}
-          onClick={() => topUpMutation.mutate(Number(topUpAmount))}
-        >
-          <PlusCircle className="h-4 w-4" /> Confirm top up
-        </Button>
-      </Modal>
 
       <Modal open={showWithdraw} onClose={() => setShowWithdraw(false)} title="Request withdrawal">
         <p className="text-sm text-[var(--color-text-secondary)]">

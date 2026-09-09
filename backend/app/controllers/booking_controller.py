@@ -139,7 +139,3 @@ class BookingController:
             {"new_date": payload.scheduled_date.isoformat(), "new_slot": payload.scheduled_slot},
         )
         return success(result, "Booking rescheduled successfully")
-
-    async def rebook(self, current_user: CurrentUser, booking_id: str, scheduled_date: datetime, scheduled_slot: str):
-        result = await self.service.rebook(current_user.id, booking_id, scheduled_date, scheduled_slot)
-        return success(result, "Booking created from previous service")

@@ -32,7 +32,7 @@ async def test_commit_consumption_decrements_remaining_count(rig):
     sub = await service.subscribe(rig["customer_id"], SubscribeRequest(plan_id=rig["plan_id"]))
     assert sub["remaining_service_count"] == 1
 
-    consumption = await service.plan_consumption(sub["id"], "irrelevant-vehicle-id", [{"id": "svc", "category_id": None}])
+    consumption = await service.plan_consumption(sub["id"], "irrelevant-vehicle-id", [{"id": "svc", "category_id": None}], rig["customer_id"])
     await service.commit_consumption(sub["id"], consumption)
 
     updated = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub["id"])})
@@ -47,7 +47,7 @@ async def test_restore_consumption_reverses_a_cancelled_booking(rig):
     service that was never performed."""
     service = UserSubscriptionService(rig["db"])
     sub = await service.subscribe(rig["customer_id"], SubscribeRequest(plan_id=rig["plan_id"]))
-    consumption = await service.plan_consumption(sub["id"], "irrelevant-vehicle-id", [{"id": "svc", "category_id": None}])
+    consumption = await service.plan_consumption(sub["id"], "irrelevant-vehicle-id", [{"id": "svc", "category_id": None}], rig["customer_id"])
     await service.commit_consumption(sub["id"], consumption)
 
     await service.restore_consumption(sub["id"], consumption)
@@ -68,7 +68,7 @@ async def test_concurrent_last_unit_consumption_never_goes_negative(rig, db, cle
 
     async def try_consume():
         try:
-            consumption = await UserSubscriptionService(db).plan_consumption(sub["id"], "v", [{"id": "svc", "category_id": None}])
+            consumption = await UserSubscriptionService(db).plan_consumption(sub["id"], "v", [{"id": "svc", "category_id": None}], rig["customer_id"])
             await UserSubscriptionService(db).commit_consumption(sub["id"], consumption)
             return "ok"
         except BadRequestException:

@@ -11,6 +11,10 @@ class BookingCreateRequest(BaseModel):
     vehicle_id: str
     address_id: str
     service_ids: list[str] = Field(default_factory=list)
+    # Per-unit add-on counts (service_id -> qty), e.g. Extra Bike Wash ×3 or
+    # Bike Polish ×2. Anything not listed is qty 1; the server decides which
+    # services may repeat at all (see BookingService._validate_service_mix).
+    service_quantities: dict[str, int] = Field(default_factory=dict)
     combo_id: Optional[str] = None
     scheduled_date: datetime
     scheduled_slot: str
@@ -20,6 +24,9 @@ class BookingCreateRequest(BaseModel):
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
+    # Slot-hold ticket (AUDIT.md M1): the anonymous/session key the client
+    # used when acquiring a hold, so create_booking can convert it.
+    hold_key: Optional[str] = Field(default=None, max_length=80)
 
 
 class ManagerBookingCreateRequest(BaseModel):
@@ -33,6 +40,7 @@ class ManagerBookingCreateRequest(BaseModel):
     address_id: Optional[str] = None
     new_address: Optional[AddressCreateRequest] = None
     service_ids: list[str] = Field(default_factory=list)
+    service_quantities: dict[str, int] = Field(default_factory=dict)
     combo_id: Optional[str] = None
     scheduled_date: datetime
     scheduled_slot: str
@@ -119,8 +127,14 @@ class ReassignCaptainRequest(BaseModel):
 
 class VerifyVehicleRequest(BaseModel):
     """Captain types the plate they see on arrival — a deliberate typed check,
-    not a yes/no toggle, so a captain can't rubber-stamp past the wrong car."""
+    not a yes/no toggle, so a captain can't rubber-stamp past the wrong car.
+    This is also the "I've reached" moment, so it carries the device's GPS
+    (geofence-checked against the customer's address like the photos).
+    Coordinates are optional only for old app versions still in the field."""
     registration_number: str = Field(min_length=3, max_length=20)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy_m: Optional[float] = None
 
 
 class ResolveIssueRequest(BaseModel):

@@ -3,6 +3,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pydantic import BaseModel, Field
+
+from app.core.responses import success
 
 from app.controllers.booking_controller import BookingController
 from app.core.dependencies import (
@@ -180,6 +183,36 @@ async def reschedule_booking(booking_id: str, payload: BookingRescheduleRequest,
     return await BookingController(db).reschedule(current_user, booking_id, payload)
 
 
-@router.post("/{booking_id}/rebook", dependencies=[Depends(require_customer)])
-async def rebook(booking_id: str, scheduled_date: datetime, scheduled_slot: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await BookingController(db).rebook(current_user, booking_id, scheduled_date, scheduled_slot)
+
+class SlotHoldRequest(BaseModel):
+    """Unauthenticated by design — guests hold a slot while filling the
+    wizard. The server validates the center/date/slot against real
+    generated slots (see BookingService.hold_slot) precisely because
+    nothing about this payload can be trusted."""
+    holder_key: str = Field(min_length=8, max_length=64)
+    service_center_id: str
+    date: str
+    slot_key: str = Field(max_length=20)
+
+
+@router.post("/hold")
+async def hold_slot(payload: SlotHoldRequest, db=Depends(get_db)):
+    from app.services.booking_service import BookingService
+
+    return success(await BookingService(db).hold_slot(payload.holder_key, payload.service_center_id, payload.date, payload.slot_key))
+
+
+@router.post("/hold/release")
+async def release_hold(payload: SlotHoldRequest, db=Depends(get_db)):
+    from app.services.booking_service import BookingService
+
+    return success(await BookingService(db).release_hold(payload.holder_key, payload.service_center_id, payload.date, payload.slot_key))
+
+
+@router.get("/{booking_id}/travel-status")
+async def travel_status(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Store->customer + captain->customer distance/ETA — powers the
+    customer's "captain is ~N min away" and staff dispatch context."""
+    from app.services.booking_service import BookingService
+
+    return success(await BookingService(db).travel_status(booking_id, current_user.id, current_user.role, current_user.service_center_id))

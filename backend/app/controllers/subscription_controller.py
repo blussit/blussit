@@ -53,6 +53,9 @@ class UserSubscriptionController:
     async def list_for_customer(self, customer_id: str):
         return success(await self.service.list_for_customer(customer_id))
 
+    async def center_overview(self, current_user: CurrentUser, service_center_id: str):
+        return success(await self.service.center_overview(service_center_id, current_user.role, current_user.service_center_id))
+
     async def subscribe(self, current_user: CurrentUser, payload: SubscribeRequest):
         result = await self.service.subscribe(current_user.id, payload)
         await self.audit.log_action(current_user.id, current_user.role, "SUBSCRIBE", "user_subscriptions", result["id"], {"plan_id": payload.plan_id})

@@ -1,18 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ArrowRight, BadgeCheck, Car, CheckCircle2, Lock, MapPin, ShieldCheck, Sparkles } from "lucide-react";
-import { catalogApi, serviceCenterApi, vehicleTypeApi } from "../../api/catalog";
-import { authApi } from "../../api/auth";
+import { ArrowLeft, ArrowRight, BadgeCheck, Car, CheckCircle2, Lock, MapPin, Plus, ShieldCheck, Sparkles } from "lucide-react";
+import { catalogApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
+import { authApi, guestAuthApi } from "../../api/auth";
 import { bookingApi } from "../../api/booking";
 import { vehicleApi, addressApi } from "../../api/profile";
-import { Badge, Button, Input, Spinner } from "../ui";
+import { Badge, Button, Input, Select, Spinner } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
 import { PhoneVerificationModal } from "../shared/PhoneVerificationModal";
 import { CoverageLeadInline } from "./CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorMessage, tokenStorage } from "../../lib/api-client";
+import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
+import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
+import { validateIndianMobile, validateIndianPlate } from "../../lib/validators";
 import type { Service } from "../../types";
+import { groupServices, parseIncludes, priceForType } from "./landing/shared";
+import { addonKit, bikeTypeIds, variantCount } from "../../lib/serviceMix";
+import { QtyStepper } from "../shared/QtyStepper";
 
 export interface WizardPreselect {
   vehicleTypeId?: string;
@@ -23,6 +29,10 @@ const STEPS = ["Choose service", "Time & place", "Confirm & verify"];
 
 function priceFor(s: Service, vt: string): number {
   return s.vehicle_type_prices?.[vt] ?? s.price;
+}
+
+function firstWashPriceFor(s: Service, vt: string): number | null {
+  return s.vehicle_type_discounted_prices?.[vt] ?? s.discounted_price ?? null;
 }
 
 function randomPassword(): string {
@@ -47,19 +57,21 @@ function randomPassword(): string {
  */
 export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect | null }) {
   const navigate = useNavigate();
-  const { user, login, register } = useAuth();
+  const { user, login, register, refreshUser } = useAuth();
   const isCustomer = !!user && user.role === "customer";
   const isStaff = !!user && user.role !== "customer";
 
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: servicesData } = useQuery({ queryKey: ["public-services"], queryFn: () => catalogApi.services({ page_size: 100 }) });
-  const services = useMemo(() => servicesData?.data || [], [servicesData]);
+  const services = useMemo(() => (servicesData?.data || []).filter((s) => s.is_active !== false), [servicesData]);
   const { data: myVehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: isCustomer });
   const { data: myAddresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list, enabled: isCustomer });
 
   const [step, setStep] = useState(0);
   const [vehicleTypeId, setVehicleTypeId] = useState("");
   const [serviceIds, setServiceIds] = useState<string[]>([]);
+  // Per-unit add-on counts (Extra Bike Wash ×N, Bike Polish ×N).
+  const [serviceQty, setServiceQty] = useState<Record<string, number>>({});
 
   // Vehicle: a saved one (logged-in) or details for a new one.
   const [savedVehicleId, setSavedVehicleId] = useState<string | null>(null);
@@ -75,6 +87,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const [centerState, setCenterState] = useState("");
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [line1, setLine1] = useState("");
+  // Map pin (Swiggy-style): the coordinates are the truth; area/city/
+  // pincode fill from it silently. Null = maps unavailable -> manual fields.
+  const [pinned, setPinned] = useState<LocationValue | null>(null);
+  const [mapsUp, setMapsUp] = useState(true);
   const [date, setDate] = useState("");
   const [slot, setSlot] = useState("");
 
@@ -82,6 +98,13 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [needLogin, setNeedLogin] = useState(false);
+  // Abandoned-signup / stale-verification recovery: prove the phone by
+  // OTP instead of a password that may never have been set.
+  const [needOtp, setNeedOtp] = useState(false);
+  const [couponCode, setCouponCode] = useState("");
+  const [loginOtp, setLoginOtp] = useState("");
+  const [otpViaWidget, setOtpViaWidget] = useState(false);
+  const otpUserRef = useRef<typeof user>(null);
   const [password, setPassword] = useState("");
 
   const [verifyOpen, setVerifyOpen] = useState(false);
@@ -115,9 +138,84 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     () => services.filter((s) => !vehicleTypeId || !s.vehicle_types?.length || s.vehicle_types.includes(vehicleTypeId)),
     [services, vehicleTypeId]
   );
+  // Main services (variant siblings such as Bike Wash 1–4 bikes collapse to
+  // one card with a chooser) vs. add-ons offered once a main service is in.
+  const mainGroups = useMemo(() => groupServices(eligibleServices.filter((s) => !s.is_addon)), [eligibleServices]);
   const selectedServices = services.filter((s) => serviceIds.includes(s.id));
-  const total = selectedServices.reduce((sum, s) => sum + priceFor(s, vehicleTypeId), 0);
-  const totalDuration = selectedServices.reduce((sum, s) => sum + (s.duration_minutes || 30), 0);
+  const isAddonId = (id: string) => !!services.find((s) => s.id === id)?.is_addon;
+  const hasMain = selectedServices.some((s) => !s.is_addon);
+  // Add-ons matched to the vehicle's class (mirrors the server's rules —
+  // see lib/serviceMix.ts): car add-ons with car washes, bike polish with
+  // bike washes, and the car+bikes combo (add bikes, polish those bikes).
+  const bikeIdSet = useMemo(() => bikeTypeIds(vehicleTypes), [vehicleTypes]);
+  const bookingIsBike = bikeIdSet.has(vehicleTypeId);
+  const kit = useMemo(() => addonKit(services, vehicleTypeId, bikeIdSet), [services, vehicleTypeId, bikeIdSet]);
+  const selectedBase = selectedServices.find((s) => !s.is_addon) || null;
+  const bikeCount = bookingIsBike && selectedBase ? variantCount(selectedBase) : 0;
+  const extraBikes = kit.addBike && serviceIds.includes(kit.addBike.id) ? serviceQty[kit.addBike.id] || 1 : 0;
+  const polishCount = kit.bikePolish && serviceIds.includes(kit.bikePolish.id) ? serviceQty[kit.bikePolish.id] || 1 : 0;
+  // Total bikes: a bike booking's −/+ counter books base wash + N extra-bike
+  // lines (₹99 + ₹60 each additional); a car booking's bikes are all extras.
+  const bikesInBooking = bookingIsBike ? bikeCount + extraBikes : extraBikes;
+  const qtyOf = (id: string) => serviceQty[id] || 1;
+  const total = selectedServices.reduce((sum, s) => sum + priceFor(s, vehicleTypeId) * qtyOf(s.id), 0);
+  // A guest IS (almost always) a first-time customer — quote the
+  // first-wash price up front instead of promising a discount while
+  // showing the full number. The backend remains the authority (it
+  // re-checks eligibility by plate+phone at booking time).
+  const firstWashTotal = selectedServices.reduce(
+    (sum, s) => sum + (firstWashPriceFor(s, vehicleTypeId) ?? priceFor(s, vehicleTypeId)) * qtyOf(s.id),
+    0
+  );
+  const hasFirstWashOffer = firstWashTotal < total;
+
+  const setUnitQty = (svc: Service | null, n: number) => {
+    if (!svc) return;
+    setServiceIds((prev) => (n > 0 ? (prev.includes(svc.id) ? prev : [...prev, svc.id]) : prev.filter((x) => x !== svc.id)));
+    setServiceQty((prev) => {
+      const next = { ...prev };
+      if (n > 0) next[svc.id] = n;
+      else delete next[svc.id];
+      return next;
+    });
+  };
+  const setExtraBikes = (n: number) => {
+    n = Math.max(0, Math.min(10, n));
+    setUnitQty(kit.addBike, n);
+    const totalBikes = bookingIsBike ? bikeCount + n : n;
+    if (kit.bikePolish && polishCount > totalBikes) setUnitQty(kit.bikePolish, totalBikes);
+  };
+  const setPolish = (n: number) => {
+    setUnitQty(kit.bikePolish, Math.max(0, Math.min(bikesInBooking, n)));
+  };
+
+  // Quantities never outlive their service selection; polish never exceeds
+  // the bikes actually in the booking (variant shrank, extras removed…).
+  useEffect(() => {
+    setServiceQty((prev) => {
+      const next = Object.fromEntries(Object.entries(prev).filter(([id]) => serviceIds.includes(id)));
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
+  }, [serviceIds]);
+  useEffect(() => {
+    if (!kit.bikePolish || !serviceIds.includes(kit.bikePolish.id)) return;
+    if (polishCount > bikesInBooking) setUnitQty(kit.bikePolish, bikesInBooking);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bikesInBooking]);
+
+  // Switching vehicle type drops services that no longer apply; add-ons
+  // never survive without a main service to attach to.
+  useEffect(() => {
+    if (!vehicleTypeId || !services.length) return;
+    setServiceIds((prev) => {
+      const eligible = new Set(eligibleServices.map((s) => s.id));
+      const isAddon = (id: string) => !!services.find((s) => s.id === id)?.is_addon;
+      const kept = prev.filter((id) => eligible.has(id));
+      const next = kept.some((id) => !isAddon(id)) ? kept : kept.filter((id) => !isAddon(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [vehicleTypeId, eligibleServices, services]);
+  const totalDuration = selectedServices.reduce((sum, s) => sum + (s.duration_minutes || 30) * qtyOf(s.id), 0);
 
   const checkCoverage = async (pin: string) => {
     setCoverage("checking");
@@ -145,10 +243,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedAddressId, pincode]);
 
-  const step1Valid = !!vehicleTypeId && serviceIds.length > 0;
+  const step1Valid = !!vehicleTypeId && hasMain;
   const step2Valid = coverage === "covered" && !!date && !!slot && (savedAddressId ? true : line1.trim().length >= 3);
-  const vehicleValid = savedVehicleId ? true : brandModel.trim().length >= 2 && regNumber.trim().length >= 3;
-  const identityValid = user ? true : name.trim().length >= 2 && /^\d{10}$/.test(phone.trim());
+  const vehicleValid = savedVehicleId ? true : brandModel.trim().length >= 2 && validateIndianPlate(regNumber) !== null;
+  const identityValid = user ? true : name.trim().length >= 2 && validateIndianMobile(phone) !== null;
   const step3Valid = vehicleValid && identityValid && (!needLogin || password.length >= 8);
 
   /** The whole pipeline, resumable and idempotent: every stage checks
@@ -159,19 +257,33 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     setError("");
     try {
       // 1. An account to book under.
-      let currentUser = user;
+      let currentUser = user ?? otpUserRef.current;
       if (!currentUser) {
         if (needLogin) {
-          currentUser = await login(phone.trim(), password);
+          currentUser = await login(validateIndianMobile(phone) || phone.trim(), password);
         } else {
           try {
             // Through AuthContext so the whole app (including the OTP
             // modal, which reads the logged-in user's phone) sees the new
             // session immediately. Random password — the customer claims
             // full access later via forgot-password → WhatsApp OTP.
-            currentUser = await register({ full_name: name.trim(), phone: phone.trim(), password: randomPassword() });
+            currentUser = await register({ full_name: name.trim(), phone: validateIndianMobile(phone) || phone.trim(), password: randomPassword(), guest: true });
           } catch (err) {
             if (getErrorMessage(err).toLowerCase().includes("already exists")) {
+              const phoneN = validateIndianMobile(phone) || phone.trim();
+              const access = await guestAuthApi.bookingAccess(phoneN).catch(() => ({ mode: "password" as const }));
+              if (access.mode === "otp") {
+                // Unverified/stale account (e.g. an earlier abandoned
+                // signup): its password was never really set — send a
+                // code instead of dead-ending on a password prompt.
+                const widgetOk = await ensureOtpWidget();
+                setOtpViaWidget(widgetOk);
+                if (widgetOk) await widgetSendOtp(phoneN);
+                else await authApi.forgotPassword(phoneN);
+                setNeedOtp(true);
+                setError("");
+                return;
+              }
               setNeedLogin(true);
               setError("This number already has an account — enter your password to continue (or use Forgot password on the login page).");
               return;
@@ -216,10 +328,12 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         } else {
           const created = await addressApi.create({
             label: "Home",
-            line1: line1.trim(),
-            city: centerCity || "—",
+            line1: pinned ? [line1.trim(), pinned.area, pinned.city].filter(Boolean).join(", ") : line1.trim(),
+            city: pinned?.city || centerCity || "—",
             state: centerState || "—",
             pincode: checkedPincode,
+            latitude: pinned?.latitude ?? null,
+            longitude: pinned?.longitude ?? null,
             is_default: existing.length === 0,
           });
           addressId = created.id;
@@ -232,7 +346,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       // completed it (resumedAfterVerify).
       if (!resumedAfterVerify) {
         const me = await authApi.me();
-        if (!me.phone_verified) {
+        if (!me.phone_verified || me.phone_verification_stale) {
           setVerifyOpen(true);
           return; // resumes via onVerified → submit(true)
         }
@@ -244,8 +358,11 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         vehicle_id: vehicleId,
         address_id: addressId,
         service_ids: serviceIds,
+        service_quantities: serviceQty,
         scheduled_date: date,
         scheduled_slot: slot,
+        coupon_code: couponCode.trim() || undefined,
+        hold_key: getSlotHolderKey(),
       });
       navigate(`/thank-you?token=${booking.confirmation_token}`);
     } catch (err) {
@@ -265,10 +382,62 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     );
   }
 
+  // Add-ons: only the ones that fit the selected vehicle class (mirrors
+  // the server's rules). Shown under the service list (step 1) and again
+  // on the review step, so extras can still be added right before
+  // confirming.
+  const addonChips =
+    hasMain && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) ? (
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap gap-2">
+          {kit.simple.map((a) => {
+            const on = serviceIds.includes(a.id);
+            const { price } = priceForType(a, vehicleTypeId);
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setServiceIds((prev) => (on ? prev.filter((x) => x !== a.id) : [...prev, a.id]))}
+                className={`inline-flex items-center gap-1.5 rounded-xl border-2 px-3.5 py-2 text-sm font-medium transition-colors ${
+                  on
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-primary)]"
+                    : "border-gray-200 bg-white text-[var(--color-text-secondary)] hover:border-gray-300"
+                }`}
+              >
+                {on ? <CheckCircle2 className="h-4 w-4 text-[var(--color-success)]" /> : <Plus className="h-4 w-4" />}
+                {a.name} · +₹{price}
+              </button>
+            );
+          })}
+        </div>
+        {!bookingIsBike && kit.addBike && (
+          <div className="flex items-center justify-between rounded-xl border-2 border-gray-200 bg-white px-3.5 py-2.5 text-sm">
+            <div>
+              <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">₹{priceForType(kit.addBike, vehicleTypeId).price} per bike, washed at the same doorstep</p>
+            </div>
+            <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
+          </div>
+        )}
+        {kit.bikePolish && bikesInBooking > 0 && (
+          <div className="flex items-center justify-between rounded-xl border-2 border-gray-200 bg-white px-3.5 py-2.5 text-sm">
+            <div>
+              <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                ₹{priceForType(kit.bikePolish, vehicleTypeId).price} per bike · up to {bikesInBooking}
+              </p>
+            </div>
+            <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  // No overflow-hidden on the card: the vehicle-type dropdown must be able to open past its edge.
   return (
-    <div className="overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-[var(--shadow-lifted)]">
+    <div className="rounded-3xl border border-gray-100 bg-white shadow-[var(--shadow-lifted)]">
       {/* Step header */}
-      <div className="border-b border-gray-100 bg-[var(--color-surface)] px-6 py-5">
+      <div className="rounded-t-3xl border-b border-gray-100 bg-[var(--color-surface)] px-4 py-3 sm:px-6 sm:py-5">
         <div className="flex flex-wrap items-center gap-2 sm:gap-0">
           {STEPS.map((label, i) => (
             <div key={label} className="flex items-center">
@@ -284,7 +453,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 }`}
               >
                 <span className="font-mono-num">{i < step ? <CheckCircle2 className="h-4 w-4" /> : i + 1}</span>
-                <span className="hidden sm:inline">{label}</span>
+                <span className={i === step ? "inline" : "hidden sm:inline"}>{label}</span>
               </button>
               {i < STEPS.length - 1 && <span className="mx-2 hidden h-px w-8 bg-gray-200 sm:block" />}
             </div>
@@ -295,7 +464,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         </div>
       </div>
 
-      <div className="p-6 md:p-8">
+      <div className="p-4 sm:p-6 md:p-8">
         {/* ---- STEP 1 — Choose service ---- */}
         {step === 0 && (
           <div className="space-y-6">
@@ -334,50 +503,137 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 </div>
               ) : null}
               {(!isCustomer || !myVehicles?.length || savedVehicleId === null) && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {(vehicleTypes || []).map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => setVehicleTypeId(t.id)}
-                      className={`rounded-xl border-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                        vehicleTypeId === t.id ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-primary)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
-                      }`}
-                    >
-                      {t.name}
-                    </button>
-                  ))}
-                </div>
+                <>
+                  {/* Phones: one dropdown instead of three rows of chips. */}
+                  <div className="mt-2 sm:hidden">
+                    <Select value={vehicleTypeId} onChange={(e) => setVehicleTypeId(e.target.value)} aria-label="Vehicle type">
+                      <option value="">Select your vehicle type</option>
+                      {(vehicleTypes || []).map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="mt-2 hidden flex-wrap gap-2 sm:flex">
+                    {(vehicleTypes || []).map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setVehicleTypeId(t.id)}
+                        className={`rounded-xl border-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                          vehicleTypeId === t.id ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-primary)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
+                        }`}
+                      >
+                        {t.name}
+                      </button>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
 
             {vehicleTypeId && (
-              <div>
-                <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">Pick your service(s)</p>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {eligibleServices.map((s) => {
-                    const active = serviceIds.includes(s.id);
-                    return (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => setServiceIds((prev) => (active ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
-                        className={`flex items-start justify-between gap-3 rounded-2xl border-2 p-4 text-left transition-colors ${
-                          active ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
-                        }`}
-                      >
-                        <span>
-                          <span className="block font-semibold text-[var(--color-text-primary)]">{s.name}</span>
-                          <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">{s.duration_minutes} min · at your doorstep</span>
-                        </span>
-                        <span className="shrink-0 text-right">
-                          <span className="block font-mono-num text-lg font-bold text-[var(--color-text-primary)]">₹{priceFor(s, vehicleTypeId)}</span>
-                          {active && <CheckCircle2 className="ml-auto mt-1 h-4 w-4 text-[var(--color-success)]" />}
-                        </span>
-                      </button>
-                    );
-                  })}
+              <div className="space-y-6">
+                <div>
+                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">Pick your service</p>
+                  <p className="mb-2.5 mt-0.5 text-xs text-[var(--color-text-secondary)]">One service per vehicle — extras can be added below.</p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {mainGroups.map((g) => {
+                      const chosen = g.variants.find((v) => serviceIds.includes(v.id));
+                      const current = chosen ?? g.primary;
+                      const active = !!chosen;
+                      let { price, original } = priceForType(current, vehicleTypeId);
+                      // A bike card's shown price grows with the −/+ counter:
+                      // base + ₹60 per additional bike.
+                      if (active && bookingIsBike && kit.addBike && extraBikes > 0) {
+                        price += extraBikes * priceForType(kit.addBike, vehicleTypeId).price;
+                        original = original != null ? original + extraBikes * priceForType(kit.addBike, vehicleTypeId).price : original;
+                      }
+                      const includes = parseIncludes(current.description);
+                      const variantIds = g.variants.map((v) => v.id);
+                      // One main service per vehicle: picking this one replaces any other main service, add-ons stay.
+                      const selectVariant = (id: string) => setServiceIds((prev) => [...prev.filter(isAddonId), id]);
+                      // Removing the main service takes its add-ons with it —
+                      // an add-on can never remain selected on its own.
+                      const clearGroup = () => setServiceIds((prev) => prev.filter((x) => !variantIds.includes(x) && !isAddonId(x)));
+                      const multi = g.variants.length > 1;
+                      return (
+                        <div
+                          key={g.primary.id}
+                          className={`rounded-2xl border-2 p-4 transition-colors ${
+                            active ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => (active ? clearGroup() : selectVariant(current.id))}
+                            className="flex w-full items-start justify-between gap-3 text-left"
+                          >
+                            <span className="min-w-0">
+                              <span className="block font-semibold text-[var(--color-text-primary)]">{g.primary.name}</span>
+                              <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">{current.duration_minutes} min · at your doorstep</span>
+                              {(includes.items.length > 0 || includes.summary) && (
+                                <span className="mt-1.5 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
+                                  {includes.items.length > 0 ? includes.items.join(" · ") : includes.summary}
+                                </span>
+                              )}
+                            </span>
+                            <span className="shrink-0 text-right">
+                              <span className="block font-mono-num text-lg font-bold text-[var(--color-text-primary)]">₹{price}</span>
+                              {original != null && <span className="block font-mono-num text-xs text-gray-400 line-through">₹{original}</span>}
+                              {active && <CheckCircle2 className="ml-auto mt-1 h-4 w-4 text-[var(--color-success)]" />}
+                            </span>
+                          </button>
+
+                          {/* Bike bookings: one −/+ counter, priced base +
+                              ₹60 per additional bike — no variant chips. */}
+                          {active && bookingIsBike && kit.addBike && (
+                            <div className="mt-3 flex items-center justify-between border-t border-black/5 pt-3">
+                              <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+                                How many bikes?
+                                <span className="block text-[11px] font-normal">
+                                  First bike ₹{priceForType(g.primary, vehicleTypeId).price}, ₹{priceForType(kit.addBike, vehicleTypeId).price} each additional
+                                </span>
+                              </span>
+                              <QtyStepper value={bikesInBooking} min={1} max={10} onChange={(n) => setExtraBikes(Math.max(0, n - bikeCount))} />
+                            </div>
+                          )}
+                          {multi && !bookingIsBike && (
+                            <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-black/5 pt-3">
+                              <span className="mr-1 text-xs font-medium text-[var(--color-text-secondary)]">Choose an option</span>
+                              {g.variants.map((v) => {
+                                const on = current.id === v.id;
+                                return (
+                                  <button
+                                    key={v.id}
+                                    type="button"
+                                    onClick={() => selectVariant(v.id)}
+                                    className={`rounded-full border-2 px-3 py-1 text-xs font-medium transition-colors ${
+                                      on
+                                        ? "border-[var(--color-primary)] bg-white font-semibold text-[var(--color-primary)]"
+                                        : "border-gray-200 bg-white text-[var(--color-text-secondary)] hover:border-gray-300"
+                                    }`}
+                                  >
+                                    {v.variant_label ?? v.name} · ₹{priceForType(v, vehicleTypeId).price}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
+
+                {addonChips && (
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--color-text-primary)]">Add-ons (optional)</p>
+                    <p className="mb-2.5 mt-0.5 text-xs text-[var(--color-text-secondary)]">Extras done in the same visit.</p>
+                    {addonChips}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -422,9 +678,54 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
               </div>
             ) : null}
 
+            {!savedAddressId && mapsUp && (
+              <LocationPicker
+                value={pinned}
+                onUnavailable={() => setMapsUp(false)}
+                onChange={async (v) => {
+                  setPinned(v);
+                  if (v.pincode) setPincode(v.pincode);
+                  // Zone-aware coverage: the PIN decides (backend falls
+                  // back to pincode rules when no zones are drawn yet).
+                  setCoverage("checking");
+                  setCheckedPincode(v.pincode || "pin");
+                  setCenterId("");
+                  setSlot("");
+                  try {
+                    const result = await coverageApi.check({ latitude: v.latitude, longitude: v.longitude, pincode: v.pincode });
+                    if (result.covered && result.center) {
+                      setCenterId(result.center.id);
+                      setCenterCity(result.center.city || v.city);
+                      setCenterState(result.center.state || v.state);
+                      setCoverage("covered");
+                    } else {
+                      setCoverage("uncovered");
+                    }
+                  } catch {
+                    setCoverage("uncovered");
+                  }
+                }}
+              />
+            )}
+            {!savedAddressId && coverage === "checking" && (
+              <p className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
+                <Spinner className="h-3.5 w-3.5" /> Checking coverage…
+              </p>
+            )}
+            {!savedAddressId && coverage === "covered" && (
+              <p className="flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
+                <BadgeCheck className="h-3.5 w-3.5" /> We serve this area!
+              </p>
+            )}
             {!savedAddressId && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[200px_1fr]">
-                <div>
+              <>
+                <Input
+                  label="House / flat, gali no."
+                  value={line1}
+                  onChange={(e) => setLine1(e.target.value)}
+                  placeholder="e.g. 12, Palm Residency"
+                />
+                {!mapsUp && (
                   <Input
                     label="Pincode"
                     value={pincode}
@@ -436,19 +737,8 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                     onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && checkCoverage(pincode.trim())}
                     placeholder="e.g. 452001"
                   />
-                  {coverage === "checking" && (
-                    <p className="mt-1.5 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
-                      <Spinner className="h-3.5 w-3.5" /> Checking coverage…
-                    </p>
-                  )}
-                  {coverage === "covered" && (
-                    <p className="mt-1.5 flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
-                      <BadgeCheck className="h-3.5 w-3.5" /> We serve this area!
-                    </p>
-                  )}
-                </div>
-                <Input label="House / flat, street & area" value={line1} onChange={(e) => setLine1(e.target.value)} placeholder="e.g. 12, Palm Residency, MG Road" />
-              </div>
+                )}
+              </>
             )}
 
             {coverage === "uncovered" && (
@@ -461,7 +751,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             )}
 
             {coverage === "covered" && (
-              <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} />
+              <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} enableHold />
             )}
           </div>
         )}
@@ -497,6 +787,70 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                       hint="We'll send a one-time verification code here — no password needed."
                     />
                   </div>
+                  {needOtp && (
+                    <div className="mt-3 rounded-xl bg-[var(--color-secondary-light)] p-4">
+                      <p className="text-sm text-[var(--color-text-primary)]">
+                        Welcome back! We sent a verification code to <span className="font-semibold">{phone}</span> — enter it to continue.
+                      </p>
+                      <Input label="Verification code" className="mt-2" value={loginOtp} onChange={(e) => setLoginOtp(e.target.value)} maxLength={6} />
+                      <Button
+                        className="mt-3 w-full"
+                        disabled={loginOtp.trim().length < 4}
+                        isLoading={submitting}
+                        onClick={async () => {
+                          setError("");
+                          setSubmitting(true);
+                          try {
+                            const phoneN = validateIndianMobile(phone) || phone.trim();
+                            const payload = otpViaWidget
+                              ? { phone: phoneN, access_token: await widgetVerifyOtp(loginOtp.trim()) }
+                              : { phone: phoneN, otp: loginOtp.trim() };
+                            const result = await guestAuthApi.otpLogin(payload);
+                            tokenStorage.set(result.access_token, result.refresh_token);
+                            otpUserRef.current = result.user;
+                            await refreshUser();
+                            setNeedOtp(false);
+                            setSubmitting(false);
+                            void submit(true);
+                          } catch (err) {
+                            setSubmitting(false);
+                            setError(getErrorMessage(err));
+                          }
+                        }}
+                      >
+                        Verify &amp; continue booking
+                      </Button>
+                      <div className="mt-2 flex items-center justify-between text-xs">
+                        <button
+                          type="button"
+                          className="font-medium text-[var(--color-primary)] hover:underline"
+                          onClick={async () => {
+                            setError("");
+                            try {
+                              const phoneN = validateIndianMobile(phone) || phone.trim();
+                              if (otpViaWidget) await widgetSendOtp(phoneN);
+                              else await authApi.forgotPassword(phoneN);
+                            } catch (err) {
+                              setError(getErrorMessage(err));
+                            }
+                          }}
+                        >
+                          Resend code
+                        </button>
+                        <button
+                          type="button"
+                          className="font-medium text-[var(--color-text-secondary)] hover:underline"
+                          onClick={() => {
+                            setNeedOtp(false);
+                            setLoginOtp("");
+                            setError("");
+                          }}
+                        >
+                          Use a different number
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {needLogin && (
                     <div className="mt-3 rounded-xl bg-[var(--color-secondary-light)] p-4">
                       <p className="text-sm text-[var(--color-text-primary)]">Welcome back! This number already has an account.</p>
@@ -527,10 +881,19 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
               <dl className="space-y-2 text-sm">
                 {selectedServices.map((s) => (
                   <div key={s.id} className="flex justify-between">
-                    <dt className="text-[var(--color-text-secondary)]">{s.name}</dt>
-                    <dd className="font-mono-num font-medium">₹{priceFor(s, vehicleTypeId)}</dd>
+                    <dt className="text-[var(--color-text-secondary)]">
+                      {s.name}
+                      {qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : ""}
+                    </dt>
+                    <dd className="font-mono-num font-medium">₹{priceFor(s, vehicleTypeId) * qtyOf(s.id)}</dd>
                   </div>
                 ))}
+                {addonChips && (
+                  <div className="border-t border-gray-200 pt-2">
+                    <dt className="mb-2 text-[var(--color-text-secondary)]">Add extras to this visit</dt>
+                    <dd>{addonChips}</dd>
+                  </div>
+                )}
                 <div className="flex justify-between border-t border-gray-200 pt-2">
                   <dt className="text-[var(--color-text-secondary)]">When</dt>
                   <dd className="text-right font-medium">
@@ -543,33 +906,47 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                   </dt>
                   <dd className="max-w-[160px] text-right text-xs">{savedAddressId ? myAddresses?.find((a) => a.id === savedAddressId)?.line1 : line1}</dd>
                 </div>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <dt className="text-[var(--color-text-secondary)]">Coupon</dt>
+                  <dd>
+                    <input
+                      value={couponCode}
+                      onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                      placeholder="Code (optional)"
+                      className="w-32 rounded-lg border border-gray-200 px-2.5 py-1.5 text-right font-mono-num text-xs uppercase outline-none focus:border-[var(--color-primary)]"
+                    />
+                  </dd>
+                </div>
                 <div className="flex justify-between border-t border-gray-200 pt-2 text-base">
                   <dt className="font-semibold">Total</dt>
-                  <dd className="font-mono-num font-bold">₹{total}</dd>
+                  <dd className="text-right">
+                    {hasFirstWashOffer && <span className="mr-2 font-mono-num text-sm text-gray-400 line-through">₹{total}</span>}
+                    <span className="font-mono-num font-bold">₹{hasFirstWashOffer ? firstWashTotal : total}</span>
+                  </dd>
                 </div>
               </dl>
               <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-                ~{totalDuration} min · pay after service · first-wash offer applied automatically if eligible.
+                ~{totalDuration} min · pay after service{hasFirstWashOffer ? " · first-wash price shown — confirmed at booking if this vehicle & number are new to Blussit" : ""}.
               </p>
             </div>
           </div>
         )}
 
         {/* Footer nav */}
-        <div className="mt-8 flex items-center justify-between gap-3">
+        <div className="mt-6 flex flex-col-reverse gap-3 sm:mt-8 sm:flex-row sm:items-center sm:justify-between">
           {step > 0 ? (
-            <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
+            <Button variant="outline" className="w-full sm:w-auto" onClick={() => setStep((s) => s - 1)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
           ) : (
-            <span />
+            <span className="hidden sm:block" />
           )}
           {step < 2 ? (
-            <Button size="lg" disabled={step === 0 ? !step1Valid : !step2Valid} onClick={() => setStep((s) => s + 1)}>
+            <Button size="lg" className="w-full sm:w-auto" disabled={step === 0 ? !step1Valid : !step2Valid} onClick={() => setStep((s) => s + 1)}>
               Continue <ArrowRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button size="lg" disabled={!step3Valid} isLoading={submitting} onClick={() => submit()}>
+            <Button size="lg" className="w-full sm:w-auto" disabled={!step3Valid} isLoading={submitting} onClick={() => submit()}>
               {user?.phone_verified ? "Confirm booking" : "Verify & book"} <ArrowRight className="h-4 w-4" />
             </Button>
           )}

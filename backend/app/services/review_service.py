@@ -1,4 +1,5 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.core.authz import ensure_own_center
 from app.core.exceptions import BadRequestException, NotFoundException
@@ -46,7 +47,12 @@ class ReviewService:
         # {"is_published": True} filter silently matched nothing. Set
         # explicitly here, same fix already applied to complaint status.
         doc["is_published"] = True
-        created = await self.repo.create(doc)
+        try:
+            created = await self.repo.create(doc)
+        except DuplicateKeyError:
+            # Double-submit race: the unique live-review-per-booking index
+            # caught the second insert — same outcome as the is_rated check.
+            raise BadRequestException("You've already reviewed this booking.")
         await self.booking_repo.update_by_id(payload.booking_id, {"is_rated": True})
         return serialize_doc(created)
 

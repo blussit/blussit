@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Car, Plus, Star, Trash2 } from "lucide-react";
+import { Car, Pencil, Plus, Star, Trash2 } from "lucide-react";
 import { vehicleApi } from "../../api/profile";
 import { vehicleTypeApi } from "../../api/catalog";
 import { Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { PLATE_FORMAT_HINT, validateIndianPlate } from "../../lib/validators";
 import { useConfirm } from "../../context/ConfirmContext";
 
 const emptyForm = { vehicle_type: "", brand: "", model: "", registration_number: "", color: "", is_default: false };
@@ -15,6 +16,7 @@ export default function VehiclesPage() {
   const { data: vehicles, isLoading } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
   const [deleteError, setDeleteError] = useState("");
@@ -33,11 +35,17 @@ export default function VehiclesPage() {
   const typeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || "Vehicle";
 
   const createMutation = useMutation({
-    mutationFn: (acknowledge?: boolean) => vehicleApi.create({ ...form, acknowledge_shared_registration: acknowledge }),
+    // Fix-a-typo flow: same form, PUT instead of POST when editing — the
+    // old page forced delete-and-re-add for any correction.
+    mutationFn: (acknowledge?: boolean) =>
+      editingId
+        ? vehicleApi.update(editingId, form)
+        : vehicleApi.create({ ...form, acknowledge_shared_registration: acknowledge }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["vehicles"] });
       setOpen(false);
       setSharedRegOpen(false);
+      setEditingId(null);
       setForm((f) => ({ ...emptyForm, vehicle_type: f.vehicle_type }));
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -63,6 +71,14 @@ export default function VehiclesPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (!validateIndianPlate(form.registration_number)) {
+      setError(`That doesn't look like a valid registration number — ${PLATE_FORMAT_HINT}`);
+      return;
+    }
+    if (editingId) {
+      createMutation.mutate(undefined);
+      return;
+    }
     setCheckingRegistration(true);
     try {
       const check = await vehicleApi.checkRegistration(form.registration_number);
@@ -82,7 +98,8 @@ export default function VehiclesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">My vehicles</h1>
+          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Garage</p>
+          <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">My vehicles</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Manage the vehicles you book services for.</p>
         </div>
         <Button onClick={() => setOpen(true)}>
@@ -107,6 +124,25 @@ export default function VehiclesPage() {
                 <div className="flex items-center gap-2">
                   {v.is_default && <Star className="h-4 w-4 fill-amber-400 text-amber-400" />}
                   <button
+                    title="Edit"
+                    onClick={() => {
+                      setEditingId(v.id);
+                      setForm({
+                        vehicle_type: v.vehicle_type,
+                        brand: v.brand,
+                        model: v.model,
+                        registration_number: v.registration_number,
+                        color: v.color || "",
+                        is_default: !!v.is_default,
+                      });
+                      setError("");
+                      setOpen(true);
+                    }}
+                    className="text-gray-400 hover:text-[var(--color-primary)]"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
                     onClick={() => handleDelete(v.id, `${v.brand} ${v.model} (${v.registration_number})`)}
                     className="text-gray-400 hover:text-[var(--color-error)]"
                   >
@@ -125,7 +161,15 @@ export default function VehiclesPage() {
         </div>
       )}
 
-      <Modal open={open} onClose={() => setOpen(false)} title="Add a vehicle">
+      <Modal
+        open={open}
+        onClose={() => {
+          setOpen(false);
+          setEditingId(null);
+          setForm((f) => ({ ...emptyForm, vehicle_type: f.vehicle_type }));
+        }}
+        title={editingId ? "Edit vehicle" : "Add a vehicle"}
+      >
         <form className="space-y-4" onSubmit={handleSubmit}>
           <Select label="Vehicle type" value={form.vehicle_type} onChange={(e) => setForm({ ...form, vehicle_type: e.target.value })}>
             {(vehicleTypes || []).map((t) => (
@@ -142,6 +186,7 @@ export default function VehiclesPage() {
             label="Registration number"
             value={form.registration_number}
             onChange={(e) => setForm({ ...form, registration_number: e.target.value })}
+            hint={PLATE_FORMAT_HINT}
             required
           />
           <Input label="Color (optional)" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} />
@@ -151,7 +196,7 @@ export default function VehiclesPage() {
           </label>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={checkingRegistration || createMutation.isPending}>
-            Add vehicle
+            {editingId ? "Save changes" : "Add vehicle"}
           </Button>
         </form>
       </Modal>

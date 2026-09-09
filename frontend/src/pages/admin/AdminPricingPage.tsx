@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, IndianRupee, XCircle } from "lucide-react";
 import { adminBookingPolicyApi, adminPricingApi } from "../../api/admin";
+import { paymentApi } from "../../api/payment";
+import { CollectionsReportCard } from "../../components/shared/CollectionsReport";
 import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
 import { Badge, Button, Card, CardBody, DataTable, Input, PageLoader } from "../../components/ui";
@@ -18,10 +20,12 @@ export default function AdminPricingPage() {
   const [policyForm, setPolicyForm] = useState({
     slot_duration_minutes: "",
     slot_booking_cutoff_minutes: "",
+    max_advance_days: "",
     delay_tolerance_minutes: "",
     captain_travel_buffer_minutes: "",
     photo_geofence_radius_m: "",
     late_start_grace_minutes: "",
+    late_assignment_grace_minutes: "",
     captain_start_lockout_hours: "",
   });
   const [policySaved, setPolicySaved] = useState(false);
@@ -58,10 +62,12 @@ export default function AdminPricingPage() {
       adminBookingPolicyApi.set({
         slot_duration_minutes: policyForm.slot_duration_minutes ? Number(policyForm.slot_duration_minutes) : undefined,
         slot_booking_cutoff_minutes: policyForm.slot_booking_cutoff_minutes ? Number(policyForm.slot_booking_cutoff_minutes) : undefined,
+        max_advance_days: policyForm.max_advance_days ? Number(policyForm.max_advance_days) : undefined,
         delay_tolerance_minutes: policyForm.delay_tolerance_minutes ? Number(policyForm.delay_tolerance_minutes) : undefined,
         captain_travel_buffer_minutes: policyForm.captain_travel_buffer_minutes ? Number(policyForm.captain_travel_buffer_minutes) : undefined,
         photo_geofence_radius_m: policyForm.photo_geofence_radius_m ? Number(policyForm.photo_geofence_radius_m) : undefined,
         late_start_grace_minutes: policyForm.late_start_grace_minutes ? Number(policyForm.late_start_grace_minutes) : undefined,
+        late_assignment_grace_minutes: policyForm.late_assignment_grace_minutes ? Number(policyForm.late_assignment_grace_minutes) : undefined,
         captain_start_lockout_hours: policyForm.captain_start_lockout_hours ? Number(policyForm.captain_start_lockout_hours) : undefined,
       }),
     onSuccess: () => {
@@ -129,6 +135,15 @@ export default function AdminPricingPage() {
         </CardBody>
       </Card>
 
+      {/* Platform money roll-up: per-center cash/online/uncollected,
+          subscription revenue, and payments parked for manual attention. */}
+      <CollectionsReportCard
+        title="Collections by center"
+        entityLabel="Center"
+        queryKey="admin-collections"
+        fetcher={(params) => paymentApi.adminCollections(params)}
+      />
+
       <Card>
         <CardBody>
           <h2 className="mb-1 font-semibold text-[var(--color-text-primary)]">Booking rules</h2>
@@ -155,6 +170,16 @@ export default function AdminPricingPage() {
               value={policyForm.slot_booking_cutoff_minutes}
               onChange={(e) => setPolicyForm({ ...policyForm, slot_booking_cutoff_minutes: e.target.value })}
               hint={`Current: a slot stops being bookable ${policy?.slot_booking_cutoff_minutes} min before it ends`}
+            />
+            <Input
+              label="Advance booking window (days)"
+              type="number"
+              min={1}
+              max={60}
+              placeholder={String(policy?.max_advance_days ?? 7)}
+              value={policyForm.max_advance_days}
+              onChange={(e) => setPolicyForm({ ...policyForm, max_advance_days: e.target.value })}
+              hint={`Current: bookings open up to ${policy?.max_advance_days ?? 7} days ahead (today included)`}
             />
             <Input
               label="Delay tolerance (minutes)"
@@ -191,6 +216,16 @@ export default function AdminPricingPage() {
               value={policyForm.late_start_grace_minutes}
               onChange={(e) => setPolicyForm({ ...policyForm, late_start_grace_minutes: e.target.value })}
               hint={`Current: ${policy?.late_start_grace_minutes} min past the slot before a late start is "severe"`}
+            />
+            <Input
+              label="Last-minute assignment grace (minutes)"
+              type="number"
+              min={0}
+              max={120}
+              placeholder={String(policy?.late_assignment_grace_minutes ?? 15)}
+              value={policyForm.late_assignment_grace_minutes}
+              onChange={(e) => setPolicyForm({ ...policyForm, late_assignment_grace_minutes: e.target.value })}
+              hint={`Current: a captain assigned after the slot began gets ${policy?.late_assignment_grace_minutes ?? 15} min to head out before he counts as late`}
             />
             <Input
               label="Captain start lockout (hours)"

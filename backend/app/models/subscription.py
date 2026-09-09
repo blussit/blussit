@@ -53,6 +53,17 @@ class UserSubscriptionModel(BusinessRecordBase):
     # for old documents written under the earlier vehicle-locked design —
     # no code reads it as authoritative anymore.
     vehicle_id: Optional[str] = None
+    # The vehicle-type TIER this subscription was purchased at (VehicleType
+    # id) — plans are priced per type (hatchback < sedan < SUV...), the buyer
+    # picks the type they're paying for, and redemption is then allowed on
+    # that type or any type the plan prices CHEAPER, never a costlier one
+    # (see UserSubscriptionService.plan_consumption / tier_allows). Using it
+    # on a cheaper type still burns one full visit — no credit for the gap.
+    # None = purchased before tiers existed; plan.vehicle_types alone governs.
+    vehicle_type: Optional[str] = None
+    # What was actually charged for that tier at purchase time — a snapshot,
+    # immune to later plan-price edits.
+    purchased_price: Optional[float] = None
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE
     total_service_count: int = 0
     remaining_service_count: int = 0

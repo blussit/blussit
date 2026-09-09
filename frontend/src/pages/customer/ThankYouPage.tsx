@@ -101,8 +101,10 @@ export default function ThankYouPage() {
               </>
             ) : (
               <>
-                <Button className="w-full" onClick={() => navigate("/login")}>
-                  <LogIn className="h-4 w-4" /> Return to login
+                {/* Guest-checkout accounts get a random password — the way
+                    in is the OTP reset flow, not a password they never had. */}
+                <Button className="w-full" onClick={() => navigate("/forgot-password")}>
+                  <LogIn className="h-4 w-4" /> Set your password (OTP)
                 </Button>
                 <Button variant="outline" className="w-full" onClick={() => navigate("/")}>
                   <Home className="h-4 w-4" /> Return to website

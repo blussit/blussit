@@ -44,6 +44,12 @@ class PaymentStatus(str, Enum):
 
 class PaymentMethod(str, Enum):
     CASH = "cash"
+    # Real online payment via Razorpay Standard Checkout — the booking is
+    # created payment_status=pending and flips to paid only after the
+    # signature-verified payment (see PaymentService.verify_payment).
+    ONLINE = "online"
+    # Legacy value from before the gateway existed — kept ONLY so old
+    # stored bookings still parse; nothing writes it anymore.
     ONLINE_PLACEHOLDER = "online_placeholder"
     SUBSCRIPTION = "subscription"
 

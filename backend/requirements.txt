@@ -20,3 +20,4 @@ pytest-asyncio==1.4.0
 # extra, listed explicitly here since it's imported directly too.
 httpx==0.28.1
 websockets==17.0.1
+razorpay==2.0.1

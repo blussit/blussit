@@ -21,19 +21,22 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, labe
   if (type === "date") {
     const { value, onChange, min, max, required, disabled, placeholder } = props;
     return (
-      <DatePicker
-        label={label}
-        error={error}
-        id={inputId}
-        value={typeof value === "string" ? value : undefined}
-        min={typeof min === "string" ? min : undefined}
-        max={typeof max === "string" ? max : undefined}
-        required={required}
-        disabled={disabled}
-        placeholder={typeof placeholder === "string" ? placeholder : undefined}
-        className={className}
-        onChange={(v) => onChange?.({ target: { value: v }, currentTarget: { value: v } } as unknown as ChangeEvent<HTMLInputElement>)}
-      />
+      <div className="w-full">
+        <DatePicker
+          label={label}
+          error={error}
+          id={inputId}
+          value={typeof value === "string" ? value : undefined}
+          min={typeof min === "string" ? min : undefined}
+          max={typeof max === "string" ? max : undefined}
+          required={required}
+          disabled={disabled}
+          placeholder={typeof placeholder === "string" ? placeholder : undefined}
+          className={className}
+          onChange={(v) => onChange?.({ target: { value: v }, currentTarget: { value: v } } as unknown as ChangeEvent<HTMLInputElement>)}
+        />
+        {hint && !error && <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{hint}</p>}
+      </div>
     );
   }
 

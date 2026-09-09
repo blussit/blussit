@@ -39,6 +39,10 @@ class AuthController:
         result = await self.auth_service.refresh(payload.refresh_token)
         return success(result, "Token refreshed")
 
+    async def logout(self, current_user: CurrentUser):
+        await self.auth_service.logout(current_user.id)
+        return success(None, "Logged out")
+
     async def me(self, current_user: CurrentUser):
         user = await self.user_service.get_by_id(current_user.id)
         return success(user, "Current user fetched")

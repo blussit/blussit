@@ -43,6 +43,10 @@ class SubscriptionPlanUpdateRequest(BaseModel):
 
 class SubscribeRequest(BaseModel):
     plan_id: str
+    # VehicleType id the buyer is purchasing this plan FOR — decides the
+    # price charged AND caps redemption at that type (or cheaper types).
+    # Optional for backward compatibility; the app always sends it.
+    vehicle_type: Optional[str] = None
     auto_renew: bool = False
 
 
@@ -51,6 +55,7 @@ class AssignSubscriptionRequest(BaseModel):
     shape as SubscribeRequest plus an explicit target customer."""
     customer_id: str
     plan_id: str
+    vehicle_type: Optional[str] = None
     auto_renew: bool = False
 
 

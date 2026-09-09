@@ -164,5 +164,5 @@ class SmsService:
         if not self.provider:
             return False
         return await self.provider.send_text(
-            phone, f"Your CleanRide temporary password is {temp_password}. Log in and change it right away."
+            phone, f"Your Blussit temporary password is {temp_password}. Log in and change it right away."
         )

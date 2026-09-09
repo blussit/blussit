@@ -17,7 +17,7 @@ from app.services.booking_service import BookingService
 from app.services.complaint_service import ComplaintService
 
 from tests.factories import (
-    get_foam_wash_service_id,
+    get_star_wash_service_id,
     get_hatchback_type_id,
     make_customer_with_vehicle,
     make_manager,
@@ -28,7 +28,7 @@ from tests.factories import (
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
-    foam = await get_foam_wash_service_id(db)
+    foam = await get_star_wash_service_id(db)
     center_id = await make_service_center(db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=10)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     manager_id = await make_manager(db, center_id)

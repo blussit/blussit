@@ -17,6 +17,11 @@ the same directory, so this ordering is safe.
 import os
 
 os.environ["MONGO_DB_NAME"] = os.environ.get("TEST_MONGO_DB_NAME", "doorstep_vehicle_care_test")
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+# Tests must never call Google (Routes/Geocoding) or reveal OAuth config.
+os.environ["GOOGLE_MAPS_SERVER_KEY"] = ""
+os.environ["GOOGLE_MAPS_BROWSER_KEY"] = ""
+os.environ["GOOGLE_OAUTH_CLIENT_ID"] = ""
 
 # CRITICAL: force the safe log-only WhatsApp provider for the entire test
 # run, regardless of what's in the real .env. Settings() reads the same

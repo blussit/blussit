@@ -8,6 +8,7 @@ import random
 import string
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, PhoneNotVerifiedException, UnauthorizedException
@@ -17,6 +18,34 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest, StaffCreateRequest, UserPublic
 from app.services.sms_service import SmsService
 from app.services.whatsapp_service import WhatsAppService
+from pymongo import ReturnDocument
+
+
+async def next_captain_employee_id(db: AsyncIOMotorDatabase) -> str:
+    """Atomic sequence for the public-facing captain staff id ("CAP-001").
+    An atomic counter doc, not a max-scan, so two captains created at the
+    same moment can never collide."""
+    counter = await db.counters.find_one_and_update(
+        {"_id": "captain_employee_id"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return f"CAP-{counter['seq']:03d}"
+
+
+async def assign_missing_employee_ids(db: AsyncIOMotorDatabase) -> None:
+    """Startup backfill: captains created before employee_id existed get one,
+    earliest account first so seniority keeps the low numbers. Idempotent —
+    every run only touches captains still missing an id."""
+    cursor = db.users.find(
+        {"role": UserRole.CAPTAIN.value, "is_deleted": {"$ne": True}, "employee_id": None}
+    ).sort("created_at", 1)
+    async for captain in cursor:
+        await db.users.update_one(
+            {"_id": captain["_id"], "employee_id": None},
+            {"$set": {"employee_id": await next_captain_employee_id(db)}},
+        )
 
 
 class AuthService:
@@ -60,6 +89,7 @@ class AuthService:
             "status": UserStatus.ACTIVE.value,
             "referral_code": referral_code,
             "referred_by": payload.referred_by,
+            **({"must_change_password": True} if payload.guest else {}),
         })
         created = await self.users.create(user_doc)
         return self._issue_tokens(created)
@@ -84,6 +114,12 @@ class AuthService:
             "service_center_id": payload.service_center_id,
             "created_by": created_by,
         })
+        if payload.photo_url:
+            # Same field UserUpdateRequest edits and the enriched booking's
+            # captain_profile falls back to (kyc.photo_url or profile_image).
+            user_doc["profile_image"] = payload.photo_url
+        if payload.role == UserRole.CAPTAIN:
+            user_doc["employee_id"] = await next_captain_employee_id(self.db)
         created = await self.users.create(user_doc)
         return UserPublic.from_doc(created).model_dump()
 
@@ -112,14 +148,47 @@ class AuthService:
         created = await self.users.create(user_doc)
         return UserPublic.from_doc(created).model_dump()
 
+    LOGIN_MAX_FAILURES = 5
+    LOGIN_LOCK_MINUTES = 5
+    PHONE_REVERIFY_DAYS = 90
+
+    @staticmethod
+    def phone_verification_fresh(user: dict) -> bool:
+        """The 90-day rule: verification counts only while fresh. Missing
+        timestamp (legacy rows are backfilled by migration) = stale."""
+        if not user.get("phone_verified"):
+            return False
+        at = user.get("phone_verified_at")
+        if at is None:
+            return False
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - at <= timedelta(days=AuthService.PHONE_REVERIFY_DAYS)
+
     async def login(self, identifier: str, password: str) -> dict:
         user = await self.users.find_by_identifier(identifier)
+        if user and user.get("login_locked_until"):
+            locked_until = user["login_locked_until"]
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                raise UnauthorizedException("Too many failed attempts. Try again in a few minutes.")
         if not user or not verify_password(password, user["password_hash"]):
+            if user:
+                failures = user.get("failed_login_attempts", 0) + 1
+                update = {"failed_login_attempts": failures}
+                if failures >= self.LOGIN_MAX_FAILURES:
+                    update["login_locked_until"] = datetime.now(timezone.utc) + timedelta(minutes=self.LOGIN_LOCK_MINUTES)
+                    update["failed_login_attempts"] = 0
+                await self.users.update_by_id(str(user["_id"]), update)
             raise UnauthorizedException("Invalid credentials")
         if user.get("status") == UserStatus.SUSPENDED.value:
             raise UnauthorizedException("Your account has been suspended. Contact support.")
 
-        await self.users.update_by_id(str(user["_id"]), {"last_login_at": datetime.now(timezone.utc)})
+        await self.users.update_by_id(
+            str(user["_id"]),
+            {"last_login_at": datetime.now(timezone.utc), "failed_login_attempts": 0, "login_locked_until": None},
+        )
         return self._issue_tokens(user)
 
     async def refresh(self, refresh_token: str) -> dict:
@@ -133,16 +202,31 @@ class AuthService:
         user = await self.users.find_by_id(payload["sub"])
         if not user:
             raise UnauthorizedException("User no longer exists")
+        # A refresh is the one guaranteed DB round-trip in the token
+        # lifecycle — enforce account standing here so suspension and
+        # password changes actually bite within one access-token TTL.
+        if user.get("status") == UserStatus.SUSPENDED.value or user.get("is_deleted"):
+            raise UnauthorizedException("Your account has been suspended. Contact support.")
+        if payload.get("tv", 0) != user.get("token_version", 0):
+            raise UnauthorizedException("Session expired — please log in again.")
 
         access_token = create_access_token(str(user["_id"]), user["role"], {"service_center_id": user.get("service_center_id")})
-        new_refresh = create_refresh_token(str(user["_id"]), user["role"])
+        new_refresh = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0))
         return {"access_token": access_token, "refresh_token": new_refresh, "token_type": "bearer"}
+
+    async def logout(self, user_id: str) -> None:
+        """Invalidates every refresh token the user holds (token_version
+        bump) — the server-side half of logging out. Access tokens expire on
+        their own within ACCESS_TOKEN_EXPIRE_MINUTES."""
+        await self.users.collection.update_one({"_id": ObjectId(user_id)}, {"$inc": {"token_version": 1}})
 
     async def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
         user = await self.users.find_by_id(user_id)
         if not user or not verify_password(current_password, user["password_hash"]):
             raise BadRequestException("Current password is incorrect")
         await self.users.update_by_id(user_id, {"password_hash": hash_password(new_password), "must_change_password": False})
+        # Invalidate every refresh token issued before this change.
+        await self.users.collection.update_one({"_id": ObjectId(user_id)}, {"$inc": {"token_version": 1}})
 
     _OTP_RESEND_COOLDOWN_SECONDS = 30
     _OTP_MAX_ATTEMPTS = 5
@@ -208,7 +292,12 @@ class AuthService:
         if record["otp"] != otp:
             await self.otp_store.update_one({"identifier": identifier}, {"$inc": {"attempts": 1}})
             return False
-        await self.otp_store.update_one({"identifier": identifier}, {"$set": {"verified": True}})
+        # CONSUME the code — a successful verification deletes the record so
+        # the same OTP can never be replayed (it used to stay valid for its
+        # full 10 minutes: one observed code could reset the password, then
+        # log in, then re-verify the phone). Every caller verifies exactly
+        # once and acts immediately, so single-use is the correct contract.
+        await self.otp_store.delete_one({"identifier": identifier, "otp": otp})
         return True
 
     async def reset_password(self, identifier: str, otp: str, new_password: str) -> None:
@@ -218,7 +307,17 @@ class AuthService:
         user = await self.users.find_by_identifier(identifier)
         if not user:
             raise BadRequestException("No account found for this identifier")
-        await self.users.update_by_id(str(user["_id"]), {"password_hash": hash_password(new_password), "must_change_password": False})
+        await self.users.update_by_id(
+            str(user["_id"]),
+            {
+                "password_hash": hash_password(new_password),
+                "must_change_password": False,
+            },
+        )
+        # Invalidate every outstanding session/refresh token — the whole
+        # point of a panic reset is locking out whoever has the old
+        # credentials (change_password already did this; this path didn't).
+        await self.users.collection.update_one({"_id": ObjectId(str(user["_id"]))}, {"$inc": {"token_version": 1}})
 
     async def request_phone_verification(self, user_id: str) -> None:
         """Gates a customer's first self-service booking/subscription
@@ -233,6 +332,36 @@ class AuthService:
             raise BadRequestException("Add a phone number to your profile before verifying it.")
         await self.request_otp(user["phone"], purpose="verification")
 
+    async def confirm_phone_verification_widget(self, user_id: str, access_token: str) -> dict:
+        """MSG91-widget variant of phone verification: the widget already
+        delivered + checked the OTP on MSG91's channels (SMS/WhatsApp/
+        email); we accept only if MSG91 confirms the token AND it was
+        issued for THIS user's phone."""
+        from app.services.msg91_widget_service import Msg91WidgetService
+
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        if not user.get("phone"):
+            raise BadRequestException("This account has no phone number on file.")
+        if not await Msg91WidgetService().verify_access_token(access_token, user["phone"]):
+            raise BadRequestException("Verification could not be confirmed — please try again.")
+        return await self.users.update_by_id(user_id, {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
+
+    async def reset_password_widget(self, access_token: str, phone: str, new_password: str) -> None:
+        """MSG91-widget variant of forgot-password. The token must verify
+        AND be bound to the given phone; only then does the password change
+        (and every existing refresh token dies via token_version)."""
+        from app.services.msg91_widget_service import Msg91WidgetService
+
+        if not await Msg91WidgetService().verify_access_token(access_token, phone):
+            raise BadRequestException("Verification could not be confirmed — please try again.")
+        user = await self.users.find_by_phone(phone) or await self.users.find_by_identifier(phone)
+        if not user:
+            raise BadRequestException("No account found for this phone number")
+        await self.users.update_by_id(str(user["_id"]), {"password_hash": hash_password(new_password), "must_change_password": False})
+        await self.users.collection.update_one({"_id": user["_id"]}, {"$inc": {"token_version": 1}})
+
     async def confirm_phone_verification(self, user_id: str, otp: str) -> dict:
         user = await self.users.find_by_id(user_id)
         if not user:
@@ -241,7 +370,7 @@ class AuthService:
             raise BadRequestException("This account has no phone number on file.")
         if not await self.verify_otp(user["phone"], otp):
             raise BadRequestException("Invalid or expired code.")
-        updated = await self.users.update_by_id(user_id, {"phone_verified": True})
+        updated = await self.users.update_by_id(user_id, {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
         return updated
 
     async def staff_reset_customer_password(self, customer_id: str, actor_id: str) -> None:
@@ -263,6 +392,7 @@ class AuthService:
 
         temp_password = "".join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=10))
         await self.users.update_by_id(customer_id, {"password_hash": hash_password(temp_password), "must_change_password": True})
+        await self.users.collection.update_one({"_id": ObjectId(customer_id)}, {"$inc": {"token_version": 1}})
         # Same channel-order fallback as OTPs (note: Fast2SMS's DLT-exempt
         # route can't carry free text, so its send_temp_password returns
         # False and WhatsApp handles it — MSG91-with-template or WhatsApp
@@ -280,13 +410,144 @@ class AuthService:
         if not sent:
             raise BadRequestException("Password was reset, but the message couldn't be sent — ask the customer to use 'Forgot password' instead.")
 
+    async def booking_access_mode(self, phone: str) -> dict:
+        """What should the guest wizard do for this phone?
+        - "register": no account -> normal silent registration path.
+        - "otp": account exists but verification is missing/stale (the
+          abandoned-signup case, or 90-day expiry) -> prove ownership by
+          OTP, never by a password that may have never been set.
+        - "password": account exists with fresh verification -> log in.
+        Reveals no more than the register endpoint's 409 already does."""
+        from app.utils.phone import validate_indian_mobile
+
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit mobile number")
+        user = await self.users.find_by_phone(normalized)
+        if not user or user.get("is_deleted"):
+            return {"mode": "register"}
+        if user.get("role") != UserRole.CUSTOMER.value:
+            return {"mode": "password"}
+        return {"mode": "password" if self.phone_verification_fresh(user) else "otp"}
+
+    async def otp_login(self, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:
+        """Logs a CUSTOMER in by proving phone ownership (classic OTP or
+        MSG91 widget token) — the recovery path for accounts whose
+        password was never really set (abandoned guest signup, WhatsApp
+        auto-created) and the 90-day re-verification path. Marks the
+        phone freshly verified. must_change_password is preserved, so the
+        mandatory set-a-password gate still catches unknown-password
+        accounts afterwards."""
+        from app.utils.phone import validate_indian_mobile
+
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit mobile number")
+        user = await self.users.find_by_phone(normalized)
+        if not user or user.get("is_deleted") or user.get("role") != UserRole.CUSTOMER.value:
+            raise BadRequestException("No customer account found for this phone number")
+        if user.get("status") == UserStatus.SUSPENDED.value:
+            raise UnauthorizedException("Your account has been suspended. Contact support.")
+
+        verified = False
+        if widget_access_token:
+            from app.services.msg91_widget_service import Msg91WidgetService
+
+            verified = await Msg91WidgetService().verify_access_token(widget_access_token, normalized)
+        elif otp:
+            verified = await self.verify_otp(normalized, otp)
+        if not verified:
+            raise BadRequestException("Invalid or expired code.")
+
+        await self.users.update_by_id(
+            str(user["_id"]),
+            {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc), "last_login_at": datetime.now(timezone.utc)},
+        )
+        fresh = await self.users.find_by_id(str(user["_id"]))
+        return self._issue_tokens(fresh)
+
+    async def add_phone_request(self, user_id: str, phone: str) -> None:
+        """Step 1 of attaching a phone to a phoneless account (Google
+        sign-ins): validate + uniqueness-check the number, then send an
+        OTP to it. The OTP is keyed by the NEW phone in the same otp_store
+        the rest of auth uses (cooldown included)."""
+        from app.utils.phone import validate_indian_mobile
+
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit Indian mobile number")
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        taken = await self.users.find_by_phone(normalized)
+        if taken and str(taken["_id"]) != user_id:
+            raise BadRequestException("This phone number is already used by another account.")
+
+        existing = await self.otp_store.find_one({"identifier": normalized})
+        now = datetime.now(timezone.utc)
+        if existing and existing.get("last_sent_at"):
+            last_sent = existing["last_sent_at"]
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            if (now - last_sent).total_seconds() < self._OTP_RESEND_COOLDOWN_SECONDS:
+                raise BadRequestException("Please wait a moment before requesting another code.")
+        otp = "".join(random.choices(string.digits, k=6))
+        await self.otp_store.update_one(
+            {"identifier": normalized},
+            {"$set": {"otp": otp, "expires_at": now + timedelta(minutes=10), "attempts": 0, "last_sent_at": now, "purpose": "add_phone"}},
+            upsert=True,
+        )
+        await self._deliver_otp(normalized, otp, "verification")
+
+    async def add_phone_confirm(self, user_id: str, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:
+        """Step 2: prove ownership (classic OTP or MSG91 widget token bound
+        to this exact number), then attach it as the account's verified
+        primary contact."""
+        from app.utils.phone import validate_indian_mobile
+
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit Indian mobile number")
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        taken = await self.users.find_by_phone(normalized)
+        if taken and str(taken["_id"]) != user_id:
+            raise BadRequestException("This phone number is already used by another account.")
+
+        verified = False
+        if widget_access_token:
+            from app.services.msg91_widget_service import Msg91WidgetService
+
+            verified = await Msg91WidgetService().verify_access_token(widget_access_token, normalized)
+        elif otp:
+            verified = await self.verify_otp(normalized, otp)
+        if not verified:
+            raise BadRequestException("Invalid or expired code.")
+        return await self.users.update_by_id(
+            user_id,
+            {"phone": normalized, "phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)},
+        )
+
+    async def set_initial_password(self, user_id: str, new_password: str) -> None:
+        """Password setup WITHOUT the current password — allowed only while
+        must_change_password is set (temp-password logins and OTP-logins,
+        which already proved identity). Clears the flag; keeps this
+        session alive (no token_version bump — it's the same person)."""
+        user = await self.users.find_by_id(user_id)
+        if not user:
+            raise NotFoundException("User not found")
+        if not user.get("must_change_password"):
+            raise BadRequestException("Use the normal change-password option (current password required).")
+        await self.users.update_by_id(user_id, {"password_hash": hash_password(new_password), "must_change_password": False})
+
     def _issue_tokens(self, user: dict) -> dict:
         access_token = create_access_token(
             str(user["_id"]),
             user["role"],
             {"email": user.get("email"), "phone": user.get("phone"), "service_center_id": user.get("service_center_id")},
         )
-        refresh_token = create_refresh_token(str(user["_id"]), user["role"])
+        refresh_token = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0))
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,

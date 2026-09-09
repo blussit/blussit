@@ -45,6 +45,13 @@ class StaffDirectoryService:
             # prevent everywhere else.
             raw_last_location_at = u.get("last_location_at")
             base["last_location_at"] = from_stored(raw_last_location_at).isoformat() if raw_last_location_at else None
+            # Verification state for the manager's team list — status only,
+            # never the numbers themselves (those live behind the dedicated
+            # review endpoint).
+            base["kyc_status"] = (u.get("captain_kyc") or {}).get("status", "pending")
+            # Roster photo — same precedence the customer's captain card
+            # uses (KYC photo first, account profile image as fallback).
+            base["photo_url"] = (u.get("captain_kyc") or {}).get("photo_url") or u.get("profile_image")
             results.append(base)
         return results, total
 
@@ -94,7 +101,11 @@ class StaffDirectoryService:
         bookings = await self.booking_repo.find_all_no_paginate(match)
         completed = [b for b in bookings if b.get("status") == "completed"]
         total_jobs = len(completed)
-        total_earnings = round(sum(b.get("total_amount", 0) for b in completed), 2)
+        # The CAPTAIN's earnings, not the customer-paid gross — summing
+        # total_amount here showed a captain "earnings" of the full booking
+        # revenue on their own earnings page. Gross is exposed separately.
+        total_earnings = round(sum(b.get("captain_earning") or 0 for b in completed), 2)
+        total_booking_value = round(sum(b.get("total_amount", 0) for b in completed), 2)
 
         reassigned_away = sum(1 for b in bookings if captain_id in (b.get("previous_captain_ids") or []))
 
@@ -133,7 +144,25 @@ class StaffDirectoryService:
         distinct_days = len({b["scheduled_date"].strftime("%Y-%m-%d") for b in bookings if b.get("scheduled_date")})
         distinct_slots = len({b.get("scheduled_slot") for b in bookings if b.get("scheduled_slot")})
 
+        # How often each anomaly signal hit this captain in the range — the
+        # repeat-offender view. Open issue flags (idle_after_arrival,
+        # left_site_during_service, captain_delay, service_overrun, ...) plus
+        # the location-mismatch flags, which persist on the booking even
+        # after a manager resolves the issue itself.
+        flags_by_type: dict[str, int] = {}
+        for b in bookings:
+            if b.get("issue_flag"):
+                flags_by_type[b["issue_flag"]] = flags_by_type.get(b["issue_flag"], 0) + 1
+            for key, label in (
+                ("arrival_flagged", "arrival_location"),
+                ("before_photo_flagged", "before_photo_location"),
+                ("after_photo_flagged", "after_photo_location"),
+            ):
+                if b.get(key):
+                    flags_by_type[label] = flags_by_type.get(label, 0) + 1
+
         return {
+            "flags_by_type": flags_by_type,
             "booking_status_counts": counts,
             "total_bookings": len(bookings),
             "cancelled_bookings": counts.get("cancelled", 0),
@@ -143,7 +172,10 @@ class StaffDirectoryService:
             "repeat_complaints": repeat_complaints,
             "total_jobs_completed": total_jobs,
             "total_earnings": total_earnings,
-            "avg_heading_punctuality_minutes": await self._avg_heading_punctuality(captain_id),
+            "total_booking_value": total_booking_value,
+            # Same date window as everything else in this payload — this
+            # helper used to ignore the filter and always report all-time.
+            "avg_heading_punctuality_minutes": await self._avg_heading_punctuality(captain_id, {k: v for k, v in match.items() if k == "scheduled_date"}),
             "on_time_start_pct": on_time_start_pct,
             "on_time_completion_pct": on_time_completion_pct,
             "delayed_jobs": len(delayed),
@@ -156,7 +188,7 @@ class StaffDirectoryService:
             "jobs_per_slot": round(total_jobs / distinct_slots, 2) if distinct_slots else None,
         }
 
-    async def _avg_heading_punctuality(self, captain_id: str) -> float | None:
+    async def _avg_heading_punctuality(self, captain_id: str, extra_match: dict | None = None) -> float | None:
         """Average (heading_at - scheduled slot start) in minutes across this
         captain's jobs that actually got underway — negative means early on
         average, positive means late. This is what tells a manager 'will this
@@ -167,7 +199,7 @@ class StaffDirectoryService:
         Done in Python rather than a Mongo aggregation because heading_at is
         a computed timestamp that needs from_stored() applied before any
         arithmetic — see app/utils/timezone.py."""
-        bookings = await self.booking_repo.find_all_no_paginate({"captain_id": captain_id, "heading_at": {"$ne": None}})
+        bookings = await self.booking_repo.find_all_no_paginate({**(extra_match or {}), "captain_id": captain_id, "heading_at": {"$ne": None}})
         if not bookings:
             return None
         deltas = []
@@ -260,4 +292,23 @@ class StaffDirectoryService:
                 "is_on_job": len(active_now) > 0,
                 "current_job_count": len(active_now),
             })
+        # Road ETA (traffic-aware) for the located captains — the number a
+        # dispatcher actually thinks in. Haversine distance_km above stays
+        # as the always-available fallback; capped to keep Routes calls
+        # bounded however many captains a center ever has.
+        from app.services.route_service import road_distance_eta
+
+        if address and address.get("latitude") is not None:
+            budget = 5
+            for row in results:
+                if budget <= 0:
+                    break
+                if row["latitude"] is None:
+                    continue
+                leg = await road_distance_eta(row["latitude"], row["longitude"], address["latitude"], address["longitude"])
+                budget -= 1
+                if leg:
+                    row["road_km"] = leg["km"]
+                    row["eta_minutes"] = leg["minutes"]
+                    row["eta_source"] = leg["source"]
         return results

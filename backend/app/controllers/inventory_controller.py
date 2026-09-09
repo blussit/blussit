@@ -19,19 +19,19 @@ class InventoryController:
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def create(self, current_user: CurrentUser, payload: InventoryCreateRequest):
-        result = await self.service.create(payload)
+        result = await self.service.create(payload, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "CREATE_INVENTORY_ITEM", "inventory", result["id"])
         return success(result, "Inventory item added successfully")
 
     async def update(self, current_user: CurrentUser, item_id: str, payload: InventoryUpdateRequest):
-        result = await self.service.update(item_id, payload)
+        result = await self.service.update(item_id, payload, current_user.role, current_user.service_center_id)
         return success(result, "Inventory item updated successfully")
 
     async def adjust(self, current_user: CurrentUser, item_id: str, payload: InventoryAdjustRequest):
-        result = await self.service.adjust(item_id, payload)
+        result = await self.service.adjust(item_id, payload, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "ADJUST_INVENTORY", "inventory", item_id, {"delta": payload.delta, "reason": payload.reason})
         return success(result, "Inventory adjusted successfully")
 
     async def delete(self, current_user: CurrentUser, item_id: str):
-        await self.service.delete(item_id)
+        await self.service.delete(item_id, current_user.role, current_user.service_center_id)
         return success(None, "Inventory item removed successfully")

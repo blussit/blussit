@@ -25,6 +25,7 @@ export interface User {
   // Set once a customer completes phone-OTP verification (gates their
   // first self-service booking/subscription) — see PhoneVerificationModal.
   phone_verified?: boolean;
+  phone_verification_stale?: boolean;
   created_at: string;
   // Only ever populated for captains, and only by the manager/admin-scoped
   // staff-directory endpoints (staffDirectoryApi.captainsForCenter) — see
@@ -34,6 +35,28 @@ export interface User {
   latitude?: number | null;
   longitude?: number | null;
   last_location_at?: string | null;
+  // Same staff-directory-only story: the captain's KYC verification state
+  // (pending | submitted | verified | rejected) for the manager's roster —
+  // never the underlying numbers/documents (those live behind the
+  // dedicated review endpoint).
+  kyc_status?: "pending" | "submitted" | "verified" | "rejected";
+  // Auto-assigned captain staff id ("CAP-001") — shown to customers on
+  // their booking once the captain is assigned.
+  employee_id?: string | null;
+  // Roster photo (KYC photo first, profile image fallback) — same
+  // staff-directory-only enrichment as kyc_status above.
+  photo_url?: string | null;
+}
+
+/** The captain's public card on an enriched booking — deliberately shared
+ * with the customer once assigned (photo, staff id, phone), so they know
+ * who is coming to their door. */
+export interface CaptainProfileSnapshot {
+  full_name?: string | null;
+  phone?: string | null;
+  employee_id?: string | null;
+  photo_url?: string | null;
+  verified?: boolean;
 }
 
 export interface Vehicle {
@@ -83,6 +106,14 @@ export interface Service {
   discounted_price?: number | null;
   vehicle_type_prices?: Record<string, number>;
   vehicle_type_discounted_prices?: Record<string, number>;
+  // Struck-through "actual"/MRP price shown beside `price`; display only, never charged.
+  original_price?: number | null;
+  vehicle_type_original_prices?: Record<string, number>;
+  // Optional extra sold only on top of a main service (e.g. exterior polish +₹200).
+  is_addon?: boolean;
+  // Sibling variants of one product (Bike Wash 1–4 bikes) share a group; each has a label.
+  variant_group?: string | null;
+  variant_label?: string | null;
   duration_minutes: number;
   image?: string | null;
   is_active: boolean;
@@ -115,10 +146,15 @@ export interface BookingPolicy {
   min_lead_minutes: number;
   slot_duration_minutes: number;
   slot_booking_cutoff_minutes: number;
+  // How far ahead bookings/holds are accepted (days from today, inclusive).
+  max_advance_days: number;
   delay_tolerance_minutes: number;
   captain_travel_buffer_minutes: number;
   photo_geofence_radius_m: number;
   late_start_grace_minutes: number;
+  // Minutes a captain gets from a LAST-MINUTE assignment before the late
+  // clock starts (the booking was late, not the captain).
+  late_assignment_grace_minutes: number;
   // How many hours past late_start_grace_minutes a captain can still be
   // allowed to start an ASSIGNED booking at all — past this, start_heading
   // is blocked outright and the booking needs a manager reschedule/reassign
@@ -241,6 +277,7 @@ export interface Booking {
   address_id: string;
   service_center_id: string;
   captain_id?: string | null;
+  captain_profile?: CaptainProfileSnapshot | null;
   service_ids: string[];
   subscription_id?: string | null;
   scheduled_date: string;
@@ -272,6 +309,12 @@ export interface Booking {
   before_photo_distance_m?: number | null;
   after_photo_flagged?: boolean;
   after_photo_distance_m?: number | null;
+  // GPS captured at the "I've reached" tap — with heading_location and
+  // the before/after photo coordinates, the manager's evidence trail
+  // (BookingDetailDrawer's "Location checks" opens each in Google Maps).
+  arrival_location?: GeoPoint | null;
+  arrival_flagged?: boolean;
+  arrival_distance_m?: number | null;
   captain_earning?: number | null;
   platform_earning?: number | null;
   wallet_settled?: boolean;
@@ -302,6 +345,8 @@ export interface Booking {
     model: string;
     registration_number: string;
   } | null;
+  travel_distance_km?: number | null;
+  travel_eta_minutes?: number | null;
   address_snapshot?: {
     line1: string;
     landmark?: string | null;
@@ -387,6 +432,12 @@ export interface UserSubscription {
   // under the earlier vehicle-locked design; never treat it as
   // authoritative for eligibility.
   vehicle_id?: string | null;
+  // The vehicle-type TIER this subscription was bought at (VehicleType id).
+  // Redeemable on that type or any type the plan prices cheaper — never a
+  // costlier one. Null/absent = pre-tier purchase, plan.vehicle_types alone
+  // governs. See lib/planTier.ts for the shared eligibility math.
+  vehicle_type?: string | null;
+  purchased_price?: number | null;
   status: "active" | "expired" | "cancelled" | "paused";
   // Computed at read time — "expired" whenever end_date has passed, even if
   // the stored `status` field hasn't been lazily flipped yet (only actually

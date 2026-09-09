@@ -8,7 +8,7 @@ const navItems: NavItem[] = [
   { label: "New booking", to: "/manager/new-booking", icon: CalendarPlus },
   { label: "Booking queue", to: "/manager/bookings", icon: ListChecks },
   { label: "Captains", to: "/manager/captains", icon: Users },
-  { label: "Subscribers", to: "/manager/subscribers", icon: Gift },
+  { label: "Subscriptions", to: "/manager/subscribers", icon: Gift },
   { label: "Inventory", to: "/manager/inventory", icon: Package },
   { label: "Complaints", to: "/manager/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/manager/reviews", icon: Star },

@@ -28,6 +28,18 @@ export function todayIST(): string {
 }
 
 /**
+ * Last bookable date (inclusive), mirroring the server's `max_advance_days`
+ * booking-policy default of 7 — today + the next 6 days. The backend is the
+ * authority (it rejects anything beyond the window at every entry point);
+ * this only keeps the date input's range honest so customers/managers never
+ * pick a date the submit would bounce.
+ */
+export function maxBookingDateIST(days = 7): string {
+  const d = new Date(Date.now() + (days - 1) * 24 * 60 * 60 * 1000);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: IST_TZ }).format(d);
+}
+
+/**
  * Minutes from now until a booking's slot actually starts (IST-anchored,
  * same "+05:30 offset string" approach as the booking-time validation in
  * NewBookingPage — Date.now() is always a true UTC epoch, no conversion
