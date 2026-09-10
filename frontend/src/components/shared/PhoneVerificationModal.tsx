@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { MessageCircle, ShieldCheck } from "lucide-react";
 import { authApi, googleAuthApi, otpWidgetApi } from "../../api/auth";
-import { Button, Input, Modal } from "../ui";
+import { Button, Input, Modal, OtpInput } from "../ui";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
@@ -128,17 +128,25 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
           </>
         ) : (
           <>
-            <p className="text-sm text-[var(--color-text-secondary)]">
-              Enter the code we sent over {channelLabel}.{" "}
-              <button type="button" className="font-medium text-[var(--color-primary)] hover:underline" onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending}>
-                Resend
-              </button>
-            </p>
-            <Input label="Verification code" value={otp} onChange={(e) => setOtp(e.target.value)} maxLength={6} autoFocus />
+            <p className="text-sm text-[var(--color-text-secondary)]">Enter the 6-digit code we sent over {channelLabel}.</p>
+            <OtpInput
+              value={otp}
+              onChange={setOtp}
+              autoFocus
+              disabled={verifyMutation.isPending}
+              // Six digits in = nothing left to decide; submit for them.
+              onComplete={() => verifyMutation.mutate()}
+            />
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-            <Button className="w-full" disabled={otp.trim().length < 4} isLoading={verifyMutation.isPending} onClick={() => verifyMutation.mutate()}>
+            <Button className="w-full" disabled={otp.trim().length < 6} isLoading={verifyMutation.isPending} onClick={() => verifyMutation.mutate()}>
               Verify &amp; continue
             </Button>
+            <p className="text-center text-xs text-[var(--color-text-secondary)]">
+              Didn't get it?{" "}
+              <button type="button" className="font-semibold text-black hover:underline" onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending}>
+                Resend code
+              </button>
+            </p>
           </>
         )}
       </div>

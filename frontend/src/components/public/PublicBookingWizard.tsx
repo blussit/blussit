@@ -5,10 +5,13 @@ import { ArrowLeft, ArrowRight, BadgeCheck, Car, CheckCircle2, Lock, MapPin, Plu
 import { catalogApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
 import { authApi, guestAuthApi } from "../../api/auth";
 import { bookingApi } from "../../api/booking";
+import { couponApi } from "../../api/engagement";
 import { vehicleApi, addressApi } from "../../api/profile";
-import { Badge, Button, Input, Select, Spinner } from "../ui";
+import { Badge, Button, Input, OtpInput, Select, Spinner } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
 import { PhoneVerificationModal } from "../shared/PhoneVerificationModal";
+import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
+import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 import { CoverageLeadInline } from "./CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage, tokenStorage } from "../../lib/api-client";
@@ -102,6 +105,12 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   // OTP instead of a password that may never have been set.
   const [needOtp, setNeedOtp] = useState(false);
   const [couponCode, setCouponCode] = useState("");
+  const [couponDiscount, setCouponDiscount] = useState(0);
+  const [couponError, setCouponError] = useState("");
+  const [couponApplying, setCouponApplying] = useState(false);
+  // Founder rule: every booking picks cash-on-service or pay-online here —
+  // never silently defaulted.
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "online">("cash");
   const [loginOtp, setLoginOtp] = useState("");
   const [otpViaWidget, setOtpViaWidget] = useState(false);
   const otpUserRef = useRef<typeof user>(null);
@@ -168,6 +177,9 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     0
   );
   const hasFirstWashOffer = firstWashTotal < total;
+  // What the customer is actually being asked to pay before any coupon —
+  // the first-wash price when it applies, otherwise the list total.
+  const payableTotal = hasFirstWashOffer ? firstWashTotal : total;
 
   const setUnitQty = (svc: Service | null, n: number) => {
     if (!svc) return;
@@ -215,7 +227,21 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       return next.length === prev.length ? prev : next;
     });
   }, [vehicleTypeId, eligibleServices, services]);
-  const totalDuration = selectedServices.reduce((sum, s) => sum + (s.duration_minutes || 30) * qtyOf(s.id), 0);
+
+  const applyCoupon = async () => {
+    setCouponError("");
+    if (!couponCode.trim()) return;
+    setCouponApplying(true);
+    try {
+      const result = await couponApi.validate(couponCode.trim(), payableTotal);
+      setCouponDiscount(result.discount_amount);
+    } catch (err) {
+      setCouponDiscount(0);
+      setCouponError(getErrorMessage(err));
+    } finally {
+      setCouponApplying(false);
+    }
+  };
 
   const checkCoverage = async (pin: string) => {
     setCoverage("checking");
@@ -244,7 +270,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   }, [savedAddressId, pincode]);
 
   const step1Valid = !!vehicleTypeId && hasMain;
-  const step2Valid = coverage === "covered" && !!date && !!slot && (savedAddressId ? true : line1.trim().length >= 3);
+  // Rapido model: the PIN is the address. A typed house/flat line is only
+  // required in the no-maps fallback, where there's no pin to stand in.
+  const step2Valid =
+    coverage === "covered" && !!date && !!slot && (savedAddressId ? true : mapsUp ? !!pinned : line1.trim().length >= 3);
   const vehicleValid = savedVehicleId ? true : brandModel.trim().length >= 2 && validateIndianPlate(regNumber) !== null;
   const identityValid = user ? true : name.trim().length >= 2 && validateIndianMobile(phone) !== null;
   const step3Valid = vehicleValid && identityValid && (!needLogin || password.length >= 8);
@@ -322,13 +351,18 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       let addressId = savedAddressId || createdRef.current.addressId;
       if (!addressId) {
         const existing = await addressApi.list();
-        const match = existing.find((a) => a.line1 === line1.trim() && a.pincode === checkedPincode);
+        // The pinned point IS the address (the captain navigates to the
+        // coordinates); its resolved label is what we store and show.
+        const resolvedLine1 = pinned
+          ? pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")
+          : line1.trim();
+        const match = existing.find((a) => a.line1 === resolvedLine1 && a.pincode === checkedPincode);
         if (match) {
           addressId = match.id;
         } else {
           const created = await addressApi.create({
             label: "Home",
-            line1: pinned ? [line1.trim(), pinned.area, pinned.city].filter(Boolean).join(", ") : line1.trim(),
+            line1: resolvedLine1,
             city: pinned?.city || centerCity || "—",
             state: centerState || "—",
             pincode: checkedPincode,
@@ -362,8 +396,19 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         scheduled_date: date,
         scheduled_slot: slot,
         coupon_code: couponCode.trim() || undefined,
+        payment_method: paymentMethod,
         hold_key: getSlotHolderKey(),
       });
+      // Online: the booking exists either way — open Razorpay now. Closing
+      // the modal just leaves it payment-pending (payable later from the
+      // booking page or at the door).
+      if (paymentMethod === "online" && booking.total_amount > 0) {
+        try {
+          await payWithRazorpay({ purpose: "booking", booking_id: booking.id }, { name: name || user?.full_name, contact: phone || user?.phone });
+        } catch (payErr) {
+          if (!(payErr instanceof PaymentCancelled)) setError(getErrorMessage(payErr));
+        }
+      }
       navigate(`/thank-you?token=${booking.confirmation_token}`);
     } catch (err) {
       setError(getErrorMessage(err));
@@ -434,37 +479,43 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     ) : null;
 
   // No overflow-hidden on the card: the vehicle-type dropdown must be able to open past its edge.
-  return (
-    <div className="rounded-3xl border border-gray-100 bg-white shadow-[var(--shadow-lifted)]">
-      {/* Step header */}
-      <div className="rounded-t-3xl border-b border-gray-100 bg-[var(--color-surface)] px-4 py-3 sm:px-6 sm:py-5">
-        <div className="flex flex-wrap items-center gap-2 sm:gap-0">
-          {STEPS.map((label, i) => (
-            <div key={label} className="flex items-center">
-              <button
-                type="button"
-                onClick={() => i < step && setStep(i)}
-                className={`flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${
-                  i === step
-                    ? "bg-[var(--color-secondary)] text-black"
-                    : i < step
-                      ? "bg-[var(--color-accent-light)] text-[var(--color-success)]"
-                      : "bg-gray-100 text-gray-400"
-                }`}
-              >
-                <span className="font-mono-num">{i < step ? <CheckCircle2 className="h-4 w-4" /> : i + 1}</span>
-                <span className={i === step ? "inline" : "hidden sm:inline"}>{label}</span>
-              </button>
-              {i < STEPS.length - 1 && <span className="mx-2 hidden h-px w-8 bg-gray-200 sm:block" />}
-            </div>
-          ))}
-          <span className="ml-auto hidden items-center gap-1.5 text-xs text-[var(--color-text-secondary)] md:flex">
-            <Lock className="h-3.5 w-3.5" /> No account needed to start
-          </span>
-        </div>
-      </div>
+  const wizardFooter = (
+    <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+      {step > 0 ? (
+        <Button variant="outline" className="w-full sm:w-auto" onClick={() => setStep((s) => s - 1)}>
+          <ArrowLeft className="h-4 w-4" /> Back
+        </Button>
+      ) : (
+        <span className="hidden sm:block" />
+      )}
+      {step < 2 ? (
+        <Button size="lg" className="w-full sm:w-auto sm:min-w-[150px]" disabled={step === 0 ? !step1Valid : !step2Valid} onClick={() => setStep((s) => s + 1)}>
+          Continue <ArrowRight className="h-4 w-4" />
+        </Button>
+      ) : (
+        <Button size="lg" className="w-full sm:w-auto sm:min-w-[150px]" disabled={!step3Valid} isLoading={submitting} onClick={() => submit()}>
+          {user?.phone_verified ? "Confirm booking" : "Verify & book"} <ArrowRight className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
+  );
 
-      <div className="p-4 sm:p-6 md:p-8">
+  return (
+    <WizardShell
+      eyebrow="Book a service"
+      title="Book your wash"
+      steps={STEPS}
+      current={step}
+      onStepClick={(i) => setStep(i)}
+      aside={
+        <p className="flex items-center gap-1.5 text-xs text-gray-400">
+          <Lock className="h-3.5 w-3.5" /> No account needed to start
+        </p>
+      }
+      footer={wizardFooter}
+    >
+      <WizardStepHeader title={STEPS[step]} />
+      <div>
         {/* ---- STEP 1 — Choose service ---- */}
         {step === 0 && (
           <div className="space-y-6">
@@ -572,7 +623,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                           >
                             <span className="min-w-0">
                               <span className="block font-semibold text-[var(--color-text-primary)]">{g.primary.name}</span>
-                              <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">{current.duration_minutes} min · at your doorstep</span>
+                              {/* No service time here (founder call) — a
+                                  duration on the picker reads as a promise
+                                  before we even know the vehicle. */}
+                              <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">at your doorstep</span>
                               {(includes.items.length > 0 || includes.summary) && (
                                 <span className="mt-1.5 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
                                   {includes.items.length > 0 ? includes.items.join(" · ") : includes.summary}
@@ -713,18 +767,35 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
               </p>
             )}
             {!savedAddressId && coverage === "covered" && (
-              <p className="flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
-                <BadgeCheck className="h-3.5 w-3.5" /> We serve this area!
-              </p>
+              <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3">
+                <p className="flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
+                  <BadgeCheck className="h-3.5 w-3.5" /> We serve this area!
+                </p>
+                {pinned && (
+                  <p className="mt-1.5 flex items-start gap-1.5 text-xs text-[var(--color-text-secondary)]">
+                    <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" />
+                    <span className="min-w-0">
+                      <span className="block font-medium text-black">{pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")}</span>
+                      Drag the pin above if this isn't your exact gate — the captain drives to this point.
+                    </span>
+                  </p>
+                )}
+              </div>
             )}
             {!savedAddressId && (
               <>
-                <Input
-                  label="House / flat, gali no."
-                  value={line1}
-                  onChange={(e) => setLine1(e.target.value)}
-                  placeholder="e.g. 12, Palm Residency"
-                />
+                {/* No house/flat text box (founder call): the pin is the
+                    address, Rapido-style. It comes back only when maps
+                    are unavailable, where there IS no pin. */}
+                {!mapsUp && (
+                  <Input
+                    label="Address"
+                    value={line1}
+                    onChange={(e) => setLine1(e.target.value)}
+                    placeholder="House / flat, street, area"
+                    hint="Maps are unavailable right now — type the address instead."
+                  />
+                )}
                 {!mapsUp && (
                   <Input
                     label="Pincode"
@@ -792,10 +863,13 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                       <p className="text-sm text-[var(--color-text-primary)]">
                         Welcome back! We sent a verification code to <span className="font-semibold">{phone}</span> — enter it to continue.
                       </p>
-                      <Input label="Verification code" className="mt-2" value={loginOtp} onChange={(e) => setLoginOtp(e.target.value)} maxLength={6} />
+                      <div className="mt-2">
+                        <p className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">Verification code</p>
+                        <OtpInput value={loginOtp} onChange={setLoginOtp} />
+                      </div>
                       <Button
                         className="mt-3 w-full"
-                        disabled={loginOtp.trim().length < 4}
+                        disabled={loginOtp.trim().length < 6}
                         isLoading={submitting}
                         onClick={async () => {
                           setError("");
@@ -906,51 +980,79 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                   </dt>
                   <dd className="max-w-[160px] text-right text-xs">{savedAddressId ? myAddresses?.find((a) => a.id === savedAddressId)?.line1 : line1}</dd>
                 </div>
-                <div className="flex items-center justify-between gap-2 pt-1">
-                  <dt className="text-[var(--color-text-secondary)]">Coupon</dt>
-                  <dd>
-                    <input
-                      value={couponCode}
-                      onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                      placeholder="Code (optional)"
-                      className="w-32 rounded-lg border border-gray-200 px-2.5 py-1.5 text-right font-mono-num text-xs uppercase outline-none focus:border-[var(--color-primary)]"
-                    />
-                  </dd>
-                </div>
+                {couponDiscount > 0 && (
+                  <div className="flex justify-between text-[var(--color-success)]">
+                    <dt>Coupon {couponCode}</dt>
+                    <dd className="font-mono-num">-₹{couponDiscount}</dd>
+                  </div>
+                )}
                 <div className="flex justify-between border-t border-gray-200 pt-2 text-base">
                   <dt className="font-semibold">Total</dt>
                   <dd className="text-right">
                     {hasFirstWashOffer && <span className="mr-2 font-mono-num text-sm text-gray-400 line-through">₹{total}</span>}
-                    <span className="font-mono-num font-bold">₹{hasFirstWashOffer ? firstWashTotal : total}</span>
+                    <span className="font-mono-num font-bold">₹{Math.max(payableTotal - couponDiscount, 0)}</span>
                   </dd>
                 </div>
               </dl>
-              <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-                ~{totalDuration} min · pay after service{hasFirstWashOffer ? " · first-wash price shown — confirmed at booking if this vehicle & number are new to Blussit" : ""}.
-              </p>
+              {hasFirstWashOffer && (
+                <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                  First-wash price shown — confirmed at booking if this vehicle &amp; number are new to Blussit.
+                </p>
+              )}
+            </div>
+
+            {/* Coupon — a real labelled field with its own Apply button and
+                plain feedback, instead of a nameless box in the price list. */}
+            <div>
+              <p className="mb-1.5 text-sm font-medium text-black">Have a coupon code?</p>
+              <div className="flex gap-2">
+                <Input
+                  value={couponCode}
+                  onChange={(e) => {
+                    setCouponCode(e.target.value.toUpperCase());
+                    setCouponDiscount(0);
+                    setCouponError("");
+                  }}
+                  placeholder="e.g. WELCOME50"
+                  className="uppercase"
+                />
+                <Button type="button" variant="outline" className="shrink-0" disabled={!couponCode.trim() || couponApplying} onClick={applyCoupon}>
+                  {couponApplying ? "Checking…" : "Apply"}
+                </Button>
+              </div>
+              {couponError && <p className="mt-1 text-xs text-[var(--color-error)]">{couponError}</p>}
+              {couponDiscount > 0 && (
+                <p className="mt-1 text-xs font-medium text-[var(--color-success)]">Coupon applied — ₹{couponDiscount} off.</p>
+              )}
+            </div>
+
+            {/* Cash or online — asked once, right before booking. */}
+            <div>
+              <p className="mb-1.5 text-sm font-medium text-black">How would you like to pay?</p>
+              <div className="flex gap-2">
+                {([
+                  { value: "cash" as const, label: "Cash on service", hint: "Pay the captain at your door" },
+                  { value: "online" as const, label: "Pay online now", hint: "UPI, cards, netbanking" },
+                ]).map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => setPaymentMethod(m.value)}
+                    className={`flex-1 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-colors ${
+                      paymentMethod === m.value
+                        ? "border-2 border-black bg-[#FFF4CD] font-semibold text-black"
+                        : "border-[#F3E5B5] bg-white text-gray-600 hover:border-black"
+                    }`}
+                  >
+                    {m.label}
+                    <span className="mt-0.5 block text-[11px] font-normal text-gray-400">{m.hint}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
 
-        {/* Footer nav */}
-        <div className="mt-6 flex flex-col-reverse gap-3 sm:mt-8 sm:flex-row sm:items-center sm:justify-between">
-          {step > 0 ? (
-            <Button variant="outline" className="w-full sm:w-auto" onClick={() => setStep((s) => s - 1)}>
-              <ArrowLeft className="h-4 w-4" /> Back
-            </Button>
-          ) : (
-            <span className="hidden sm:block" />
-          )}
-          {step < 2 ? (
-            <Button size="lg" className="w-full sm:w-auto" disabled={step === 0 ? !step1Valid : !step2Valid} onClick={() => setStep((s) => s + 1)}>
-              Continue <ArrowRight className="h-4 w-4" />
-            </Button>
-          ) : (
-            <Button size="lg" className="w-full sm:w-auto" disabled={!step3Valid} isLoading={submitting} onClick={() => submit()}>
-              {user?.phone_verified ? "Confirm booking" : "Verify & book"} <ArrowRight className="h-4 w-4" />
-            </Button>
-          )}
-        </div>
       </div>
 
       <PhoneVerificationModal
@@ -961,6 +1063,6 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
           void submit(true);
         }}
       />
-    </div>
+    </WizardShell>
   );
 }

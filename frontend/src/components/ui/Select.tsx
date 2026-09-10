@@ -144,8 +144,8 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
             className={cn(
               "flex w-full items-center justify-between gap-2 rounded-xl border bg-[var(--color-surface,#fff)] px-3.5 py-2.5 text-left text-sm text-[var(--color-text-primary)] transition-colors",
               "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)]",
-              disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:border-[var(--color-primary)]",
-              error ? "border-[var(--color-error)]" : "border-gray-300",
+              disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:border-black",
+              error ? "border-[var(--color-error)]" : "border-[#F3E5B5]",
               className
             )}
           >
@@ -160,7 +160,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
                 ref={panelRef}
                 role="listbox"
                 style={panelStyle}
-                className="z-[70] overflow-y-auto rounded-xl border border-gray-200 bg-[var(--color-surface,#fff)] p-1 shadow-lg"
+                className="z-[70] overflow-y-auto rounded-xl border border-[#F3E5B5] bg-white p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18)]"
               >
                 {options.map((opt, i) => {
                   const optValue = opt.props.value ?? String(opt.props.children);
@@ -177,7 +177,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
                           ? "cursor-not-allowed text-gray-400"
                           : isSelected
                             ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
-                            : "text-[var(--color-text-primary)] hover:bg-gray-100"
+                            : "text-black hover:bg-[#FAFAFA]"
                       )}
                     >
                       <span className="truncate">{opt.props.children}</span>

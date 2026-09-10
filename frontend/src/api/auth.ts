@@ -46,7 +46,7 @@ export const authApi = {
 
 // ---- MSG91 OTP widget (server-verified) -----------------------------------
 export const otpWidgetApi = {
-  config: () =>
+  config: () =>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
     apiClient
       .get<ApiSuccess<{ enabled: boolean; widget_id: string | null; token_auth: string | null }>>("/auth/otp-widget-config")
       .then((r) => r.data.data),

@@ -13,7 +13,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
 import { kpiApi } from "../../api/admin";
-import { Card, CardBody, PageLoader } from "../../components/ui";
+import { Card, CardBody, PageLoader, Panel, StatCard } from "../../components/ui";
 import { DatePicker } from "../../components/ui/DatePicker";
 import { DeltaPill, InfoTip, TargetChip, formatINR } from "../../components/admin/kpi/charts";
 import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, MarketingTab, OperationsTab } from "../../components/admin/kpi/sections";
@@ -80,12 +80,16 @@ export default function AdminDashboardPage() {
     },
   ] : [];
 
+  // Revenue leads (it is THE business number); the rest support it.
+  const hero = primary.find((p) => p.label.includes("evenue"));
+  const rest = primary.filter((p) => p !== hero);
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Analytics dashboard</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Business health at a glance — compared with the {periodNoun}.</p>
+          <h1 className="text-2xl font-bold text-black">Analytics</h1>
+          <p className="mt-1 text-sm text-gray-500">Business health, compared with {periodNoun}.</p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {PERIODS.map((p) => (
@@ -93,7 +97,7 @@ export default function AdminDashboardPage() {
               key={p.key}
               type="button"
               onClick={() => { setPeriodKey(p.key); setShowCustom(false); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "bg-[var(--color-primary)] text-white" : "bg-white text-[var(--color-text-secondary)] hover:bg-[var(--color-primary-light)]"}`}
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
             >
               {p.label}
             </button>
@@ -101,7 +105,7 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             onClick={() => { setShowCustom((v) => !v); if (custom.start && custom.end) setPeriodKey("custom"); }}
-            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "bg-[var(--color-primary)] text-white" : "bg-white text-[var(--color-text-secondary)] hover:bg-[var(--color-primary-light)]"}`}
+            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
           >
             <SlidersHorizontal className="h-3 w-3" /> Custom
           </button>
@@ -125,53 +129,66 @@ export default function AdminDashboardPage() {
         </Card>
       )}
 
-      {/* PRIMARY — the 10-second business-health answer. */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-        {primary.map((s) => (
-          <Card key={s.label}>
-            <CardBody className="p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
-                <s.icon className="h-3.5 w-3.5" /> {s.label} <InfoTip text={s.tip} />
-              </p>
-              <p className="mt-1.5 font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{s.value}</p>
-              <div className="mt-1 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
+      {/* PRIMARY — revenue is the headline, the rest are supporting tiles.
+          Same console shape as every other panel in the product. */}
+      {hero && (
+        <StatCard
+          label={hero.label}
+          labelAfter={<InfoTip text={hero.tip} />}
+          value={hero.value}
+          hint={
+            <span className="flex items-center gap-1.5">
+              {hero.delta} <span>vs {periodNoun}</span>
+            </span>
+          }
+          icon={hero.icon}
+        />
+      )}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+        {rest.map((s) => (
+          <StatCard
+            key={s.label}
+            label={s.label}
+            labelAfter={<InfoTip text={s.tip} />}
+            value={s.value}
+            icon={s.icon}
+            hint={
+              <span className="flex flex-wrap items-center gap-1.5">
                 {s.delta} <span>vs {periodNoun}</span>
-              </div>
-              {"target" in s ? s.target : null}
-            </CardBody>
-          </Card>
+                {"target" in s ? s.target : null}
+              </span>
+            }
+          />
         ))}
       </div>
 
       {/* Action required — only triggered exceptions, invisible when healthy. */}
       {alerts.length > 0 ? (
-        <Card className="border-amber-200 bg-amber-50/60">
-          <CardBody className="p-4">
-            <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-amber-800">
-              <AlertTriangle className="h-3.5 w-3.5" /> Action required
-            </p>
-            <ul className="space-y-1">
-              {alerts.map((a) => (
-                <li key={a.text} className="text-sm text-amber-900">⚠ {a.text}</li>
-              ))}
-            </ul>
-          </CardBody>
-        </Card>
+        <Panel title="Action required">
+          <ul className="space-y-1.5">
+            {alerts.map((a) => (
+              <li key={a.text} className="flex items-start gap-2 text-sm text-gray-700">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                {a.text}
+              </li>
+            ))}
+          </ul>
+        </Panel>
       ) : (
-        <p className="flex items-center gap-1.5 text-xs text-[var(--color-success)]">
+        <p className="flex items-center gap-1.5 text-xs text-gray-400">
           <Sparkles className="h-3.5 w-3.5" /> No exceptions need attention in this period.
         </p>
       )}
 
       {/* SECONDARY — one focus area at a time. */}
       <div className="overflow-x-auto">
-        <div className="flex min-w-max gap-1 rounded-xl bg-white p-1 shadow-[var(--shadow-soft)]">
+        <div className="flex min-w-max gap-1 rounded-xl border border-[#F3E5B5] bg-white p-1">
           {TABS.map((t) => (
             <button
               key={t.key}
               type="button"
               onClick={() => setTab(t.key)}
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[var(--color-primary)] text-white" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-primary-light)]"}`}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-black text-white" : "text-gray-600 hover:bg-[#FFF4CD]"}`}
             >
               {t.label}
             </button>

@@ -9,7 +9,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, CalendarPlus, Car, Clock, Gift, LifeBuoy, ListChecks, MapPin } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { subscriptionApi } from "../../api/engagement";
-import { Badge, Card, CardBody, CardHeader, EmptyState, PageLoader, StatusBadge } from "../../components/ui";
+import { Badge, Card, CardBody, CardHeader, EmptyState, PageLoader, StatCard, StatusBadge } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
 import { format } from "../../lib/date";
 
@@ -39,51 +39,46 @@ export default function CustomerDashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Greeting band — black panel, gold accents, primary CTA */}
-      <div className="relative overflow-hidden rounded-2xl bg-[#101010] px-6 py-7 text-white sm:px-8">
-        <div
-          className="pointer-events-none absolute right-6 top-4 hidden h-[90px] w-[110px] opacity-50 sm:block"
-          style={{ backgroundImage: "radial-gradient(#E8A900 1.1px, transparent 1.1px)", backgroundSize: "10px 10px", maskImage: "linear-gradient(to bottom left, black, transparent)" }}
-        />
-        <div className="relative flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#E8A900]">Dashboard</p>
-            <h1 className="mt-1.5 font-display text-2xl font-bold">Welcome back, {user?.full_name?.split(" ")[0]}</h1>
-            <p className="mt-1 text-sm text-white/60">
-              {next
-                ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
-                : "Your car misses you — book a doorstep wash whenever you're ready."}
-            </p>
-          </div>
-          <button
-            onClick={() => navigate("/app/book")}
-            className="group inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#E8A900] px-6 py-3 text-sm font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.3)] transition-all hover:-translate-y-0.5 hover:bg-[#D99A00]"
-          >
-            <CalendarPlus className="h-4 w-4" /> Book a service
-            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-          </button>
+      {/* Plain page header — the black greeting band was dropped (founder
+          call): the console panels below carry the page, and the booking
+          CTA sits inline where it doesn't compete with them. */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-black">Welcome back, {user?.full_name?.split(" ")[0]}</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            {next
+              ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
+              : "Book a doorstep wash whenever you're ready."}
+          </p>
         </div>
+        <button
+          onClick={() => navigate("/app/book")}
+          className="group inline-flex shrink-0 items-center justify-center gap-2 rounded-full bg-[#E8A900] px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#D99A00]"
+        >
+          <CalendarPlus className="h-4 w-4" /> Book a service
+          <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+        </button>
       </div>
 
-      {/* Stat tiles */}
+      {/* Stat tiles — same console tile as every other panel, each one a
+          drill-down (the link appears on hover, always shown on touch). */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {[
-          { icon: ListChecks, value: upcoming.length, label: "Upcoming bookings" },
-          { icon: Gift, value: activeSubs.length, label: "Active subscriptions" },
-          { icon: Car, value: bookings?.meta.total ?? 0, label: "Total bookings" },
-        ].map((s) => (
-          <Card key={s.label}>
-            <CardBody className="flex items-center gap-4 !p-5">
-              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-gray-100 text-black">
-                <s.icon className="h-5 w-5" />
-              </span>
-              <div>
-                <p className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{s.value}</p>
-                <p className="text-sm text-[var(--color-text-secondary)]">{s.label}</p>
-              </div>
-            </CardBody>
-          </Card>
-        ))}
+        <StatCard
+          label="Upcoming bookings"
+          value={upcoming.length}
+          hint={next ? `Next on ${format(next.scheduled_date)}` : "Nothing scheduled"}
+          icon={ListChecks}
+          to="/app/bookings"
+        />
+        <StatCard
+          label="Active plans"
+          value={activeSubs.length}
+          hint={activeSubs.length ? "Washes included" : "Subscribe and save"}
+          icon={Gift}
+          to="/app/subscriptions"
+          linkLabel={activeSubs.length ? "View all" : "See plans"}
+        />
+        <StatCard label="Total bookings" value={bookings?.meta.total ?? 0} hint="All time" icon={Car} to="/app/bookings" />
       </div>
 
       {/* Subscription above the bookings card on every screen; quick links

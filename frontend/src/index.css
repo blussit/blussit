@@ -13,6 +13,10 @@
   --color-accent: #EAB308;
   --color-accent-light: #FEF9C3;
   --color-surface: #F5F5F5;
+  /* One card hairline for the whole product — the light-yellow boundary
+     the founder approved. Set here (not only in the brand portals) so
+     customer, captain, manager and admin all read as one system. */
+  --color-card-border: #F3E5B5;
   --color-text-primary: #0A0A0A;
   --color-text-secondary: #525252;
   /* Warm-white page surfaces below the hero (matches the pre-launch site),

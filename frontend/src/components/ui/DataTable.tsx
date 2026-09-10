@@ -32,12 +32,15 @@ export function DataTable<T extends { id: string }>({
   if (!data.length) return <EmptyState title={emptyTitle} description={emptyDescription} />;
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-gray-100">
+    // Console table: hairline yellow frame, quiet grey header, and a warm
+    // row hover so a clickable row reads as clickable without borders or
+    // shadows shouting on every line.
+    <div className="overflow-x-auto rounded-2xl border border-[#F3E5B5] bg-white">
       <table className="w-full min-w-[640px] text-left text-sm">
         <thead>
-          <tr className="border-b border-gray-100 bg-gray-50/60">
+          <tr className="border-b border-[#F3E5B5]">
             {columns.map((col) => (
-              <th key={col.header} className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">
+              <th key={col.header} className="px-4 py-3 text-xs font-medium text-gray-500">
                 {col.header}
               </th>
             ))}
@@ -47,11 +50,11 @@ export function DataTable<T extends { id: string }>({
           {data.map((row) => (
             <tr
               key={row.id}
-              className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 ${onRowClick ? "cursor-pointer" : ""}`}
+              className={`border-b border-[#FAF3DF] last:border-0 transition-colors ${onRowClick ? "cursor-pointer hover:bg-[#FFFCF0]" : ""}`}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
             >
               {columns.map((col) => (
-                <td key={col.header} className={`px-4 py-3.5 text-[var(--color-text-primary)] ${col.className || ""}`}>
+                <td key={col.header} className={`px-4 py-3.5 text-black ${col.className || ""}`}>
                   {col.accessor(row)}
                 </td>
               ))}

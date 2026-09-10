@@ -9,7 +9,8 @@ const toneClasses: Record<Tone, string> = {
   success: "bg-[var(--color-accent-light)] text-[var(--color-success)]",
   warning: "bg-amber-50 text-amber-700",
   error: "bg-red-50 text-[var(--color-error)]",
-  info: "bg-[var(--color-secondary-light)] text-sky-700",
+  // Light-yellow tint + dark text — never blue, never a solid fill.
+  info: "bg-[#FFF4CD] text-[#8A6600]",
 };
 
 export function Badge({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: Tone }) {

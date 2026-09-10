@@ -205,17 +205,19 @@ export function Funnel({ steps }: { steps: { label: string; value: number }[] })
 /* Small building blocks                                               */
 /* ------------------------------------------------------------------ */
 export function MiniStat({ label, value, tip, children }: { label: string; value: ReactNode; tip?: string; children?: ReactNode }) {
+  // Same console language as ui/StatCard (the blueprint tile), one size
+  // down: hairline card, sentence-case grey label, big mono number.
   return (
-    <div className="rounded-xl border border-gray-100 bg-white p-3">
-      <p className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
+    <div className="rounded-xl border border-[#F3E5B5] bg-white p-4">
+      <p className="flex items-center gap-1 text-xs font-medium text-gray-500">
         {label} {tip && <InfoTip text={tip} />}
       </p>
-      <p className="mt-0.5 font-mono-num text-lg font-bold text-[var(--color-text-primary)]">{value}</p>
+      <p className="font-mono-num mt-1.5 text-xl font-bold text-black">{value}</p>
       {children}
     </div>
   );
 }
 
 export function SectionCaption({ children }: { children: ReactNode }) {
-  return <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">{children}</p>;
+  return <p className="mb-3 text-sm font-semibold text-black">{children}</p>;
 }

@@ -15,7 +15,10 @@ const variantClasses: Record<string, string> = {
   ghost: "text-[var(--color-text-primary)] hover:bg-gray-100",
   danger: "bg-[var(--color-error)] text-white hover:brightness-95",
   success: "bg-[var(--color-success)] text-white hover:brightness-95",
-  info: "bg-blue-600 text-white hover:bg-blue-700",
+  // No blue anywhere in the product (founder call): the palette is white,
+  // black and gold. "info" is the gold action — used for the captain's
+  // mid-flow step buttons.
+  info: "bg-[#E8A900] text-white hover:bg-[#D99A00]",
 };
 
 const sizeClasses: Record<string, string> = {

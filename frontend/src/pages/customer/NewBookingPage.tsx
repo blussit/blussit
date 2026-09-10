@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Calendar, Car, Check, CheckCircle2, ChevronLeft, Gift, MapPin } from "lucide-react";
+import { Car, CheckCircle2, Gift, MapPin } from "lucide-react";
 import { vehicleApi, addressApi } from "../../api/profile";
 import { catalogApi, comboOfferApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
 import { bookingApi } from "../../api/booking";
 import { couponApi, subscriptionApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
-import { Badge, Button, Card, Input, Select } from "../../components/ui";
+import { Badge, Button, Input, Select } from "../../components/ui";
 import { LocationPicker, type LocationValue } from "../../components/shared/LocationPicker";
 import { SubscriptionPicker } from "../../components/shared/SubscriptionPicker";
 import { SubscriptionQuickBook } from "../../components/shared/SubscriptionQuickBook";
 import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
+import { WizardShell, WizardStepHeader } from "../../components/shared/WizardShell";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
@@ -262,11 +263,12 @@ export default function NewBookingPage() {
         vehicleId = vehicle.id;
       }
 
-      let addressId = !showNewAddressForm && selectedAddressId ? selectedAddressId : addresses?.find((a) => a.line1 === addressLine && a.pincode === pincode)?.id;
+      const derivedLine1 = location ? location.formatted || [location.area, location.city].filter(Boolean).join(", ") : addressLine;
+      let addressId = !showNewAddressForm && selectedAddressId ? selectedAddressId : addresses?.find((a) => a.line1 === derivedLine1 && a.pincode === pincode)?.id;
       if (!addressId) {
         const address = await addressApi.create({
           label: "Doorstep",
-          line1: location ? [addressLine, location.area, location.city].filter(Boolean).join(", ") : addressLine,
+          line1: derivedLine1,
           landmark: landmark || undefined,
           city,
           state,
@@ -430,29 +432,64 @@ export default function NewBookingPage() {
   const hasSelection = !!selectedBase || !!selectedCombo; // an add-on never rides alone
   const stepValid = [
     !!carNumber && hasSelection,
-    !!addressLine && !!city && !!state && !!pincode && !!date && !!slot,
+    // A saved address already carries its own coordinates; otherwise the
+    // PIN is the address (typed line only in the no-maps fallback).
+    (selectedAddressId ? true : mapsDown ? !!addressLine : !!location) && !!city && !!state && !!pincode && !!date && !!slot,
     true,
   ][step];
 
-  return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => (step > 0 ? setStep((s) => s - 1) : navigate(-1))}
-          aria-label="Back"
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#F3E5B5] bg-white text-black transition-colors hover:border-[#E8A900]/50"
-        >
-          <ChevronLeft className="h-5 w-5" />
-        </button>
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">
-            Step {step + 1} of {STEPS.length} · {STEPS[step]}
-          </p>
-          <h1 className="mt-0.5 font-display text-2xl font-bold uppercase text-[var(--color-primary)]">Book Your Wash</h1>
-          <p className="text-sm text-[var(--color-text-secondary)]">{STEP_HINTS[step]}</p>
+  // What's chosen so far, as one quiet line above the action — replaces
+  // the old summary sidebar (the reference layout has no third column).
+  const chosenService = selectedCombo
+    ? selectedCombo.name
+    : selectedServices.length
+      ? selectedServices.map((s) => s.name + (qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : "")).join(", ")
+      : "";
+  const summaryLine = [chosenService, date && slot ? `${date} · ${slot}` : "", chosenService ? `${totalDuration} min` : ""]
+    .filter(Boolean)
+    .join("  ·  ");
+
+  const wizardFooter = (
+    <div className="space-y-4">
+      {(summaryLine || total > 0) && (
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate text-xs text-gray-500">{summaryLine || "Nothing selected yet"}</span>
+          <span className="font-mono-num text-lg font-bold text-black">₹{total || 0}</span>
         </div>
+      )}
+      <div className="flex items-center justify-between gap-3">
+        <Button variant="outline" onClick={() => (step > 0 ? setStep((s) => s - 1) : navigate(-1))}>
+          Back
+        </Button>
+        {step < STEPS.length - 1 ? (
+          <Button className="min-w-[140px]" disabled={!stepValid} onClick={() => setStep((s) => s + 1)}>
+            Continue
+          </Button>
+        ) : (
+          <Button
+            className="min-w-[140px]"
+            isLoading={createMutation.isPending}
+            onClick={() => {
+              // Checked client-side, BEFORE this multi-step mutation starts
+              // creating a vehicle/address — retrying mid-flow after a
+              // server-side 403 would risk re-creating a vehicle/address
+              // that already succeeded on the first attempt.
+              if (!user?.phone_verified) {
+                setVerifyOpen(true);
+                return;
+              }
+              createMutation.mutate();
+            }}
+          >
+            <CheckCircle2 className="h-4 w-4" /> Confirm booking
+          </Button>
+        )}
       </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
 
       {planMode && !allUsableSubscriptions.length && (
         <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[#F3E5B5] bg-[#FAFAFA] p-4 text-sm">
@@ -481,23 +518,15 @@ export default function NewBookingPage() {
         />
       )}
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[220px_1fr_320px]">
-        <div className="flex gap-3 lg:flex-col lg:gap-6">
-          {STEPS.map((label, i) => (
-            <div key={label} className="flex items-center gap-3 lg:items-start">
-              <span
-                className={`font-mono-num flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                  i < step ? "bg-[var(--color-success)] text-white" : i === step ? "bg-[var(--color-secondary)] text-white" : "bg-gray-100 text-gray-400"
-                }`}
-              >
-                {i < step ? <Check className="h-4 w-4" /> : i + 1}
-              </span>
-              <span className={`hidden text-sm font-medium lg:block ${i === step ? "text-[var(--color-text-primary)]" : "text-gray-400"}`}>{label}</span>
-            </div>
-          ))}
-        </div>
-
-        <Card className="p-6">
+      <WizardShell
+        eyebrow="Book a service"
+        title="Book your wash"
+        steps={STEPS}
+        current={step}
+        onStepClick={(i) => setStep(i)}
+        footer={wizardFooter}
+      >
+        <WizardStepHeader title={STEPS[step]} description={STEP_HINTS[step]} />
           {step === 0 && (
             <div className="space-y-6">
               <div>
@@ -567,7 +596,7 @@ export default function NewBookingPage() {
                 <p className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">What do you need done?</p>
                 {!!combos?.length && (
                   <>
-                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Combo offers</p>
+                    <p className="mb-2 text-sm font-medium text-black">Combo offers</p>
                     <div className="mb-4 flex flex-wrap gap-2">
                       {combos.map((c) => {
                         const { price, firstTime } = priceFor(c, vehicleType);
@@ -588,7 +617,7 @@ export default function NewBookingPage() {
                   </>
                 )}
 
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Main service</p>
+                <p className="mb-2 text-sm font-medium text-black">Main service</p>
                 {servicesLoading ? (
                   <p className="text-sm text-[var(--color-text-secondary)]">Loading services…</p>
                 ) : !vehicleType ? (
@@ -640,7 +669,7 @@ export default function NewBookingPage() {
                     {/* Add-ons — only the ones valid for what's selected */}
                     {selectedBase && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) && (
                       <div className="mt-4">
-                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Add-ons</p>
+                        <p className="mb-2 text-sm font-medium text-black">Add-ons</p>
                         <div className="space-y-2.5">
                           {kit.simple.map((s) => {
                             const on = serviceIds.includes(s.id);
@@ -748,22 +777,37 @@ export default function NewBookingPage() {
                   if (v.pincode) setPincode(v.pincode);
                 }}
               />
-              <Input
-                label="House / flat, gali no."
-                placeholder="e.g. 75, Gali No. 2"
-                value={addressLine}
-                onChange={(e) => { setAddressLine(e.target.value); setSelectedAddressId(null); }}
-                required
-              />
+              {/* No house/flat text box (founder call): the pin IS the
+                  address, Rapido-style — the captain navigates to those
+                  coordinates. It returns only in the no-maps fallback. */}
+              {!mapsDown && location && (
+                <p className="flex items-start gap-1.5 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3 text-xs text-[var(--color-text-secondary)]">
+                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" />
+                  <span className="min-w-0">
+                    <span className="block font-medium text-black">{location.formatted || [location.area, location.city].filter(Boolean).join(", ")}</span>
+                    Drag the pin if this isn't your exact gate.
+                  </span>
+                </p>
+              )}
               <Input label="Landmark (optional)" placeholder="Near Apollo Hospital" value={landmark} onChange={(e) => { setLandmark(e.target.value); setSelectedAddressId(null); }} />
 
               {mapsDown && (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <>
                   {/* Manual fallback ONLY when Google Maps can't load. */}
-                  <Input label="City" value={city} onChange={(e) => setCity(e.target.value)} required />
-                  <Input label="State" value={state} onChange={(e) => setState(e.target.value)} required />
-                  <Input label="Pincode" value={pincode} onChange={(e) => setPincode(e.target.value)} required />
-                </div>
+                  <Input
+                    label="Address"
+                    placeholder="House / flat, street, area"
+                    value={addressLine}
+                    onChange={(e) => { setAddressLine(e.target.value); setSelectedAddressId(null); }}
+                    hint="Maps are unavailable right now — type the address instead."
+                    required
+                  />
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <Input label="City" value={city} onChange={(e) => setCity(e.target.value)} required />
+                    <Input label="State" value={state} onChange={(e) => setState(e.target.value)} required />
+                    <Input label="Pincode" value={pincode} onChange={(e) => setPincode(e.target.value)} required />
+                  </div>
+                </>
               )}
 
               <div className="border-t border-gray-100 pt-5">
@@ -921,80 +965,8 @@ export default function NewBookingPage() {
             </div>
           )}
 
-          <div className="mt-8 flex justify-between gap-3">
-            {step > 0 ? (
-              <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
-                Back
-              </Button>
-            ) : (
-              <span />
-            )}
-            {step < STEPS.length - 1 ? (
-              <Button disabled={!stepValid} onClick={() => setStep((s) => s + 1)}>
-                Continue
-              </Button>
-            ) : (
-              <Button
-                isLoading={createMutation.isPending}
-                onClick={() => {
-                  // Checked client-side, BEFORE this multi-step mutation
-                  // starts creating a vehicle/address — retrying mid-flow
-                  // after a server-side 403 would risk re-creating a
-                  // vehicle/address that already succeeded on the first
-                  // attempt. Pre-empting here means the OTP gate never
-                  // interrupts a partially-completed submission.
-                  if (!user?.phone_verified) {
-                    setVerifyOpen(true);
-                    return;
-                  }
-                  createMutation.mutate();
-                }}
-              >
-                <CheckCircle2 className="h-4 w-4" /> Confirm Booking
-              </Button>
-            )}
-          </div>
-
           <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); createMutation.mutate(); }} />
-        </Card>
-
-        <Card className="h-fit p-6 lg:sticky lg:top-24">
-          <p className="mb-4 text-sm font-semibold uppercase tracking-wide text-[var(--color-text-primary)]">Your Booking</p>
-          <div className="mb-4 flex h-28 items-center justify-center rounded-xl bg-[var(--color-primary-light)]">
-            <MapPin className="h-8 w-8 text-[var(--color-primary)]" />
-          </div>
-          <div className="space-y-3 text-sm">
-            <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Service</span>
-              <span className="text-right font-medium text-[var(--color-text-primary)]">
-                {selectedCombo
-                  ? selectedCombo.name
-                  : selectedServices.length
-                    ? selectedServices.map((s) => s.name + (qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : "")).join(", ")
-                    : "—"}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Date</span>
-              <span className="flex items-center gap-1 font-medium text-[var(--color-text-primary)]">
-                <Calendar className="h-3.5 w-3.5" /> {date || "—"}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Slot</span>
-              <span className="font-mono-num font-medium text-[var(--color-text-primary)]">{slot || "—"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--color-text-secondary)]">Duration</span>
-              <span className="font-medium text-[var(--color-text-primary)]">{totalDuration} min</span>
-            </div>
-            <div className="flex justify-between border-t border-gray-100 pt-3 text-base">
-              <span className="font-semibold text-[var(--color-text-primary)]">Price</span>
-              <span className="font-mono-num font-bold text-[var(--color-secondary)]">₹{total || 0}</span>
-            </div>
-          </div>
-        </Card>
-      </div>
+      </WizardShell>
     </div>
   );
 }

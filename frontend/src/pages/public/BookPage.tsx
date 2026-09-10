@@ -25,14 +25,10 @@ export default function BookPage() {
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
       <PublicNavbar />
-      <div className="bg-cream pb-10 pt-6 sm:pb-12 sm:pt-12">
+      {/* The wizard shell carries its own title/step rail — the page just
+          gives it a white ground and breathing room, same as after login. */}
+      <div className="bg-white pb-12 pt-8 sm:pt-12">
         <div className="container-page">
-          <div className="mx-auto mb-5 max-w-2xl text-center sm:mb-8">
-            <h1 className="font-display text-[28px] font-black tracking-tight text-[#111] sm:text-4xl">Book a service</h1>
-            <p className="mt-2 text-[14px] text-neutral-500 sm:mt-3 sm:text-lg">
-              No account needed — just your name and WhatsApp number at the end.
-            </p>
-          </div>
           <PublicBookingWizard preselect={preselect} />
         </div>
       </div>

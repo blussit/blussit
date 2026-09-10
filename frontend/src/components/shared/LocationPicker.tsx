@@ -62,6 +62,7 @@ export function LocationPicker({
   const [locating, setLocating] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [gpsError, setGpsError] = useState("");
+  const watchRef = useRef<number | null>(null);
 
   const settle = (lat: number, lng: number, zoomIn = false) => {
     const { map, marker } = objects.current;
@@ -82,6 +83,57 @@ export function LocationPicker({
       if (searchRef.current) searchRef.current.value = shortLabel(next);
     }, 350);
   };
+
+  /**
+   * Get the BEST device fix, not the first one.
+   *
+   * getCurrentPosition({enableHighAccuracy:true}) answers as soon as the
+   * browser has *any* position — on a laptop (no GPS radio) and often on
+   * the first seconds of a phone request that's a WiFi/IP estimate whose
+   * accuracy is hundreds of metres to several kilometres. Dropping the
+   * pin there looks confident and is simply wrong, which is exactly the
+   * "we're nowhere near that spot" complaint.
+   *
+   * So: watch the position, keep the most accurate reading seen, and stop
+   * as soon as it's genuinely precise (<= GOOD_FIX_M) or the window
+   * closes. The customer can always drag the pin afterwards.
+   */
+  const acquireBestFix = (onFix: (lat: number, lng: number) => void, onFail: () => void) => {
+    const GOOD_FIX_M = 50;
+    const WINDOW_MS = 12000;
+    if (!navigator.geolocation) {
+      onFail();
+      return;
+    }
+    let best: GeolocationPosition | null = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
+      watchRef.current = null;
+      clearTimeout(windowTimer);
+      if (best) onFix(best.coords.latitude, best.coords.longitude);
+      else onFail();
+    };
+    const windowTimer = setTimeout(finish, WINDOW_MS);
+    watchRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        if (!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
+        if (pos.coords.accuracy <= GOOD_FIX_M) finish();
+      },
+      () => finish(),
+      // maximumAge:0 — never reuse a cached fix from another part of town.
+      { enableHighAccuracy: true, timeout: WINDOW_MS, maximumAge: 0 },
+    );
+  };
+
+  useEffect(
+    () => () => {
+      if (watchRef.current != null) navigator.geolocation?.clearWatch(watchRef.current);
+    },
+    [],
+  );
 
   // Key rejected by Google (wrong referrer, billing, API off): Google would
   // otherwise paint its "Oops! Something went wrong" box inside our map.
@@ -147,10 +199,9 @@ export function LocationPicker({
       // First open with no value: try GPS right away (best-effort — a
       // denial just leaves the search/tap paths).
       if (!value) {
-        navigator.geolocation?.getCurrentPosition(
-          (pos) => settle(pos.coords.latitude, pos.coords.longitude, true),
+        acquireBestFix(
+          (lat, lng) => settle(lat, lng, true),
           () => setGpsError("Location access is off — search your area below or tap the map."),
-          { enableHighAccuracy: true, timeout: 7000 },
         );
       }
     })();
@@ -168,16 +219,15 @@ export function LocationPicker({
     }
     setGpsError("");
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
+    acquireBestFix(
+      (lat, lng) => {
         setLocating(false);
-        settle(pos.coords.latitude, pos.coords.longitude, true);
+        settle(lat, lng, true);
       },
       () => {
         setLocating(false);
         setGpsError("Couldn't get your location — allow location access, or search / tap the map.");
       },
-      { enableHighAccuracy: true, timeout: 10000 },
     );
   };
 
