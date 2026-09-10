@@ -1,3 +1,4 @@
+import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useEffect, useState } from "react";
 import { AlertTriangle, BadgeCheck, CarFront, CheckCircle2, Flag, Lock, MapPin, Phone, Sparkles, XCircle, Map as MapIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -56,6 +57,7 @@ export function NowJobCard({
   onReportRisk: () => void;
   onMarkUrgent: () => void;
 }) {
+  const { t } = useCaptainTranslation();
   const [showMap, setShowMap] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
@@ -72,13 +74,13 @@ export function NowJobCard({
   const minutesLeft = minutesUntilSlotStart(job.scheduled_date, job.scheduled_slot);
   const isUrgent = job.status === "assigned" && !isFlagged && minutesLeft <= URGENT_ASSIGNMENT_MINUTES;
   // The route (Navigate + pin map) exists only for the RIDE: it unlocks
-  // when the captain presses "Head out" (no directions before the
+  // when the captain presses t("captain.actions.headOut") (no directions before the
   // geo-stamped departure) and disappears again once he's verified the
   // vehicle — he's standing at the car, navigation is just clutter.
   const canNavigate = job.status === "captain_on_the_way" && !job.vehicle_verified;
 
   const steps = [
-    { label: "Assigned", at: job.assigned_at },
+    { label: t("captain.status.assigned"), at: job.assigned_at },
     { label: "Heading", at: job.heading_at },
     { label: "Reached", at: job.vehicle_verified_at },
     { label: "Started", at: job.service_started_at },
@@ -184,7 +186,7 @@ export function NowJobCard({
         <div className="space-y-2 text-sm">
           {(job.customer_name || job.customer_phone) && (
             <div className="flex items-center gap-2 text-[var(--color-text-primary)]">
-              <span className="font-semibold">{job.customer_name || "Customer"}</span>
+              <span className="font-semibold">{job.customer_name || t("captain.job.customer")}</span>
               {job.customer_phone && (
                 <a href={`tel:${job.customer_phone}`} className="flex items-center gap-1 font-medium text-black hover:underline">
                   <Phone className="h-3.5 w-3.5" /> {job.customer_phone}
@@ -204,7 +206,7 @@ export function NowJobCard({
               )}
             </span>
             {/* Navigate only exists around the RIDE: locked chip while
-                assigned (unlocks at "Head out"), live while riding, and
+                assigned (unlocks at t("captain.actions.headOut")), live while riding, and
                 GONE once the vehicle is verified — he's standing at the
                 car, the button is just clutter from there on. */}
             {job.address_snapshot?.latitude != null && job.address_snapshot?.longitude != null && canNavigate && (
@@ -224,13 +226,13 @@ export function NowJobCard({
             )}
           </div>
           {/* Navigation (and the pin map) stay locked until the captain
-              actually taps "Head out" — that tap is what geo-stamps the
+              actually taps t("captain.actions.headOut") — that tap is what geo-stamps the
               start of his ride (heading_at + GPS), so letting him open
               the route beforehand would let him ride off with no record
               of when he left. */}
           {!canNavigate && action?.kind === "heading" && job.address_snapshot?.latitude != null && (
             <p className="text-xs text-gray-400">
-              Tap "{"Head out"}" below to unlock navigation — that's what records your departure.
+              Tap "{t("captain.actions.headOut")}" below to unlock navigation — that's what records your departure.
             </p>
           )}
           {canNavigate && job.address_snapshot?.latitude != null && job.address_snapshot?.longitude != null && (

@@ -21,7 +21,7 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
   if (!reviews.length) return null;
 
   return (
-    <SectionShell id={id} className="border-t border-cream-line-soft bg-cream-deep">
+    <SectionShell id={id} className="border-t border-cream-line-soft bg-white">
       <SectionHeader title="What customers say" subtitle="Real doorstep washes, in their own words." />
 
       {/* Auto-advancing swipe row on phones, grid from tablet up */}

@@ -1,3 +1,4 @@
+import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { AlertTriangle, CheckCircle2, Flag, XCircle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Button, StatusBadge } from "../ui";
@@ -39,6 +40,7 @@ export function JobRow({
    * collect flow (cash tap / scan-to-pay QR). */
   onCollect?: () => void;
 }) {
+  const { t } = useCaptainTranslation();
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
 
@@ -49,12 +51,18 @@ export function JobRow({
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 border-b border-gray-50 p-4 last:border-0 sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-3 rounded-[var(--radius-card)] border border-[#E5E7EB] bg-white p-4 transition-colors hover:border-[#E8A900] sm:flex-row sm:items-center sm:justify-between cursor-pointer",
         isFlagged && "bg-amber-50/40",
         isUrgent && "bg-red-50/40"
       )}
+      onClick={(e) => {
+        // Prevent opening details if clicking a specific action button
+        if (!(e.target as HTMLElement).closest("button:not(.job-row-main-btn)")) {
+          onOpenDetails();
+        }
+      }}
     >
-      <button type="button" onClick={onOpenDetails} className="flex-1 text-left">
+      <button type="button" className="job-row-main-btn flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{job.scheduled_slot}</span>
           <span className="font-mono-num text-xs text-[var(--color-text-secondary)]">{job.booking_number}</span>
@@ -71,7 +79,7 @@ export function JobRow({
           )}
         </div>
         <p className="mt-1 text-sm text-[var(--color-text-primary)]">
-          {job.customer_name || "Customer"}
+          {job.customer_name || t("captain.job.customer")}
           {job.vehicle_snapshot && (
             <span className="text-[var(--color-text-secondary)]">
               {" "}
@@ -130,3 +138,4 @@ export function JobRow({
     </div>
   );
 }
+

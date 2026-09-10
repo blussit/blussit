@@ -1,3 +1,4 @@
+import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
@@ -16,6 +17,7 @@ import type { Booking } from "../../types";
  * Razorpay directly) so the ✅ lands seconds after the customer pays.
  */
 export function CollectPaymentModal({ booking, onClose }: { booking: Booking | null; onClose: () => void }) {
+  const { t } = useCaptainTranslation();
   const queryClient = useQueryClient();
   const [view, setView] = useState<"choose" | "qr">("choose");
   const [cashArmed, setCashArmed] = useState(false);
@@ -69,37 +71,39 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
   const settled = paid || cashMutation.isSuccess;
 
   return (
-    <Modal open={!!booking} onClose={onClose} title={settled ? "Payment done" : `Collect ₹${amount}`}>
+    <Modal open={!!booking} onClose={onClose} title={settled ? t("captain.payment.done") : `${t("captain.payment.amount")} ₹${amount}`}>
       {settled ? (
         <div className="py-6 text-center">
           <CheckCircle2 className="mx-auto h-14 w-14 text-[var(--color-success)]" />
           <p className="mt-3 text-lg font-bold text-black">
-            ₹{amount} {cashMutation.isSuccess || live?.payment_method === "cash" ? "received in cash" : "paid online"} ✅
+            ₹{amount} {cashMutation.isSuccess || live?.payment_method === "cash" ? t("captain.payment.received_cash") : t("captain.payment.paid_online")} ✅
           </p>
-          <p className="mt-1 text-sm text-gray-600">Booking {booking.booking_number} is settled. All done!</p>
-          <button onClick={onClose} className="mt-5 w-full rounded-full bg-black py-3 text-sm font-semibold text-white">
-            Close
-          </button>
+          <p className="mt-1 text-sm text-gray-600">
+            {t("captain.payment.settled_desc").replace("{booking_number}", booking.booking_number)}
+          </p>
+          <button onClick={onClose} className="mt-5 w-full rounded-full bg-black py-3 text-sm font-semibold text-white">{t("captain.common.close")}</button>
         </div>
       ) : view === "qr" ? (
         <div className="text-center">
-          <p className="text-sm text-gray-600">Ask the customer to scan and pay</p>
+          <p className="text-sm text-gray-600">{t("captain.payment.scan_pay_desc")}</p>
           <p className="mt-1 font-mono-num text-2xl font-bold text-black">₹{amount}</p>
           {qrDataUrl && <img src={qrDataUrl} alt="Payment QR" className="mx-auto mt-3 h-64 w-64 rounded-xl border border-[#F3E5B5]" />}
           <p className="mt-3 flex items-center justify-center gap-2 text-xs text-gray-400">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-[#E8A900]" /> Waiting for payment — confirms here automatically
+            <span className="h-2 w-2 animate-pulse rounded-full bg-[#E8A900]" /> {t("captain.payment.waiting_payment")}
           </p>
           <button
             onClick={() => setView("choose")}
             className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-gray-600 hover:text-black"
           >
-            <ChevronLeft className="h-4 w-4" /> Back
+            <ChevronLeft className="h-4 w-4" /> {t("captain.common.back")}
           </button>
         </div>
       ) : (
         <div className="space-y-3">
           <p className="text-sm text-gray-600">
-            Service done — collect <span className="font-bold text-black">₹{amount}</span> from {booking.customer_name || "the customer"}.
+            {t("captain.payment.service_done_desc")
+              .replace("{amount}", `₹${amount}`)
+              .replace("{customer}", booking.customer_name || "the customer")}
           </p>
           <button
             onClick={() => (cashArmed ? cashMutation.mutate() : setCashArmed(true))}
@@ -109,7 +113,7 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
             }`}
           >
             <Banknote className="h-5 w-5" />
-            {cashArmed ? `Tap again to confirm ₹${amount} received` : "Cash received"}
+            {cashArmed ? t("captain.payment.tap_again_cash").replace("{amount}", `₹${amount}`) : t("captain.payment.cash")}
           </button>
           <button
             onClick={() => {
@@ -120,7 +124,7 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
             className="flex w-full items-center justify-center gap-2 rounded-2xl bg-[#E8A900] py-4 text-base font-bold text-white hover:bg-[#D99A00]"
           >
             <QrCode className="h-5 w-5" />
-            {qrMutation.isPending ? "Preparing QR…" : "Show QR — customer scans & pays"}
+            {qrMutation.isPending ? t("captain.payment.preparing_qr") : t("captain.payment.qr")}
           </button>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
         </div>

@@ -27,7 +27,7 @@ function BlussitLogo() {
       />
 
       <span
-        className="mt-2 text-[9px] font-medium tracking-[3.5px] text-[#E8A900] leading-none"
+        className="mt-2 text-[9px] font-medium tracking-[3.5px] text-[var(--color-gold)] leading-none"
         style={{
           fontFamily: "'Montserrat', sans-serif",
           WebkitFontSmoothing: "antialiased",
@@ -114,28 +114,30 @@ export function PublicNavbar() {
               onClick={() => setContactOpen(true)}
               className="
                 text-sm font-semibold text-black/70
-                hover:text-[#E8A900]
+                hover:text-[var(--color-gold)]
                 transition-colors
                 relative
+                cursor-pointer
                 after:content-['']
                 after:absolute
                 after:-bottom-1.5
                 after:left-0
                 after:h-[2px]
                 after:w-0
-                after:bg-[#E8A900]
+                after:bg-[var(--color-gold)]
                 after:rounded-full
                 after:transition-all
                 after:duration-300
                 hover:after:w-full
+                
               "
             >
               {link.label}
             </button>
           ) : (
             <a key={link.label} href={link.href} className="
-              text-sm font-semibold text-black/70 hover:text-[#E8A900] transition-colors relative
-              after:content-[''] after:absolute after:-bottom-1.5 after:left-0 after:h-[2px] after:w-0 after:bg-[#E8A900] after:rounded-full after:transition-all after:duration-300 hover:after:w-full
+              text-sm font-semibold text-black/70 hover:text-[var(--color-gold)] transition-colors relative
+              after:content-[''] after:absolute after:-bottom-1.5 after:left-0 after:h-[2px] after:w-0 after:bg-[var(--color-gold)] after:rounded-full after:transition-all after:duration-300 hover:after:w-full 
             ">{link.label}</a>
           ))}
         </nav>
@@ -148,14 +150,13 @@ export function PublicNavbar() {
               className="
                 group inline-flex cursor-pointer items-center gap-2
                 rounded-[10px]
-                bg-[#E8A900]
+                bg-[var(--color-gold)]
                 px-6 py-2.5
                 text-sm font-bold text-white
-                shadow-[0_6px_16px_rgba(232,169,0,0.24)]
                 transition-all duration-200
                 hover:-translate-y-0.5
                 hover:bg-[#D99A00]
-                hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)]
+                
               "
             >
               Dashboard
@@ -180,7 +181,7 @@ export function PublicNavbar() {
                   text-sm font-semibold
                   text-black/80
                   transition-all duration-200
-                  hover:border-[#E8A900]/50
+                  hover:border-[var(--color-gold)]/50
                   hover:text-[#A87400]
                   hover:bg-[#FFF4CD]/30
                 "
@@ -193,14 +194,13 @@ export function PublicNavbar() {
                 className="
                   group inline-flex cursor-pointer items-center gap-2
                   rounded-[10px]
-                  bg-[#E8A900]
+                  bg-[var(--color-gold)]
                   px-6 py-2.5
                   text-sm font-bold text-white
-                  shadow-[0_6px_16px_rgba(232,169,0,0.24)]
                   transition-all duration-200
                   hover:-translate-y-0.5
                   hover:bg-[#D99A00]
-                  hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)]
+                  
                 "
               >
                 Book Now
@@ -231,7 +231,7 @@ export function PublicNavbar() {
             shadow-[0_4px_16px_rgba(49,45,38,0.06)]
             transition-all duration-200
             hover:bg-[#FFF4CD]/60
-            hover:border-[#E8A900]/40
+            hover:border-[var(--color-gold)]/40
           "
           onClick={() => setOpen((o) => !o)}
           aria-label="Toggle menu"
@@ -292,6 +292,7 @@ export function PublicNavbar() {
                 duration-200
                 hover:bg-[#FFF4CD]
                 hover:text-[#A87400]
+                cursor-pointer
               "
             >
               {link.label}
@@ -317,16 +318,16 @@ export function PublicNavbar() {
               className="
                 w-full
                 rounded-xl
-                bg-[#E8A900]
+                bg-[var(--color-gold)]
                 px-5
                 py-3
                 text-sm
                 font-bold
                 text-white
-                shadow-[0_6px_18px_rgba(232,169,0,0.22)]
                 transition-all
                 duration-200
                 hover:bg-[#D99A00]
+                
               "
             >
               Go to Dashboard
@@ -351,7 +352,7 @@ export function PublicNavbar() {
                   text-[#312D26]
                   transition-all
                   duration-200
-                  hover:border-[#E8A900]
+                  hover:border-[var(--color-gold)]
                   hover:bg-[#FFF4CD]/60
                 "
               >
@@ -368,17 +369,17 @@ export function PublicNavbar() {
                   justify-center
                   gap-2
                   rounded-xl
-                  bg-[#E8A900]
+                  bg-[var(--color-gold)]
                   px-5
                   py-3
                   text-sm
                   font-bold
                   text-white
-                  shadow-[0_7px_20px_rgba(232,169,0,0.24)]
                   transition-all
                   duration-200
                   hover:-translate-y-0.5
                   hover:bg-[#D99A00]
+                  
                 "
               >
                 Book Now

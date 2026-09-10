@@ -556,11 +556,10 @@ export function LandingHero({
             style={{ objectPosition: heroImagePosition[slide.id] ?? "center center" }}
           />
 
-          {/* Cinematic left-side shading gives the copy contrast without hiding the car. */}
-          <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.88)_0%,rgba(0,0,0,0.72)_18%,rgba(0,0,0,0.48)_38%,rgba(0,0,0,0.18)_60%,rgba(0,0,0,0.05)_100%)]" />
-          <div className="absolute inset-0 bg-black/[0.06]" />
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.08)_0%,transparent_28%,transparent_62%,rgba(0,0,0,0.38)_100%)]" />
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.08)_0%,rgba(0,0,0,0.30)_35%,rgba(0,0,0,0.88)_100%)] sm:hidden" />
+          {/* Subtle left-side shading gives the copy contrast without hiding the car. */}
+          <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.48)_0%,rgba(0,0,0,0.35)_22%,rgba(0,0,0,0.18)_42%,rgba(0,0,0,0.06)_65%,rgba(0,0,0,0)_100%)]" />
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_0%,transparent_25%,transparent_75%,rgba(0,0,0,0.12)_100%)]" />
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_0%,rgba(0,0,0,0.15)_35%,rgba(0,0,0,0.55)_100%)] sm:hidden" />
         </div>
 
         {/* Hero Content */}
@@ -613,14 +612,24 @@ export function LandingHero({
                 {/* Admin Homepage Settings drives the home headline — the
                     hardcoded slide copy is only the fallback. */}
                 {config?.hero_headline ? (
-                  <span className="whitespace-pre-line">{config.hero_headline}</span>
+                  <span className="whitespace-pre-line">
+                    {config.hero_headline.split(/(doorstep)/i).map((part, i) =>
+                      part.toUpperCase() === "DOORSTEP" ? (
+                        <span key={i} className="text-[var(--color-gold)]">
+                          {part}
+                        </span>
+                      ) : (
+                        part
+                      )
+                    )}
+                  </span>
                 ) : (
                   <>
                     {slide.title}
                     <br />
                     {slide.titleLine2}
                     <br />
-                    <span className="text-accent">
+                    <span className="text-[var(--color-gold)]">
                       {slide.titleAccent}
                     </span>
                   </>
@@ -633,7 +642,7 @@ export function LandingHero({
                 {slide.titleLine2 && (
                   <>
                     <br />
-                    <span className="text-accent">
+                    <span className="text-[var(--color-gold)]">
                       {slide.titleLine2}
                     </span>
                   </>
@@ -720,26 +729,26 @@ export function LandingHero({
 
           {/* Shared benefit strip: identical and static on every slide (no per-slide animation). */}
           <div
-              className="absolute bottom-[52px] left-5 right-5 z-40 hidden sm:grid sm:grid-cols-4 grid-cols-2 gap-y-3 rounded-[18px] border border-white/15 bg-[#141414]/80 px-3 py-3 shadow-[0_14px_36px_rgba(0,0,0,0.28)] backdrop-blur-md sm:left-8 sm:right-8 sm:px-5 lg:bottom-[42px] lg:left-auto lg:right-[3%] lg:w-[min(46vw,760px)] lg:px-5 lg:py-4"
+              className="absolute bottom-[52px] left-5 right-5 z-40 hidden sm:grid sm:grid-cols-4 grid-cols-2 gap-y-3 rounded-[18px] border border-[#E5E5E5] bg-white px-3 py-3 shadow-[0_12px_32px_rgba(0,0,0,0.06)] sm:left-8 sm:right-8 sm:px-5 lg:bottom-[42px] lg:left-auto lg:right-[3%] lg:w-[min(46vw,760px)] lg:px-5 lg:py-4"
             >
 
               {HERO_FEATURES.map((f) => (
                 <div
                   key={f.sub}
-                  className="flex min-w-0 flex-col items-center justify-center gap-1.5 border-l border-white/10 px-2 odd:border-l-0 sm:odd:border-l sm:first:border-l-0"
+                  className="flex min-w-0 flex-col items-center justify-center gap-1.5 border-l border-[#E5E5E5] px-2 odd:border-l-0 sm:odd:border-l sm:first:border-l-0"
                 >
 
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full border border-[#E8A900]/50 bg-[#E8A900]/15 text-[#F5C542]">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-full border border-[#E8A900]/40 bg-[#E8A900]/10 text-[var(--color-gold)]">
                     <f.icon className="h-4 w-4" />
                   </span>
 
                   <div className="text-center">
 
-                    <span className="block text-[9px] font-bold leading-tight text-white">
+                    <span className="block text-[9px] font-bold leading-tight text-[#312D26]">
                       {f.label}
                     </span>
 
-                    <span className="mt-1 block text-[8px] font-medium leading-tight text-white/60">
+                    <span className="mt-1 block text-[8px] font-medium leading-tight text-gray-500">
                       {f.sub}
                     </span>
 
@@ -778,7 +787,7 @@ export function LandingHero({
       {/* ============================================================ */}
 
       {SHOW_LIMITED_TIME_OFFERS && (
-      <section className="border-t border-black/[0.05] bg-[#FFFCF5] py-6 sm:py-7">
+      <section className="border-t border-black/[0.05] bg-white py-6 sm:py-7">
 
         <div className="container-page">
 
@@ -1005,7 +1014,7 @@ export function LandingHero({
       {/* overlay, shown below the hero; static, identical on every slide */}
       {/* ============================================================ */}
 
-      <div className="grid grid-cols-2 gap-3 border-t border-cream-line-soft bg-cream px-5 py-4 sm:hidden">
+      <div className="grid grid-cols-2 gap-3 border-t border-cream-line-soft bg-white px-5 py-4 sm:hidden">
 
         {HERO_FEATURES.map((f) => (
           <div
@@ -1079,11 +1088,11 @@ export function WhyBlussit() {
   return (
     <section
       id="why"
-      className="bg-[#FFFCF5] px-4 py-2 sm:px-6 sm:py-3 lg:px-0 lg:py-4"
+      className="bg-white px-4 py-2 sm:px-6 sm:py-3 lg:px-0 lg:py-4"
     >
       <div className="container-page">
 
-        <div className="relative mx-auto overflow-hidden rounded-[18px] border border-[#C9B795] bg-[#FFFCF5] shadow-[0_6px_24px_rgba(24,34,44,0.045)]">
+        <div className="relative mx-auto overflow-hidden rounded-[18px] border border-[#C9B795] bg-white shadow-[0_6px_24px_rgba(24,34,44,0.045)]">
 
           {/* Desktop image */}
           <div className="absolute inset-0 hidden md:block">
@@ -1423,7 +1432,7 @@ export function ServicesHorizontalScroll({
   return (
     <section
       id="services"
-      className="relative overflow-hidden bg-[#FFFCF5] px-4 py-2 sm:px-6 sm:py-3 md:py-4 lg:px-0 lg:py-5"
+      className="relative overflow-hidden bg-white px-4 py-2 sm:px-6 sm:py-3 md:py-4 lg:px-0 lg:py-5"
     >
       {/* Decorative dots — same visual language as the Figma */}
       <div className="pointer-events-none absolute right-5 top-5 hidden h-[115px] w-[115px] opacity-70 sm:block">
@@ -1455,7 +1464,7 @@ export function ServicesHorizontalScroll({
       </div>
 
       <div className="container-page relative z-10">
-        <div className="rounded-[18px] border border-[#C9B795] bg-[#FFFCF5] px-4 py-4 shadow-[0_5px_20px_rgba(24,34,44,0.03)] sm:px-6 sm:py-5 md:px-7 md:py-6 lg:px-8 lg:py-7">
+        <div className="rounded-[18px] border border-[#C9B795] bg-white px-4 py-4 shadow-[0_5px_20px_rgba(24,34,44,0.03)] sm:px-6 sm:py-5 md:px-7 md:py-6 lg:px-8 lg:py-7">
           {/* Header */}
           <div className="mx-auto max-w-[760px] text-center">
             <div className="flex items-center justify-center gap-2">
@@ -1633,7 +1642,7 @@ export function ServicesGrid({
         }));
 
   return (
-    <section className="relative overflow-hidden bg-[#FFFCF5] px-4 py-5 sm:px-6 sm:py-6 lg:px-0 lg:py-7">
+    <section className="relative overflow-hidden bg-white px-4 py-5 sm:px-6 sm:py-6 lg:px-0 lg:py-7">
       <div className="pointer-events-none absolute right-5 top-5 hidden h-[115px] w-[115px] opacity-70 sm:block">
         <div
           className="h-full w-full"
@@ -1649,7 +1658,7 @@ export function ServicesGrid({
       </div>
 
       <div className="container-page relative z-10">
-        <div className="rounded-[18px] border border-[#C9B795] bg-[#FFFCF5] px-4 py-5 shadow-[0_5px_20px_rgba(24,34,44,0.03)] sm:px-6 sm:py-6 md:px-7 md:py-7 lg:px-8 lg:py-8">
+        <div className="rounded-[18px] border border-[#C9B795] bg-white px-4 py-5 shadow-[0_5px_20px_rgba(24,34,44,0.03)] sm:px-6 sm:py-6 md:px-7 md:py-7 lg:px-8 lg:py-8">
           <div className="mx-auto max-w-[760px] text-center">
             <div className="flex items-center justify-center gap-2">
               <span className="text-[16px] leading-none text-[#E8A900] sm:text-[18px]">
@@ -1804,7 +1813,7 @@ export function VideoReviewsScroll() {
   const videoItems = [...reviews, ...reviews];
 
   return (
-  <section className="relative overflow-hidden bg-[#FFFCF5] pt-0 pb-10 sm:pb-12">
+  <section className="relative overflow-hidden bg-white pt-0 pb-10 sm:pb-12">
       {/* ------------------------------------------------------------ */}
       {/* BACKGROUND DETAILS                                           */}
       {/* ------------------------------------------------------------ */}
@@ -2107,14 +2116,14 @@ export function FinalBookingCTA({
   onBook: () => void;
 }) {
   return (
-    <section className="bg-[#FFFCF5] px-4 py-7 sm:px-6 sm:py-9 lg:px-0">
+    <section className="bg-white px-4 py-7 sm:px-6 sm:py-9 lg:px-0">
       <div className="container-page">
         <div
           className="
             relative overflow-hidden
             rounded-[20px]
             border border-[#DCCFB5]
-            bg-[#FFF8E7]
+            bg-white
             shadow-[0_8px_24px_rgba(49,45,38,0.05)]
           "
         >
@@ -2263,7 +2272,7 @@ export function HowItWorksSection() {
       className="bg-white px-4 py-2.5 sm:px-6 sm:py-3 lg:px-0 lg:py-4"
     >
       <div className="container-page">
-        <div className="relative overflow-hidden rounded-[18px] border border-[#C9B795]/55 bg-[#FFFCF5] shadow-[0_8px_26px_rgba(49,45,38,0.055)]">
+        <div className="relative overflow-hidden rounded-[18px] border border-[#C9B795]/55 bg-white shadow-[0_8px_26px_rgba(49,45,38,0.055)]">
           {/* Right-side photography */}
           <div className="pointer-events-none absolute inset-y-0 right-0 hidden w-[66%] md:block">
             <img
@@ -2408,7 +2417,7 @@ export function PremiumBanner({
   onBook: () => void;
 }) {
   return (
-    <section className="bg-[#FFFCF5] py-8 sm:py-10 md:py-12">
+    <section className="bg-white py-8 sm:py-10 md:py-12">
 
       <div className="container-page">
 
@@ -2610,7 +2619,7 @@ export function PlansSplit() {
   return (
     <section
       id="plans"
-      className="relative overflow-hidden bg-[#FFFCF5] px-4 py-8 sm:px-6 sm:py-10 lg:px-0 lg:py-11"
+      className="relative overflow-hidden bg-white px-4 py-8 sm:px-6 sm:py-10 lg:px-0 lg:py-11"
     >
       <div className="container-page relative z-10">
 

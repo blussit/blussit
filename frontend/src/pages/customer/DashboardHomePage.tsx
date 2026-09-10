@@ -38,13 +38,82 @@ export default function CustomerDashboardPage() {
   const next = upcoming[0];
 
   return (
-    <div className="space-y-6">
+    <div className="customer-dashboard space-y-5 bg-white [&_a]:cursor-pointer [&_button]:cursor-pointer">
+      <style>{`
+        /* Other dashboard cards use the same interaction language. */
+        .customer-dashboard [data-dashboard-card],
+        .customer-dashboard .dashboard-interactive-card {
+          border-color: #E5E7EB !important;
+          transition: border-color 160ms ease, box-shadow 160ms ease;
+        }
+
+        .customer-dashboard [data-dashboard-card]:hover,
+        .customer-dashboard .dashboard-interactive-card:hover {
+          border-color: #E8A900 !important;
+        }
+
+        /* Inputs/selects/textareas: grey normally, yellow on hover/focus. */
+        .customer-dashboard :is(
+          input[type="text"],
+          input[type="email"],
+          input[type="password"],
+          input[type="number"],
+          input[type="tel"],
+          input[type="url"],
+          input[type="search"],
+          input[type="date"],
+          input[type="time"],
+          input[type="datetime-local"],
+          input:not([type]),
+          select,
+          textarea
+        ) {
+          border-color: #E5E7EB !important;
+          outline: none;
+          transition: border-color 160ms ease, box-shadow 160ms ease;
+        }
+
+        .customer-dashboard :is(
+          input[type="text"],
+          input[type="email"],
+          input[type="password"],
+          input[type="number"],
+          input[type="tel"],
+          input[type="url"],
+          input[type="search"],
+          input[type="date"],
+          input[type="time"],
+          input[type="datetime-local"],
+          input:not([type]),
+          select,
+          textarea
+        ):hover,
+        .customer-dashboard :is(
+          input[type="text"],
+          input[type="email"],
+          input[type="password"],
+          input[type="number"],
+          input[type="tel"],
+          input[type="url"],
+          input[type="search"],
+          input[type="date"],
+          input[type="time"],
+          input[type="datetime-local"],
+          input:not([type]),
+          select,
+          textarea
+        ):focus {
+          border-color: #E8A900 !important;
+          outline: none;
+          box-shadow: 0 0 0 1px rgba(232, 169, 0, 0.08) !important;
+        }
+      `}</style>
       {/* Plain page header — the black greeting band was dropped (founder
           call): the console panels below carry the page, and the booking
           CTA sits inline where it doesn't compete with them. */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-bold text-black">Welcome back, {user?.full_name?.split(" ")[0]}</h1>
+          <h1 className="font-display text-[26px] font-bold leading-tight tracking-[-0.025em] text-black">Welcome back, {user?.full_name?.split(" ")[0]}</h1>
           <p className="mt-1 text-sm text-gray-500">
             {next
               ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
@@ -53,7 +122,7 @@ export default function CustomerDashboardPage() {
         </div>
         <button
           onClick={() => navigate("/app/book")}
-          className="group inline-flex shrink-0 items-center justify-center gap-2 rounded-full bg-[#E8A900] px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#D99A00]"
+          className="group inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#E8A900] px-5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-[#D99A00] hover:-translate-y-0.5 !shadow-none hover:!shadow-none"
         >
           <CalendarPlus className="h-4 w-4" /> Book a service
           <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
@@ -62,8 +131,9 @@ export default function CustomerDashboardPage() {
 
       {/* Stat tiles — same console tile as every other panel, each one a
           drill-down (the link appears on hover, always shown on touch). */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="dashboard-stat-grid grid grid-cols-1 gap-3.5 sm:grid-cols-3">
         <StatCard
+          className="!border-[#E5E7EB] hover:!border-[#E8A900] transition-colors duration-200"
           label="Upcoming bookings"
           value={upcoming.length}
           hint={next ? `Next on ${format(next.scheduled_date)}` : "Nothing scheduled"}
@@ -71,6 +141,7 @@ export default function CustomerDashboardPage() {
           to="/app/bookings"
         />
         <StatCard
+          className="!border-[#E5E7EB] hover:!border-[#E8A900] transition-colors duration-200"
           label="Active plans"
           value={activeSubs.length}
           hint={activeSubs.length ? "Washes included" : "Subscribe and save"}
@@ -78,13 +149,13 @@ export default function CustomerDashboardPage() {
           to="/app/subscriptions"
           linkLabel={activeSubs.length ? "View all" : "See plans"}
         />
-        <StatCard label="Total bookings" value={bookings?.meta.total ?? 0} hint="All time" icon={Car} to="/app/bookings" />
+        <StatCard className="!border-[#E5E7EB] hover:!border-[#E8A900] transition-colors duration-200" label="Total bookings" value={bookings?.meta.total ?? 0} hint="All time" icon={Car} to="/app/bookings" />
       </div>
 
       {/* Subscription above the bookings card on every screen; quick links
           ride in the right column on desktop, at the end on mobile. */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <Card className="order-2 lg:col-span-2">
+      <div className="grid grid-cols-1 gap-4.5 lg:grid-cols-3">
+        <Card data-dashboard-card className="order-2 lg:col-span-2">
           <CardHeader className="flex items-center justify-between">
             <h2 className="font-semibold text-[var(--color-text-primary)]">{next ? "Your next booking" : "Recent bookings"}</h2>
             <Link to="/app/bookings" className="text-sm font-semibold text-black hover:underline">
@@ -99,21 +170,21 @@ export default function CustomerDashboardPage() {
                 title="No bookings yet"
                 description="Book your first doorstep service to see it here."
                 action={
-                  <button onClick={() => navigate("/app/book")} className="inline-flex items-center gap-2 rounded-xl bg-[#E8A900] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#D99A00]">
+                  <button onClick={() => navigate("/app/book")} className="inline-flex items-center gap-2 rounded-lg bg-[#111827] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#1F2937]">
                     Book now <ArrowRight className="h-4 w-4" />
                   </button>
                 }
               />
             ) : (
-              <div className="space-y-4">
+              <div className="space-y-5 bg-white [&_a]:cursor-pointer [&_button]:cursor-pointer">
                 {next && (
                   <button
                     onClick={() => navigate(`/app/bookings/${next.id}`)}
-                    className="flex w-full flex-col gap-3 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-4 text-left transition-colors hover:border-[#E8A900]/60 sm:flex-row sm:items-center sm:justify-between"
+                    data-dashboard-card className="flex w-full flex-col gap-3 rounded-xl border border-gray-200 bg-[#FAFAFA] p-4 text-left transition-colors  sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="flex items-center gap-4">
-                      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#E8A900] text-white">
-                        <Clock className="h-5 w-5" />
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#E8A900] text-white">
+                        <Clock className="h-4 w-4" />
                       </span>
                       <div>
                         <p className="font-mono-num text-sm font-bold text-black">{next.booking_number}</p>
@@ -123,7 +194,7 @@ export default function CustomerDashboardPage() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-4">
                       <StatusBadge status={next.status} />
                       <ArrowRight className="h-4 w-4 text-black" />
                     </div>
@@ -134,14 +205,14 @@ export default function CustomerDashboardPage() {
                     .filter((b) => b.id !== next?.id)
                     .slice(0, 4)
                     .map((b) => (
-                      <button key={b.id} onClick={() => navigate(`/app/bookings/${b.id}`)} className="flex w-full items-center justify-between gap-4 py-3.5 text-left">
+                      <button key={b.id} onClick={() => navigate(`/app/bookings/${b.id}`)} className="flex w-full items-center justify-between gap-4 py-3 text-left">
                         <div>
                           <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
                           <p className="text-xs text-[var(--color-text-secondary)]">
                             {format(b.scheduled_date)} · {b.scheduled_slot}
                           </p>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-4">
                           <Badge tone="neutral" className="hidden font-mono-num sm:inline-flex">₹{b.total_amount}</Badge>
                           <StatusBadge status={b.status} />
                         </div>
@@ -154,14 +225,14 @@ export default function CustomerDashboardPage() {
         </Card>
 
         {/* Subscription snapshot — first, everywhere */}
-        <Card className="order-1 h-fit lg:col-span-2">
+        <Card data-dashboard-card className="order-1 h-fit lg:col-span-2">
             <CardHeader className="flex items-center justify-between">
               <h2 className="font-semibold text-[var(--color-text-primary)]">Subscription</h2>
               <Link to="/app/subscriptions" className="text-sm font-semibold text-black hover:underline">
                 Plans
               </Link>
             </CardHeader>
-            <CardBody className="!p-5">
+            <CardBody className="!p-6">
               {activeSubs.length ? (
                 activeSubs.slice(0, 1).map((s) => (
                   <div key={s.id}>
@@ -181,9 +252,9 @@ export default function CustomerDashboardPage() {
                     <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Valid until {format(s.end_date)}</p>
                     <button
                       onClick={() => navigate("/app/book?mode=plan")}
-                      className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-[#E8A900] py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#D99A00]"
+                      className="mt-4 inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 transition-all hover:border-gray-400 hover:bg-gray-50 hover:-translate-y-0.5"
                     >
-                      <Gift className="h-4 w-4" /> Book with plan
+                      <Gift className="h-4 w-4 text-[#E8A900]" /> Book with plan
                     </button>
                   </div>
                 ))
@@ -203,10 +274,10 @@ export default function CustomerDashboardPage() {
               <Link
                 key={q.to}
                 to={q.to}
-                className="flex items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 transition-all hover:-translate-y-0.5 hover:border-[#E8A900]/50 hover:shadow-[0_10px_24px_rgba(60,40,0,0.07)]"
+                data-dashboard-card className="flex items-center gap-4 rounded-xl border border-gray-200 bg-white shadow-[0_2px_8px_rgba(15,23,42,0.03)] shadow-[0_1px_3px_rgba(15,23,42,0.03)] p-4 transition-all hover:-translate-y-0.5  hover:shadow-[0_10px_24px_rgba(60,40,0,0.07)]"
               >
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
-                  <q.icon className="h-5 w-5" />
+                  <q.icon className="h-4 w-4" />
                 </span>
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-black">{q.label}</p>

@@ -2,6 +2,7 @@ import { type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
+import { LaunchCountdownBar } from "../../components/public/landing/LaunchCountdownBar";
 import { LandingHero } from "../../components/public/LandingSections";
 import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 import { HowItWorksStrip } from "../../components/public/landing/HowItWorksStrip";
@@ -25,6 +26,7 @@ export default function LandingPage() {
 
   return (
     <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
+      <LaunchCountdownBar />
       <PublicNavbar />
       <LandingHero onBook={(serviceId) => navigate(serviceId ? `/book?serviceId=${serviceId}` : "/book")} />
       <ServicesShowcase limit={6} />

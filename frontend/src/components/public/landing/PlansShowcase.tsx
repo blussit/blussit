@@ -40,7 +40,7 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   const choose = () => navigate(user?.role === "customer" ? "/app/subscriptions" : "/login");
 
   return (
-    <SectionShell id={id} className="bg-cream">
+    <SectionShell id={id} className="bg-white">
       <SectionHeader
         title="Wash plans"
         subtitle="Pay once for a set of washes and we come on schedule. Cheaper per wash than booking one at a time."
