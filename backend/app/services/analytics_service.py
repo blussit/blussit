@@ -434,7 +434,15 @@ class AnalyticsService:
         ReviewService._enrich resolves the same relationship. review.
         booking_id is a string, booking._id is an ObjectId, so a cross-type
         $lookup isn't the natural fit here either."""
-        reviews = await self.db.reviews.find({"is_deleted": {"$ne": True}}).to_list(length=None)
+        # Projected to the four fields this actually needs: review comments
+        # are free text and by far the biggest part of the document, and
+        # pulling them to compute an average is pure waste. NOTE (scale):
+        # this still reads every review; once the reviews collection is
+        # large enough for that to matter, move the join into a $lookup
+        # aggregation so Mongo does it server-side.
+        reviews = await self.db.reviews.find(
+            {"is_deleted": {"$ne": True}}, {"booking_id": 1, "captain_rating": 1, "rating": 1}
+        ).to_list(length=None)
         booking_ids = [r["booking_id"] for r in reviews if r.get("booking_id")]
         bookings = {str(b["_id"]): b for b in await self.booking_repo.find_by_ids(booking_ids)}
         vehicle_ids = {b["vehicle_id"] for b in bookings.values() if b.get("vehicle_id")}
@@ -506,7 +514,15 @@ class AnalyticsService:
         return results
 
     async def _ratings_grouped_by_service(self, service_center_id: str | None) -> dict[str, list[float]]:
-        reviews = await self.db.reviews.find({"is_deleted": {"$ne": True}}).to_list(length=None)
+        # Projected to the four fields this actually needs: review comments
+        # are free text and by far the biggest part of the document, and
+        # pulling them to compute an average is pure waste. NOTE (scale):
+        # this still reads every review; once the reviews collection is
+        # large enough for that to matter, move the join into a $lookup
+        # aggregation so Mongo does it server-side.
+        reviews = await self.db.reviews.find(
+            {"is_deleted": {"$ne": True}}, {"booking_id": 1, "service_rating": 1, "rating": 1}
+        ).to_list(length=None)
         booking_ids = [r["booking_id"] for r in reviews if r.get("booking_id")]
         bookings = {str(b["_id"]): b for b in await self.booking_repo.find_by_ids(booking_ids)}
         grouped: dict[str, list[float]] = {}

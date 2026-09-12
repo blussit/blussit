@@ -1,7 +1,7 @@
 """
 WhatsApp messaging — the single place every OTP, temp password, and
 customer-facing update gets sent through. Provider-abstracted the same way
-app/core/storage.py abstracts Cloudinary vs local disk: callers only ever
+app/core/storage.py abstracts Cloudflare R2 vs local disk: callers only ever
 talk to WhatsAppService, never to a specific provider directly, so swapping
 "log" for a real API later (or switching API vendors) never touches a
 call site.

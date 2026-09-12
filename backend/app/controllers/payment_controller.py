@@ -45,7 +45,7 @@ class PaymentController:
             current_user.role,
             "PAYMENT_VERIFIED",
             "payment_orders",
-            payload.razorpay_order_id,
+            payload.reference_id,
             {"purpose": result.get("purpose"), "payment_id": payload.razorpay_payment_id},
         )
         # A paid subscription purchase gets the same thank-you ticket a

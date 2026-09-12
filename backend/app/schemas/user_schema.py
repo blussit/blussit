@@ -29,6 +29,15 @@ class RegisterRequest(BaseModel):
             raise ValueError("Enter a valid 10-digit Indian mobile number (starts with 6-9)")
         return phone
 
+    @field_validator("email")
+    @classmethod
+    def validate_email_domain(cls, v):
+        # Customer sign-ups are limited to mainstream consumer providers
+        # (see app/utils/email_domains.py for the why and the list).
+        from app.utils.email_domains import validate_consumer_email
+
+        return validate_consumer_email(v)
+
     def model_post_init(self, __context) -> None:
         if not self.email and not self.phone:
             raise ValueError("Either email or phone is required")
@@ -133,6 +142,13 @@ class ManagerCreateCustomerRequest(BaseModel):
         if not phone:
             raise ValueError("Enter a valid 10-digit Indian mobile number (starts with 6-9)")
         return phone
+
+    @field_validator("email")
+    @classmethod
+    def _valid_email_domain(cls, v):
+        from app.utils.email_domains import validate_consumer_email
+
+        return validate_consumer_email(v)
 
 
 class UserUpdateRequest(BaseModel):

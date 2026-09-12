@@ -9,6 +9,8 @@ import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { useBookingFilters } from "../../lib/useBookingFilters";
 import { format } from "../../lib/date";
+import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
+import { vehicleLabel } from "../../lib/constants";
 import type { Booking } from "../../types";
 
 /**
@@ -121,28 +123,70 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
         <BookingFilterBar search={search} onSearchChange={setSearch} sortOrder={sortOrder} onSortOrderChange={setSortOrder} dateFrom={dateFrom} onDateFromChange={setDateFrom} dateTo={dateTo} onDateToChange={setDateTo} />
       </div>
 
-      <DataTable<Booking>
+      {/* One row per VISIT: several cars washed on one trip are one job to
+          dispatch and one bill, so they share a row that lists every car.
+          The drawer that opens from it shows each car's own work. */}
+      <DataTable<BookingSlab & { id: string }>
         isLoading={isLoading}
-        data={filtered}
+        data={toSlabs(filtered).map((slab) => ({ ...slab, id: slab.key }))}
         emptyTitle="No bookings"
-        onRowClick={(b) => setSelectedBooking(b)}
+        onRowClick={(slab) => setSelectedBooking(slab.primary)}
         columns={[
-          { header: "Booking #", accessor: (b) => <span className="font-mono-num">{b.booking_number}</span> },
-          { header: "Customer", accessor: (b) => b.customer_name || "—" },
-          { header: "Vehicle", accessor: (b) => (b.vehicle_snapshot ? `${b.vehicle_snapshot.brand} ${b.vehicle_snapshot.model}` : "—") },
-          { header: "Service", accessor: (b) => b.combo_name || b.service_names?.join(", ") || "—" },
-          { header: "Slot", accessor: (b) => `${format(b.scheduled_date)} · ${b.scheduled_slot}` },
-          { header: "Priority", accessor: (b) => <Badge tone={b.priority === "high" ? "error" : "neutral"}>{b.priority}</Badge> },
-          { header: "Status", accessor: (b) => <StatusBadge status={b.status} /> },
+          {
+            header: "Booking #",
+            accessor: (slab) => (
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono-num">{slab.isVisit ? slab.bookings.map((b) => b.booking_number).join(" · ") : slab.primary.booking_number}</span>
+                {slab.isVisit && (
+                  <span
+                    title="Several vehicles washed on one visit — one trip, one slot, one payment"
+                    className="rounded-full bg-gray-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white"
+                  >
+                    {slab.vehicleCount} vehicles
+                  </span>
+                )}
+              </span>
+            ),
+          },
+          { header: "Customer", accessor: (slab) => slab.primary.customer_name || "—" },
+          {
+            header: "Vehicle & service",
+            accessor: (slab) =>
+              slab.isVisit ? (
+                <ul className="space-y-0.5 text-xs">
+                  {slab.bookings.map((b, i) => (
+                    <li key={b.id}>
+                      <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
+                      {vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {b.combo_name || b.service_names?.join(", ") || "—"}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <span>
+                  {slab.primary.vehicle_snapshot ? `${slab.primary.vehicle_snapshot.brand} ${slab.primary.vehicle_snapshot.model}` : "—"}
+                  <span className="block text-xs text-[var(--color-text-secondary)]">{slab.serviceLabel}</span>
+                </span>
+              ),
+          },
+          { header: "Slot", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${slab.primary.scheduled_slot}` },
+          { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
+          { header: "Priority", accessor: (slab) => <Badge tone={slab.primary.priority === "high" ? "error" : "neutral"}>{slab.primary.priority}</Badge> },
+          { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
           {
             header: "Review",
-            accessor: (b) => {
-              const r = reviewByBooking.get(b.id);
-              if (!r) return <span className="text-xs text-[var(--color-text-secondary)]">No review yet</span>;
-              const rating = r.captain_rating ?? r.rating ?? 0;
+            accessor: (slab) => {
+              // Each car is rated on its own; the row shows the visit's
+              // average when more than one has been rated.
+              const ratings = slab.bookings
+                .map((b) => reviewByBooking.get(b.id))
+                .filter(Boolean)
+                .map((r) => r!.captain_rating ?? r!.rating ?? 0);
+              if (!ratings.length) return <span className="text-xs text-[var(--color-text-secondary)]">No review yet</span>;
+              const rating = ratings.reduce((a, b) => a + b, 0) / ratings.length;
               return (
                 <span className="flex items-center gap-1 text-xs">
                   <Star className="h-3 w-3 fill-[var(--color-secondary)] text-[var(--color-secondary)]" /> {rating.toFixed(1)}
+                  {ratings.length > 1 ? <span className="text-[var(--color-text-secondary)]">· {ratings.length} cars</span> : null}
                 </span>
               );
             },

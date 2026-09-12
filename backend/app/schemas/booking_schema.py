@@ -72,6 +72,37 @@ class BookingRescheduleRequest(BaseModel):
     scheduled_slot: str
 
 
+class GroupVehicleRequest(BaseModel):
+    """One car on a multi-car visit — its own vehicle and its own choice of
+    service. Everything shared by the visit (where, when, how it's paid for)
+    lives on BookingGroupCreateRequest."""
+
+    vehicle_id: str
+    service_ids: list[str] = []
+    service_quantities: dict[str, int] = Field(default_factory=dict)
+    combo_id: Optional[str] = None
+    # This car's own pass, if it has one. A pass belongs to one car, so a
+    # customer with two passes gets two cars covered and pays for the rest.
+    subscription_id: Optional[str] = None
+
+
+class BookingGroupCreateRequest(BaseModel):
+    """Several of one customer's vehicles washed on ONE visit: one address,
+    one slot, one captain, one payment. It takes ONE slot seat however many
+    cars are on it — same address, so the travel happens once."""
+
+    vehicles: list[GroupVehicleRequest] = Field(min_length=1)
+    address_id: str
+    scheduled_date: str
+    scheduled_slot: str
+    hold_key: Optional[str] = None
+    payment_method: Optional[PaymentMethod] = None
+    coupon_code: Optional[str] = None
+    customer_notes: Optional[str] = None
+    alternate_contact_name: Optional[str] = None
+    alternate_contact_phone: Optional[str] = None
+
+
 class BookingCancelRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=300)
 

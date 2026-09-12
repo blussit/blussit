@@ -7,12 +7,14 @@ from typing import Optional
 from fastapi import Depends, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
+from bson.errors import InvalidId
 
 from app.core.config import settings
 from app.core.database import get_database
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.security import decode_token
-from app.models.enums import UserRole
+from app.models.enums import UserRole, UserStatus
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -34,12 +36,6 @@ class CurrentUser:
         self.role = role
         self.email = email
         self.phone = phone
-        # Embedded in the JWT at login (see AuthService._issue_tokens) — a
-        # manager/captain whose center changes needs to re-login for this to
-        # update, same accepted tradeoff as must_change_password's frontend
-        # staleness. Deliberately not a per-request DB lookup: this claim is
-        # read on every single center-scoped request, and this app is meant
-        # to scale to many concurrent managers.
         self.service_center_id = service_center_id
 
 
@@ -56,13 +52,45 @@ async def get_current_user(
     if payload.get("type") != "access":
         raise UnauthorizedException("Invalid token type")
 
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str):
+        raise UnauthorizedException("Invalid token subject")
+    try:
+        user = await get_database().users.find_one({"_id": ObjectId(user_id)})
+    except (InvalidId, TypeError):
+        raise UnauthorizedException("Invalid token subject") from None
+    if not user or user.get("is_deleted") or user.get("status") == UserStatus.SUSPENDED.value:
+        raise UnauthorizedException("Your account is no longer active")
+    if payload.get("tv", 0) != user.get("token_version", 0):
+        raise UnauthorizedException("Session expired — please log in again.")
+    if payload.get("role") != user.get("role"):
+        raise UnauthorizedException("Session permissions changed — please log in again.")
+    if payload.get("service_center_id") != user.get("service_center_id"):
+        raise UnauthorizedException("Session scope changed — please log in again.")
+
     return CurrentUser(
-        id=payload["sub"],
-        role=payload.get("role", UserRole.CUSTOMER.value),
-        email=payload.get("email"),
-        phone=payload.get("phone"),
-        service_center_id=payload.get("service_center_id"),
+        id=user_id,
+        role=user["role"],
+        email=user.get("email"),
+        phone=user.get("phone"),
+        service_center_id=user.get("service_center_id"),
     )
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> CurrentUser | None:
+    """Who's calling, IF anyone — for routes that are genuinely public but
+    can attach context when the caller happens to be signed in (e.g. a
+    plan enquiry from a logged-in customer). A bad or expired token is
+    treated as "not signed in" rather than an error: the route works either
+    way, so failing it would only break the public case."""
+    if credentials is None:
+        return None
+    try:
+        return await get_current_user(credentials)
+    except Exception:
+        return None
 
 
 def require_roles(*roles: UserRole):

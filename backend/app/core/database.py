@@ -107,11 +107,31 @@ async def create_indexes() -> None:
     # outright (DuplicateKeyError), which create_booking translates into a
     # clean BadRequestException. Partial: only active-status bookings are
     # constrained, so a cancelled/completed one never blocks a fresh rebooking.
+    # The partial filter GREW (awaiting_payment joined the active set) and
+    # Mongo won't re-spec a partialFilterExpression in place — drop the
+    # original auto-named index once, then build the named replacement.
+    try:
+        await db.bookings.drop_index("customer_id_1_vehicle_id_1_scheduled_date_1_scheduled_slot_1")
+    except Exception:
+        pass
     await db.bookings.create_index(
         [("customer_id", 1), ("vehicle_id", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
         unique=True,
-        partialFilterExpression={"status": {"$in": ["pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
+        name="uniq_active_customer_slot",
+        partialFilterExpression={"status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
     )
+
+    # Custom-plan enquiries — one row per phone (upserted), newest first.
+    await db.plan_enquiries.create_index("phone", unique=True)
+    await db.plan_enquiries.create_index([("last_requested_at", -1)])
+    # A pass belongs to ONE car and one car carries ONE pass — this is the
+    # index behind _active_pass_for_vehicle, the guard that enforces it.
+    await db.user_subscriptions.create_index([("customer_id", 1), ("vehicle_id", 1), ("status", 1)])
+    await db.user_subscriptions.create_index([("customer_id", 1), ("plan_id", 1), ("status", 1)])
+
+    # Multi-vehicle visits: every read of a group ("show me the other cars
+    # on this visit") goes through this.
+    await db.bookings.create_index("booking_group_id", sparse=True)
 
     await db.booking_status_history.create_index("booking_id")
 
@@ -258,8 +278,18 @@ async def create_indexes() -> None:
         "razorpay_link_id", unique=True, name="uniq_rzp_link",
         partialFilterExpression={"razorpay_link_id": {"$exists": True}},
     )
+    await db.payment_orders.create_index(
+        "razorpay_subscription_id", unique=True, name="uniq_rzp_mandate",
+        partialFilterExpression={"razorpay_subscription_id": {"$exists": True}},
+    )
     await db.payment_orders.create_index([("customer_id", 1), ("created_at", -1)])
     await db.payment_orders.create_index([("kind", 1), ("status", 1), ("created_at", -1)])
+    # Auto-pay: one Razorpay plan per (our plan, vehicle tier, price) — the
+    # unique key is what keeps _ensure_razorpay_plan from minting a new
+    # gateway plan on every purchase.
+    await db.razorpay_plans.create_index(
+        [("plan_id", 1), ("vehicle_type", 1), ("amount_paise", 1)], unique=True, name="uniq_autopay_plan"
+    )
     await db.withdrawal_requests.create_index("captain_id")
     await db.withdrawal_requests.create_index("status")
 

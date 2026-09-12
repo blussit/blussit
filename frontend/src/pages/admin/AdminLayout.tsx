@@ -33,7 +33,7 @@ const navItems: NavItem[] = [
   { label: "Vehicle types", to: "/admin/vehicle-types", icon: Car },
   { label: "Combo offers", to: "/admin/combo-offers", icon: Package },
   { label: "Homepage", to: "/admin/homepage", icon: Megaphone },
-  { label: "Pricing & wallets", to: "/admin/pricing", icon: IndianRupee },
+  { label: "Settings & pricing", to: "/admin/pricing", icon: IndianRupee },
   { label: "Subscription plans", to: "/admin/subscription-plans", icon: Gift },
   { label: "Coupons", to: "/admin/coupons", icon: Ticket },
   { label: "Complaints", to: "/admin/complaints", icon: AlertTriangle },

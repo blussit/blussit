@@ -4,14 +4,70 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vehicle-icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="India's most trusted premium doorstep vehicle care platform. Book professional car and bike cleaning services at your home." />
+    <meta name="theme-color" content="#0A0A0A" />
+
+    <title>Blussit | Premium Doorstep Vehicle Care in Indore</title>
+    <meta
+      name="description"
+      content="Blussit brings professional car and bike cleaning to your doorstep in Indore. Book a wash by the slot, or take a monthly pass for one car."
+    />
+    <!-- Canonical is the bare domain, never www — the host is configured to
+         redirect www and http to https://blussit.com. -->
+    <link rel="canonical" href="https://blussit.com/" />
+
+    <meta property="og:site_name" content="Blussit" />
     <meta property="og:title" content="Blussit — Premium Doorstep Vehicle Care" />
-    <meta property="og:description" content="Premium doorstep vehicle cleaning, at your convenience." />
+    <meta
+      property="og:description"
+      content="Professional car and bike cleaning at your doorstep in Indore. Book a slot, or take a monthly pass."
+    />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://blussit.com/" />
+    <meta property="og:image" content="https://blussit.com/banner.webp" />
+    <meta property="og:locale" content="en_IN" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Blussit — Premium Doorstep Vehicle Care" />
+    <meta name="twitter:description" content="Professional car and bike cleaning at your doorstep in Indore." />
+    <meta name="twitter:image" content="https://blussit.com/banner.webp" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-    <title>Blussit | Premium Doorstep Vehicle Care</title>
+    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@1,400;1,500;1,600;1,800&display=swap" rel="stylesheet" />
+
+    <!-- Structured data. Deliberately factual only: no ratings, awards or
+         certifications we can't substantiate. areaServed reflects where we
+         actually operate today. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://blussit.com/#organization",
+            "name": "Blussit",
+            "url": "https://blussit.com/",
+            "logo": "https://blussit.com/blussit-logo.png",
+            "areaServed": { "@type": "City", "name": "Indore" }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://blussit.com/#website",
+            "url": "https://blussit.com/",
+            "name": "Blussit",
+            "publisher": { "@id": "https://blussit.com/#organization" },
+            "inLanguage": "en-IN"
+          },
+          {
+            "@type": "Service",
+            "name": "Doorstep vehicle cleaning",
+            "serviceType": "Car and bike cleaning at the customer's location",
+            "provider": { "@id": "https://blussit.com/#organization" },
+            "areaServed": { "@type": "City", "name": "Indore" }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

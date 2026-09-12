@@ -66,7 +66,9 @@ class BookingRepository(BaseRepository):
         rescheduling into) two overlapping slots for themselves."""
         filters: dict = {
             "customer_id": customer_id,
-            "status": {"$in": ["pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]},
+            # awaiting_payment counts: the slot is genuinely reserved while
+            # the customer finishes paying, so it can't also be double-booked.
+            "status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]},
         }
         docs = await self.find_all_no_paginate(filters)
         if exclude_booking_id:

@@ -1,4 +1,3 @@
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, NotFoundException
@@ -45,12 +44,22 @@ class UserService:
             raise NotFoundException("User not found")
         return UserPublic.from_doc(updated).model_dump()
 
-    async def delete_user(self, user_id: str, deleted_by: str) -> bool:
-        """Refuses while the user is tied to live work (their bookings would
+    async def delete_user(self, user_id: str) -> bool:
+        """PERMANENTLY removes the account's row from the database — a real
+        delete, not the soft is_deleted flag most other records use. An
+        admin clicking Delete on a person's account means gone, not merely
+        hidden from lists while every field sits in Mongo forever.
+
+        Refuses while the user is tied to live work (their bookings would
         otherwise sit orphaned in the manager queue / captain job list with
-        a null name), and kills every session immediately — a soft delete
-        used to leave the access token valid for its full 15 minutes and
-        every refresh token for 7 days."""
+        a null name) — everything else about them (completed/cancelled
+        booking history, reviews, etc.) is left as historical record
+        pointing at an id that no longer resolves, exactly as it would for
+        any other "the person left" scenario; only the account itself, and
+        whatever it can authenticate as, actually disappears. No
+        token_version bump is needed: with the row gone, both the auth
+        dependency and /auth/refresh's own user lookup fail closed on
+        their own (refresh explicitly raises "User no longer exists")."""
         user = await self.repo.find_by_id(user_id)
         if not user:
             return False
@@ -64,7 +73,4 @@ class UserService:
             raise BadRequestException(
                 f"This account still has {active} active booking(s) — cancel or complete them before deleting the account."
             )
-        deleted = await self.repo.soft_delete(user_id, deleted_by)
-        if deleted:
-            await self.repo.collection.update_one({"_id": ObjectId(user_id)}, {"$inc": {"token_version": 1}})
-        return deleted
+        return await self.repo.hard_delete(user_id)

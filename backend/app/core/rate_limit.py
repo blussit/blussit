@@ -22,27 +22,40 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 
-# (prefix, max requests, per seconds) — first match wins, so keep more
-# specific prefixes above shorter ones they share a stem with.
-RULES: list[tuple[str, int, int]] = [
-    ("/api/v1/auth/forgot-password", 5, 300),
-    ("/api/v1/auth/verify-phone/request", 5, 300),
-    ("/api/v1/auth/verify-phone/confirm", 10, 300),
-    ("/api/v1/auth/verify-phone/widget", 10, 300),
-    ("/api/v1/auth/reset-password/widget", 5, 300),
-    ("/api/v1/auth/reset-password", 5, 300),
-    ("/api/v1/auth/otp/request", 5, 300),
-    ("/api/v1/auth/otp/verify", 10, 300),
-    ("/api/v1/auth/add-phone", 10, 300),
-    ("/api/v1/auth/google", 20, 60),
-    ("/api/v1/auth/otp-login", 10, 300),
-    ("/api/v1/auth/booking-access", 20, 60),
-    ("/api/v1/auth/login", 15, 60),
-    ("/api/v1/auth/register", 10, 300),
-    ("/api/v1/bookings/hold", 30, 60),
-    ("/api/v1/coverage-leads", 6, 60),
-    ("/api/v1/contact", 6, 60),
-    ("/api/v1/", 300, 60),  # catch-all for the whole API
+# (prefix, max requests, per seconds, method) — first match wins, so keep
+# more specific prefixes above shorter ones they share a stem with.
+# `method` is None for "any", or an HTTP verb when only WRITES need the
+# limit: /api/v1/bookings is both "create a booking" (expensive, floodable)
+# and "show me my bookings" (read, browsed freely), and throttling the
+# second to protect the first would break normal use.
+RULES: list[tuple[str, int, int, str | None]] = [
+    ("/api/v1/auth/forgot-password", 5, 300, None),
+    ("/api/v1/auth/verify-phone/request", 5, 300, None),
+    ("/api/v1/auth/verify-phone/confirm", 10, 300, None),
+    ("/api/v1/auth/verify-phone/widget", 10, 300, None),
+    ("/api/v1/auth/reset-password/widget", 5, 300, None),
+    ("/api/v1/auth/reset-password", 5, 300, None),
+    ("/api/v1/auth/otp/request", 5, 300, None),
+    ("/api/v1/auth/otp/verify", 10, 300, None),
+    ("/api/v1/auth/add-phone", 10, 300, None),
+    ("/api/v1/auth/google", 20, 60, None),
+    ("/api/v1/auth/otp-login", 10, 300, None),
+    ("/api/v1/auth/booking-access", 20, 60, None),
+    ("/api/v1/auth/login", 15, 60, None),
+    ("/api/v1/auth/register", 10, 300, None),
+    ("/api/v1/bookings/hold", 30, 60, None),
+    # Money-moving and data-creating endpoints. Each create-order call mints
+    # a real Razorpay order, and each booking reserves capacity — a flood of
+    # either costs us something, while a real customer books once. Generous
+    # enough that a retry storm on a flaky connection still gets through.
+    ("/api/v1/payments/create-order", 20, 60, "POST"),
+    ("/api/v1/bookings", 20, 60, "POST"),
+    ("/api/v1/reviews", 15, 60, "POST"),
+    # Public forms: junk-data buckets, same shape as coverage leads.
+    ("/api/v1/subscriptions/enquiries", 6, 60, None),
+    ("/api/v1/coverage-leads", 6, 60, None),
+    ("/api/v1/contact", 6, 60, None),
+    ("/api/v1/", 300, 60, None),  # catch-all for the whole API
 ]
 
 _WINDOWS: dict[tuple, int] = defaultdict(int)
@@ -85,8 +98,8 @@ async def rate_limit_middleware(request: Request, call_next):
     now = time.time()
     _sweep(now)
     ip = _client_ip(request)
-    for prefix, limit, window in RULES:
-        if path.startswith(prefix):
+    for prefix, limit, window, method in RULES:
+        if path.startswith(prefix) and (method is None or request.method == method):
             window_start = int(now // window) * window
             key = (ip, prefix, window, window_start)
             _WINDOWS[key] += 1

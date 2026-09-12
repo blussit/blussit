@@ -19,9 +19,12 @@ The centralization guarantees these tests pin down:
 import itertools
 from datetime import timedelta
 
+import uuid
+
 import pytest
 from bson import ObjectId
 
+from app.schemas.booking_schema import BookingCreateRequest
 from app.services.booking_service import BookingService
 from app.services.whatsapp_bot_service import WhatsAppBotService
 from app.utils.timezone import now_ist
@@ -37,6 +40,9 @@ from tests.factories import (
 _wamid = itertools.count(1)
 
 
+_RUN_TOKEN = uuid.uuid4().hex[:6]
+
+
 def wa_payload(wa_id: str, *, text=None, reply=None, location=None, name="WA Tester", wamid=None):
     if text is not None:
         msg = {"type": "text", "text": {"body": text}}
@@ -47,7 +53,12 @@ def wa_payload(wa_id: str, *, text=None, reply=None, location=None, name="WA Tes
     else:  # unsupported type (e.g. an image)
         msg = {"type": "image", "image": {"id": "media"}}
     msg["from"] = wa_id
-    msg["id"] = wamid or f"wamid.TEST{next(_wamid):08d}"
+    # Unique PER RUN, not just per call: the bot correctly drops a webhook
+    # whose message id it has already seen, so a plain counter restarting at
+    # 1 each run collides with rows an earlier (or interrupted) run left in
+    # the test DB and the message is silently ignored — which shows up as a
+    # baffling "no inbox row" failure in whichever test drew the low number.
+    msg["id"] = wamid or f"wamid.TEST{_RUN_TOKEN}{next(_wamid):08d}"
     return {
         "object": "whatsapp_business_account",
         "entry": [{
@@ -386,3 +397,95 @@ async def test_stateless_pay_buttons_send_link_or_cash_ack(db, cleanup, rig, mon
     assert "https://rzp.io/l/bot-test" in out["message"]
     fresh = await db.bookings.find_one({"_id": res.inserted_id})
     assert fresh["payment_method"] == "online" and fresh["payment_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_cash_button_promotes_an_awaiting_payment_booking(db, cleanup, rig):
+    """The naive "just acknowledge cash" reply is only correct for a
+    booking that's ALREADY real. An AWAITING_PAYMENT one — an online-pay
+    choice that never completed, nothing dispatched, nobody told yet —
+    must actually be confirmed (same as the web app's "Pay cash instead"
+    button), not just get a friendly text while it silently expires."""
+    from bson import ObjectId as _OID
+
+    wa_id, phone = "919333000222", "9333000222"
+    customer_id, vehicle_id, address_id = await make_customer_with_vehicle(db, rig["hatchback"])
+    cleanup.append(("users", {"_id": _OID(customer_id)}))
+    cleanup.append(("vehicles", {"owner_id": customer_id}))
+    cleanup.append(("addresses", {"owner_id": customer_id}))
+    cleanup.append(("whatsapp_conversations", {"wa_id": wa_id}))
+    cleanup.append(("whatsapp_outbox", {"phone": phone}))
+    cleanup.append(("whatsapp_message_dedup", {}))
+    cleanup.append(("bookings", {"customer_id": customer_id}))
+    cleanup.append(("slot_capacity", {"service_center_id": rig["center_id"]}))
+    cleanup.append(("daily_capacity", {"service_center_id": rig["center_id"]}))
+    await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
+
+    bs = BookingService(db)
+    when = (now_ist().date() + timedelta(days=2)).isoformat()
+    slots = await bs.available_slots(rig["center_id"], when)
+    # "low" (<=5 left) is still genuinely bookable — only "full" (0 left)
+    # isn't. This rig's default_slot_capacity=5 means every fresh slot
+    # reports "low", never "available". Skip rather than raising
+    # StopIteration out of a coroutine — see test_online_payment_gate.py.
+    slot = next((s["key"] for s in slots if s["status"] != "full"), None)
+    if slot is None:
+        pytest.skip(f"no bookable slot left for {when} at this time of day")
+    booking = await bs.create_booking(
+        customer_id,
+        BookingCreateRequest(
+            vehicle_id=vehicle_id, address_id=address_id, service_ids=[rig["foam"]],
+            scheduled_date=when, scheduled_slot=slot, payment_method="online",
+        ),
+    )
+    assert booking["status"] == "awaiting_payment"
+
+    bot = WhatsAppBotService(db)
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"pay:cash:{booking['id']}"))
+
+    fresh = await db.bookings.find_one({"_id": _OID(booking["id"])})
+    assert fresh["status"] == "pending", "cash tap must promote it out of awaiting_payment"
+    assert fresh["payment_method"] == "cash"
+    out = await last_out(db, phone)
+    assert "confirmed" in out["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_payment_reminder_sends_the_same_stateless_buttons(db, cleanup, rig):
+    """The proactive nudge (reminder sweep) reuses the exact pay: button
+    ids the post-confirmation message uses — so whichever one the
+    customer taps, days later, is handled correctly with zero new
+    routing. Verifies both the buttons AND that tapping one afterward
+    still works."""
+    from bson import ObjectId as _OID
+
+    wa_id, phone = "919333000333", "9333000333"
+    customer_id, _, _ = await make_customer_with_vehicle(db, rig["hatchback"])
+    cleanup.append(("users", {"_id": _OID(customer_id)}))
+    cleanup.append(("vehicles", {"owner_id": customer_id}))
+    cleanup.append(("addresses", {"owner_id": customer_id}))
+    cleanup.append(("whatsapp_conversations", {"wa_id": wa_id}))
+    cleanup.append(("whatsapp_outbox", {"phone": phone}))
+    cleanup.append(("whatsapp_message_dedup", {}))
+    await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
+
+    res = await db.bookings.insert_one({
+        "booking_number": "BK-WAREMIND", "customer_id": customer_id, "customer_phone": phone,
+        "service_center_id": rig["center_id"], "status": "pending", "payment_method": "cash",
+        "payment_status": "pending", "total_amount": 359.0,
+        "scheduled_date": now_ist().replace(tzinfo=None), "scheduled_slot": "09:00-12:00", "is_deleted": False,
+    })
+    cleanup.append(("bookings", {"_id": res.inserted_id}))
+    booking = await db.bookings.find_one({"_id": res.inserted_id})
+
+    sent = await WhatsAppBotService(db).send_payment_reminder(booking)
+    assert sent is True
+    out = await last_out(db, phone)
+    assert out["interactive_kind"] == "buttons"
+    ids = [b["id"] for b in out["options"]]
+    assert ids == [f"pay:online:{res.inserted_id}", f"pay:cash:{res.inserted_id}"]
+
+    # And the buttons genuinely still work when tapped.
+    await WhatsAppBotService(db).handle_webhook(wa_payload(wa_id, reply=f"pay:cash:{res.inserted_id}"))
+    out = await last_out(db, phone)
+    assert "cash" in out["message"].lower()

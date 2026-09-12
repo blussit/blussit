@@ -22,6 +22,6 @@ async def set_booking_policy(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    result = await BookingPolicyService(db).set_policy(payload.model_dump(exclude_unset=True))
+    result = await BookingPolicyService(db).set_policy(payload.model_dump(exclude_unset=True), updated_by=current_user.id)
     await AuditService(db).log_action(current_user.id, current_user.role, "UPDATE_BOOKING_POLICY", "settings", None, payload.model_dump(exclude_unset=True))
     return success(result, "Booking policy updated")

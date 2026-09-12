@@ -15,6 +15,7 @@ import { StaffBookingRedirect } from "./routes/StaffBookingRedirect";
 import LandingPage from "./pages/public/LandingPage";
 import ServicesPage from "./pages/public/ServicesPage";
 import PlansPage from "./pages/public/PlansPage";
+import ServicePolicyPage from "./pages/public/ServicePolicyPage";
 import CancellationPolicyPage from "./pages/public/CancellationPolicyPage";
 import PrivacyPolicyPage from "./pages/public/PrivacyPolicyPage";
 import TermsPage from "./pages/public/TermsPage";
@@ -104,6 +105,7 @@ export default function App() {
             <Route path="/services" element={<ServicesPage />} />
             <Route path="/plans" element={<PlansPage />} />
             <Route path="/cancellation-policy" element={<CancellationPolicyPage />} />
+            <Route path="/service-policy" element={<ServicePolicyPage />} />
             <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
             <Route path="/terms" element={<TermsPage />} />
             <Route path="/book" element={<BookPage />} />

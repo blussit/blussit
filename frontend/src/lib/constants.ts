@@ -41,3 +41,13 @@ export const needsCaptain = (b: Booking) => b.status === "pending" || b.status =
 // manager dashboard so a captain-not-started (etc.) flag shows up in both
 // places consistently.
 export const isOpenIssue = (b: Booking) => !!b.issue_flag && !b.issue_resolved && !["completed", "cancelled"].includes(b.status);
+
+/** The booking's vehicle in one short label — "Maruti Swift · MP09AB1234",
+ * falling back to whichever half the booking actually carries. Shared so
+ * every booking row shows the vehicle the same way. */
+export const vehicleLabel = (b: Booking): string => {
+  const v = b.vehicle_snapshot;
+  const name = v ? [v.brand, v.model].filter(Boolean).join(" ") : "";
+  const plate = v?.registration_number || b.vehicle_registration_number || "";
+  return [name, plate].filter(Boolean).join(" · ");
+};

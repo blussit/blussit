@@ -6,16 +6,28 @@ import type { UserSubscription } from "../types";
  * PUBLIC half of the credentials (the modal needs it); the secret never
  * leaves the backend. */
 export interface RazorpayOrder {
-  order_id: string;
+  /** One-time payment. Exactly one of order_id / subscription_id is set. */
+  order_id?: string;
+  /** Auto-pay: a recurring mandate for checkout to authorise instead. */
+  subscription_id?: string;
+  auto_pay?: boolean;
+  /** Auto-pay was asked for but the gateway couldn't set a mandate up —
+   *  this is a plain one-cycle purchase and the UI must say so. */
+  auto_pay_unavailable?: boolean;
   amount: number; // paise
   currency: string;
   key_id: string;
   description: string;
+  /** "test" | "live" — read off the key id server-side. A test payment that
+   *  looks identical to a real one is how fake revenue gets reported. */
+  mode?: "test" | "live" | "unconfigured";
 }
 
 export interface VerifyPaymentResult {
   status: "paid";
   purpose: "booking" | "subscription";
+  /** The purchase set up a recurring mandate, not just one cycle. */
+  auto_pay?: boolean;
   booking_id?: string;
   subscription?: UserSubscription & { plan_name?: string };
   confirmation_token?: string;
@@ -23,23 +35,33 @@ export interface VerifyPaymentResult {
 }
 
 export const paymentApi = {
-  createOrder: (payload: { purpose: "booking" | "subscription"; booking_id?: string; plan_id?: string; vehicle_type?: string }) =>
+  createOrder: (payload: { purpose: "booking" | "booking_group" | "subscription"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean }) =>
     apiClient.post<ApiSuccess<RazorpayOrder>>("/payments/create-order", payload).then((r) => r.data.data),
-  verify: (payload: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) =>
+  verify: (payload: { razorpay_order_id?: string; razorpay_subscription_id?: string; razorpay_payment_id: string; razorpay_signature: string }) =>
     apiClient.post<ApiSuccess<VerifyPaymentResult>>("/payments/verify", payload).then((r) => r.data.data),
   // Captain doorstep settlement (see CollectPaymentModal).
+  // A booking on a multi-car visit settles the VISIT: amount and vehicles
+  // cover every car on it, and "paid" means every car is paid.
   collectCash: (bookingId: string) =>
-    apiClient.post<ApiSuccess<{ payment_status: string; payment_method: string }>>("/payments/collect/cash", { booking_id: bookingId }).then((r) => r.data.data),
+    apiClient.post<ApiSuccess<CollectResult>>("/payments/collect/cash", { booking_id: bookingId }).then((r) => r.data.data),
   collectLink: (bookingId: string) =>
     apiClient.post<ApiSuccess<{ short_url: string; amount: number }>>("/payments/collect/link", { booking_id: bookingId }).then((r) => r.data.data),
   collectStatus: (bookingId: string) =>
-    apiClient.get<ApiSuccess<{ payment_status: string; payment_method?: string }>>(`/payments/collect/status/${bookingId}`).then((r) => r.data.data),
+    apiClient.get<ApiSuccess<CollectResult>>(`/payments/collect/status/${bookingId}`).then((r) => r.data.data),
   // Collections reporting — manager (per captain) and admin (per center).
   centerCollections: (centerId: string, params?: { date_from?: string; date_to?: string }) =>
     apiClient.get<ApiSuccess<CollectionsReport>>(`/payments/collections/center/${centerId}`, { params }).then((r) => r.data.data),
   adminCollections: (params?: { date_from?: string; date_to?: string }) =>
     apiClient.get<ApiSuccess<CollectionsReport>>("/payments/collections/admin", { params }).then((r) => r.data.data),
 };
+
+export interface CollectResult {
+  payment_status: string;
+  payment_method?: string;
+  /** Rupees still owed (status) or just collected (cash). */
+  amount?: number;
+  vehicles?: number;
+}
 
 export interface CollectionsRow {
   captain_id?: string | null;

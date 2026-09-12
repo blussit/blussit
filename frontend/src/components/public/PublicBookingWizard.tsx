@@ -17,6 +17,7 @@ import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage, tokenStorage } from "../../lib/api-client";
 import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
 import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
+import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { validateIndianMobile, validateIndianPlate } from "../../lib/validators";
 import type { Service } from "../../types";
 import { groupServices, parseIncludes, priceForType } from "./landing/shared";
@@ -120,6 +121,49 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const createdRef = useRef<{ vehicleId?: string; addressId?: string }>({});
+  // A booking that exists but isn't paid — "Pay online" was chosen and the
+  // checkout was closed. It stays held (the payment window) while the
+  // customer retries, switches to cash, or changes something; they are
+  // NOT sent anywhere else. Guests included: by now they're signed in.
+  const [held, setHeld] = useState<{ id: string; token?: string; number: string; total: number } | null>(null);
+  const [paying, setPaying] = useState(false);
+
+  const openCheckout = async (h: { id: string; token?: string }) => {
+    setPaying(true);
+    setError("");
+    try {
+      await payWithRazorpay({ purpose: "booking", booking_id: h.id }, { name: name || user?.full_name, contact: phone || user?.phone });
+    } catch (payErr) {
+      setPaying(false);
+      if (!(payErr instanceof PaymentCancelled)) setError(getErrorMessage(payErr));
+      return false;
+    }
+    setPaying(false);
+    navigate(`/thank-you?token=${h.token}`);
+    return true;
+  };
+  const payHeldInCash = async () => {
+    if (!held) return;
+    setPaying(true);
+    setError("");
+    try {
+      await bookingApi.switchToCash(held.id);
+      navigate(`/thank-you?token=${held.token}`);
+    } catch (err) {
+      setPaying(false);
+      setError(getErrorMessage(err));
+    }
+  };
+  const releaseHeld = async () => {
+    if (!held) return;
+    try {
+      await bookingApi.cancel(held.id, "Changed before paying");
+    } catch {
+      // Already released by the payment window — nothing to undo.
+    }
+    setHeld(null);
+    setError("");
+  };
 
   // Landing-section "Book this" buttons drive the wizard from outside.
   useEffect(() => {
@@ -129,19 +173,32 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     setStep(0);
   }, [preselect]);
 
-  // Logged-in customers start prefilled from their default vehicle/address.
+  // Logged-in customers start prefilled from their default vehicle/address —
+  // ONCE, when their data first arrives.
+  //
+  // These used to guard on `savedVehicleId`/`savedAddressId` being empty AND
+  // list them as dependencies, which made "+ Different vehicle" and
+  // "+ New address" impossible to use: the click set the id to null, the
+  // effect re-ran because that id had changed, the guard saw "nothing
+  // chosen" and put the default straight back. Both buttons looked dead.
+  // A ref records that the prefill has happened, so a deliberate "none"
+  // is never mistaken for "not chosen yet".
+  const prefilledVehicle = useRef(false);
+  const prefilledAddress = useRef(false);
   useEffect(() => {
-    if (!isCustomer || !myVehicles?.length || savedVehicleId) return;
+    if (!isCustomer || !myVehicles?.length || prefilledVehicle.current) return;
+    prefilledVehicle.current = true;
     const def = myVehicles.find((v) => v.is_default) || myVehicles[0];
     setSavedVehicleId(def.id);
     setVehicleTypeId(def.vehicle_type);
-  }, [isCustomer, myVehicles, savedVehicleId]);
+  }, [isCustomer, myVehicles]);
   useEffect(() => {
-    if (!isCustomer || !myAddresses?.length || savedAddressId) return;
+    if (!isCustomer || !myAddresses?.length || prefilledAddress.current) return;
+    prefilledAddress.current = true;
     const def = myAddresses.find((a) => a.is_default) || myAddresses[0];
     setSavedAddressId(def.id);
     setPincode(def.pincode);
-  }, [isCustomer, myAddresses, savedAddressId]);
+  }, [isCustomer, myAddresses]);
 
   const eligibleServices = useMemo(
     () => services.filter((s) => !vehicleTypeId || !s.vehicle_types?.length || s.vehicle_types.includes(vehicleTypeId)),
@@ -306,9 +363,20 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 // signup): its password was never really set — send a
                 // code instead of dead-ending on a password prompt.
                 const widgetOk = await ensureOtpWidget();
-                setOtpViaWidget(widgetOk);
-                if (widgetOk) await widgetSendOtp(phoneN);
-                else await authApi.forgotPassword(phoneN);
+                let sentViaWidget = false;
+                if (widgetOk) {
+                  try {
+                    await widgetSendOtp(phoneN);
+                    sentViaWidget = true;
+                  } catch {
+                    // The widget loaded but couldn't actually send (e.g.
+                    // MSG91's account is out of balance) — fall back to
+                    // our own WhatsApp OTP instead of leaving the customer
+                    // stuck on a code that will never arrive.
+                  }
+                }
+                if (!sentViaWidget) await authApi.forgotPassword(phoneN);
+                setOtpViaWidget(sentViaWidget);
                 setNeedOtp(true);
                 setError("");
                 return;
@@ -399,15 +467,16 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         payment_method: paymentMethod,
         hold_key: getSlotHolderKey(),
       });
-      // Online: the booking exists either way — open Razorpay now. Closing
-      // the modal just leaves it payment-pending (payable later from the
-      // booking page or at the door).
+      // Online: the booking is created UNCONFIRMED (awaiting_payment) and
+      // only becomes real when this payment verifies. An abandoned or
+      // failed checkout keeps the customer RIGHT HERE with the booking
+      // held: retry, pay cash instead, or change something — every option
+      // stays on this page. Only a completed payment moves them on.
       if (paymentMethod === "online" && booking.total_amount > 0) {
-        try {
-          await payWithRazorpay({ purpose: "booking", booking_id: booking.id }, { name: name || user?.full_name, contact: phone || user?.phone });
-        } catch (payErr) {
-          if (!(payErr instanceof PaymentCancelled)) setError(getErrorMessage(payErr));
-        }
+        const h = { id: booking.id, token: booking.confirmation_token, number: booking.booking_number, total: booking.total_amount };
+        setHeld(h);
+        await openCheckout(h);
+        return;
       }
       navigate(`/thank-you?token=${booking.confirmation_token}`);
     } catch (err) {
@@ -482,7 +551,16 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const wizardFooter = (
     <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
       {step > 0 ? (
-        <Button variant="outline" className="w-full sm:w-auto" onClick={() => setStep((s) => s - 1)}>
+        <Button
+          variant="outline"
+          className="w-full sm:w-auto"
+          onClick={() => {
+            // Going back means wanting to change something — release
+            // whatever's held rather than let it linger unpaid.
+            if (held) void releaseHeld();
+            setStep((s) => s - 1);
+          }}
+        >
           <ArrowLeft className="h-4 w-4" /> Back
         </Button>
       ) : (
@@ -493,8 +571,27 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
           Continue <ArrowRight className="h-4 w-4" />
         </Button>
       ) : (
-        <Button size="lg" className="w-full sm:w-auto sm:min-w-[150px]" disabled={!step3Valid} isLoading={submitting} onClick={() => submit()}>
-          {user?.phone_verified ? "Confirm booking" : "Verify & book"} <ArrowRight className="h-4 w-4" />
+        <Button
+          size="lg"
+          className="w-full sm:w-auto sm:min-w-[150px]"
+          disabled={!step3Valid}
+          isLoading={submitting || paying}
+          onClick={() => {
+            // A held booking (an earlier "pay online" that didn't finish)
+            // just gets retried — same page, same button. Switching to
+            // cash here confirms it as cash directly, no new booking made.
+            if (held) void (paymentMethod === "online" ? openCheckout(held) : payHeldInCash());
+            else void submit();
+          }}
+        >
+          {held
+            ? paymentMethod === "online"
+              ? `Retry payment ₹${held.total}`
+              : "Confirm — pay cash on service"
+            : user?.phone_verified
+              ? "Confirm booking"
+              : "Verify & book"}{" "}
+          <ArrowRight className="h-4 w-4" />
         </Button>
       )}
     </div>
@@ -900,12 +997,24 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                           className="font-medium text-[var(--color-primary)] hover:underline"
                           onClick={async () => {
                             setError("");
+                            const phoneN = validateIndianMobile(phone) || phone.trim();
                             try {
-                              const phoneN = validateIndianMobile(phone) || phone.trim();
                               if (otpViaWidget) await widgetSendOtp(phoneN);
                               else await authApi.forgotPassword(phoneN);
                             } catch (err) {
-                              setError(getErrorMessage(err));
+                              if (!otpViaWidget) {
+                                setError(getErrorMessage(err));
+                                return;
+                              }
+                              // The widget failed again — fall back to
+                              // WhatsApp rather than let "Resend" keep
+                              // failing the same way forever.
+                              try {
+                                await authApi.forgotPassword(phoneN);
+                                setOtpViaWidget(false);
+                              } catch (fallbackErr) {
+                                setError(getErrorMessage(fallbackErr));
+                              }
                             }
                           }}
                         >
@@ -1050,6 +1159,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 ))}
               </div>
             </div>
+
+            {/* Same checklist the logged-in wizard shows, at the same
+                moment — a first-time customer needs it most. */}
+            <ServicePrepNotice services={selectedServices} className="mt-4" />
           </div>
         )}
 

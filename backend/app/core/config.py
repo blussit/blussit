@@ -38,9 +38,11 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
-    # Storage abstraction (Phase 2: Cloudinary). "local" writes uploaded
+    # Storage abstraction. "local" writes uploaded
     # files to UPLOAD_DIR on disk and serves them back via the app's own
-    # StaticFiles mount at /uploads — see app/core/storage.py. Never store
+    # StaticFiles mount at /uploads — see app/core/storage.py. "r2" uploads
+    # to Cloudflare R2's S3-compatible API and returns the public object URL.
+    # Never store
     # uploaded file bytes (e.g. base64) directly in a MongoDB document: it
     # was tried for captain before/after photos, ballooned each booking
     # document to ~1.4MB, and made every full-document read on the bookings
@@ -48,10 +50,16 @@ class Settings(BaseSettings):
     # fast; find() effectively hung) — see KNOWN_ISSUES.md.
     STORAGE_PROVIDER: str = "local"
     UPLOAD_DIR: str = "uploads"
-    PUBLIC_BASE_URL: str = "http://localhost:8000"
-    CLOUDINARY_CLOUD_NAME: str = ""
-    CLOUDINARY_API_KEY: str = ""
-    CLOUDINARY_API_SECRET: str = ""
+    # PUBLIC_BASE_URL (this backend's own public base) is declared ONCE,
+    # in the payments block below — local file storage reads the same
+    # setting to build absolute photo URLs.
+    R2_ENDPOINT_URL: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = "blussit-images"
+    R2_PRIVATE_BUCKET_NAME: str = "blussit-private-documents"
+    R2_PUBLIC_BASE_URL: str = "https://d2208b1ea9cea36f384529411277791e.r2.cloudflarestorage.com/blussit-images"
+    R2_UPLOAD_PREFIX: str = "photos"
 
     # Pagination
     DEFAULT_PAGE_SIZE: int = 20
@@ -134,8 +142,15 @@ class Settings(BaseSettings):
     # NEVER leave the backend. Blank = online payments disabled (the
     # create-order endpoint refuses with a clear message; cash keeps
     # working).
+    # The ACTIVE pair — whatever is here is what customers are charged
+    # against. A test key id starts "rzp_test_", a live one "rzp_live_".
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
+    # The live pair parked out of the way while testing, so switching back
+    # is a copy rather than a hunt through a password manager. NOTHING reads
+    # these — they exist to be moved into the pair above.
+    RAZORPAY_LIVE_KEY_ID: str = ""
+    RAZORPAY_LIVE_KEY_SECRET: str = ""
     # Public https base of THIS backend (e.g. "https://api.blussit.com") —
     # used as the payment-link callback target so the customer's browser
     # lands back on our verified "payment received" page. Blank (dev):
@@ -155,6 +170,16 @@ class Settings(BaseSettings):
     # whichever isn't first is the automatic fallback when the first send
     # fails or isn't configured.
     OTP_CHANNEL: str = "whatsapp"
+
+    @property
+    def razorpay_mode(self) -> str:
+        """"test" | "live" | "unconfigured" — read off the key id itself, so
+        it can never disagree with the key actually in use. Surfaced at
+        startup and in the create-order response, so nobody mistakes a real
+        charge for a test one (or ships to production still in test)."""
+        if not self.RAZORPAY_KEY_ID:
+            return "unconfigured"
+        return "live" if self.RAZORPAY_KEY_ID.startswith("rzp_live_") else "test"
 
     @property
     def cors_origins_list(self) -> List[str]:

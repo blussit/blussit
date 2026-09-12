@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, PhoneNotVerifiedException, UnauthorizedException
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
@@ -91,7 +92,20 @@ class AuthService:
             "referred_by": payload.referred_by,
             **({"must_change_password": True} if payload.guest else {}),
         })
-        created = await self.users.create(user_doc)
+        try:
+            created = await self.users.create(user_doc)
+        except DuplicateKeyError:
+            # The existence checks above are check-then-act, not atomic — a
+            # near-simultaneous second request for the same phone/email
+            # (a double-tapped "Verify & book", a retried network request)
+            # can both pass the check before either has inserted. Only the
+            # unique index actually catches it, and an uncaught
+            # DuplicateKeyError here is a raw 500 with no CORS headers
+            # (Starlette's own error path, which the CORS middleware never
+            # gets a chance to wrap) — the browser reports that as a
+            # confusing "blocked by CORS policy" network error instead of
+            # the real, simple "this account already exists".
+            raise ConflictException("An account with this email or phone number already exists")
         return self._issue_tokens(created)
 
     async def create_staff_account(self, payload: StaffCreateRequest, created_by: str, creator_role: str = "admin") -> dict:
@@ -120,7 +134,11 @@ class AuthService:
             user_doc["profile_image"] = payload.photo_url
         if payload.role == UserRole.CAPTAIN:
             user_doc["employee_id"] = await next_captain_employee_id(self.db)
-        created = await self.users.create(user_doc)
+        try:
+            created = await self.users.create(user_doc)
+        except DuplicateKeyError:
+            # Same check-then-act race as register_customer — see there.
+            raise ConflictException("An account with this email or phone number already exists")
         return UserPublic.from_doc(created).model_dump()
 
     async def create_customer_by_staff(self, payload: ManagerCreateCustomerRequest, created_by: str) -> dict:
@@ -145,7 +163,11 @@ class AuthService:
             "must_change_password": True,
             "created_by": created_by,
         })
-        created = await self.users.create(user_doc)
+        try:
+            created = await self.users.create(user_doc)
+        except DuplicateKeyError:
+            # Same check-then-act race as register_customer — see there.
+            raise ConflictException("An account with this email or phone number already exists")
         return UserPublic.from_doc(created).model_dump()
 
     LOGIN_MAX_FAILURES = 5
@@ -210,7 +232,11 @@ class AuthService:
         if payload.get("tv", 0) != user.get("token_version", 0):
             raise UnauthorizedException("Session expired — please log in again.")
 
-        access_token = create_access_token(str(user["_id"]), user["role"], {"service_center_id": user.get("service_center_id")})
+        access_token = create_access_token(
+            str(user["_id"]),
+            user["role"],
+            {"service_center_id": user.get("service_center_id"), "tv": user.get("token_version", 0)},
+        )
         new_refresh = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0))
         return {"access_token": access_token, "refresh_token": new_refresh, "token_type": "bearer"}
 
@@ -545,7 +571,12 @@ class AuthService:
         access_token = create_access_token(
             str(user["_id"]),
             user["role"],
-            {"email": user.get("email"), "phone": user.get("phone"), "service_center_id": user.get("service_center_id")},
+            {
+                "email": user.get("email"),
+                "phone": user.get("phone"),
+                "service_center_id": user.get("service_center_id"),
+                "tv": user.get("token_version", 0),
+            },
         )
         refresh_token = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0))
         return {

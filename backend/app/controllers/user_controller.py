@@ -35,6 +35,6 @@ class UserController:
         return success(result, "User suspended successfully")
 
     async def delete_user(self, current_user: CurrentUser, user_id: str):
-        await self.service.delete_user(user_id, current_user.id)
+        await self.service.delete_user(user_id)
         await self.audit.log_action(current_user.id, current_user.role, "DELETE_USER", "users", user_id)
         return success(None, "User deleted successfully")

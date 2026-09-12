@@ -38,6 +38,14 @@ class ServiceModel(BusinessRecordBase):
     # wizard offers it after a main service is picked. Priced like any
     # service, so bookings/pricing need no special case.
     is_addon: bool = False
+    # Waterless washes are a different job on the ground, and the customer
+    # has to prepare differently for them: a WATER-BASED wash needs the
+    # customer to supply water and power, a WATERLESS one needs the vehicle
+    # in shade and can't clean the inner wheel area. The booking flow shows
+    # the right instructions off this flag, so it is a real admin-set field
+    # rather than something guessed from the service's name — a wrong guess
+    # here means a captain arrives to no water.
+    is_waterless: bool = False
     # Sibling variants of one product — Bike Wash for 1/2/3/4 bikes are four
     # services sharing variant_group="bike-wash" with labels "1 bike"…"4
     # bikes". The website shows one card and lets the customer pick a

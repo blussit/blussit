@@ -7,22 +7,24 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BadgeCheck, Camera, Check, Clock, FileText, KeyRound, LogOut, ShieldAlert, Upload } from "lucide-react";
+import { BadgeCheck, Camera, Check, Clock, FileText, KeyRound, Loader2, LogOut, ShieldAlert, Upload } from "lucide-react";
 import { authApi } from "../../api/auth";
 import { uploadApi } from "../../api/upload";
 import { kycApi, type CaptainKyc } from "../../api/staffOps";
-import { Button, Input } from "../../components/ui";
+import { Button, Input, Modal } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
+import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { getErrorMessage } from "../../lib/api-client";
 
-const STATUS_CHIP: Record<string, { label: string; cls: string }> = {
-  pending: { label: "Not verified", cls: "bg-gray-100 text-gray-600" },
-  submitted: { label: "Under review", cls: "bg-amber-100 text-amber-700" },
-  verified: { label: "Verified", cls: "bg-green-100 text-green-700" },
-  rejected: { label: "Needs changes", cls: "bg-red-100 text-red-700" },
+const STATUS_CHIP: Record<string, { labelKey: string; cls: string }> = {
+  pending: { labelKey: "captain.profile.kyc.pending", cls: "bg-gray-100 text-gray-600" },
+  submitted: { labelKey: "captain.profile.kyc.submitted", cls: "bg-amber-100 text-amber-700" },
+  verified: { labelKey: "captain.profile.kyc.verified", cls: "bg-green-100 text-green-700" },
+  rejected: { labelKey: "captain.profile.kyc.rejected", cls: "bg-red-100 text-red-700" },
 };
 
 function DocUpload({ label, url, disabled, onUploaded }: { label: string; url?: string | null; disabled: boolean; onUploaded: (url: string) => void }) {
+  const { t } = useCaptainTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -36,12 +38,12 @@ function DocUpload({ label, url, disabled, onUploaded }: { label: string; url?: 
               View uploaded document
             </a>
           ) : (
-            <p className="text-xs text-gray-400">Clear photo or scan</p>
+            <p className="text-xs text-gray-400">{t("captain.profile.clearPhoto")}</p>
           )}
         </div>
         {!disabled && (
           <Button size="sm" variant="outline" isLoading={busy} onClick={() => inputRef.current?.click()}>
-            <Upload className="h-3.5 w-3.5" /> {url ? "Replace" : "Upload"}
+            <Upload className="h-3.5 w-3.5" /> {url ? t("captain.profile.replace") : t("captain.profile.upload")}
           </Button>
         )}
       </div>
@@ -58,7 +60,7 @@ function DocUpload({ label, url, disabled, onUploaded }: { label: string; url?: 
           setBusy(true);
           setError("");
           try {
-            onUploaded(await uploadApi.photo(file));
+            onUploaded(await uploadApi.document(file));
           } catch (err) {
             setError(getErrorMessage(err));
           } finally {
@@ -71,9 +73,12 @@ function DocUpload({ label, url, disabled, onUploaded }: { label: string; url?: 
 }
 
 export default function CaptainProfilePage() {
+  const { t } = useCaptainTranslation();
   const { user, logout, refreshUser } = useAuth();
   const queryClient = useQueryClient();
   const photoRef = useRef<HTMLInputElement>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoPreviewOpen, setPhotoPreviewOpen] = useState(false);
 
   const { data: kyc } = useQuery({ queryKey: ["my-kyc"], queryFn: kycApi.my });
   const [form, setForm] = useState<Partial<CaptainKyc>>({});
@@ -117,7 +122,7 @@ export default function CaptainProfilePage() {
   const changePassword = useMutation({
     mutationFn: () => authApi.changePassword({ current_password: currentPassword, new_password: newPassword }),
     onSuccess: async () => {
-      setPasswordMsg("Password updated.");
+      setPasswordMsg(t("captain.profile.passwordUpdated"));
       setPasswordError("");
       setCurrentPassword("");
       setNewPassword("");
@@ -138,30 +143,37 @@ export default function CaptainProfilePage() {
         <div className="flex items-center gap-4">
           <button
             type="button"
-            onClick={() => !locked && photoRef.current?.click()}
+            onClick={() => {
+              if (photoUploading) return;
+              if (form.photo_url) setPhotoPreviewOpen(true);
+              else if (!locked) photoRef.current?.click();
+            }}
             className="relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-100 font-display text-xl font-bold text-black"
-            title={locked ? undefined : "Add your photo"}
+            title={locked ? undefined : t("captain.profile.addPhoto")}
           >
             {form.photo_url ? <img src={form.photo_url} alt="Profile" className="h-full w-full object-cover" /> : initial}
             {!locked && (
               <span className="absolute bottom-0 inset-x-0 flex items-center justify-center bg-black/50 py-0.5">
-                <Camera className="h-3 w-3 text-white" />
+                {photoUploading ? <Loader2 className="h-3 w-3 animate-spin text-white" /> : <Camera className="h-3 w-3 text-white" />}
               </span>
             )}
           </button>
           <input
             ref={photoRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf,application/pdf"
             className="hidden"
             onChange={async (e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
               if (!file) return;
+              setPhotoUploading(true);
               try {
                 set({ photo_url: await uploadApi.photo(file) });
               } catch (err) {
                 setFormError(getErrorMessage(err));
+              } finally {
+                setPhotoUploading(false);
               }
             }}
           />
@@ -174,24 +186,19 @@ export default function CaptainProfilePage() {
               {user?.phone && <span className="font-mono-num text-xs text-gray-400">{user.phone}</span>}
               <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${chip.cls}`}>
                 {status === "verified" ? <BadgeCheck className="h-3 w-3" /> : status === "submitted" ? <Clock className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}
-                {chip.label}
+                {t(chip.labelKey as Parameters<typeof t>[0])}
               </span>
             </div>
           </div>
         </div>
         {status === "rejected" && kyc?.review_note && (
-          <p className="mt-3 rounded-xl bg-red-50 px-3.5 py-2.5 text-xs text-red-700">Manager's note: {kyc.review_note}</p>
-        )}
-        {status === "pending" && (
-          <p className="mt-3 rounded-xl bg-[#FAFAFA] px-3.5 py-2.5 text-xs text-gray-600">
-            Complete your background verification below — your manager reviews and approves it.
-          </p>
+          <p className="mt-3 rounded-xl bg-red-50 px-3.5 py-2.5 text-xs text-red-700">{t("captain.profile.managersNote")}: {kyc.review_note}</p>
         )}
       </div>
 
       {/* KYC */}
       <div className="space-y-2">
-        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-black">Background verification</p>
+        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-black">{t("captain.profile.backgroundVerification")}</p>
         <div className="space-y-3 rounded-2xl border border-[#F3E5B5] bg-white p-4">
           {locked && (
             <p className="flex items-center gap-1.5 text-xs text-green-700">
@@ -200,24 +207,24 @@ export default function CaptainProfilePage() {
           )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
-              label="Aadhaar number"
+              label={t("captain.profile.aadhaarNumber")}
               placeholder="12 digits"
               value={form.aadhaar_number || ""}
               disabled={locked}
               onChange={(e) => set({ aadhaar_number: e.target.value.replace(/\D/g, "").slice(0, 12) })}
             />
             <Input
-              label="PAN number"
+              label={t("captain.profile.panNumber")}
               placeholder="ABCDE1234F"
               value={form.pan_number || ""}
               disabled={locked}
               onChange={(e) => set({ pan_number: e.target.value.toUpperCase().slice(0, 10) })}
             />
           </div>
-          <DocUpload label="Aadhaar card photo" url={form.aadhaar_doc_url} disabled={locked} onUploaded={(url) => set({ aadhaar_doc_url: url })} />
-          <DocUpload label="PAN card photo" url={form.pan_doc_url} disabled={locked} onUploaded={(url) => set({ pan_doc_url: url })} />
+          <DocUpload label={t("captain.profile.aadhaarPhoto")} url={form.aadhaar_doc_url} disabled={locked} onUploaded={(url) => set({ aadhaar_doc_url: url })} />
+          <DocUpload label={t("captain.profile.panPhoto")} url={form.pan_doc_url} disabled={locked} onUploaded={(url) => set({ pan_doc_url: url })} />
           <div>
-            <label className="mb-1 block text-sm font-medium text-[var(--color-text-primary)]">Local address</label>
+            <label className="mb-1 block text-sm font-medium text-[var(--color-text-primary)]">{t("captain.profile.localAddress")}</label>
             <textarea
               className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] disabled:bg-gray-50"
               rows={2}
@@ -234,11 +241,11 @@ export default function CaptainProfilePage() {
               onChange={(e) => set({ same_as_local: e.target.checked })}
               className="h-4 w-4 rounded border-gray-300 accent-[#E8A900]"
             />
-            Permanent address is the same as local
+            {t("captain.profile.sameAsLocalLabel")}
           </label>
           {!form.same_as_local && (
             <div>
-              <label className="mb-1 block text-sm font-medium text-[var(--color-text-primary)]">Permanent address</label>
+              <label className="mb-1 block text-sm font-medium text-[var(--color-text-primary)]">{t("captain.profile.permanentAddress")}</label>
               <textarea
                 className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] disabled:bg-gray-50"
                 rows={2}
@@ -256,7 +263,7 @@ export default function CaptainProfilePage() {
           )}
           {!locked && (
             <Button className="w-full" isLoading={submitKyc.isPending} onClick={() => submitKyc.mutate()}>
-              <FileText className="h-4 w-4" /> {status === "pending" ? "Submit for verification" : "Resubmit"}
+              <FileText className="h-4 w-4" /> {status === "pending" ? t("captain.profile.submitForVerification") : t("captain.profile.resubmit")}
             </Button>
           )}
         </div>
@@ -264,19 +271,19 @@ export default function CaptainProfilePage() {
 
       {/* Security */}
       <div className="space-y-2">
-        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-black">Security</p>
+        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-black">{t("captain.profile.security")}</p>
         <div className="rounded-2xl border border-[#F3E5B5] bg-white p-4">
           {!changingPassword ? (
             <button type="button" onClick={() => setChangingPassword(true)} className="flex w-full items-center gap-3 text-left">
               <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gray-100 text-black">
                 <KeyRound className="h-[17px] w-[17px]" />
               </span>
-              <span className="flex-1 text-sm font-semibold text-black">Change password</span>
+              <span className="flex-1 text-sm font-semibold text-black">{t("captain.profile.changePassword")}</span>
             </button>
           ) : (
             <div className="space-y-3">
-              <Input label="Current password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
-              <Input label="New password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+              <Input label={t("captain.profile.currentPassword")} type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+              <Input label={t("captain.profile.newPassword")} type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
               {passwordError && <p className="text-sm text-[var(--color-error)]">{passwordError}</p>}
               <div className="flex gap-2">
                 <Button variant="outline" className="flex-1" onClick={() => setChangingPassword(false)}>
@@ -297,8 +304,27 @@ export default function CaptainProfilePage() {
         onClick={logout}
         className="flex w-full items-center justify-center gap-2 rounded-2xl border border-red-200 bg-white py-3 text-sm font-bold text-[var(--color-error)] transition-colors hover:bg-red-50"
       >
-        <LogOut className="h-4 w-4" /> Log out
+        <LogOut className="h-4 w-4" /> {t("captain.nav.logout")}
       </button>
+
+      <Modal open={photoPreviewOpen} onClose={() => setPhotoPreviewOpen(false)} title="Profile photo" maxWidth="max-w-xl">
+        {form.photo_url && (
+          <div className="space-y-4">
+            <img src={form.photo_url} alt="Full profile" className="max-h-[65vh] w-full rounded-xl object-contain" />
+            {!locked && (
+              <Button
+                className="w-full"
+                onClick={() => {
+                  setPhotoPreviewOpen(false);
+                  photoRef.current?.click();
+                }}
+              >
+                <Camera className="h-4 w-4" /> Edit photo
+              </Button>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

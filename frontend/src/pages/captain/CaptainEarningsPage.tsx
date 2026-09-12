@@ -8,8 +8,10 @@ import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
 import { Badge, Button, Card, CardBody, Input, Modal, PageLoader } from "../../components/ui";
 import { format } from "../../lib/date";
+import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 
 export default function CaptainEarningsPage() {
+  const { t } = useCaptainTranslation();
   const queryClient = useQueryClient();
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [showBank, setShowBank] = useState(false);
@@ -62,16 +64,16 @@ export default function CaptainEarningsPage() {
 
   const belowMinimum = wallet ? wallet.balance < wallet.minimum_balance : false;
   const stats = [
-    { label: "Jobs completed", value: String(performance.total_jobs_completed ?? 0), icon: Briefcase },
-    { label: "Average rating", value: String(performance.average_rating ?? 0), icon: Star },
-    { label: "Total reviews", value: String(performance.total_reviews ?? 0), icon: TrendingUp },
+    { label: t("captain.earnings.jobsCompleted"), value: String(performance.total_jobs_completed ?? 0), icon: Briefcase },
+    { label: t("captain.earnings.averageRating"), value: String(performance.average_rating ?? 0), icon: Star },
+    { label: t("captain.earnings.totalReviews"), value: String(performance.total_reviews ?? 0), icon: TrendingUp },
   ];
   const statusCounts = (performance.booking_status_counts as Record<string, number>) || {};
 
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Wallet & earnings</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t("captain.earnings.title")}</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           Cash bookings debit the platform's share from your wallet; online bookings credit your fee straight in.
         </p>
@@ -87,7 +89,7 @@ export default function CaptainEarningsPage() {
               <p className="font-mono-num mt-1 text-4xl font-bold">₹{wallet?.balance ?? 0}</p>
             </div>
             <div className="text-right text-sm text-white/80">
-              <p>Minimum required</p>
+              <p>{t("captain.earnings.minimumRequired")}</p>
               <p className="font-mono-num font-semibold text-white">₹{wallet?.minimum_balance ?? 50}</p>
             </div>
           </div>
@@ -103,7 +105,7 @@ export default function CaptainEarningsPage() {
             <ArrowUpCircle className="h-4 w-4" /> Request withdrawal
           </Button>
           <Button variant="outline" onClick={() => setShowBank(true)}>
-            <Landmark className="h-4 w-4" /> {wallet?.bank_account_number ? "Update bank details" : "Add bank details"}
+            <Landmark className="h-4 w-4" /> {wallet?.bank_account_number ? t("captain.earnings.updateBankDetails") : t("captain.earnings.addBankDetails")}
           </Button>
         </CardBody>
       </Card>
@@ -127,9 +129,9 @@ export default function CaptainEarningsPage() {
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Card>
           <CardBody>
-            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Recent transactions</h2>
+            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.recentTransactions")}</h2>
             {!transactions?.data.length ? (
-              <p className="text-sm text-[var(--color-text-secondary)]">No wallet activity yet.</p>
+              <p className="text-sm text-[var(--color-text-secondary)]">{t("captain.earnings.noActivity")}</p>
             ) : (
               <div className="space-y-3">
                 {transactions.data.map((t) => (
@@ -157,9 +159,9 @@ export default function CaptainEarningsPage() {
 
         <Card>
           <CardBody>
-            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Withdrawal requests</h2>
+            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.withdrawalRequests")}</h2>
             {!withdrawals?.data.length ? (
-              <p className="text-sm text-[var(--color-text-secondary)]">No withdrawal requests yet.</p>
+              <p className="text-sm text-[var(--color-text-secondary)]">{t("captain.earnings.noWithdrawals")}</p>
             ) : (
               <div className="space-y-3">
                 {withdrawals.data.map((w) => (
@@ -181,7 +183,7 @@ export default function CaptainEarningsPage() {
 
       <Card>
         <CardBody>
-          <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Jobs by status</h2>
+          <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.jobsByStatus")}</h2>
           <div className="space-y-3">
             {Object.entries(statusCounts).map(([s, count]) => (
               <div key={s} className="flex items-center justify-between text-sm">
@@ -193,13 +195,13 @@ export default function CaptainEarningsPage() {
         </CardBody>
       </Card>
 
-      <Modal open={showWithdraw} onClose={() => setShowWithdraw(false)} title="Request withdrawal">
+      <Modal open={showWithdraw} onClose={() => setShowWithdraw(false)} title={t("captain.earnings.requestWithdrawal")}>
         <p className="text-sm text-[var(--color-text-secondary)]">
           Requests are reviewed by the admin team and paid to your registered bank account.
         </p>
         <Input
           className="mt-3"
-          label="Amount (₹)"
+          label={t("captain.earnings.amount")}
           type="number"
           min={1}
           value={amount}
@@ -216,19 +218,19 @@ export default function CaptainEarningsPage() {
         </Button>
       </Modal>
 
-      <Modal open={showBank} onClose={() => setShowBank(false)} title="Bank details">
+      <Modal open={showBank} onClose={() => setShowBank(false)} title={t("captain.earnings.bankDetails")}>
         <div className="space-y-3">
           <Input
-            label="Account holder name"
+            label={t("captain.earnings.accountHolder")}
             value={bank.bank_account_holder}
             onChange={(e) => setBank((b) => ({ ...b, bank_account_holder: e.target.value }))}
           />
           <Input
-            label="Account number"
+            label={t("captain.earnings.accountNumber")}
             value={bank.bank_account_number}
             onChange={(e) => setBank((b) => ({ ...b, bank_account_number: e.target.value }))}
           />
-          <Input label="IFSC code" value={bank.bank_ifsc} onChange={(e) => setBank((b) => ({ ...b, bank_ifsc: e.target.value }))} />
+          <Input label={t("captain.earnings.ifsc")} value={bank.bank_ifsc} onChange={(e) => setBank((b) => ({ ...b, bank_ifsc: e.target.value }))} />
         </div>
         {formError && <p className="mt-2 text-sm text-[var(--color-error)]">{formError}</p>}
         <Button

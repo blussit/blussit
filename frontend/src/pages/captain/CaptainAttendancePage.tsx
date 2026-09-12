@@ -6,7 +6,7 @@ import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, LogIn, LogOut, MapPin, Plus } from "lucide-react";
+import { CheckCircle2, LogIn, LogOut, Plus } from "lucide-react";
 import { attendanceApi, leaveApi, type GeoPayload } from "../../api/staffOps";
 import {
   Button,
@@ -121,9 +121,6 @@ export default function CaptainAttendancePage() {
         <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">
           {t("captain.attendance.your_day")}
         </h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          {t("captain.attendance.day_desc")}
-        </p>
       </div>
 
       {/* Today - one big state card */}
@@ -135,6 +132,7 @@ export default function CaptainAttendancePage() {
             </p>
             <Button
               className="w-full max-w-xs !py-3"
+              title={t("captain.attendance.loc_recorded")}
               isLoading={locating === "in" || checkInMutation.isPending}
               onClick={() => {
                 setLocating("in");
@@ -143,10 +141,6 @@ export default function CaptainAttendancePage() {
             >
               <LogIn className="h-4 w-4" /> {t("captain.attendance.check_in")}
             </Button>
-            <p className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)]">
-              <MapPin className="h-3 w-3" />{" "}
-              {t("captain.attendance.loc_recorded")}
-            </p>
           </div>
         ) : (
           <div className="space-y-3">

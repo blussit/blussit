@@ -167,10 +167,15 @@ export default function RegisterPage() {
                     type="email"
                     value={form.email}
                     onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    placeholder="Enter your email"
+                    placeholder="you@gmail.com"
                     className="h-[43px] w-full rounded-[9px] border border-[#D9DDE3] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10"
                   />
                 </div>
+                {/* Stated up front — the server enforces the same list
+                    (backend/app/utils/email_domains.py). */}
+                <span className="mt-1 block text-[11px] text-[#8A8A8A]">
+                  Gmail, Yahoo, Outlook/Hotmail, iCloud, Rediffmail, Proton or Zoho only.
+                </span>
               </label>
 
               {/* Phone */}

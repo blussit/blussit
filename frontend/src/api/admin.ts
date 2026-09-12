@@ -13,6 +13,18 @@ export const adminBookingPolicyApi = {
   set: (payload: Partial<BookingPolicy>) => apiClient.put<ApiSuccess<BookingPolicy>>("/booking-policy", payload).then((r) => r.data.data),
 };
 
+/** One saved change to an admin setting: who, when, and each field's before → after. */
+export interface SettingsChange {
+  changed_at: string;
+  changed_by?: string | null;
+  changed_by_name: string;
+  changes: Record<string, { from: unknown; to: unknown }>;
+}
+
+export const adminSettingsApi = {
+  history: (key: string) => apiClient.get<ApiSuccess<SettingsChange[]>>(`/settings-history/${key}`).then((r) => r.data.data),
+};
+
 export const adminHomepageConfigApi = {
   get: () => apiClient.get<ApiSuccess<HomepageConfig>>("/homepage-config").then((r) => r.data.data),
   set: (payload: Partial<HomepageConfig>) => apiClient.put<ApiSuccess<HomepageConfig>>("/homepage-config", payload).then((r) => r.data.data),

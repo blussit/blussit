@@ -37,6 +37,7 @@ import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { useBookingFilters } from "../../lib/useBookingFilters";
 import { useLiveChannel } from "../../lib/socket";
 import { useAuth } from "../../context/AuthContext";
+import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import type { Booking, BookingStatus } from "../../types";
 
 // How often a captain's device sends a location update while they have an
@@ -231,15 +232,24 @@ export default function CaptainJobsPage() {
   const afterPhotoMutation = useMutation({
     mutationFn: ({ id, photo }: { id: string; photo: CapturedPhoto }) =>
       bookingApi.captureAfterPhoto(id, photo),
-    onSuccess: () => {
+    onSuccess: (updated) => {
       invalidate();
       const job = activeJob;
       closeModal();
+      if (!job) return;
       // Wash done → straight into settlement (founder spec): cash tap or
       // scan-to-pay QR. Skipped entirely when the customer already paid
-      // online — nothing to collect, nothing to show.
-      if (job && job.payment_status !== "paid" && job.total_amount > 0)
-        setCollectFor({ ...job, status: "completed" });
+      // online — nothing to collect, nothing to show. On a visit the
+      // customer pays ONCE, so this waits for the LAST car's after-photo.
+      const finished = { ...job, ...(updated || {}), status: "completed" as const };
+      const others = (data?.data || []).filter(
+        (b) => !!job.booking_group_id && b.booking_group_id === job.booking_group_id && b.id !== job.id,
+      );
+      const visitDone = others.every((b) => b.status === "completed" || b.status === "cancelled");
+      const anyUnpaid = [finished, ...others].some(
+        (b) => b.status !== "cancelled" && b.payment_status !== "paid" && b.total_amount > 0,
+      );
+      if (visitDone && anyUnpaid) setCollectFor(finished);
     },
     onError: (e) => setActionError(getErrorMessage(e)),
   });
@@ -264,14 +274,6 @@ export default function CaptainJobsPage() {
     onError: (e) => setActionError(getErrorMessage(e)),
   });
 
-  // Lets a captain escalate a job they discover is more urgent than it
-  // looked (e.g. an upset customer, a time-sensitive request) — deliberately
-  // one-way (escalate to high, not a full priority editor) to keep the
-  // captain's own workflow simple; a manager still has full control.
-  const markUrgentMutation = useMutation({
-    mutationFn: (id: string) => bookingApi.updatePriority(id, "high"),
-    onSuccess: invalidate,
-  });
 
   const openHeadingModal = (job: Booking) => {
     setActiveJob(job);
@@ -382,42 +384,51 @@ export default function CaptainJobsPage() {
     status === "completed" ? "newest" : "oldest",
   );
 
+  // Several cars at one address are ONE job to the captain: one row, one
+  // card, one trip. Each car still has its own plate check and photos, so
+  // "the car he works next" is the first one on the visit not yet done.
+  const slabs = toSlabs(visibleJobs);
+  const currentCar = (slab: BookingSlab): Booking =>
+    slab.bookings.find((c) => c.status !== "completed" && c.status !== "cancelled") || slab.primary;
+
   // The hero: whatever the captain is physically doing right now — an
   // in-motion/in-progress job wins, then the next job he can actually ACT
   // on (a missed-window zombie waiting on a manager must not sit on top
   // of a live job as the "NOW" card), then whatever's left.
-  const nowJob = !status
-    ? visibleJobs.find(
-        (j) =>
-          j.status === "captain_on_the_way" || j.status === "service_started",
-      ) ||
-      visibleJobs.find((j) => !needsManager(j)) ||
-      visibleJobs[0] ||
+  const nowSlab = !status
+    ? slabs.find((s) => ["captain_on_the_way", "service_started"].includes(currentCar(s).status)) ||
+      slabs.find((s) => !needsManager(currentCar(s))) ||
       null
     : null;
-  const restJobs = nowJob
-    ? visibleJobs.filter((j) => j.id !== nowJob.id)
-    : visibleJobs;
+  // Jobs whose window has passed have NO captain action — the backend
+  // refuses start_heading past the lockout. They belong in their own quiet
+  // list ("waiting on your manager"), not dressed up as work he can do.
+  const waitingOnManager = !status ? slabs.filter((s) => needsManager(currentCar(s))) : [];
+  const restSlabs = (nowSlab ? slabs.filter((s) => s.key !== nowSlab.key) : slabs).filter(
+    (s) => !waitingOnManager.some((w) => w.key === s.key)
+  );
 
-  const rowProps = (job: Booking) => ({
-    job,
-    action: actionFor(job),
-    canCancel:
-      !needsManager(job) &&
-      (job.status === "assigned" || job.status === "captain_on_the_way"),
-    canReportRisk: canReportRisk(job),
-    onAction: (kind: JobAction["kind"]) =>
-      kind === "heading" ? openHeadingModal(job) : openActionModal(job, kind),
-    onCancel: () => openActionModal(job, "cancel"),
-    onCollect:
-      job.status === "completed" &&
-      job.payment_status === "pending" &&
-      job.total_amount > 0
-        ? () => setCollectFor(job)
-        : undefined,
-    onReportRisk: () => openActionModal(job, "report-risk"),
-    onMarkUrgent: () => markUrgentMutation.mutate(job.id),
-  });
+  const rowProps = (slab: BookingSlab) => {
+    const job = currentCar(slab);
+    // The customer pays for the visit once, so the doorstep collect waits
+    // until every car is done and covers whatever is still owed.
+    const allDone = slab.bookings.every((c) => c.status === "completed" || c.status === "cancelled");
+    const owed = slab.bookings.some((c) => c.status === "completed" && c.payment_status === "pending" && c.total_amount > 0);
+    return {
+      job,
+      visit: slab.isVisit ? slab : null,
+      action: actionFor(job),
+      canCancel:
+        !needsManager(job) &&
+        (job.status === "assigned" || job.status === "captain_on_the_way"),
+      canReportRisk: canReportRisk(job),
+      onAction: (kind: JobAction["kind"]) =>
+        kind === "heading" ? openHeadingModal(job) : openActionModal(job, kind),
+      onCancel: () => openActionModal(job, "cancel"),
+      onCollect: allDone && owed ? () => setCollectFor(slab.primary) : undefined,
+      onReportRisk: () => openActionModal(job, "report-risk"),
+    };
+  };
 
   return (
     <div className="space-y-5">
@@ -428,10 +439,6 @@ export default function CaptainJobsPage() {
         <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">
           {t("captain.jobs.title")}
         </h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Head out → reach & verify → before-photo → after-photo. Every step is
-          geo-tagged.
-        </p>
       </div>
 
       {/* One row: booking-type dropdown + the Filters toggle. The old
@@ -489,26 +496,48 @@ export default function CaptainJobsPage() {
         />
       ) : (
         <>
-          {nowJob && (
+          {nowSlab && (
             <NowJobCard
-              {...rowProps(nowJob)}
+              {...rowProps(nowSlab)}
               showEarnings={!!walletPolicy?.wallet_gating_enabled}
             />
           )}
 
-          {!!restJobs.length && (
+          {!!restSlabs.length && (
             <div>
-              {nowJob && (
+              {nowSlab && (
                 <p className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--color-text-secondary)]">
-                  {status ? "Jobs" : "Up next"}
+                  {status ? t("captain.nav.jobs") : t("captain.jobs.upNext")}
                 </p>
               )}
               <Card className="overflow-hidden">
-                {restJobs.map((job: Booking) => (
+                {restSlabs.map((slab) => (
                   <JobRow
-                    key={job.id}
-                    {...rowProps(job)}
-                    onOpenDetails={() => setDetailJob(job)}
+                    key={slab.key}
+                    {...rowProps(slab)}
+                    onOpenDetails={() => setDetailJob(currentCar(slab))}
+                  />
+                ))}
+              </Card>
+            </div>
+          )}
+
+          {/* Stuck with the manager — visually separate and visually quiet,
+              so it never competes with the job he can actually do. */}
+          {!!waitingOnManager.length && (
+            <div>
+              <p className="mb-2 text-xs font-bold uppercase tracking-wide text-gray-400">
+                {t("captain.jobs.waiting.title")}
+              </p>
+              <Card className="overflow-hidden border-dashed border-gray-300 bg-[#FAFAFA] opacity-90">
+                <p className="border-b border-gray-200 px-4 py-2.5 text-xs text-gray-500">
+                  {t("captain.jobs.waiting.desc")}
+                </p>
+                {waitingOnManager.map((slab) => (
+                  <JobRow
+                    key={slab.key}
+                    {...rowProps(slab)}
+                    onOpenDetails={() => setDetailJob(currentCar(slab))}
                   />
                 ))}
               </Card>
@@ -521,12 +550,9 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "heading"}
         onClose={closeModal}
-        title="Start heading to customer"
+        title={t("captain.modal.headingTitle")}
       >
-        <p className="text-sm text-[var(--color-text-secondary)]">
-          You can only start heading out within 30 minutes of the scheduled
-          slot. We'll capture your current location as proof.
-        </p>
+        <p className="text-sm text-[var(--color-text-secondary)]">{t("captain.modal.headingNote")}</p>
         {actionError && (
           <p className="mt-3 text-sm text-[var(--color-error)]">
             {actionError}
@@ -550,7 +576,7 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "verify"}
         onClose={closeModal}
-        title="I've reached — verify the vehicle"
+        title={t("captain.modal.verifyTitle")}
       >
         <div className="mb-3 flex items-start gap-2 rounded-lg bg-[var(--color-secondary-light)] px-3 py-2.5 text-xs text-[var(--color-text-secondary)]">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-secondary)]" />
@@ -558,7 +584,7 @@ export default function CaptainJobsPage() {
           not proceed — release the job instead.
         </div>
         <Input
-          label="Registration number on the vehicle"
+          label={t("captain.modal.plateLabel")}
           placeholder="MP09XX1234"
           value={regInput}
           onChange={(e) => setRegInput(e.target.value.toUpperCase())}
@@ -586,10 +612,10 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "before"}
         onClose={closeModal}
-        title="Before-service photo"
+        title={t("captain.modal.beforeTitle")}
       >
         <PhotoCapture
-          label="Take a photo of the vehicle before starting"
+          label={t("captain.modal.beforeLabel")}
           onCapture={(photo) =>
             activeJob && beforePhotoMutation.mutate({ id: activeJob.id, photo })
           }
@@ -615,10 +641,10 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "after"}
         onClose={closeModal}
-        title="After-service photo"
+        title={t("captain.modal.afterTitle")}
       >
         <PhotoCapture
-          label="Take a photo of the vehicle after completing the service"
+          label={t("captain.modal.afterLabel")}
           onCapture={(photo) =>
             activeJob && afterPhotoMutation.mutate({ id: activeJob.id, photo })
           }
@@ -639,7 +665,7 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "report-risk"}
         onClose={closeModal}
-        title="Flag this booking as at-risk"
+        title={t("captain.modal.riskTitle")}
       >
         <div className="mb-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -650,7 +676,7 @@ export default function CaptainJobsPage() {
         <textarea
           className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
           rows={3}
-          placeholder="What's going on? (optional)"
+          placeholder={t("captain.modal.riskPlaceholder")}
           value={riskNote}
           onChange={(e) => setRiskNote(e.target.value)}
         />
@@ -683,7 +709,7 @@ export default function CaptainJobsPage() {
       <Modal
         open={modalKind === "cancel"}
         onClose={closeModal}
-        title="Release this job"
+        title={t("captain.modal.releaseTitle")}
       >
         <p className="text-sm text-[var(--color-text-secondary)]">
           This sends the booking back to pending so a manager can reassign it.
@@ -692,7 +718,7 @@ export default function CaptainJobsPage() {
         <textarea
           className="mt-3 w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
           rows={3}
-          placeholder="Reason (min 3 characters)"
+          placeholder={t("captain.modal.releasePlaceholder")}
           value={cancelReason}
           onChange={(e) => setCancelReason(e.target.value)}
         />

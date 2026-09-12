@@ -23,6 +23,7 @@ export function Badge({ tone = "neutral", className, ...props }: HTMLAttributes<
 }
 
 const statusToneMap: Record<string, Tone> = {
+  awaiting_payment: "error",
   pending: "warning",
   assigned: "info",
   captain_on_the_way: "info",
@@ -39,7 +40,12 @@ const statusToneMap: Record<string, Tone> = {
   closed: "neutral",
 };
 
-export function StatusBadge({ status }: { status: string | null | undefined }) {
+/** Statuses whose raw value doesn't read well to a customer. */
+const statusLabelMap: Record<string, string> = {
+  awaiting_payment: "Payment pending",
+};
+
+export function StatusBadge({ status, label }: { status: string | null | undefined; label?: string }) {
   // Defensive: a null/undefined/empty status (a legacy record from before a
   // status field existed, a partially-loaded row, bad data) must render as
   // "unknown" rather than throw — this component has no error boundary
@@ -47,5 +53,7 @@ export function StatusBadge({ status }: { status: string | null | undefined }) {
   // the entire page, not just this one badge.
   if (!status) return <Badge tone="neutral">Unknown</Badge>;
   const tone = statusToneMap[status] || "neutral";
-  return <Badge tone={tone}>{status.replace(/_/g, " ")}</Badge>;
+  // `label` lets a localized surface (the captain panel) pass its own
+  // wording while every other caller keeps the shared English one.
+  return <Badge tone={tone}>{label || statusLabelMap[status] || status.replace(/_/g, " ")}</Badge>;
 }

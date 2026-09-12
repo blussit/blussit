@@ -26,11 +26,16 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "Subscriptions",
+    title: "Monthly passes",
     body: [
-      "A plan is purchased for a vehicle type and can be redeemed on that type or a smaller one, never a bigger one.",
-      "Each visit uses one plan credit; picking a cheaper service still uses one full credit. Add-ons are always charged separately.",
-      "Plans expire at the end of their cycle; unused visits don't carry over.",
+      "A pass is bought for ONE named vehicle and covers ONE service, chosen at purchase. Its price depends on that vehicle's type and that service.",
+      "One vehicle carries one pass at a time. You can hold passes for as many of your vehicles as you like.",
+      "The pass covers only the service it was bought for, on the vehicle it was bought for. Anything else is booked and paid for normally.",
+      "Each visit uses one wash from the pass. Add-ons (polish, extra bike washes and similar) are never covered and are paid online with that booking.",
+      "Passes are monthly and are paid online only — there is no cash option for buying a pass or for the add-ons on a pass booking.",
+      "With auto-pay on, the pass renews itself each month at the same price until you turn it off; you can turn it off at any time and keep the washes you have already paid for.",
+      "A pass runs for its month; unused washes don't carry over into the next one.",
+      "Need something these passes don't cover — more vehicles, more washes or a fixed weekly time? Request a custom plan and we'll price it for you.",
     ],
   },
   {

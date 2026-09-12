@@ -93,6 +93,24 @@ DEFAULT_BOOKING_POLICY = {
     # See _effective_start_anchor in booking_service.py.
     "late_assignment_grace_minutes": 15,
     "captain_start_lockout_hours": 4,
+    # How long a customer who chose "pay online" has to actually finish
+    # paying before the unconfirmed booking is cancelled and its slot handed
+    # back (default 30). Generous on purpose: a bank/UPI page can take a
+    # while, and the customer can also switch the booking to cash instead.
+    "payment_window_minutes": 30,
+    # How many vehicles one customer can have washed on a single visit.
+    # They share one slot seat: it's one trip to one address, so the travel
+    # is paid and counted once (see create_booking_group).
+    "max_vehicles_per_booking": 5,
+    # A nudge this many minutes BEFORE the payment window closes, to a
+    # customer who chose "pay online" and never finished (one per booking).
+    "payment_reminder_minutes_before": 10,
+    # "Time for a wash?" — sent to a customer this many days after their
+    # last completed wash when nothing is booked and no pass is live. At
+    # most once every 30 days per customer; never to opted-out customers;
+    # WhatsApp only through the approved marketing template.
+    "repeat_reminder_enabled": True,
+    "repeat_reminder_days": 21,
     "wallet_gating_enabled": False,
 }
 
@@ -122,9 +140,9 @@ class BookingPolicyService:
         _POLICY_CACHE["at"] = now
         return policy
 
-    async def set_policy(self, updates: dict) -> dict:
+    async def set_policy(self, updates: dict, updated_by: str | None = None) -> dict:
         current = await self.get_policy()
         current.update({k: v for k, v in updates.items() if v is not None})
-        await self.settings_repo.upsert("booking_policy", current, "Booking scheduling rules")
+        await self.settings_repo.upsert("booking_policy", current, "Booking scheduling rules", updated_by=updated_by)
         _POLICY_CACHE["value"] = None  # bust — next read refetches
         return current

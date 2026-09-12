@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { CalendarPlus, ChevronRight, Gift, Search, SlidersHorizontal, Sparkles, Star } from "lucide-react";
+import { CalendarPlus, ChevronRight, Gift, RotateCcw, Search, SlidersHorizontal, Sparkles, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { reviewApi } from "../../api/engagement";
 import { Button, EmptyState, Input, PageLoader, Select, StatusBadge } from "../../components/ui";
 import { useBookingFilters, type SortOrder } from "../../lib/useBookingFilters";
 import { serviceImage } from "../../components/public/landing/shared";
 import { format } from "../../lib/date";
+import { toSlabs } from "../../lib/bookingGroups";
 
-const STATUS_OPTIONS = ["", "pending", "assigned", "captain_on_the_way", "service_started", "completed", "cancelled", "rescheduled"];
+const STATUS_OPTIONS = ["", "awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "completed", "cancelled", "rescheduled"];
+const STATUS_LABELS: Record<string, string> = { awaiting_payment: "Payment pending" };
 
 export default function MyBookingsPage() {
   const navigate = useNavigate();
@@ -82,7 +84,7 @@ export default function MyBookingsPage() {
               <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
                 {STATUS_OPTIONS.map((s) => (
                   <option key={s} value={s}>
-                    {s ? s.replace(/_/g, " ") : "All statuses"}
+                    {s ? STATUS_LABELS[s] || s.replace(/_/g, " ") : "All statuses"}
                   </option>
                 ))}
               </Select>
@@ -121,16 +123,29 @@ export default function MyBookingsPage() {
         />
       ) : (
         <div className="space-y-3">
-          {filtered.map((b, i) => {
+          {toSlabs(filtered).map((slab, i) => {
+            const b = slab.primary;
             // Same real shoot photo the landing uses for this service —
             // matched by the first service's name; the size stays 44px.
             const firstService = (b.combo_name || b.service_names?.[0] || "").replace(/\s*×\d+$/, "");
             const isPlanBooking = b.payment_method === "subscription" || !!b.subscription_id;
+            // A finished or cancelled booking is the one a customer wants
+            // back — the shortcut sits on the row, and the wizard replays
+            // the car, service and address so only the date is left.
+            const canRebook = slab.status === "completed" || slab.status === "cancelled";
             return (
-              <button
-                key={b.id}
+              <div
+                key={slab.key}
+                role="button"
+                tabIndex={0}
                 onClick={() => navigate(`/app/bookings/${b.id}`)}
-                className="flex w-full items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 text-left transition-all hover:border-[#E8A900]/50 hover:shadow-[0_10px_24px_rgba(60,40,0,0.07)] sm:p-5"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    navigate(`/app/bookings/${b.id}`);
+                  }
+                }}
+                className="flex w-full cursor-pointer items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 text-left transition-all hover:border-[#E8A900]/50 hover:shadow-[0_10px_24px_rgba(60,40,0,0.07)] sm:p-5"
               >
                 {firstService ? (
                   <img
@@ -144,8 +159,16 @@ export default function MyBookingsPage() {
                   </span>
                 )}
                 <div className="min-w-0 flex-1">
+                  {/* The SERVICE leads the row — that's what the customer
+                      recognises; the booking id is reference data and sits
+                      underneath in small mono type. */}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <p className="font-mono-num text-sm font-bold text-black">{b.booking_number}</p>
+                    <p className="truncate text-sm font-bold text-black">{slab.serviceLabel}</p>
+                    {slab.isVisit && (
+                      <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-600">
+                        {slab.vehicleCount} vehicles
+                      </span>
+                    )}
                     <p className="text-sm text-gray-600">
                       {format(b.scheduled_date)} · {b.scheduled_slot}
                     </p>
@@ -156,15 +179,17 @@ export default function MyBookingsPage() {
                     )}
                   </div>
                   <p className="mt-0.5 truncate text-xs text-gray-400">
-                    {b.combo_name || b.service_names?.join(", ") || "Service"}
-                    {b.vehicle_registration_number ? ` · ${b.vehicle_registration_number}` : ""}
+                    <span className="font-mono-num">
+                      {slab.isVisit ? slab.bookings.map((x) => x.booking_number).join(" · ") : b.booking_number}
+                    </span>
+                    {slab.vehicleLabel ? ` · ${slab.vehicleLabel}` : ""}
                   </p>
                   {/* Completed bookings carry their rating right on the
                       row — filled stars for what they gave, or empty
                       "Rate" stars that jump straight into the rating
                       window (the detail page auto-opens it when the
                       booking is completed and unrated). */}
-                  {b.status === "completed" && (() => {
+                  {!slab.isVisit && b.status === "completed" && (() => {
                     const r = reviewByBookingId.get(b.id);
                     const given = r ? r.service_rating ?? r.captain_rating ?? r.rating ?? 0 : 0;
                     return (
@@ -177,10 +202,23 @@ export default function MyBookingsPage() {
                     );
                   })()}
                 </div>
-                <span className="hidden font-mono-num text-sm font-bold text-black md:block">₹{b.total_amount}</span>
-                <StatusBadge status={b.status} />
+                <span className="hidden font-mono-num text-sm font-bold text-black md:block">₹{slab.totalAmount}</span>
+                <StatusBadge status={slab.status} />
+                {canRebook && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/app/book?repeat=${b.id}`);
+                    }}
+                    title="Book this again — same vehicle, service and address; just pick a new date"
+                    className="hidden shrink-0 items-center gap-1.5 rounded-xl border border-black px-3 py-1.5 text-xs font-bold text-black transition-colors hover:bg-black hover:text-white sm:inline-flex"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> Book again
+                  </button>
+                )}
                 <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
-              </button>
+              </div>
             );
           })}
         </div>

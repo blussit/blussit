@@ -77,9 +77,6 @@ export default function SupportPage() {
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Support</p>
           <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">We're here to help</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            Raise an issue about one of your bookings — it goes straight to the team that served you.
-          </p>
         </div>
         <Button onClick={() => setOpen(true)}>
           <Plus className="h-4 w-4" /> New support request
@@ -153,9 +150,7 @@ export default function SupportPage() {
                   ))}
                 </div>
               ) : (
-                <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
-                  No updates yet — the branch manager has been notified and will respond here.
-                </p>
+                <p className="mt-2 text-sm text-[var(--color-text-secondary)]">No updates yet.</p>
               )}
 
               {/* The customer can ANSWER now — support used to be one-way. */}

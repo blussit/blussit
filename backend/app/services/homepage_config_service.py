@@ -29,8 +29,8 @@ class HomepageConfigService:
             config.update(setting.get("value", {}))
         return config
 
-    async def set_config(self, updates: dict) -> dict:
+    async def set_config(self, updates: dict, updated_by: str | None = None) -> dict:
         current = await self.get_config()
         current.update({k: v for k, v in updates.items() if v is not None})
-        await self.settings_repo.upsert("homepage_config", current, "Landing page merchandising")
+        await self.settings_repo.upsert("homepage_config", current, "Landing page merchandising", updated_by=updated_by)
         return current

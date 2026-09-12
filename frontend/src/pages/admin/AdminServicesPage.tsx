@@ -34,6 +34,7 @@ const emptyForm = {
   original_price: "",
   vehicle_type_original_prices: {} as Record<string, string>,
   is_addon: false,
+  is_waterless: false,
   variant_group: "",
   variant_label: "",
 };
@@ -88,6 +89,7 @@ export default function AdminServicesPage() {
     original_price: form.original_price ? Number(form.original_price) : undefined,
     vehicle_type_original_prices: toNumberMap(form.vehicle_type_original_prices),
     is_addon: form.is_addon,
+    is_waterless: form.is_waterless,
     variant_group: form.variant_group.trim() || undefined,
     variant_label: form.variant_label.trim() || undefined,
   });
@@ -166,6 +168,7 @@ export default function AdminServicesPage() {
       original_price: service.original_price != null ? String(service.original_price) : "",
       vehicle_type_original_prices: origMap,
       is_addon: !!service.is_addon,
+      is_waterless: !!service.is_waterless,
       variant_group: service.variant_group || "",
       variant_label: service.variant_label || "",
     });
@@ -337,10 +340,11 @@ export default function AdminServicesPage() {
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Input label="Selling price (₹)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
+            <Input label="Selling price (₹)" type="number" step={20} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
             <Input
               label="Actual price (₹)"
               type="number"
+              step={20}
               hint="Shown struck through on the website; never charged"
               value={form.original_price}
               onChange={(e) => setForm({ ...form, original_price: e.target.value })}
@@ -348,6 +352,7 @@ export default function AdminServicesPage() {
             <Input
               label="First-time price (₹)"
               type="number"
+              step={20}
               hint="Only applied if this exact vehicle & phone have no prior booking"
               value={form.discounted_price}
               onChange={(e) => setForm({ ...form, discounted_price: e.target.value })}
@@ -363,6 +368,7 @@ export default function AdminServicesPage() {
           <Input
             label="Captain fee override (₹, optional)"
             type="number"
+            step={20}
             hint="Leave blank to use the platform's default captain fee from Pricing & wallets."
             value={form.captain_fee ?? ""}
             onChange={(e) => setForm({ ...form, captain_fee: e.target.value === "" ? undefined : Number(e.target.value) })}
@@ -379,6 +385,25 @@ export default function AdminServicesPage() {
                 <span className="block text-sm font-medium text-[var(--color-text-primary)]">Add-on</span>
                 <span className="block text-xs text-[var(--color-text-secondary)]">
                   Optional extra offered on top of a main service (e.g. Exterior Polish +₹200). Not shown as its own card on the website.
+                </span>
+              </span>
+            </label>
+            {/* Drives what the customer is told to prepare at booking —
+                water and power for a water-based wash, shade for a
+                waterless one. Getting this wrong sends a captain to a
+                vehicle with no water. */}
+            <label className="mt-3 flex cursor-pointer items-start gap-3 border-t border-gray-100 pt-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                checked={form.is_waterless}
+                onChange={(e) => setForm({ ...form, is_waterless: e.target.checked })}
+              />
+              <span>
+                <span className="block text-sm font-medium text-[var(--color-text-primary)]">Waterless wash</span>
+                <span className="block text-xs text-[var(--color-text-secondary)]">
+                  Customer is asked to park in shade and told the inner wheel area isn't cleaned. Leave off for
+                  water-based washes, where they're asked to have water and power ready.
                 </span>
               </span>
             </label>
@@ -431,6 +456,7 @@ export default function AdminServicesPage() {
                     <Input
                       placeholder={`₹${form.price || 0}`}
                       type="number"
+                      step={20}
                       value={form.vehicle_type_prices[vt] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_prices: { ...form.vehicle_type_prices, [vt]: e.target.value } })}
                     />

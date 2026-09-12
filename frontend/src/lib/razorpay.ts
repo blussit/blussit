@@ -7,6 +7,12 @@ import { paymentApi, type VerifyPaymentResult } from "../api/payment";
  * the backend confirms the signature, rejected with PaymentCancelled
  * when the customer closes the modal, and rejected with the API error
  * when verification fails.
+ *
+ * Two shapes come back from create-order and checkout takes whichever it
+ * is handed: an `order_id` (pay once) or a `subscription_id` (authorise a
+ * recurring auto-pay mandate). They are signed over DIFFERENT messages,
+ * so the handler passes back exactly the id it was given and the backend
+ * picks the matching check — never both.
  */
 
 declare global {
@@ -43,31 +49,51 @@ function loadCheckout(): Promise<void> {
 }
 
 export async function payWithRazorpay(
-  order: { purpose: "booking" | "subscription"; booking_id?: string; plan_id?: string; vehicle_type?: string },
-  prefill?: { name?: string | null; email?: string | null; contact?: string | null }
+  order: { purpose: "booking" | "booking_group" | "subscription"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean },
+  prefill?: { name?: string | null; email?: string | null; contact?: string | null },
+  /** Told what actually got created — auto-pay can silently degrade to a
+   *  one-time purchase when the gateway won't set a mandate up. */
+  onCreated?: (created: { auto_pay?: boolean; auto_pay_unavailable?: boolean; amount: number }) => void
 ): Promise<VerifyPaymentResult> {
   await loadCheckout();
   const created = await paymentApi.createOrder(order);
+  onCreated?.(created);
+  // Impossible to confuse a sandbox payment with a real one: the checkout
+  // itself is labelled, and the console says so for anyone watching.
+  if (created.mode === "test") {
+    console.warn("Razorpay is in TEST mode — no real money will move.");
+  }
 
   return new Promise<VerifyPaymentResult>((resolve, reject) => {
     const rzp = new window.Razorpay!({
       key: created.key_id,
       amount: created.amount,
       currency: created.currency,
-      order_id: created.order_id,
-      name: "BLUSSIT",
-      description: created.description,
+      ...(created.subscription_id ? { subscription_id: created.subscription_id } : { order_id: created.order_id }),
+      name: created.mode === "test" ? "BLUSSIT (TEST MODE)" : "BLUSSIT",
+      description: created.mode === "test" ? `TEST — ${created.description}` : created.description,
       theme: { color: "#E8A900" },
       prefill: {
         name: prefill?.name || undefined,
         email: prefill?.email || undefined,
         contact: prefill?.contact || undefined,
       },
-      // Success path: hand the three ids to OUR backend — nothing is
-      // considered paid until the HMAC signature checks out there.
-      handler: async (resp: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) => {
+      // Success path: hand the ids to OUR backend — nothing is considered
+      // paid until the HMAC signature checks out there. Razorpay returns
+      // razorpay_subscription_id for a mandate and razorpay_order_id for a
+      // one-time order; forward whichever we opened with, so a tampered
+      // response can't pick the weaker check.
+      handler: async (resp: { razorpay_order_id?: string; razorpay_subscription_id?: string; razorpay_payment_id: string; razorpay_signature: string }) => {
         try {
-          resolve(await paymentApi.verify(resp));
+          resolve(
+            await paymentApi.verify({
+              ...(created.subscription_id
+                ? { razorpay_subscription_id: created.subscription_id }
+                : { razorpay_order_id: created.order_id }),
+              razorpay_payment_id: resp.razorpay_payment_id,
+              razorpay_signature: resp.razorpay_signature,
+            })
+          );
         } catch (err) {
           reject(err);
         }

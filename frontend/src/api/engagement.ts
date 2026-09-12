@@ -26,7 +26,38 @@ export interface CenterSubscriptionOverview {
   rows: CenterSubscriptionRow[];
 }
 
+/** What a monthly pass would cost for one car + one service. Priced by the
+ *  same backend code that charges for it. */
+export interface PassQuote {
+  plan_id: string;
+  plan_name: string;
+  vehicle_id: string;
+  vehicle_type: string;
+  service_id: string;
+  service_name: string;
+  visits: number;
+  price_per_wash: number;
+  price: number;
+  discount_percent: number;
+  /** This car already has a live pass — one car carries one pass. */
+  vehicle_has_pass: boolean;
+}
+
+export interface PlanEnquiryPayload {
+  name: string;
+  phone: string;
+  vehicle_count: number;
+  services_wanted: string;
+  washes_per_month?: number;
+  preferred_time?: string;
+  notes?: string;
+}
+
 export const subscriptionApi = {
+  quotePass: (payload: { plan_id: string; vehicle_id: string; service_id: string }) =>
+    apiClient.post<ApiSuccess<PassQuote>>("/subscriptions/quote", payload).then((r) => r.data.data),
+  submitEnquiry: (payload: PlanEnquiryPayload) =>
+    apiClient.post<ApiSuccess<null>>("/subscriptions/enquiries", payload).then((r) => r.data),
   centerOverview: (centerId: string) =>
     apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
   plans: (activeOnly = true) =>
@@ -41,6 +72,11 @@ export const subscriptionApi = {
   cancel: (id: string) => apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/cancel`).then((r) => r.data.data),
   upgrade: (id: string, newPlanId: string) =>
     apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/upgrade`, { new_plan_id: newPlanId }).then((r) => r.data.data),
+  /** Turn auto-pay OFF (the mandate is cancelled at the end of the cycle
+   *  already paid for). Turning it back ON needs a fresh authorisation and
+   *  is refused by the API — buy the plan again to restart it. */
+  setAutoPay: (id: string, enabled: boolean) =>
+    apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/auto-pay`, { enabled }).then((r) => r.data.data),
   adminAll: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<UserSubscription>>("/subscriptions/admin/all", { params }).then((r) => r.data),
 };

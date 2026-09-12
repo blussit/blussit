@@ -13,6 +13,33 @@ import { formatDateTime } from "../../lib/date";
  * booking is the surveillance number: someone finished a wash and no
  * payment was recorded.
  */
+type PresetKey = "today" | "week" | "month" | "30d" | "custom";
+
+const PRESETS: { key: PresetKey; label: string }[] = [
+  { key: "today", label: "Today" },
+  { key: "week", label: "This week" },
+  { key: "month", label: "This month" },
+  { key: "30d", label: "Last 30 days" },
+];
+
+const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+/** Ranges the way a settlement conversation actually works: today, the week
+ *  so far (Monday-based), the calendar month so far. */
+function presetRange(key: PresetKey): { from: string; to: string } {
+  const today = new Date();
+  if (key === "today") return { from: iso(today), to: iso(today) };
+  if (key === "week") {
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+    return { from: iso(monday), to: iso(today) };
+  }
+  if (key === "month") {
+    return { from: iso(new Date(today.getFullYear(), today.getMonth(), 1)), to: iso(today) };
+  }
+  return { from: "", to: "" }; // 30d is the backend default
+}
+
 export function CollectionsReportCard({
   title,
   entityLabel,
@@ -26,6 +53,14 @@ export function CollectionsReportCard({
 }) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [preset, setPreset] = useState<PresetKey>("30d");
+
+  const applyPreset = (key: PresetKey) => {
+    setPreset(key);
+    const { from, to } = presetRange(key);
+    setDateFrom(from);
+    setDateTo(to);
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: [queryKey, dateFrom, dateTo],
@@ -42,14 +77,48 @@ export function CollectionsReportCard({
           <IndianRupee className="h-4 w-4 text-[var(--color-primary)]" />
           <h2 className="font-semibold text-[var(--color-text-primary)]">{title}</h2>
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} placeholder="From" />
-          <Input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} placeholder="To" />
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Settlement happens by day, week and month — one tap each; the
+              date boxes stay for anything else. */}
+          <div className="flex flex-wrap gap-1.5">
+            {PRESETS.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => applyPreset(option.key)}
+                aria-pressed={preset === option.key}
+                className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                  preset === option.key ? "border-black bg-black text-white" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              type="date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={(e) => { setDateFrom(e.target.value); setPreset("custom"); }}
+              placeholder="From"
+            />
+            <Input
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(e) => { setDateTo(e.target.value); setPreset("custom"); }}
+              placeholder="To"
+            />
+          </div>
         </div>
       </CardHeader>
       <CardBody>
-        <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-          {dateFrom || dateTo ? "Selected range" : "Last 30 days"} · paid bookings only; "uncollected" = completed washes with no payment recorded yet.
+        <p
+          className="mb-3 text-xs text-[var(--color-text-secondary)]"
+          title={'Paid bookings only. "Uncollected" = completed washes with no payment recorded yet.'}
+        >
+          {PRESETS.find((option) => option.key === preset)?.label || "Selected range"}
         </p>
         {isLoading ? (
           <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>

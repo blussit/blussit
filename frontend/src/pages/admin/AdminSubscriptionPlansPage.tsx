@@ -16,6 +16,11 @@ const emptyForm = {
   price: 0,
   discounted_price: "",
   vehicle_type_prices: {} as Record<string, string>,
+  // "<serviceId>:<vehicleTypeId>" -> flat monthly pass price. A value here
+  // is the WHOLE monthly price for that wash type on that vehicle type and
+  // beats the computed one; blank falls back to the calculation.
+  service_pass_prices: {} as Record<string, string>,
+  plan_discount_percent: "",
   included_service_ids: [] as string[],
   total_service_count: 1,
   category_quotas: {} as Record<string, string>,
@@ -23,6 +28,30 @@ const emptyForm = {
   upgrade_to_plan_ids: [] as string[],
   is_popular: false,
 };
+
+/** The form keeps pass prices flat ("svc:type" -> "999") because a nested
+ *  object is miserable to edit in React state; the API wants them nested. */
+const passKey = (serviceId: string, typeId: string) => `${serviceId}:${typeId}`;
+
+function nestPassPrices(flat: Record<string, string>): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const [key, value] of Object.entries(flat)) {
+    const amount = Number(value);
+    if (!value || !Number.isFinite(amount) || amount <= 0) continue; // blank = use the formula
+    const [serviceId, typeId] = key.split(":");
+    if (!serviceId || !typeId) continue;
+    (out[serviceId] ||= {})[typeId] = amount;
+  }
+  return out;
+}
+
+function flattenPassPrices(nested?: Record<string, Record<string, number>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [serviceId, byType] of Object.entries(nested || {})) {
+    for (const [typeId, amount] of Object.entries(byType || {})) out[passKey(serviceId, typeId)] = String(amount);
+  }
+  return out;
+}
 
 function totalOf(quotas: Record<string, string>): number {
   return Object.values(quotas).reduce((sum, v) => sum + (Number(v) || 0), 0);
@@ -74,6 +103,8 @@ export default function AdminSubscriptionPlansPage() {
       price: form.price,
       discounted_price: form.discounted_price ? Number(form.discounted_price) : undefined,
       vehicle_type_prices: toNumberMap(form.vehicle_type_prices),
+      plan_discount_percent: Number(form.plan_discount_percent) || 0,
+      service_pass_prices: nestPassPrices(form.service_pass_prices),
       included_service_ids: form.included_service_ids,
       category_quotas,
       total_service_count,
@@ -141,6 +172,8 @@ export default function AdminSubscriptionPlansPage() {
       price: plan.price,
       discounted_price: plan.discounted_price != null ? String(plan.discounted_price) : "",
       vehicle_type_prices: typePrices,
+      service_pass_prices: flattenPassPrices(plan.service_pass_prices),
+      plan_discount_percent: plan.plan_discount_percent != null ? String(plan.plan_discount_percent) : "",
       included_service_ids: plan.included_service_ids || [],
       total_service_count: plan.total_service_count || 1,
       category_quotas: quotas,
@@ -250,10 +283,11 @@ export default function AdminSubscriptionPlansPage() {
             <option value="yearly">Yearly</option>
           </Select>
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Price (₹)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
+            <Input label="Price (₹)" type="number" step={20} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
             <Input
               label="Discounted price (optional)"
               type="number"
+              step={20}
               value={form.discounted_price}
               onChange={(e) => setForm({ ...form, discounted_price: e.target.value })}
             />
@@ -272,6 +306,7 @@ export default function AdminSubscriptionPlansPage() {
                     <span className="text-sm text-[var(--color-text-primary)]">{t.name}</span>
                     <Input
                       type="number"
+                      step={20}
                       placeholder={`₹${form.price || 0}`}
                       value={form.vehicle_type_prices[t.id] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_prices: { ...form.vehicle_type_prices, [t.id]: e.target.value } })}
@@ -283,10 +318,9 @@ export default function AdminSubscriptionPlansPage() {
           )}
 
           <div className="rounded-xl border-2 border-dashed border-[var(--color-primary)]/40 p-4">
-            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Which service(s) this plan covers</p>
+            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Which washes this pass is sold for</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-              Fixed by you, not chosen by the customer at booking time. Booking anything else on this subscription is treated
-              as a same-visit swap — the customer pays the price difference instead of it being free or blocked outright.
+              The buyer picks ONE of these at purchase, and that is the only wash the pass ever covers.
             </p>
             <div className="flex flex-wrap gap-2">
               {services.map((s) => (
@@ -303,6 +337,59 @@ export default function AdminSubscriptionPlansPage() {
               ))}
             </div>
             {!form.included_service_ids.length && <p className="mt-2 text-xs text-[var(--color-error)]">Pick at least one service.</p>}
+
+            {/* Monthly price per wash type x vehicle type. Blank = work it
+                out from the service price; a number here is the whole
+                monthly price and is what the customer is charged. */}
+            {!!form.included_service_ids.length && (
+              <div className="mt-4 border-t border-gray-100 pt-3">
+                <p className="text-sm font-medium text-[var(--color-text-primary)]">Monthly price per wash</p>
+                <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
+                  Leave blank to calculate it ({form.total_service_count} washes less the discount below). Steps of ₹20 — type any figure.
+                </p>
+                <div className="space-y-3">
+                  {form.included_service_ids.map((sid) => {
+                    const service = services.find((x) => x.id === sid);
+                    const types = form.vehicle_types.length ? form.vehicle_types : (vehicleTypes || []).map((t) => t.id);
+                    return (
+                      <div key={sid}>
+                        <p className="mb-1 text-xs font-semibold text-black">{service?.name || sid}</p>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                          {types.map((tid) => (
+                            <Input
+                              key={tid}
+                              label={vehicleTypeName(tid)}
+                              type="number"
+                              min={0}
+                              step={20}
+                              placeholder="auto"
+                              value={form.service_pass_prices[passKey(sid, tid)] || ""}
+                              onChange={(e) =>
+                                setForm({
+                                  ...form,
+                                  service_pass_prices: { ...form.service_pass_prices, [passKey(sid, tid)]: e.target.value },
+                                })
+                              }
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 max-w-[220px]">
+                  <Input
+                    label="Pass discount (%)"
+                    type="number"
+                    min={0}
+                    max={90}
+                    hint="Only used where no price is set above"
+                    value={form.plan_discount_percent}
+                    onChange={(e) => setForm({ ...form, plan_discount_percent: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
             <div className="mt-3">
               <Input
                 label="Total visits included"

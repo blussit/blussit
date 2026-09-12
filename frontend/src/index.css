@@ -74,9 +74,28 @@
 }
 
 @layer utilities {
+  /* All numeric data (prices, booking codes, KPIs) — italic JetBrains
+     Mono, regular by default. Pair with Tailwind's own weight utilities
+     for the loaded steps: font-medium (500), font-semibold (600); bold/
+     extrabold both land on the one heavy weight actually loaded (800),
+     via the overrides below, so nothing needs re-touching call-site by
+     call-site. */
   .font-mono-num {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+    font-style: italic;
+    font-weight: 400;
+  }
+  .font-mono-num.font-medium {
+    font-weight: 500;
+  }
+  .font-mono-num.font-semibold {
+    font-weight: 600;
+  }
+  .font-mono-num.font-bold,
+  .font-mono-num.font-extrabold,
+  .font-mono-num.font-black {
+    font-weight: 800;
   }
   .container-page {
     max-width: 1440px;
@@ -159,12 +178,46 @@
   animation: marquee 22s linear infinite;
 }
 
+/* Glare on a glossy black surface. Two layers, both always in motion so
+   the reflection never "parks":
+     - .animate-glare: a hard specular streak crossing edge to edge at a
+       constant speed (two of them, half a cycle apart, so one is always
+       on screen — the reflection floats continuously);
+     - .animate-sheen-drift: a wide soft highlight sliding slowly back and
+       forth, the way a room light moves across a screen.
+   prefers-reduced-motion (below) neutralises both. */
+@keyframes glare-slide {
+  from { transform: translateX(-340%) skewX(-18deg); }
+  to   { transform: translateX(440%) skewX(-18deg); }
+}
+
+.animate-glare {
+  animation: glare-slide 6s linear infinite;
+}
+
+@keyframes sheen-drift {
+  0%, 100% { transform: translateX(-14%); opacity: 0.5; }
+  50%      { transform: translateX(14%);  opacity: 1; }
+}
+
+.animate-sheen-drift {
+  animation: sheen-drift 9s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Purely decorative light layers: the blanket rule above would freeze
+     them at their un-transformed position (a static bright streak parked
+     at the left edge), so remove them outright instead. */
+  .animate-glare,
+  .animate-sheen-drift {
+    display: none !important;
   }
 }
 

@@ -30,6 +30,7 @@ class ServiceCreateRequest(BaseModel):
     original_price: Optional[float] = Field(default=None, ge=0, description="Struck-through 'actual' price shown on the website; display only, never charged")
     vehicle_type_original_prices: dict[str, float] = Field(default_factory=dict, description="Per-vehicle-type original-price overrides; falls back to `original_price`")
     is_addon: bool = Field(default=False, description="Optional extra sold only on top of a main service; hidden from landing cards")
+    is_waterless: bool = Field(default=False, description="Waterless wash — needs shade; no water/power from the customer.")
     variant_group: Optional[str] = Field(default=None, max_length=60, description="Services sharing a group are variants of one product (e.g. Bike Wash 1–4 bikes)")
     variant_label: Optional[str] = Field(default=None, max_length=40, description="Short label for this variant, e.g. '2 bikes'")
     captain_fee: Optional[float] = Field(default=None, ge=0, description="Flat ₹ paid to captain for this service; falls back to admin default if unset")
@@ -52,6 +53,7 @@ class ServiceUpdateRequest(BaseModel):
     original_price: Optional[float] = Field(default=None, ge=0)
     vehicle_type_original_prices: Optional[dict[str, float]] = None
     is_addon: Optional[bool] = None
+    is_waterless: Optional[bool] = None
     variant_group: Optional[str] = Field(default=None, max_length=60)
     variant_label: Optional[str] = Field(default=None, max_length=40)
     captain_fee: Optional[float] = None

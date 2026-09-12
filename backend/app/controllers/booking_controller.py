@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
 from app.schemas.booking_schema import (
+    BookingGroupCreateRequest,
     BookingAssignCaptainRequest,
     BookingCancelRequest,
     BookingCreateRequest,
@@ -60,7 +61,11 @@ class BookingController:
         )
 
     async def get(self, current_user: CurrentUser, booking_id: str):
-        return success(await self.service.get_booking_with_history(booking_id, current_user.id, current_user.role))
+        return success(
+            await self.service.get_booking_with_history(
+                booking_id, current_user.id, current_user.role, current_user.service_center_id
+            )
+        )
 
     async def list_my_bookings(self, current_user: CurrentUser, status: str | None, pagination: PaginationParams):
         items, total = await self.service.list_for_customer(current_user.id, status, pagination.page, pagination.page_size)
@@ -126,6 +131,55 @@ class BookingController:
     async def capture_after_photo(self, current_user: CurrentUser, booking_id: str, payload: PhotoCaptureRequest):
         result = await self.service.capture_after_photo_and_complete(booking_id, payload, current_user.id)
         return success(result, "Service completed")
+
+    async def get_group(self, current_user: CurrentUser, booking_group_id: str):
+        return success(
+            await self.service.get_booking_group(
+                booking_group_id, current_user.id, current_user.role, current_user.service_center_id
+            )
+        )
+
+    async def switch_group_to_cash(self, current_user: CurrentUser, booking_group_id: str):
+        result = await self.service.switch_group_to_cash(booking_group_id, current_user.id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "VISIT_SWITCHED_TO_CASH", "bookings", booking_group_id, None
+        )
+        return success(result, "Visit confirmed — pay the captain at your doorstep")
+
+    async def cancel_group(self, current_user: CurrentUser, booking_group_id: str, payload: BookingCancelRequest):
+        result = await self.service.cancel_booking_group(
+            booking_group_id, payload, current_user.id, current_user.role, current_user.service_center_id
+        )
+        await self.audit.log_action(
+            current_user.id, current_user.role, "CANCEL_BOOKING_GROUP", "bookings", booking_group_id,
+            {"vehicles": result["cancelled_count"]},
+        )
+        return success(result, "Visit cancelled")
+
+    async def assign_group(self, current_user: CurrentUser, booking_group_id: str, payload: BookingAssignCaptainRequest):
+        result = await self.service.assign_captain_to_group(
+            booking_group_id, payload, current_user.id, current_user.role, current_user.service_center_id
+        )
+        await self.audit.log_action(
+            current_user.id, current_user.role, "ASSIGN_CAPTAIN_GROUP", "bookings", booking_group_id,
+            {"captain_id": payload.captain_id, "vehicles": result["assigned_count"]},
+        )
+        return success(result, f"{result['assigned_count']} vehicles assigned")
+
+    async def create_group(self, current_user: CurrentUser, payload: BookingGroupCreateRequest):
+        result = await self.service.create_booking_group(current_user.id, payload)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "CREATE_BOOKING_GROUP", "bookings",
+            result["booking_group_id"], {"vehicles": result["vehicle_count"]},
+        )
+        return success(result, f"{result['vehicle_count']} vehicles booked for one visit")
+
+    async def switch_to_cash(self, current_user: CurrentUser, booking_id: str):
+        result = await self.service.switch_to_cash(booking_id, current_user.id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "BOOKING_SWITCHED_TO_CASH", "bookings", booking_id, None
+        )
+        return success(result, "Booking confirmed — pay the captain at your doorstep")
 
     async def cancel(self, current_user: CurrentUser, booking_id: str, payload: BookingCancelRequest):
         result = await self.service.cancel_booking(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)

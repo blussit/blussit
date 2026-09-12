@@ -35,6 +35,11 @@ class BookingModel(BusinessRecordBase):
     service_center_id: str
     captain_id: Optional[str] = None
     service_ids: list[str] = []
+    # Only counts above 1 are stored — {service_id: 3} means "×3".
+    service_quantities: dict[str, int] = {}
+    # Set when the booking was sold as a combo bundle; service_ids above is
+    # that bundle's expansion. None for an ordinary pick-your-services booking.
+    combo_id: Optional[str] = None
     subscription_id: Optional[str] = None
     # Exactly what consume_for_services deducted at creation time (see
     # UserSubscriptionService.plan_consumption/commit_consumption) — snapshotted
@@ -90,6 +95,16 @@ class BookingModel(BusinessRecordBase):
     # BookingService.find_bookings_late_to_start.
     late_start_reminder_sent_at: Optional[datetime] = None
 
+    # Several vehicles washed on ONE visit share a group id. They are real,
+    # separate bookings — each keeps its own plate verification, before/after
+    # photos, pass redemption and review — but they were created together,
+    # occupy ONE slot seat between them (same address, no travel in between),
+    # are paid for together and are assigned to one captain.
+    booking_group_id: Optional[str] = None
+    # Minutes after the slot start this car is expected to begin — the summed
+    # duration of the cars before it on the same visit. 0 for the first car
+    # and for every single-car booking.
+    group_offset_minutes: int = 0
     status: BookingStatus = BookingStatus.PENDING
     payment_status: PaymentStatus = PaymentStatus.PENDING
     payment_method: PaymentMethod = PaymentMethod.CASH

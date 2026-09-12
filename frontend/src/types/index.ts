@@ -111,6 +111,8 @@ export interface Service {
   vehicle_type_original_prices?: Record<string, number>;
   // Optional extra sold only on top of a main service (e.g. exterior polish +₹200).
   is_addon?: boolean;
+  /** Waterless wash — needs shade, and the customer supplies no water/power. */
+  is_waterless?: boolean;
   // Sibling variants of one product (Bike Wash 1–4 bikes) share a group; each has a label.
   variant_group?: string | null;
   variant_label?: string | null;
@@ -148,6 +150,17 @@ export interface BookingPolicy {
   slot_booking_cutoff_minutes: number;
   // How far ahead bookings/holds are accepted (days from today, inclusive).
   max_advance_days: number;
+  /** How many vehicles one customer can have washed on a single visit. */
+  max_vehicles_per_booking?: number;
+  /** Minutes an online-pay booking is held before its slot is released. */
+  payment_window_minutes?: number;
+  /** Minutes before that window closes that the customer gets one nudge. */
+  payment_reminder_minutes_before?: number;
+  /** "I've reached" to before-photo gap that flags the manager. */
+  arrival_to_start_tolerance_minutes?: number;
+  /** "Time for a wash?" nudge: on/off and days since the last wash. */
+  repeat_reminder_enabled?: boolean;
+  repeat_reminder_days?: number;
   delay_tolerance_minutes: number;
   captain_travel_buffer_minutes: number;
   photo_geofence_radius_m: number;
@@ -237,6 +250,10 @@ export interface ContactMessage {
 }
 
 export type BookingStatus =
+  /** Created and holding its slot, but NOT a real booking yet: the customer
+   *  chose to pay online and hasn't finished. Nobody has been notified and
+   *  no captain can be assigned until it's paid (or switched to cash). */
+  | "awaiting_payment"
   | "pending"
   | "assigned"
   | "captain_on_the_way"
@@ -265,6 +282,10 @@ export interface EquipmentUsed {
 
 export interface Booking {
   id: string;
+  /** Several cars washed on ONE visit share this. Null on a single booking. */
+  booking_group_id?: string | null;
+  /** Minutes after the slot start this car begins — 0 for the first. */
+  group_offset_minutes?: number;
   booking_number: string;
   customer_id: string;
   // Only present on the response to a customer's OWN self-service
@@ -279,6 +300,10 @@ export interface Booking {
   captain_id?: string | null;
   captain_profile?: CaptainProfileSnapshot | null;
   service_ids: string[];
+  /** Only counts above 1 are stored — { [serviceId]: 3 } means "×3". */
+  service_quantities?: Record<string, number> | null;
+  /** Set when this was sold as a combo bundle; service_ids is its expansion. */
+  combo_id?: string | null;
   subscription_id?: string | null;
   scheduled_date: string;
   scheduled_slot: string;
@@ -409,10 +434,15 @@ export interface SubscriptionPlan {
   vehicle_type_prices?: Record<string, number>;
   vehicle_type_discounted_prices?: Record<string, number>;
   category_quotas?: Record<string, number>;
-  // Which specific services this plan covers — when set, a booking made
-  // from this subscription uses exactly these, no picking required. Empty
-  // = an unrestricted/legacy plan (any service, up to the flat count).
+  // THE MENU a buyer picks ONE service from for this pass (Jet Wash,
+  // Waterless, Star Wash — deliberately not Deep Cleaning). On pre-pass
+  // plans this instead means "everything here is covered".
   included_service_ids?: string[];
+  /** Pass saving vs paying per wash — see the backend's resolve_pass_price. */
+  plan_discount_percent?: number;
+  /** service_id -> vehicle_type_id -> flat monthly pass price, set by admin.
+   *  A value here IS the whole monthly price and beats the calculation. */
+  service_pass_prices?: Record<string, Record<string, number>>;
   total_service_count: number;
   vehicle_types: VehicleType[];
   upgrade_to_plan_ids?: string[];
@@ -427,11 +457,12 @@ export interface UserSubscription {
   // Only on the response to a customer's own POST /subscriptions.
   confirmation_token?: string;
   plan_name?: string;
-  // No longer locked to one vehicle — eligibility is by vehicle TYPE (see
-  // plan.vehicle_types). Present (non-null) only on subscriptions created
-  // under the earlier vehicle-locked design; never treat it as
-  // authoritative for eligibility.
+  // AUTHORITATIVE AGAIN on a pass: the ONE car it belongs to, named at
+  // purchase. Null only on pre-pass subscriptions, which redeem by vehicle
+  // TYPE instead (see lib/planTier.ts).
   vehicle_id?: string | null;
+  /** The one main service this pass covers. Null on pre-pass subscriptions. */
+  service_id?: string | null;
   // The vehicle-type TIER this subscription was bought at (VehicleType id).
   // Redeemable on that type or any type the plan prices cheaper — never a
   // costlier one. Null/absent = pre-tier purchase, plan.vehicle_types alone
@@ -450,6 +481,15 @@ export interface UserSubscription {
   remaining_by_category?: Record<string, number>;
   start_date: string;
   end_date: string;
+  /** Auto-pay: the plan re-bills itself every cycle instead of lapsing. */
+  auto_renew?: boolean;
+  /** Present only while an auto-pay mandate backs this plan. */
+  razorpay_subscription_id?: string | null;
+  /** How many times auto-pay has renewed it (0 = the original cycle). */
+  renewal_count?: number;
+  last_renewed_at?: string | null;
+  /** Upgrade response only — the old plan's mandate had to be retired. */
+  auto_pay_retired?: boolean;
 }
 
 export interface ServiceCenter {

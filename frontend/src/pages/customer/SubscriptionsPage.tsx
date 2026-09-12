@@ -1,83 +1,93 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Gift } from "lucide-react";
+import { CalendarClock, Gift, RefreshCw } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { vehicleApi } from "../../api/profile";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { Button, Card, EmptyState, Modal, PageLoader, StatusBadge } from "../../components/ui";
+import { PassPurchaseSheet } from "../../components/customer/PassPurchaseSheet";
+import { CustomPlanEnquiryModal } from "../../components/shared/CustomPlanEnquiryModal";
 import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 import { format } from "../../lib/date";
-import { cheapestTier, planPriceFor, tierAllows } from "../../lib/planTier";
-import type { SubscriptionPlan } from "../../types";
+import { passFromPrice } from "../../lib/passPricing";
+import type { SubscriptionPlan, UserSubscription } from "../../types";
+import { VehicleIcon } from "../../components/shared/VehicleIcon";
 
+/**
+ * Monthly passes (founder model): a pass belongs to ONE car and covers ONE
+ * service. Buy as many as you have cars; a car never carries two. Anything
+ * that doesn't fit — a fleet, a different rhythm — goes through the custom
+ * enquiry at the bottom rather than dead-ending.
+ */
 export default function SubscriptionsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const confirm = useConfirm();
   const queryClient = useQueryClient();
   const [verifyOpen, setVerifyOpen] = useState(false);
+
   const { data: plans, isLoading: plansLoading } = useQuery({ queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) });
   const { data: mySubs, isLoading: subsLoading } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-subscriptions"], queryFn: () => catalogApi.services({ page_size: 100 }) });
+  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const services = servicesData?.data || [];
-  const serviceName = (id: string) => services.find((s) => s.id === id)?.name || id;
-  const typeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
+  const serviceName = (id?: string | null) => services.find((s) => s.id === id)?.name || "";
+  const plateOf = (id?: string | null) => (vehicles || []).find((v) => v.id === id)?.registration_number || "";
+  const vehicleTypeOf = (id?: string | null) => (vehicles || []).find((v) => v.id === id)?.vehicle_type;
 
-  const [subscribingPlan, setSubscribingPlan] = useState<SubscriptionPlan | null>(null);
-  const [subscribeError, setSubscribeError] = useState("");
-  // The TIER being purchased — which vehicle type this card will be paid
-  // for. Sets the price now and caps redemption later (that type & smaller).
-  const [subscribeTypeId, setSubscribeTypeId] = useState<string | null>(null);
-
-  // Which vehicle types a plan is sold for — the plan's own list, or every
-  // active type when the plan doesn't restrict.
-  const candidateTypesFor = (plan: SubscriptionPlan) =>
-    plan.vehicle_types?.length
-      ? plan.vehicle_types
-      : (vehicleTypes || []).filter((t) => t.is_active !== false).map((t) => t.id);
-
+  const [buyingPlan, setBuyingPlan] = useState<SubscriptionPlan | null>(null);
+  const [purchaseError, setPurchaseError] = useState("");
+  const [pendingPurchase, setPendingPurchase] = useState<{ vehicleId: string; serviceId: string; autoPay: boolean } | null>(null);
   const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
   const [upgradeError, setUpgradeError] = useState("");
+  const [enquiryOpen, setEnquiryOpen] = useState(false);
 
   const invalidateSubs = () => queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
 
-  // Founder rule: subscriptions are ONLINE-PAYMENT ONLY. This launches
-  // Razorpay for the plan's tier price (amount resolved server-side) and
-  // the subscription is created by the backend only AFTER the payment
-  // signature verifies — closing the modal buys nothing.
-  const subscribeMutation = useMutation({
-    mutationFn: () =>
-      payWithRazorpay(
-        { purpose: "subscription", plan_id: subscribingPlan!.id, vehicle_type: subscribeTypeId || undefined },
+
+  const purchaseMutation = useMutation({
+    mutationFn: (args: { vehicleId: string; serviceId: string; autoPay: boolean }) => {
+      setPurchaseError("");
+      return payWithRazorpay(
+        {
+          purpose: "subscription",
+          plan_id: buyingPlan!.id,
+          vehicle_id: args.vehicleId,
+          service_id: args.serviceId,
+          auto_pay: args.autoPay,
+        },
         { name: user?.full_name, email: user?.email, contact: user?.phone }
-      ),
+      );
+    },
     onSuccess: (result) => {
       invalidateSubs();
-      const planName = result.subscription?.plan_name || subscribingPlan?.name;
-      setSubscribingPlan(null);
-      setSubscribeError("");
-      // Same opaque, single-purpose token approach as a booking — see
-      // PurchaseConfirmationModel / ThankYouPage.
+      const planName = result.subscription?.plan_name || buyingPlan?.name;
+      setBuyingPlan(null);
+      setPurchaseError("");
       navigate(`/thank-you?token=${result.confirmation_token}${planName ? `&plan=${encodeURIComponent(planName)}` : ""}`);
     },
     onError: (err) => {
-      if (err instanceof PaymentCancelled) return; // modal closed — nothing purchased, nothing to show
-      setSubscribeError(getErrorMessage(err));
+      // A pass only exists once the payment verifies, so an abandoned
+      // checkout has bought nothing — say so rather than closing silently.
+      if (err instanceof PaymentCancelled) {
+        setPurchaseError("Payment wasn't completed, so your pass hasn't started. Nothing was charged — you can try again.");
+        return;
+      }
+      setPurchaseError(getErrorMessage(err));
     },
   });
 
-  const cancelMutation = useMutation({
-    mutationFn: subscriptionApi.cancel,
+  const cancelMutation = useMutation({ mutationFn: subscriptionApi.cancel, onSuccess: invalidateSubs });
+  const autoPayOffMutation = useMutation({
+    mutationFn: (id: string) => subscriptionApi.setAutoPay(id, false),
     onSuccess: invalidateSubs,
   });
-
   const upgradeMutation = useMutation({
     mutationFn: (newPlanId: string) => subscriptionApi.upgrade(upgradingSub!.id, newPlanId),
     onSuccess: () => {
@@ -88,225 +98,223 @@ export default function SubscriptionsPage() {
     onError: (err) => setUpgradeError(getErrorMessage(err)),
   });
 
-  // Which of the customer's owned vehicles a plan covers at a given tier —
-  // the plan's type list AND the tier cap (that type or cheaper) both apply.
-  const eligibleVehiclesFor = (plan: SubscriptionPlan, purchasedType?: string | null) =>
-    (vehicles || []).filter(
-      (v) =>
-        (!plan.vehicle_types?.length || plan.vehicle_types.includes(v.vehicle_type)) &&
-        tierAllows(plan, purchasedType, v.vehicle_type)
-    );
-
-  const openSubscribe = (plan: SubscriptionPlan) => {
-    setSubscribingPlan(plan);
-    // Default the tier to the cheapest type the plan is sold for (in
-    // practice: hatchback) — same default the plan card's price shows.
-    setSubscribeTypeId(cheapestTier(plan, candidateTypesFor(plan)).typeId);
-    setSubscribeError("");
+  const startPurchase = (args: { vehicleId: string; serviceId: string; autoPay: boolean }) => {
+    if (!user?.phone_verified) {
+      setPendingPurchase(args);
+      setVerifyOpen(true);
+      return;
+    }
+    purchaseMutation.mutate(args);
   };
 
-  const upgradeTargets = upgradingSub ? (plans || []).filter((p) => (plans?.find((cp) => cp.id === upgradingSub.planId)?.upgrade_to_plan_ids || []).includes(p.id)) : [];
+  const upgradeTargets = upgradingSub
+    ? (plans || []).filter((p) => (plans?.find((cp) => cp.id === upgradingSub.planId)?.upgrade_to_plan_ids || []).includes(p.id))
+    : [];
+
+  const renderPass = (sub: UserSubscription) => {
+    const plan = plans?.find((p) => p.id === sub.plan_id);
+    const isActive = sub.effective_status === "active";
+    const canUpgrade = isActive && !!plan?.upgrade_to_plan_ids?.length;
+    const pct = sub.total_service_count ? Math.round(((sub.remaining_service_count ?? 0) / sub.total_service_count) * 100) : 0;
+    const plate = plateOf(sub.vehicle_id);
+    const covered = serviceName(sub.service_id);
+    return (
+      <Card key={sub.id} className="border-[#E5E7EB] p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="font-display font-bold text-[var(--color-text-primary)]">{covered || plan?.name || "Monthly pass"}</h3>
+            {plate && (
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-gray-500">
+                <VehicleIcon vehicleTypeId={vehicleTypeOf(sub.vehicle_id)} className="h-3 w-3" />
+                <span className="font-mono-num">{plate}</span>
+              </p>
+            )}
+          </div>
+          <StatusBadge status={sub.effective_status} />
+        </div>
+
+        <p className="mt-3 text-sm text-gray-600">
+          <span className="font-mono-num font-bold text-black">{sub.remaining_service_count}</span> of {sub.total_service_count} washes left
+        </p>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
+          <div className="h-full rounded-full bg-black" style={{ width: `${pct}%` }} />
+        </div>
+
+        <p className="mt-2.5 flex items-center gap-1.5 text-xs text-gray-500">
+          {sub.auto_renew ? (
+            <>
+              <RefreshCw className="h-3.5 w-3.5" />
+              Renews automatically on {format(sub.end_date)}
+            </>
+          ) : (
+            <>
+              <CalendarClock className="h-3.5 w-3.5" />
+              {isActive ? `Ends ${format(sub.end_date)} — no auto-renewal` : `Ended ${format(sub.end_date)}`}
+            </>
+          )}
+        </p>
+
+        {isActive && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => navigate(`/app/book?subscription=${sub.id}`)} disabled={sub.remaining_service_count <= 0}>
+              Book a wash
+            </Button>
+            {canUpgrade && (
+              <Button size="sm" variant="outline" onClick={() => setUpgradingSub({ id: sub.id, planId: sub.plan_id })}>
+                Upgrade
+              </Button>
+            )}
+            {sub.auto_renew && (
+              <Button
+                size="sm"
+                variant="ghost"
+                isLoading={autoPayOffMutation.isPending && autoPayOffMutation.variables === sub.id}
+                onClick={async () => {
+                  if (
+                    await confirm({
+                      title: "Turn off auto-pay?",
+                      message: `Your ${sub.remaining_service_count} remaining wash(es) stay usable until ${format(sub.end_date)} — it just won't renew after that.`,
+                    })
+                  )
+                    autoPayOffMutation.mutate(sub.id);
+                }}
+              >
+                Turn off auto-pay
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={async () => {
+                if (
+                  await confirm({
+                    title: "Cancel this pass?",
+                    message: `${sub.remaining_service_count} unused wash(es) will be lost${sub.auto_renew ? ", and auto-pay stops immediately" : ""} — this can't be undone.`,
+                    tone: "danger",
+                  })
+                )
+                  cancelMutation.mutate(sub.id);
+              }}
+            >
+              Cancel pass
+            </Button>
+          </div>
+        )}
+      </Card>
+    );
+  };
 
   return (
     <div className="space-y-8">
       <div>
-        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Plans</p>
-        <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">Subscriptions</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Subscribe once, save on every wash — manage your active plans below.</p>
+        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Passes</p>
+        <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">Monthly passes</h1>
+        <p className="mt-1 text-sm text-gray-600">One car, one service, one monthly price — book a wash whenever you need it.</p>
       </div>
 
       <div>
-        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">My subscriptions</h2>
+        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">My passes</h2>
         {subsLoading ? (
           <PageLoader />
         ) : !mySubs?.length ? (
-          <EmptyState icon={Gift} title="No active subscriptions" description="Subscribe to a plan below to save on regular services." />
+          <EmptyState icon={Gift} title="No passes yet" description="Pick a pass below to save on every wash for one of your cars." />
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {mySubs.map((sub) => {
-              const plan = plans?.find((p) => p.id === sub.plan_id);
-              const isActive = sub.effective_status === "active";
-              const canUpgrade = isActive && !!plan?.upgrade_to_plan_ids?.length;
-              return (
-                <Card key={sub.id} className="border-[#F3E5B5] p-5">
-                  <div className="flex items-start justify-between">
-                    <h3 className="font-display font-bold text-[var(--color-text-primary)]">{plan?.name || "Subscription"}</h3>
-                    <StatusBadge status={sub.effective_status} />
-                  </div>
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                    {sub.vehicle_type
-                      ? `Bought for: ${typeName(sub.vehicle_type)} — works for that type & smaller`
-                      : plan?.vehicle_types?.length
-                        ? `Covers: ${plan.vehicle_types.map(typeName).join(", ")}`
-                        : "Covers: any vehicle type"}
-                  </p>
-                  {plan && (
-                    <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                      {eligibleVehiclesFor(plan, sub.vehicle_type).length
-                        ? `Usable on: ${eligibleVehiclesFor(plan, sub.vehicle_type).map((v) => `${v.brand} ${v.model} (${v.registration_number})`).join(", ")}`
-                        : "You don't currently own a matching vehicle — add one to use this plan."}
-                    </p>
-                  )}
-                  <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
-                    <span className="font-mono-num font-bold text-black">{sub.remaining_service_count}</span> of {sub.total_service_count} services remaining
-                  </p>
-                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-gray-100">
-                    <div
-                      className="h-full rounded-full bg-[#E8A900]"
-                      style={{ width: `${sub.total_service_count ? Math.round(((sub.remaining_service_count ?? 0) / sub.total_service_count) * 100) : 0}%` }}
-                    />
-                  </div>
-                  <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
-                    Valid until {format(sub.end_date)}
-                  </p>
-                  {isActive && (
-                    <div className="mt-4 flex gap-2">
-                      {canUpgrade && (
-                        <Button size="sm" variant="outline" onClick={() => setUpgradingSub({ id: sub.id, planId: sub.plan_id })}>
-                          Upgrade
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={async () => {
-                          if (
-                            await confirm({
-                              title: "Cancel this plan?",
-                              message: `${sub.remaining_service_count} unused visit(s) will be lost — this can't be undone.`,
-                              tone: "danger",
-                            })
-                          )
-                            cancelMutation.mutate(sub.id);
-                        }}
-                      >
-                        Cancel plan
-                      </Button>
-                    </div>
-                  )}
-                </Card>
-              );
-            })}
-          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{mySubs.map(renderPass)}</div>
         )}
       </div>
 
       <div>
-        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Available plans</h2>
+        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Get a pass</h2>
         {plansLoading ? (
           <PageLoader />
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {(plans || []).map((plan) => (
-              <Card key={plan.id} className="border-[#F3E5B5] p-5 transition-all hover:-translate-y-0.5 hover:border-[#E8A900]/50 hover:shadow-[0_14px_30px_rgba(60,40,0,0.08)]">
-                <h3 className="font-display font-bold text-[var(--color-text-primary)]">{plan.name}</h3>
-                {(() => {
-                  // Default display = the cheapest tier's price (hatchback in
-                  // practice); bigger types are priced in the purchase step.
-                  const cheap = cheapestTier(plan, candidateTypesFor(plan));
-                  const varies = candidateTypesFor(plan).some((id) => planPriceFor(plan, id) !== cheap.price);
-                  return (
-                    <>
-                      <p className="mt-1 font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">₹{cheap.price}</p>
-                      {cheap.typeId && varies && (
-                        <p className="text-xs text-[var(--color-text-secondary)]">{typeName(cheap.typeId)} price · changes with vehicle type</p>
-                      )}
-                    </>
-                  );
-                })()}
-                <p className="text-xs capitalize text-[var(--color-text-secondary)]">{plan.billing_cycle} · {plan.total_service_count} visits</p>
-                {!!plan.included_service_ids?.length && (
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Covers: {plan.included_service_ids.map(serviceName).join(", ")}</p>
-                )}
-                {!!plan.vehicle_types?.length && (
-                  <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                    For: {plan.vehicle_types.map((id) => vehicleTypes?.find((t) => t.id === id)?.name || id).join(", ")}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {(plans || []).map((plan) => {
+              const from = passFromPrice(plan, services, vehicleTypes);
+              const menuNames = (plan.included_service_ids || []).map(serviceName).filter(Boolean);
+              return (
+                <Card key={plan.id} className="flex flex-col border-[#E5E7EB] p-5">
+                  <h3 className="font-display font-bold text-[var(--color-text-primary)]">{plan.name}</h3>
+                  {from != null && (
+                    <p className="mt-1">
+                      <span className="text-xs text-gray-500">from </span>
+                      <span className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">₹{from}</span>
+                      <span className="text-xs text-gray-500"> / month</span>
+                    </p>
+                  )}
+                  <p className="mt-1 text-xs text-gray-500">
+                    {plan.total_service_count} washes a month · final price depends on your car and service
                   </p>
-                )}
-                <Button className="mt-4 w-full !rounded-xl bg-[#E8A900] hover:bg-[#D99A00]" onClick={() => openSubscribe(plan)}>
-                  Subscribe
-                </Button>
-              </Card>
-            ))}
+                  {!!menuNames.length && (
+                    <p className="mt-2 text-xs text-gray-600">Choose from: {menuNames.join(", ")}</p>
+                  )}
+                  <Button className="mt-4 w-full" onClick={() => { setBuyingPlan(plan); setPurchaseError(""); }}>
+                    Choose this pass
+                  </Button>
+                </Card>
+              );
+            })}
+
+            {/* Anything the standard passes can't serve — a fleet, a
+                different rhythm — goes to a human instead of nowhere. */}
+            <Card className="flex flex-col justify-between border-dashed border-gray-300 p-5">
+              <div>
+                <h3 className="font-display font-bold text-[var(--color-text-primary)]">Something else?</h3>
+                <p className="mt-1 text-sm text-gray-600">
+                  More cars, more washes, or a fixed time every week — tell us what you need and we'll price it for you.
+                </p>
+              </div>
+              <Button variant="outline" className="mt-4 w-full" onClick={() => setEnquiryOpen(true)}>
+                Request a custom plan
+              </Button>
+            </Card>
           </div>
         )}
       </div>
 
-      <Modal open={!!subscribingPlan} onClose={() => setSubscribingPlan(null)} title={`Subscribe — ${subscribingPlan?.name || ""}`}>
-        <div className="space-y-4">
-          {subscribingPlan && (
-            <div>
-              <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Which vehicle type is this plan for?</p>
-              <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
-                The plan is priced by vehicle type. You can redeem it on that type or a smaller one — never a bigger one.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {candidateTypesFor(subscribingPlan).map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setSubscribeTypeId(id)}
-                    className={`rounded-full border px-3.5 py-2 text-sm font-medium transition-colors ${
-                      subscribeTypeId === id
-                        ? "border-black bg-[#FFF4CD] text-black"
-                        : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
-                    }`}
-                  >
-                    {typeName(id)} · ₹{planPriceFor(subscribingPlan, id)}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
-                You pay{" "}
-                <span className="font-mono-num font-bold text-black">₹{planPriceFor(subscribingPlan, subscribeTypeId)}</span>
-                {" "}· {subscribingPlan.total_service_count} visits / {subscribingPlan.billing_cycle}
-              </p>
-            </div>
-          )}
-          {subscribingPlan && subscribeTypeId && !eligibleVehiclesFor(subscribingPlan, subscribeTypeId).length && (
-            <p className="text-sm text-[var(--color-warning)]">
-              You don't currently own a matching vehicle — you can still subscribe and use it once you add one.
-            </p>
-          )}
-          {subscribeError && <p className="text-sm text-[var(--color-error)]">{subscribeError}</p>}
-          <Button
-            className="w-full"
-            disabled={!!subscribingPlan && candidateTypesFor(subscribingPlan).length > 0 && !subscribeTypeId}
-            isLoading={subscribeMutation.isPending}
-            onClick={() => {
-              if (!user?.phone_verified) {
-                setVerifyOpen(true);
-                return;
-              }
-              subscribeMutation.mutate();
-            }}
-          >
-            Pay & subscribe
-          </Button>
-          <p className="text-center text-[11px] text-gray-400">Online payment only — UPI, cards, netbanking via Razorpay.</p>
-        </div>
-      </Modal>
+      <PassPurchaseSheet
+        plan={buyingPlan}
+        open={!!buyingPlan}
+        onClose={() => setBuyingPlan(null)}
+        onConfirm={startPurchase}
+        isPaying={purchaseMutation.isPending}
+        error={purchaseError}
+      />
 
-      <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); subscribeMutation.mutate(); }} />
+      <PhoneVerificationModal
+        open={verifyOpen}
+        onClose={() => setVerifyOpen(false)}
+        onVerified={() => {
+          setVerifyOpen(false);
+          if (pendingPurchase) purchaseMutation.mutate(pendingPurchase);
+          setPendingPurchase(null);
+        }}
+      />
 
-      <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade subscription">
+      <CustomPlanEnquiryModal open={enquiryOpen} onClose={() => setEnquiryOpen(false)} defaultName={user?.full_name} defaultPhone={user?.phone} />
+
+      <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade pass">
         <div className="space-y-3">
           {upgradeTargets.length === 0 ? (
-            <p className="text-sm text-[var(--color-text-secondary)]">No upgrade is available from your current plan.</p>
+            <p className="text-sm text-gray-600">No upgrade is available from your current pass.</p>
           ) : (
-            upgradeTargets.map((p) => (
-              <Card key={p.id} className="flex items-center justify-between p-4">
-                <div>
-                  <p className="font-medium text-[var(--color-text-primary)]">{p.name}</p>
-                  <p className="text-xs text-[var(--color-text-secondary)]">
-                    ₹{p.discounted_price ?? p.price} · {p.total_service_count} services
-                  </p>
-                </div>
-                <Button size="sm" isLoading={upgradeMutation.isPending} onClick={() => upgradeMutation.mutate(p.id)}>
-                  Upgrade
-                </Button>
-              </Card>
-            ))
+            <>
+              <p className="text-xs text-gray-500">
+                Your washes reset to the new pass's allowance for the rest of this month. If auto-pay is on it stops with the old
+                price — turn it back on by buying the new pass when this month ends.
+              </p>
+              {upgradeTargets.map((p) => (
+                <Card key={p.id} className="flex items-center justify-between p-4">
+                  <div>
+                    <p className="font-medium text-[var(--color-text-primary)]">{p.name}</p>
+                    <p className="text-xs text-gray-500">{p.total_service_count} washes a month</p>
+                  </div>
+                  <Button size="sm" isLoading={upgradeMutation.isPending} onClick={() => upgradeMutation.mutate(p.id)}>
+                    Upgrade
+                  </Button>
+                </Card>
+              ))}
+            </>
           )}
           {upgradeError && <p className="text-sm text-[var(--color-error)]">{upgradeError}</p>}
         </div>

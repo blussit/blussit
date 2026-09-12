@@ -1,6 +1,6 @@
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
-import { AlertTriangle, CheckCircle2, Clock } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock, ParkingCircle } from "lucide-react";
 
 /**
  * The published cancellation policy. The 4-hour online-cancellation lock is
@@ -68,6 +68,30 @@ export default function CancellationPolicyPage() {
               </li>
               <li>Rescheduling in good time is always free — if your plan changes, move the slot instead of cancelling.</li>
               <li>Need help with a booking inside the 4-hour window? Message us on WhatsApp and our team will sort it out.</li>
+            </ul>
+          </section>
+          {/* Parking is the customer's own arrangement — stated plainly so
+              there is no argument at the door about tickets, towing or a
+              spot the captain cannot reach. */}
+          <section className="rounded-2xl border border-[#EDE6D6] bg-white p-5">
+            <div className="flex items-center gap-2.5">
+              <ParkingCircle className="h-5 w-5 text-[#B08A00]" />
+              <h2 className="font-display text-lg font-bold">Parking is your responsibility</h2>
+            </div>
+            <ul className="mt-3 space-y-2 text-sm leading-relaxed text-neutral-700">
+              <li>
+                Please park the vehicle yourself, in a spot where it can be washed. Our captain services the vehicle where
+                you have parked it — we do not move, drive or re-park it at any time.
+              </li>
+              <li>
+                Blussit is not responsible for parking fees, parking tickets, clamping, towing or any dispute with the
+                society, building or authority over where the vehicle is parked. What a wash covers, and what you need
+                ready before we arrive, is set out in our <a href="/service-policy" className="font-semibold text-black underline underline-offset-2">service policy</a>.
+              </li>
+              <li>
+                If the captain reaches your address and the vehicle is unreachable — locked basement, no access, or no
+                usable space to work in — the visit counts as a late cancellation.
+              </li>
             </ul>
           </section>
         </div>

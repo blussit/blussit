@@ -20,6 +20,12 @@ class UserStatus(str, Enum):
 
 
 class BookingStatus(str, Enum):
+    # Created, its slot is HELD, but it is not a real booking yet: the
+    # customer chose to pay online and hasn't finished paying. It is in no
+    # queue, no captain can be assigned, and nobody has been notified.
+    # A verified payment (or the customer switching to cash) promotes it to
+    # PENDING; the unpaid-booking sweep cancels it if neither happens.
+    AWAITING_PAYMENT = "awaiting_payment"
     PENDING = "pending"
     ASSIGNED = "assigned"
     CAPTAIN_ON_THE_WAY = "captain_on_the_way"

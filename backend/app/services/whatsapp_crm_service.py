@@ -55,6 +55,17 @@ EVENT_TEMPLATES = {
     "booking_reminder": "blussit_booking_reminder",
     "reschedule_confirmation": "blussit_reschedule_confirmation",
     "payment_confirmation": "blussit_payment_confirmation",
+    "booking_cancelled": "blussit_booking_cancelled",
+    "payment_pending": "blussit_payment_pending",
+    "captain_released": "blussit_captain_released",
+    "subscription_activated": "blussit_subscription_activated",
+    "subscription_renewed": "blussit_subscription_renewed",
+    "subscription_expiring": "blussit_subscription_expiring",
+    "subscription_expired": "blussit_subscription_expired",
+    # Marketing — sent only through the approved template, only to
+    # customers who haven't opted out (see NotificationService.notify).
+    "repeat_booking": "blussit_repeat_booking",
+    "we_miss_you": "blussit_we_miss_you",
 }
 
 WINDOW_HOURS = 24
@@ -696,11 +707,27 @@ BLUSSIT_TEMPLATE_DEFS = [
     ("blussit_booking_reminder", "UTILITY", "Hi {{1}} 👋\n\nJust a reminder about your BLUSSIT booking.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
     ("blussit_reschedule_confirmation", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking has been rescheduled.\n\nNew date: {{2}}\nNew time: {{3}}\nBooking ID: {{4}}\n\nSee you at the new time!", "View Booking"),
     ("blussit_payment_confirmation", "UTILITY", "Hi {{1}} 👋\n\nYour payment of ₹{{2}} for booking {{3}} has been received.\n\nThank you for choosing BLUSSIT!", "View Booking"),
+    # Every remaining moment a customer hears from us, so nothing has to
+    # wait for a template review later. Each pairs with an EVENT_TEMPLATES
+    # entry above and a notify(..., wa_event=...) call site.
+    ("blussit_booking_cancelled", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} has been cancelled.\n\nNeed it back? You can book again any time.", "Book Again"),
+    ("blussit_payment_pending", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} is waiting for payment.\n\nFinish paying in the next {{3}} minutes to keep your slot, or choose cash on service.", "Complete Payment"),
+    ("blussit_captain_released", "UTILITY", "Hi {{1}} 👋\n\nYour captain for booking {{2}} is no longer available. We're assigning a replacement and will confirm shortly.", "View Booking"),
+    ("blussit_subscription_activated", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}", "View Plan"),
+    ("blussit_subscription_renewed", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass has renewed.\n\nPlan: {{2}}\nValid till: {{3}}\n\nAuto-pay went through — nothing to do.", "View Plan"),
+    ("blussit_subscription_expiring", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) ends on {{3}} with {{4}} washes left.\n\nBook them before it ends, or renew to keep going.", "Book Now"),
+    ("blussit_subscription_expired", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) has ended.\n\nRenew any time to keep your car shining.", "Renew Pass"),
 ]
 
-MARKETING_DRAFTS = [
+# Marketing templates are SUBMITTED for approval up front too (an approved
+# template that's never sent costs nothing; one that's missing when the
+# founder wants a campaign costs a week). Sending stays gated: approved +
+# not opted out, via NotificationService's wa_marketing path only.
+MARKETING_TEMPLATE_DEFS = [
     ("blussit_repeat_booking", "MARKETING", "Hi {{1}} 👋\n\nReady for your next BLUSSIT car wash?\n\nBook a doorstep wash whenever your car needs it.", "Book Now"),
+    ("blussit_we_miss_you", "MARKETING", "Hi {{1}} 👋\n\nIt's been a while since your last BLUSSIT wash.\n\nYour car deserves a shine — we'll come to your doorstep whenever suits you.", "Book Now"),
 ]
+MARKETING_DRAFTS = MARKETING_TEMPLATE_DEFS  # kept for older callers
 
 
 async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
@@ -719,13 +746,15 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
             results.append(r)
         except BadRequestException as exc:
             results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in MARKETING_DRAFTS:
-        await db.whatsapp_templates.update_one(
-            {"name": name},
-            {"$set": {"name": name, "status": "DRAFT", "category": category, "language": "en_US", "body": body,
-                      "param_count": body.count("{{"), "disabled": False, "draft_button": button},
-             "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
-        results.append({"name": name, "status": "DRAFT", "note": "marketing draft — submit manually when consent flow is ready"})
+    for name, category, body, button in MARKETING_TEMPLATE_DEFS:
+        existing = await db.whatsapp_templates.find_one({"name": name})
+        if existing and existing.get("status") in ("APPROVED", "PENDING"):
+            results.append({"name": name, "status": existing["status"], "note": "already exists"})
+            continue
+        try:
+            r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/")
+            r["note"] = "marketing — sent only via this template, to customers who haven't opted out"
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": name, "status": "ERROR", "note": exc.message})
     return results

@@ -5,6 +5,8 @@ import { AlertTriangle, Ban, CalendarClock, CheckCircle2, Clock, Phone, Sparkles
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
+import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
+import { vehicleLabel } from "../../lib/constants";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
@@ -44,6 +46,10 @@ const monthLabel = (key: string) => {
 // dropdown.
 const STATUS_FILTERS = [
   { label: "All", value: "" },
+  // Never in the assignment queue (they aren't confirmed bookings) — this
+  // filter exists so a manager can FIND one when a customer rings up
+  // saying they booked and you can't see it.
+  { label: "Payment pending", value: "awaiting_payment" },
   { label: "Pending", value: "pending" },
   { label: "Assigned", value: "assigned" },
   { label: "On the way", value: "captain_on_the_way" },
@@ -309,7 +315,16 @@ export default function BookingQueuePage() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => bookingApi.cancel(cancellingBooking!.id, cancelReason),
+    // A car on a visit is never cancelled alone from here — the manager
+    // made one decision about one visit, so this cancels every vehicle on
+    // it. (A customer can still drop a single car themselves from their
+    // own booking page; this button is the manager's "cancel the booking"
+    // action, and a visit only ever reads as one booking to them.) The two
+    // endpoints return different shapes; the caller only cares it worked.
+    mutationFn: async (): Promise<void> => {
+      if (cancellingBooking!.booking_group_id) await bookingApi.cancelGroup(cancellingBooking!.booking_group_id, cancelReason);
+      else await bookingApi.cancel(cancellingBooking!.id, cancelReason);
+    },
     onSuccess: () => {
       invalidate();
       setCancellingBooking(null);
@@ -318,6 +333,15 @@ export default function BookingQueuePage() {
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
+
+  // A collapsed visit row shows one set of actions for cars that should
+  // all be in the same state — but the whole reason for this fix is that,
+  // pre-convergence, they might not be. Whichever car actually still
+  // needs (re)assignment is the one the click acts on; the backend then
+  // converges every other car on the visit onto that same captain
+  // regardless of which one triggered it.
+  const actionTarget = (slab: BookingSlab): Booking =>
+    slab.bookings.find(needsCaptain) || slab.bookings.find(canReassign) || slab.primary;
 
   const openAssign = (booking: Booking, reassign: boolean) => {
     setAssigningBooking(booking);
@@ -421,24 +445,34 @@ export default function BookingQueuePage() {
               <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">Nothing waiting on assignment.</p>
             ) : (
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                {newBookings.map((b) => {
+                {toSlabs(newBookings).map((slab) => {
+                  const b = slab.primary;
                   const minutesLeft = minutesUntilSlotStart(b.scheduled_date, b.scheduled_slot);
                   const urgent = isUrgentUnassigned(b);
                   return (
                   <Card
-                    key={b.id}
+                    key={slab.key}
                     className={`cursor-pointer transition-shadow hover:shadow-[var(--shadow-lifted)] ${urgent ? "border-l-4 border-l-[var(--color-error)] bg-red-50/40 p-4" : "p-4"}`}
                     onClick={() => setSelectedBooking(b)}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
+                        <p className="flex flex-wrap items-center gap-2 font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">
+                          {slab.isVisit ? slab.bookings.map((x) => x.booking_number).join(" · ") : b.booking_number}
+                          {/* One trip, several cars — dispatching them
+                              separately would send two captains to one gate. */}
+                          {slab.isVisit && (
+                            <span className="rounded-full bg-black px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+                              1 visit · {slab.vehicleCount} vehicles
+                            </span>
+                          )}
+                        </p>
                         <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                           {format(b.scheduled_date)} · {b.scheduled_slot}
                         </p>
                       </div>
                       <div className="flex flex-col items-end gap-1.5">
-                        <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">₹{b.total_amount}</span>
+                        <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">₹{slab.totalAmount}</span>
                         {prioritySelector(b)}
                       </div>
                     </div>
@@ -604,20 +638,60 @@ export default function BookingQueuePage() {
             onDateToChange={setDateTo}
           />
 
-          <DataTable<Booking>
+          {/* One row per VISIT — several cars washed on one trip are one
+              booking to assign, reschedule or cancel. Every action below
+              still fires on a single underlying car id (slab.primary),
+              because the backend itself converges the whole visit onto
+              whatever's chosen there (assigning/reassigning a captain,
+              rescheduling, resolving a flag, changing priority) — this
+              table just has to stop OFFERING two separate decisions for
+              one visit, which is what let a manager assign two different
+              cars of the same trip to two different captains. */}
+          <DataTable<BookingSlab & { id: string }>
             isLoading={isLoading}
-            data={filteredAll}
+            data={toSlabs(filteredAll).map((slab) => ({ ...slab, id: slab.key }))}
             emptyTitle="No bookings"
-            onRowClick={(b) => setSelectedBooking(b)}
+            onRowClick={(slab) => setSelectedBooking(slab.primary)}
             columns={[
-              { header: "Booking #", accessor: (b) => <span className="font-mono-num">{b.booking_number}</span> },
-              { header: "Customer", accessor: (b) => b.customer_name || "—" },
-              { header: "Date", accessor: (b) => `${format(b.scheduled_date)} · ${b.scheduled_slot}` },
-              { header: "Captain", accessor: (b) => captainName(b.captain_id) },
-              { header: "Amount", accessor: (b) => <span className="font-mono-num">₹{b.total_amount}</span> },
-              { header: "Status", accessor: (b) => <StatusBadge status={b.status} /> },
-              { header: "What happened", accessor: (b) => <WhatHappened booking={b} /> },
-              { header: "", accessor: (b) => bookingActions(b) },
+              {
+                header: "Booking #",
+                accessor: (slab) => (
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono-num">{slab.isVisit ? slab.bookings.map((b) => b.booking_number).join(" · ") : slab.primary.booking_number}</span>
+                    {slab.isVisit && (
+                      <span
+                        title="Several vehicles washed on one visit — one trip, one captain, one payment"
+                        className="rounded-full bg-gray-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white"
+                      >
+                        {slab.vehicleCount} vehicles
+                      </span>
+                    )}
+                  </span>
+                ),
+              },
+              { header: "Customer", accessor: (slab) => slab.primary.customer_name || "—" },
+              {
+                header: "Vehicle & service",
+                accessor: (slab) =>
+                  slab.isVisit ? (
+                    <ul className="space-y-0.5 text-xs">
+                      {slab.bookings.map((b, i) => (
+                        <li key={b.id}>
+                          <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
+                          {vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {b.combo_name || b.service_names?.join(", ") || "—"}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <span className="text-xs text-[var(--color-text-secondary)]">{bookingLabel(slab.primary)}</span>
+                  ),
+              },
+              { header: "Date", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${slab.primary.scheduled_slot}` },
+              { header: "Captain", accessor: (slab) => captainName(slab.primary.captain_id) },
+              { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
+              { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
+              { header: "What happened", accessor: (slab) => <WhatHappened booking={slab.primary} /> },
+              { header: "", accessor: (slab) => bookingActions(actionTarget(slab)) },
             ]}
           />
         </div>
@@ -671,8 +745,12 @@ export default function BookingQueuePage() {
         </Button>
       </Modal>
 
-      <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title="Cancel booking">
-        <p className="mb-3 text-sm text-[var(--color-text-secondary)]">This cancels the booking outright — the customer and captain (if assigned) are notified.</p>
+      <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel visit" : "Cancel booking"}>
+        <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
+          {cancellingBooking?.booking_group_id
+            ? "This cancels every vehicle on this visit outright — the customer and captain (if assigned) are notified."
+            : "This cancels the booking outright — the customer and captain (if assigned) are notified."}
+        </p>
         <textarea
           className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
           rows={3}

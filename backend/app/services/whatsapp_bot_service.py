@@ -915,6 +915,23 @@ class WhatsAppBotService:
             return
 
         if choice == "cash":
+            if booking.get("status") == "awaiting_payment":
+                # This booking isn't real yet — nothing was dispatched, no
+                # one was told. Choosing cash here is the actual promotion
+                # step (same one the web app's "Pay cash instead" button
+                # triggers): it confirms the booking, enters the manager's
+                # queue, and sends the normal booking-confirmed message.
+                try:
+                    await self.booking_service.switch_to_cash(booking_id, customer_id)
+                except AppException as exc:
+                    await self.wa.send_text(phone, f"Couldn't switch this to cash: {exc.message}")
+                    return
+                await self.wa.send_text(
+                    phone,
+                    f"Booking *{booking['booking_number']}* is confirmed ✅ — pay the captain "
+                    f"*₹{booking.get('total_amount')}* in cash after the wash.",
+                )
+                return
             await self.wa.send_text(
                 phone,
                 f"Noted 💵 — pay the captain *₹{booking.get('total_amount')}* in cash after the wash. "
@@ -943,6 +960,39 @@ class WhatsAppBotService:
             f"Here's your secure payment link for *₹{booking.get('total_amount')}* "
             f"(UPI, cards, netbanking — powered by Razorpay):\n\n{link['short_url']}\n\n"
             "I'll confirm right here the moment it's received ✅",
+        )
+
+    async def send_payment_reminder(self, booking: dict) -> bool:
+        """A proactive "still hasn't paid" nudge with the SAME tappable
+        buttons _on_confirm sends right after booking — called from the
+        reminder sweep (main.py), not the webhook dispatcher. Stateless by
+        design: whichever button gets tapped, whenever, is handled by the
+        "pay:" intercept above exactly as if it just arrived — including
+        promoting an AWAITING_PAYMENT booking to real (see the cash branch
+        above), so this is safe to send for a booking still waiting to be
+        confirmed, not just an already-real one that's merely unpaid.
+
+        This is a plain interactive message, not an approved template —
+        it only actually reaches the customer within WhatsApp's 24h
+        session window. The caller (find_bookings_payment_reminder_due's
+        sweep) already sends the approved wa_event="payment_pending"
+        template alongside this, which is the one guaranteed to land
+        outside that window; this is the nicer, tappable version for
+        whenever the window is open. Best-effort — a failed send here
+        must never be treated as the reminder itself having failed."""
+        phone = booking.get("customer_phone")
+        if not phone or float(booking.get("total_amount") or 0) < 1:
+            return False
+        amount = booking.get("total_amount")
+        booking_id = str(booking.get("_id") or booking.get("id"))
+        return await self.wa.send_buttons(
+            phone,
+            f"⏳ *{booking.get('booking_number')}* is still waiting on payment — *₹{amount}*.\n"
+            "Pay online now, or choose cash and we'll confirm it straight away.",
+            [
+                {"id": f"pay:online:{booking_id}", "title": "💳 Pay online now"},
+                {"id": f"pay:cash:{booking_id}", "title": "💵 Cash after wash"},
+            ],
         )
 
     # -- confirm & create ---------------------------------------------

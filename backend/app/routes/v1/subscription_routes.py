@@ -2,9 +2,21 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.subscription_controller import SubscriptionPlanController, UserSubscriptionController
-from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_admin, require_customer, require_manager_or_admin
+from app.core.dependencies import (
+    CurrentUser,
+    PaginationParams,
+    get_current_user,
+    get_db,
+    get_optional_user,
+    require_admin,
+    require_customer,
+    require_manager_or_admin,
+)
 from app.schemas.subscription_schema import (
     AssignSubscriptionRequest,
+    AutoPayRequest,
+    PassQuoteRequest,
+    PlanEnquiryRequest,
     SubscribeRequest,
     SubscriptionPlanCreateRequest,
     SubscriptionPlanUpdateRequest,
@@ -38,6 +50,32 @@ async def update_plan(plan_id: str, payload: SubscriptionPlanUpdateRequest, curr
 @plan_router.delete("/{plan_id}", dependencies=[Depends(require_admin)])
 async def delete_plan(plan_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await SubscriptionPlanController(db).delete(current_user, plan_id)
+
+
+@subscription_router.post("/quote", dependencies=[Depends(require_customer)])
+async def quote_pass(payload: PassQuoteRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """What a monthly pass would cost for THIS car and THIS service — priced
+    by the same code that charges for it, so the purchase sheet can never
+    show a number the checkout won't honour. Read-only."""
+    return await UserSubscriptionController(db).quote_pass(current_user, payload)
+
+
+@subscription_router.post("/enquiries")
+async def submit_plan_enquiry(payload: PlanEnquiryRequest, current_user: CurrentUser | None = Depends(get_optional_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """"None of these fit us" — a fleet/custom request the team follows up
+    on by hand. Public: someone comparing plans before signing up is exactly
+    who this is for."""
+    return await UserSubscriptionController(db).submit_enquiry(current_user, payload)
+
+
+@subscription_router.get("/enquiries", dependencies=[Depends(require_admin)])
+async def list_plan_enquiries(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await UserSubscriptionController(db).list_enquiries(pagination)
+
+
+@subscription_router.post("/enquiries/{enquiry_id}/status", dependencies=[Depends(require_admin)])
+async def set_plan_enquiry_status(enquiry_id: str, status: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await UserSubscriptionController(db).set_enquiry_status(current_user, enquiry_id, status)
 
 
 @subscription_router.get("/my", dependencies=[Depends(require_customer)])
@@ -88,6 +126,16 @@ async def assign_subscription(payload: AssignSubscriptionRequest, current_user: 
 @subscription_router.post("/{subscription_id}/cancel", dependencies=[Depends(require_customer)])
 async def cancel_subscription(subscription_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await UserSubscriptionController(db).cancel(current_user, subscription_id)
+
+
+@subscription_router.post("/{subscription_id}/auto-pay", dependencies=[Depends(require_customer)])
+async def set_auto_pay(subscription_id: str, payload: AutoPayRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Turn auto-pay off (or confirm it's on) for the caller's own plan.
+    Switching it OFF cancels the Razorpay mandate at the end of the cycle
+    already paid for — the remaining visits stay usable. Switching it back
+    ON needs a fresh authorisation, so that direction is refused with a
+    pointer to the purchase flow."""
+    return await UserSubscriptionController(db).set_auto_pay(current_user, subscription_id, payload)
 
 
 @subscription_router.post("/{subscription_id}/upgrade", dependencies=[Depends(require_customer)])

@@ -1,4 +1,13 @@
 venv
+
+# Secrets: every .env EXCEPT the committed placeholder examples.
+# frontend/ and backend/ each already carry their own .gitignore covering
+# .env; this repeats it at the root so a new package added later is safe by
+# default rather than by remembering.
+.env
+.env.*
+!.env.example
+!*/.env.example
 backend/.env
 backend/app/__pycache__
 __pycache__

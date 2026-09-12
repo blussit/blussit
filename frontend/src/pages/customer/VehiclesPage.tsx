@@ -7,6 +7,7 @@ import { Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../.
 import { getErrorMessage } from "../../lib/api-client";
 import { PLATE_FORMAT_HINT, validateIndianPlate } from "../../lib/validators";
 import { useConfirm } from "../../context/ConfirmContext";
+import { VehicleIcon } from "../../components/shared/VehicleIcon";
 
 const emptyForm = { vehicle_type: "", brand: "", model: "", registration_number: "", color: "", is_default: false };
 
@@ -119,7 +120,7 @@ export default function VehiclesPage() {
             <Card key={v.id} className="p-5">
               <div className="flex items-start justify-between">
                 <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)]">
-                  <Car className="h-5 w-5" />
+                  <VehicleIcon vehicleTypeId={v.vehicle_type} className="h-5 w-5" />
                 </span>
                 <div className="flex items-center gap-2">
                   {v.is_default && <Star className="h-4 w-4 fill-amber-400 text-amber-400" />}

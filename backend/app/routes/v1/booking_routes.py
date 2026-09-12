@@ -19,6 +19,7 @@ from app.core.dependencies import (
     require_manager_or_admin,
 )
 from app.schemas.booking_schema import (
+    BookingGroupCreateRequest,
     BookingAssignCaptainRequest,
     BookingCancelRequest,
     BookingCreateRequest,
@@ -169,6 +170,48 @@ async def capture_before_photo(booking_id: str, payload: PhotoCaptureRequest, cu
 @router.post("/{booking_id}/after-photo", dependencies=[Depends(require_captain)])
 async def capture_after_photo(booking_id: str, payload: PhotoCaptureRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).capture_after_photo(current_user, booking_id, payload)
+
+
+@router.get("/group/{booking_group_id}")
+async def get_booking_group(booking_group_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Every vehicle on one visit. A customer sees their own; staff see one
+    their center serves."""
+    return await BookingController(db).get_group(current_user, booking_group_id)
+
+
+@router.post("/group/{booking_group_id}/switch-to-cash", dependencies=[Depends(require_customer)])
+async def switch_group_to_cash(booking_group_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """One decision for the whole visit — the customer made one booking."""
+    return await BookingController(db).switch_group_to_cash(current_user, booking_group_id)
+
+
+@router.post("/group/{booking_group_id}/cancel")
+async def cancel_booking_group(booking_group_id: str, payload: BookingCancelRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Cancelling a visit cancels every vehicle on it."""
+    return await BookingController(db).cancel_group(current_user, booking_group_id, payload)
+
+
+@router.post("/group/{booking_group_id}/assign-captain", dependencies=[Depends(require_manager_or_admin)])
+async def assign_captain_to_group(booking_group_id: str, payload: BookingAssignCaptainRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """One captain takes every vehicle on a visit — they're worked back to
+    back at one address, so splitting them would send two people to one gate."""
+    return await BookingController(db).assign_group(current_user, booking_group_id, payload)
+
+
+@router.post("/group", dependencies=[Depends(require_customer)])
+async def create_booking_group(payload: BookingGroupCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Several of the caller's own vehicles washed on ONE visit — one
+    address, one slot, one captain, one payment. Takes a single slot seat
+    however many cars are on it, because it's a single trip."""
+    return await BookingController(db).create_group(current_user, payload)
+
+
+@router.post("/{booking_id}/switch-to-cash", dependencies=[Depends(require_customer)])
+async def switch_to_cash(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """"I couldn't finish paying online — let me pay the captain instead."
+    Confirms the caller's own still-unpaid booking as a cash booking, so an
+    abandoned or failed online payment doesn't cost them the slot."""
+    return await BookingController(db).switch_to_cash(current_user, booking_id)
 
 
 @router.post("/{booking_id}/cancel")

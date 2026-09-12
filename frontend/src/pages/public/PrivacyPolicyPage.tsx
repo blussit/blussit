@@ -27,14 +27,6 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "Third-party services",
-    body: [
-      "WhatsApp (Meta) — booking updates, OTPs and support conversations are delivered through the WhatsApp Business API.",
-      "Google Maps — address pinning, coverage checks and travel estimates.",
-      "Our cloud hosting and database providers store the data described above.",
-    ],
-  },
-  {
     title: "Your choices",
     body: [
       "You can edit your vehicles, addresses and profile from your account at any time.",

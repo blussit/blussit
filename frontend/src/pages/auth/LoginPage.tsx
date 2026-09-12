@@ -32,7 +32,11 @@ export default function LoginPage() {
       const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
       navigate(from && user.role === "customer" ? from : roleHomePath(user.role), { replace: true });
     } catch (err) {
-      setError(getErrorMessage(err));
+      // Keep it short and unambiguous: the two things a customer can fix
+      // are the id and the password. Anything else (locked out, rate
+      // limited) keeps the server's own wording, which explains itself.
+      const message = getErrorMessage(err);
+      setError(/invalid credentials/i.test(message) ? "Incorrect email/phone or password" : message);
     } finally {
       setIsLoading(false);
     }

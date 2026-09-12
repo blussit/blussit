@@ -19,7 +19,27 @@ class SubscriptionPlanModel(BusinessRecordBase):
     # vehicle type pays the flat price.
     vehicle_type_prices: dict[str, float] = {}
     vehicle_type_discounted_prices: dict[str, float] = {}
+    # THE MENU the buyer picks ONE service from when they buy this pass
+    # (founder model, 2026-09-11: "which car, which service" — Jet Wash,
+    # Waterless, Star Wash; deliberately NOT Deep Cleaning). The chosen one
+    # is stored on the subscription as `service_id` and is the only main
+    # service that pass ever covers.
+    #
+    # Older plans that predate the pass model use this list the previous
+    # way — "everything here is covered" — and keep working unchanged; the
+    # difference is entirely whether the subscription carries a service_id.
     included_service_ids: list[str] = []
+    # Pass pricing = the chosen service's price FOR THE CHOSEN VEHICLE'S TYPE
+    # x total_service_count, less this discount. So a pass costs what those
+    # washes would cost, minus the reason to buy a pass.
+    plan_discount_percent: float = 0.0
+    # ...unless admin has set the monthly price for a wash type OUTRIGHT.
+    # service_id -> vehicle_type_id -> the whole monthly price. A number
+    # here WINS over the formula above, so the team can price a pass at a
+    # round, sellable figure ("₹999 for a hatchback jet-wash pass") instead
+    # of whatever the multiplication happens to produce. Anything not listed
+    # keeps falling back to the formula.
+    service_pass_prices: dict[str, dict[str, float]] = {}
     # What the plan actually covers, per category — e.g. {"normal-clean": 4,
     # "deep-clean": 1, "foaming": 1}. This is what makes "4 normal washes + 1
     # deep clean" a real, enforced allowance instead of one flat counter that
@@ -44,15 +64,16 @@ class SubscriptionPlanModel(BusinessRecordBase):
 class UserSubscriptionModel(BusinessRecordBase):
     customer_id: str
     plan_id: str
-    # REVERSED from an earlier design: a subscription is no longer locked to
-    # one specific vehicle — it's locked to the VEHICLE TYPE(S) its plan
-    # covers (plan.vehicle_types). Any of the customer's owned vehicles of a
-    # matching type can use it; which vehicle a given booking actually uses
-    # is just a normal property of that booking (see
-    # UserSubscriptionService.plan_consumption). Kept (not removed) purely
-    # for old documents written under the earlier vehicle-locked design —
-    # no code reads it as authoritative anymore.
+    # AUTHORITATIVE AGAIN (founder model, 2026-09-11): a pass belongs to ONE
+    # car, named by registration at purchase, and one car carries one pass.
+    # (This reverses an intermediate design where a subscription was scoped
+    # to vehicle TYPES instead. Subscriptions written under that design have
+    # vehicle_id None and still redeem by type — see plan_consumption, which
+    # branches on whether this field is set.)
     vehicle_id: Optional[str] = None
+    # The ONE main service this pass covers, chosen at purchase from the
+    # plan's included_service_ids. None on pre-pass subscriptions.
+    service_id: Optional[str] = None
     # The vehicle-type TIER this subscription was purchased at (VehicleType
     # id) — plans are priced per type (hatchback < sedan < SUV...), the buyer
     # picks the type they're paying for, and redemption is then allowed on
@@ -60,6 +81,8 @@ class UserSubscriptionModel(BusinessRecordBase):
     # (see UserSubscriptionService.plan_consumption / tier_allows). Using it
     # on a cheaper type still burns one full visit — no credit for the gap.
     # None = purchased before tiers existed; plan.vehicle_types alone governs.
+    # On a pass this is simply the named vehicle's type, snapshotted so
+    # pricing history survives the customer editing the vehicle later.
     vehicle_type: Optional[str] = None
     # What was actually charged for that tier at purchase time — a snapshot,
     # immune to later plan-price edits.
@@ -73,4 +96,14 @@ class UserSubscriptionModel(BusinessRecordBase):
     remaining_by_category: dict[str, int] = {}
     start_date: datetime
     end_date: datetime
+    # Auto-pay (Razorpay Subscriptions): True once a mandate is active, so
+    # the plan re-bills itself on end_date instead of silently lapsing.
     auto_renew: bool = False
+    # The Razorpay subscription (mandate) id backing auto_renew — the handle
+    # used to poll for renewal charges and to cancel the mandate. None for a
+    # one-time purchase or a staff-granted plan.
+    razorpay_subscription_id: Optional[str] = None
+    # How many times auto-pay has re-billed and refreshed this card (0 = the
+    # original cycle the customer paid for at checkout).
+    renewal_count: int = 0
+    last_renewed_at: Optional[datetime] = None

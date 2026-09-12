@@ -62,6 +62,11 @@ class BookingPolicyUpdateRequest(BaseModel):
     late_start_grace_minutes: Optional[int] = Field(default=None, ge=0)
     late_assignment_grace_minutes: Optional[int] = Field(default=None, ge=0, le=120)
     captain_start_lockout_hours: Optional[int] = Field(default=None, ge=1)
+    payment_window_minutes: Optional[int] = Field(default=None, ge=5, le=240)
+    payment_reminder_minutes_before: Optional[int] = Field(default=None, ge=0, le=120)
+    max_vehicles_per_booking: Optional[int] = Field(default=None, ge=1, le=10)
+    repeat_reminder_enabled: Optional[bool] = None
+    repeat_reminder_days: Optional[int] = Field(default=None, ge=3, le=365)
     wallet_gating_enabled: Optional[bool] = None
 
 

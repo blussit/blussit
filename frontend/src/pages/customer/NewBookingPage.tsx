@@ -1,32 +1,63 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Car, CheckCircle2, Gift, MapPin } from "lucide-react";
+import { Car, CheckCircle2, Gift, MapPin, Pencil, RotateCcw } from "lucide-react";
 import { vehicleApi, addressApi } from "../../api/profile";
-import { catalogApi, comboOfferApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
+import { bookingPolicyApi, catalogApi, comboOfferApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
 import { bookingApi } from "../../api/booking";
 import { couponApi, subscriptionApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 import { Badge, Button, Input, Select } from "../../components/ui";
 import { LocationPicker, type LocationValue } from "../../components/shared/LocationPicker";
-import { SubscriptionPicker } from "../../components/shared/SubscriptionPicker";
-import { SubscriptionQuickBook } from "../../components/shared/SubscriptionQuickBook";
 import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
 import { WizardShell, WizardStepHeader } from "../../components/shared/WizardShell";
 import { SlotPicker } from "../../components/shared/SlotPicker";
+import { ServicePrepNotice } from "../../components/shared/ServicePrepNotice";
 import { getErrorMessage } from "../../lib/api-client";
+import { useToast } from "../../context/ToastContext";
+import { format } from "../../lib/date";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { estimatePlanTopUp, subscriptionCoversType } from "../../lib/planTier";
 import { QtyStepper } from "../../components/shared/QtyStepper";
-import type { Address, ComboOffer, Service, VehicleType } from "../../types";
+import type { Address, Booking, ComboOffer, Service, VehicleType } from "../../types";
 
-const STEPS = ["Vehicle & Service", "Address & Time", "Review & Pay"];
-const STEP_HINTS = [
-  "Which vehicle and what service.",
-  "Where and when should we come?",
-  "Check the price and choose how to pay — including any subscription plan you own.",
-];
+/** A normal booking picks a vehicle and a service first. A PASS booking
+ *  already knows both — it goes straight to where and when (founder model:
+ *  "directly choose address, date, slot and book"). */
+/** A booking that exists but isn't paid yet — created by "Pay online",
+ *  then the customer closed the checkout. It stays HELD (the payment
+ *  window) while they retry, switch to cash, or change their mind; the
+ *  wizard reuses it as long as `signature` (everything they chose) still
+ *  matches, and replaces it the moment anything changes. */
+interface HeldBooking {
+  id: string;
+  groupId: string | null;
+  token?: string;
+  number: string;
+  total: number;
+  signature: string;
+}
+
+/** One car already added to a multi-vehicle visit. */
+interface AddedCar {
+  vehicleId: string;
+  label: string;
+  vehicleType: string;
+  serviceIds: string[];
+  serviceQty: Record<string, number>;
+  serviceLabel: string;
+  subtotal: number;
+}
+
+const FULL_STEPS = ["Vehicle & Service", "Address & Time", "Review & Pay"] as const;
+const PASS_STEPS = ["Address & Time", "Add-ons & Confirm"] as const;
+const STEP_HINTS: Record<string, string> = {
+  vehicle: "Which vehicle and what service.",
+  address: "Where and when should we come?",
+  review: "Check the price and choose how to pay — including any subscription plan you own.",
+  passReview: "Add anything extra, then confirm — the wash itself is on your pass.",
+};
 
 function priceFor(item: Service | ComboOffer, vehicleType: VehicleType): { price: number; firstTime: number | null } {
   const price = item.vehicle_type_prices?.[vehicleType] ?? item.price;
@@ -36,12 +67,30 @@ function priceFor(item: Service | ComboOffer, vehicleType: VehicleType): { price
 
 export default function NewBookingPage() {
   const navigate = useNavigate();
-  // "?mode=plan" (the + button's "Book with my plan"): jump straight into
-  // the subscription quick-book flow.
+  // Booking WITH a plan is this exact wizard, not a separate flow: the
+  // catalogue, the map, the slots and the confirm button are all the same
+  // — the only difference is that the plan pays instead of the customer.
+  // "?subscription=<id>" spends that specific plan; "?mode=plan" (the +
+  // menu) spends the only usable one, or asks which on step 1.
   const [searchParams] = useSearchParams();
-  const planMode = searchParams.get("mode") === "plan";
+  const requestedSubscriptionId = searchParams.get("subscription");
+  const planMode = searchParams.get("mode") === "plan" || !!requestedSubscriptionId;
+  // "Book again" on a past booking: "?repeat=<booking id>" replays exactly
+  // what was booked — the car, the services, the add-on counts and the
+  // address — so the only thing left to choose is a new date and slot.
+  const repeatBookingId = searchParams.get("repeat");
+  // "?edit=<booking id>": the same replay, but the date and slot come along
+  // and confirming REPLACES the original — it's cancelled first. Only an
+  // unpaid or still-unassigned booking offers the button (detail page);
+  // that cancel is what enforces it here.
+  const editBookingId = searchParams.get("edit");
+  const replayBookingId = editBookingId || repeatBookingId;
+  // "?service=<id>": "Book now" on a service card on the public site,
+  // landing here because the customer is already signed in.
+  const wantedServiceId = searchParams.get("service");
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const { push: pushToast } = useToast();
   const [step, setStep] = useState(0);
   const [verifyOpen, setVerifyOpen] = useState(false);
 
@@ -74,13 +123,18 @@ export default function NewBookingPage() {
   const [altContactPhone, setAltContactPhone] = useState("");
 
   const [showNewVehicleForm, setShowNewVehicleForm] = useState(false);
+  // Cars already added to THIS visit. The editor below always configures
+  // one more car; these are the ones already settled. Keeping them separate
+  // means the single-car flow is untouched — a one-car booking never goes
+  // near the group endpoint.
+  const [extraCars, setExtraCars] = useState<AddedCar[]>([]);
+  const [addCarError, setAddCarError] = useState("");
 
   const [couponCode, setCouponCode] = useState("");
   const [couponDiscount, setCouponDiscount] = useState(0);
   const [couponError, setCouponError] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState("");
 
   const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: addresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
@@ -92,6 +146,34 @@ export default function NewBookingPage() {
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: mySubscriptions } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: subscriptionPlans } = useQuery({ queryKey: ["subscription-plans-for-booking"], queryFn: () => subscriptionApi.plans(true) });
+  const { data: bookingPolicy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
+  const maxCars = bookingPolicy?.max_vehicles_per_booking ?? 5;
+
+  // The booking being repeated, and — when it was one car of a visit — the
+  // rest of that visit, so "Book again" on a three-car wash rebuilds all
+  // three rather than just the car whose page they tapped it from.
+  const { data: repeatSource, isError: repeatFailed } = useQuery({
+    queryKey: ["booking", replayBookingId],
+    queryFn: () => bookingApi.get(replayBookingId as string),
+    enabled: !!replayBookingId,
+    retry: false,
+  });
+  const repeatGroupId = repeatSource?.booking_group_id || null;
+  const { data: repeatGroup } = useQuery({
+    queryKey: ["booking-group", repeatGroupId],
+    queryFn: () => bookingApi.getGroup(repeatGroupId as string),
+    enabled: !!repeatGroupId,
+  });
+  // Flipped once the replay has run (or has been given up on). Until then
+  // the "default vehicle"/"default address" effects below stand down, so
+  // the customer never sees the defaults flash in and get replaced.
+  const [repeatApplied, setRepeatApplied] = useState(false);
+  const repeatPending = !!replayBookingId && !repeatApplied;
+  /** The booking being edited — confirming replaces it. */
+  const [editing, setEditing] = useState<{ id: string; groupId: string | null; number: string } | null>(null);
+  const [held, setHeld] = useState<HeldBooking | null>(null);
+  const [paying, setPaying] = useState(false);
+  const paymentWindow = (bookingPolicy as { payment_window_minutes?: number } | undefined)?.payment_window_minutes ?? 30;
 
   // Slots are generated per service center, and which center applies is
   // only knowable once we have an address — resolved by pincode the same
@@ -119,23 +201,30 @@ export default function NewBookingPage() {
   // Zones active + no pin -> the backend demands a real location.
   const pinRequired = addressLat == null && pinlessCoverage?.pin_required === true;
 
-  // Subscription eligibility is by vehicle TYPE: the plan must cover the
-  // selected type AND the purchased tier must allow it (bought for one
-  // type = usable on that type or a cheaper one, never bigger) — same
-  // rules the backend enforces at plan_consumption time.
-  const eligibleSubscriptions = (mySubscriptions || []).filter((s) => {
-    if (s.effective_status !== "active" || s.remaining_service_count <= 0) return false;
-    const plan = subscriptionPlans?.find((p) => p.id === s.plan_id);
-    return subscriptionCoversType(s, plan, vehicleType);
-  });
   // Every currently-usable subscription, independent of whatever vehicle
   // type is selected in the wizard below — the quick-book shortcut lets the
   // customer pick which of their matching-type vehicles to use, so it
   // isn't gated on the wizard's current selection the way the picker
   // above is.
   const allUsableSubscriptions = (mySubscriptions || []).filter((s) => s.effective_status === "active" && s.remaining_service_count > 0);
+  const activeSubscription = subscriptionId ? (mySubscriptions || []).find((s) => s.id === subscriptionId) || null : null;
+  // A PASS names its car AND its service, so there is nothing to choose on
+  // step one — the wizard drops to two steps. (A pre-pass subscription,
+  // which is scoped only by vehicle type, still uses the full flow.)
+  const passMode = !!activeSubscription?.vehicle_id && !!activeSubscription?.service_id;
+  const passPlate = vehicles?.find((v) => v.id === activeSubscription?.vehicle_id)?.registration_number || "";
+  const stepKeys: string[] = passMode ? ["address", "review"] : ["vehicle", "address", "review"];
+  const STEPS: string[] = [...(passMode ? PASS_STEPS : FULL_STEPS)];
+  const stepKey = stepKeys[Math.min(step, stepKeys.length - 1)];
+  useEffect(() => {
+    // Choosing a pass mid-flow drops the wizard from three steps to two —
+    // don't strand the customer on a step that no longer exists.
+    if (step > stepKeys.length - 1) setStep(stepKeys.length - 1);
+  }, [step, stepKeys.length]);
+  const planNameOf = (sub: { plan_id: string }) => subscriptionPlans?.find((p) => p.id === sub.plan_id)?.name || "";
 
   useEffect(() => {
+    if (repeatPending) return; // the booking being repeated names the car
     const defaultVehicle = vehicles?.find((v) => v.is_default) || vehicles?.[0];
     if (defaultVehicle && !carNumber) {
       setVehicleType(defaultVehicle.vehicle_type);
@@ -143,7 +232,7 @@ export default function NewBookingPage() {
       setCarModel(`${defaultVehicle.brand} ${defaultVehicle.model}`.trim());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vehicles]);
+  }, [vehicles, repeatPending]);
 
   // Default the type selector to the first admin-configured type — ONLY
   // for customers with no saved vehicles (a saved vehicle sets the real
@@ -164,6 +253,7 @@ export default function NewBookingPage() {
   }, [vehicles, carNumber, vehicleType]);
 
   useEffect(() => {
+    if (repeatPending) return; // the booking being repeated names the address
     const defaultAddress = addresses?.find((a) => a.is_default) || addresses?.[0];
     if (defaultAddress && !addressLine) {
       setAddressLine(defaultAddress.line1);
@@ -176,7 +266,56 @@ export default function NewBookingPage() {
       setSelectedAddressId(defaultAddress.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addresses]);
+  }, [addresses, repeatPending]);
+
+  // Arriving from "Book with my plan" / a plan card: pick the plan to
+  // spend, once, as soon as the subscriptions load. A named plan wins; a
+  // bare ?mode=plan auto-picks only when there's exactly one usable plan
+  // (otherwise step 1 asks which).
+  const [planPreselected, setPlanPreselected] = useState(false);
+  useEffect(() => {
+    if (!planMode || planPreselected || !mySubscriptions) return;
+    const usable = mySubscriptions.filter((s) => s.effective_status === "active" && s.remaining_service_count > 0);
+    const chosen = requestedSubscriptionId
+      ? usable.find((s) => s.id === requestedSubscriptionId)
+      : usable.length === 1
+        ? usable[0]
+        : undefined;
+    if (chosen) setSubscriptionId(chosen.id);
+    setPlanPreselected(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planMode, mySubscriptions, requestedSubscriptionId]);
+
+  // A plan only covers certain vehicle TYPES. When one is being spent,
+  // move the wizard onto a vehicle it actually covers instead of letting
+  // the customer build a whole booking the backend will refuse.
+  useEffect(() => {
+    if (!subscriptionId || !vehicles?.length) return;
+    const sub = mySubscriptions?.find((s) => s.id === subscriptionId);
+    if (!sub) return;
+    // A PASS belongs to one specific car — use that one, full stop.
+    if (sub.vehicle_id) {
+      const owned = vehicles.find((v) => v.id === sub.vehicle_id);
+      if (owned && owned.registration_number.toUpperCase() !== carNumber.toUpperCase()) selectVehicle(owned);
+      return;
+    }
+    const plan = subscriptionPlans?.find((p) => p.id === sub.plan_id);
+    if (vehicleType && subscriptionCoversType(sub, plan, vehicleType)) return;
+    const covered = vehicles.find((v) => subscriptionCoversType(sub, plan, v.vehicle_type));
+    if (covered) selectVehicle(covered);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscriptionId, vehicles, mySubscriptions, subscriptionPlans]);
+
+  // ...and if the customer then switches to a vehicle the plan can't cover,
+  // drop the plan rather than sending a booking that would be rejected at
+  // the last step. The step-3 picker offers it back the moment it fits.
+  useEffect(() => {
+    if (!subscriptionId || !vehicleType) return;
+    const sub = mySubscriptions?.find((s) => s.id === subscriptionId);
+    const plan = subscriptionPlans?.find((p) => p.id === sub?.plan_id);
+    if (sub && !subscriptionCoversType(sub, plan, vehicleType)) setSubscriptionId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicleType, subscriptionId, mySubscriptions, subscriptionPlans]);
 
   // Tapping a saved address fills every field from it and remembers its id
   // directly — skips the fuzzy "does this line1+pincode match something
@@ -192,9 +331,35 @@ export default function NewBookingPage() {
     setAddressLng(a.longitude ?? null);
     setSelectedAddressId(a.id);
     setShowNewAddressForm(false);
+    setLocation(null);
   };
 
+  /** Drop back to a blank, map-pinned address — the ONLY path that asks
+   *  the customer to pin, and the one "+ New address" takes everywhere. */
+  const startNewAddress = () => {
+    setShowNewAddressForm(true);
+    setSelectedAddressId(null);
+    setLocation(null);
+    setAddressLine("");
+    setLandmark("");
+    setCity("");
+    setState("");
+    setPincode("");
+    setAddressLat(null);
+    setAddressLng(null);
+    setDate("");
+    setSlot("");
+  };
+
+  // The saved address currently in play (null while adding a new one) —
+  // it already carries the coordinates pinned when it was saved, which is
+  // why this branch never asks for the map again.
+  const savedAddress = !showNewAddressForm && selectedAddressId
+    ? (addresses || []).find((a) => a.id === selectedAddressId) || null
+    : null;
+
   const services = servicesData?.data || [];
+  const passServiceName = services.find((s) => s.id === activeSubscription?.service_id)?.name || "";
   const selectedServices = services.filter((s) => serviceIds.includes(s.id));
   const selectedCombo = combos?.find((c) => c.id === comboId) || null;
   const isFirstOrderGuess = !vehicles?.length; // best-effort UI hint only — backend is the source of truth on eligibility
@@ -206,6 +371,30 @@ export default function NewBookingPage() {
   const bookingIsBike = bikeIds.has(vehicleType);
   const groups = useMemo(() => baseGroups(services, vehicleType), [services, vehicleType]);
   const kit = useMemo(() => addonKit(services, vehicleType, bikeIds), [services, vehicleType, bikeIds]);
+  // The plan already says what it covers — start the catalogue on that
+  // service so a plan booking is two taps, while leaving every other
+  // service (and every add-on) selectable exactly as normal.
+  useEffect(() => {
+    if (!subscriptionId || comboId || !services.length) return;
+    const sub = mySubscriptions?.find((s) => s.id === subscriptionId);
+    // A pass covers exactly its own service: keep it selected even if the
+    // customer had picked something else before choosing the pass, since
+    // the backend refuses any other main service on a pass booking.
+    if (sub?.service_id) {
+      if (!serviceIds.includes(sub.service_id)) {
+        setServiceIds((prev) => [sub.service_id!, ...prev.filter((id) => services.find((s) => s.id === id)?.is_addon)]);
+      }
+      return;
+    }
+    if (serviceIds.length) return;
+    const plan = subscriptionPlans?.find((p) => p.id === sub?.plan_id);
+    const includedId = plan?.included_service_ids?.[0];
+    if (!includedId) return;
+    const group = groups.find((g) => g.variants.some((v) => v.id === includedId));
+    if (group) setServiceIds([group.primary.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscriptionId, groups, services, mySubscriptions, subscriptionPlans]);
+
   const selectedBase = selectedServices.find((s) => !s.is_addon) || null;
   const selectedGroup = selectedBase ? groups.find((g) => g.variants.some((v) => v.id === selectedBase.id)) || null : null;
   const bikeCount = bookingIsBike && selectedBase ? variantCount(selectedBase) : 0;
@@ -228,14 +417,6 @@ export default function NewBookingPage() {
     }, 0);
   }, [selectedServices, selectedCombo, vehicleType, isFirstOrderGuess, serviceQty]);
 
-  const totalDuration = useMemo(() => {
-    if (selectedCombo) {
-      const includedServices = services.filter((s) => selectedCombo.service_ids.includes(s.id));
-      return includedServices.reduce((sum, s) => sum + s.duration_minutes, 0) || 60;
-    }
-    return selectedServices.reduce((sum, s) => sum + s.duration_minutes * (serviceQty[s.id] || 1), 0) || 60;
-  }, [selectedServices, selectedCombo, services, serviceQty]);
-
   // A subscription (when picked) covers the MAIN service — add-ons and any
   // swap-to-costlier gap stay a real charge (mirrors the backend's
   // _subscription_discount; coupons are ignored on subscription bookings).
@@ -248,37 +429,254 @@ export default function NewBookingPage() {
   }, [subscriptionId, selectedServices, selectedCombo, mySubscriptions, subscriptionPlans, services, vehicleType, serviceQty]);
   const total = subscriptionId ? planTopUp : Math.max(subtotal - couponDiscount, 0);
 
+  /** The id of the car currently in the editor, saving it to the garage
+   *  first if it's a plate we haven't seen. */
+  const resolveCurrentVehicleId = async (): Promise<string> => {
+    const existing = vehicles?.find((v) => v.registration_number.toUpperCase() === carNumber.toUpperCase())?.id;
+    if (existing) return existing;
+    const [brand, ...modelParts] = carModel.trim().split(" ");
+    const vehicle = await vehicleApi.create({
+      vehicle_type: vehicleType,
+      brand: brand || "Vehicle",
+      model: modelParts.join(" ") || carModel || "—",
+      registration_number: carNumber.toUpperCase(),
+      is_default: !vehicles?.length,
+    });
+    await queryClient.invalidateQueries({ queryKey: ["vehicles"] });
+    return vehicle.id;
+  };
+
+  const resolveAddressId = async (): Promise<string> => {
+    const derivedLine1 = location ? location.formatted || [location.area, location.city].filter(Boolean).join(", ") : addressLine;
+    const existing = !showNewAddressForm && selectedAddressId
+      ? selectedAddressId
+      : addresses?.find((a) => a.line1 === derivedLine1 && a.pincode === pincode)?.id;
+    if (existing) return existing;
+    const address = await addressApi.create({
+      label: "Doorstep",
+      line1: derivedLine1,
+      landmark: landmark || undefined,
+      city,
+      state,
+      pincode,
+      latitude: addressLat ?? undefined,
+      longitude: addressLng ?? undefined,
+      is_default: !addresses?.length,
+    });
+    return address.id;
+  };
+
+  /** That car's own monthly pass, if it has one covering this wash. A pass
+   *  belongs to one car, so on a multi-car visit each car redeems its own. */
+  const passForCar = (vehicleId: string, ids: string[]): string | undefined =>
+    (mySubscriptions || []).find(
+      (sub) =>
+        sub.effective_status === "active" &&
+        sub.remaining_service_count > 0 &&
+        sub.vehicle_id === vehicleId &&
+        !!sub.service_id &&
+        ids.includes(sub.service_id)
+    )?.id;
+
+  // A pass belongs to ONE car, so a pass booking is a one-car booking by
+  // definition — the multi-car controls stay out of that flow.
+  const canAddMoreCars = !passMode && extraCars.length + 1 < maxCars;
+  const currentCarReady = !!carNumber && !!selectedBase && !selectedCombo;
+
+  const addCurrentCar = async () => {
+    setAddCarError("");
+    try {
+      const vehicleId = await resolveCurrentVehicleId();
+      if (extraCars.some((c) => c.vehicleId === vehicleId)) {
+        setAddCarError("That car is already on this visit.");
+        return;
+      }
+      setExtraCars((cars) => [
+        ...cars,
+        {
+          vehicleId,
+          label: `${carModel || "Vehicle"} · ${carNumber.toUpperCase()}`,
+          vehicleType,
+          serviceIds: [...serviceIds],
+          serviceQty: { ...serviceQty },
+          serviceLabel: chosenService,
+          subtotal,
+        },
+      ]);
+      // Clear the editor for the NEXT car — the vehicle picker reopens and
+      // the service selection starts fresh, because the next car is very
+      // likely a different type needing different services.
+      setCarNumber("");
+      setCarModel("");
+      setShowNewVehicleForm(false);
+      clearServices();
+      setComboId(null);
+    } catch (err) {
+      setAddCarError(getErrorMessage(err));
+    }
+  };
+
+  const removeCar = (vehicleId: string) => setExtraCars((cars) => cars.filter((c) => c.vehicleId !== vehicleId));
+
+  const extrasSubtotal = extraCars.reduce((sum, c) => sum + c.subtotal, 0);
+  /** Every service across the whole visit — one waterless car means the
+   *  whole visit needs a shaded spot, so the prep checklist reads them all. */
+  const visitServices = [
+    ...selectedServices,
+    ...extraCars.flatMap((c) => c.serviceIds.map((id) => services.find((s) => s.id === id)).filter(Boolean)),
+  ] as Service[];
+
+  /** Everything the customer has chosen, as one string. A held (unpaid)
+   *  booking is reused only while this is unchanged — any edit means a
+   *  fresh booking, and the held one goes back. */
+  const currentSignature = () =>
+    JSON.stringify({
+      car: carNumber.toUpperCase(),
+      vt: vehicleType,
+      services: serviceIds,
+      qty: serviceQty,
+      combo: comboId,
+      extras: extraCars.map((c) => [c.vehicleId, c.serviceIds, c.serviceQty]),
+      date,
+      slot,
+      address: selectedAddressId || addressLine,
+      pin: [addressLat, addressLng],
+      sub: subscriptionId,
+      coupon: couponDiscount > 0 ? couponCode : null,
+      notes,
+      alt: [altContactName, altContactPhone],
+    });
+  const heldIsCurrent = !!held && held.signature === currentSignature();
+
+  /** Open Razorpay for a held booking and STAY on this page if it doesn't
+   *  complete — the customer can retry, pick cash, or change something.
+   *  Dragging them to the booking page took every one of those away. */
+  const attemptPayment = async (h: HeldBooking): Promise<boolean> => {
+    setPaying(true);
+    try {
+      await payWithRazorpay(
+        h.groupId ? { purpose: "booking_group", booking_group_id: h.groupId } : { purpose: "booking", booking_id: h.id },
+        { name: user?.full_name, email: user?.email, contact: user?.phone }
+      );
+    } catch (err) {
+      setPaying(false);
+      if (err instanceof PaymentCancelled) {
+        pushToast({
+          tone: "info",
+          title: "Payment not completed",
+          message: `${h.number} is held for you for ${paymentWindow} minutes — retry the payment, or choose cash on service.`,
+        });
+      } else {
+        pushToast({ tone: "error", title: "Payment didn't go through", message: getErrorMessage(err) });
+      }
+      return false;
+    }
+    setPaying(false);
+    setHeld(null);
+    queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+    navigate(h.token ? `/thank-you?token=${h.token}` : "/app/bookings");
+    return true;
+  };
+
+  /** Before creating anything, retire what the new booking supersedes: an
+   *  earlier unpaid attempt with different choices, and — in edit mode —
+   *  the original booking, which confirming replaces. */
+  const prepareToCreate = async () => {
+    if (held) {
+      try {
+        if (held.groupId) await bookingApi.cancelGroup(held.groupId, "Changed before paying");
+        else await bookingApi.cancel(held.id, "Changed before paying");
+      } catch {
+        // Already released (payment window ran out) — nothing to undo.
+      }
+      setHeld(null);
+    }
+    if (editing) {
+      if (editing.groupId) await bookingApi.cancelGroup(editing.groupId, "Edited by customer — replaced by a new booking");
+      else await bookingApi.cancel(editing.id, "Edited by customer — replaced by a new booking");
+      setEditing(null);
+    }
+  };
+
+  // "Pay cash instead" on a held online booking — it's confirmed as it is.
+  const switchHeldMutation = useMutation({
+    mutationFn: async () => {
+      if (!held) return;
+      if (held.groupId) await bookingApi.switchGroupToCash(held.groupId);
+      else await bookingApi.switchToCash(held.id);
+    },
+    onSuccess: () => {
+      const h = held;
+      setHeld(null);
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      navigate(h?.token ? `/thank-you?token=${h.token}` : "/app/bookings");
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't switch to cash", message: getErrorMessage(err) }),
+  });
+
+  const createGroupMutation = useMutation({
+    mutationFn: async () => {
+      await prepareToCreate();
+      const currentVehicleId = await resolveCurrentVehicleId();
+      const addressId = await resolveAddressId();
+      const cars = [
+        ...extraCars.map((c) => ({
+          vehicle_id: c.vehicleId,
+          service_ids: c.serviceIds,
+          service_quantities: c.serviceQty,
+          subscription_id: passForCar(c.vehicleId, c.serviceIds),
+        })),
+        {
+          vehicle_id: currentVehicleId,
+          service_ids: serviceIds,
+          service_quantities: serviceQty,
+          subscription_id: passForCar(currentVehicleId, serviceIds),
+        },
+      ];
+      return bookingApi.createGroup({
+        vehicles: cars,
+        address_id: addressId,
+        scheduled_date: date,
+        scheduled_slot: slot,
+        hold_key: getSlotHolderKey(),
+        payment_method: paymentMethod,
+        customer_notes: notes || undefined,
+        alternate_contact_name: altContactName || undefined,
+        alternate_contact_phone: altContactPhone || undefined,
+      });
+    },
+    onSuccess: async (visit) => {
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      // ONE payment covers the whole visit — every car on it is settled by
+      // the same verified signature. If it doesn't complete, the visit is
+      // held and the customer stays right here.
+      const unpaid = visit.bookings.some((b) => b.status === "awaiting_payment");
+      if (unpaid && visit.total_amount > 0) {
+        const h: HeldBooking = {
+          id: visit.bookings[0].id,
+          groupId: visit.booking_group_id,
+          token: visit.confirmation_token,
+          number: visit.bookings.map((b) => b.booking_number).join(" + "),
+          total: visit.total_amount,
+          signature: currentSignature(),
+        };
+        setHeld(h);
+        await attemptPayment(h);
+        return;
+      }
+      navigate(visit.confirmation_token ? `/thank-you?token=${visit.confirmation_token}` : "/app/bookings");
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't book this visit", message: getErrorMessage(err) }),
+  });
+
   const createMutation = useMutation({
     mutationFn: async () => {
-      let vehicleId = vehicles?.find((v) => v.registration_number.toUpperCase() === carNumber.toUpperCase())?.id;
-      if (!vehicleId) {
-        const [brand, ...modelParts] = carModel.trim().split(" ");
-        const vehicle = await vehicleApi.create({
-          vehicle_type: vehicleType,
-          brand: brand || "Vehicle",
-          model: modelParts.join(" ") || carModel || "—",
-          registration_number: carNumber.toUpperCase(),
-          is_default: !vehicles?.length,
-        });
-        vehicleId = vehicle.id;
-      }
+      await prepareToCreate();
+      const vehicleId = await resolveCurrentVehicleId();
 
       const derivedLine1 = location ? location.formatted || [location.area, location.city].filter(Boolean).join(", ") : addressLine;
-      let addressId = !showNewAddressForm && selectedAddressId ? selectedAddressId : addresses?.find((a) => a.line1 === derivedLine1 && a.pincode === pincode)?.id;
-      if (!addressId) {
-        const address = await addressApi.create({
-          label: "Doorstep",
-          line1: derivedLine1,
-          landmark: landmark || undefined,
-          city,
-          state,
-          pincode,
-          latitude: addressLat ?? undefined,
-          longitude: addressLng ?? undefined,
-          is_default: !addresses?.length,
-        });
-        addressId = address.id;
-      }
+      void derivedLine1;
+      const addressId = await resolveAddressId();
 
       return bookingApi.create({
         vehicle_id: vehicleId,
@@ -303,28 +701,30 @@ export default function NewBookingPage() {
       // now; if the customer closes the modal, the booking stays
       // payment-pending and the detail page offers "Pay online" to
       // finish later.
-      if (!subscriptionId && paymentMethod === "online" && booking.total_amount > 0) {
-        try {
-          await payWithRazorpay(
-            { purpose: "booking", booking_id: booking.id },
-            { name: user?.full_name, email: user?.email, contact: user?.phone }
-          );
-        } catch (err) {
-          if (err instanceof PaymentCancelled) {
-            navigate(`/app/bookings/${booking.id}`);
-            return;
-          }
-          setSubmitError(getErrorMessage(err));
-          navigate(`/app/bookings/${booking.id}`);
-          return;
-        }
+      // The backend parks anything that must be paid before it counts as a
+      // booking — an online-pay wash, or a pass booking with paid add-ons
+      // (no cash option on those). Whatever it parked, finish paying now.
+      if (booking.status === "awaiting_payment" && booking.total_amount > 0) {
+        const h: HeldBooking = {
+          id: booking.id,
+          groupId: null,
+          token: booking.confirmation_token,
+          number: booking.booking_number,
+          total: booking.total_amount,
+          signature: currentSignature(),
+        };
+        setHeld(h);
+        await attemptPayment(h);
+        return;
       }
       // A fixed, opaque, single-purpose token (not the raw booking id) so
       // the confirmation page can't be reached by guessing or bookmarking
       // a URL — see PurchaseConfirmationModel / ThankYouPage.
       navigate(`/thank-you?token=${booking.confirmation_token}`);
     },
-    onError: (err) => setSubmitError(getErrorMessage(err)),
+    onError: (err) => {
+      pushToast({ tone: "error", title: "Couldn't confirm this booking", message: getErrorMessage(err) });
+    },
   });
 
   // Changing the selection changes subtotal, and a coupon discount computed
@@ -406,15 +806,136 @@ export default function NewBookingPage() {
     resetCoupon();
   };
 
-  // Why the subscription section might look empty even though the customer
-  // owns one — shown instead of just silently rendering nothing, which is
-  // what made subscription-booking look like it didn't exist at all.
-  const subscriptionHint = (() => {
-    if (!mySubscriptions?.length || eligibleSubscriptions.length) return null;
-    const usable = mySubscriptions.filter((s) => s.effective_status === "active" && s.remaining_service_count > 0);
-    if (!usable.length) return "Your subscription is expired or has no washes left.";
-    return "Your subscription doesn't cover this vehicle's type — switch to a matching vehicle above to pay with it.";
-  })();
+  /** How much of an old booking can still be booked today. The car has to
+   *  still be in the garage and the services still on the menu FOR that car
+   *  — a sold car or a discontinued wash can't be replayed, and quietly
+   *  substituting something else would be worse than saying so. */
+  const replayCar = (b: Booking) => {
+    const vehicle = vehicles?.find((v) => v.id === b.vehicle_id);
+    if (!vehicle) return null;
+    const blank = { vehicle, serviceIds: [] as string[], serviceQty: {} as Record<string, number> };
+    if (b.combo_id) {
+      const combo = combos?.find((c) => c.id === b.combo_id);
+      return combo ? { ...blank, comboId: combo.id } : null;
+    }
+    // Exactly what the picker itself would offer this car today — built
+    // from the same base groups and add-on kit, so a repeat can never
+    // preselect something the customer couldn't have chosen by hand.
+    const offerable = new Set<string>();
+    for (const g of baseGroups(services, vehicle.vehicle_type)) for (const v of g.variants) offerable.add(v.id);
+    const carKit = addonKit(services, vehicle.vehicle_type, bikeIds);
+    for (const a of carKit.simple) offerable.add(a.id);
+    if (carKit.addBike) offerable.add(carKit.addBike.id);
+    if (carKit.bikePolish) offerable.add(carKit.bikePolish.id);
+
+    const ids = (b.service_ids || []).filter((id) => offerable.has(id));
+    // An add-on never rides alone: without its main service there is no
+    // booking left to repeat.
+    if (!ids.some((id) => { const s = services.find((x) => x.id === id); return !!s && !s.is_addon; })) return null;
+    const qty: Record<string, number> = {};
+    for (const [id, n] of Object.entries(b.service_quantities || {})) if (ids.includes(id) && n > 1) qty[id] = n;
+    return { ...blank, comboId: null as string | null, serviceIds: ids, serviceQty: qty };
+  };
+
+  // "Book again": replay everything the customer chose last time — car,
+  // services, add-on counts, address, notes — and leave only the one thing
+  // that can't be repeated, WHEN. Runs once, after the catalogue and the
+  // customer's own garage have loaded, and lands on the date/slot step.
+  useEffect(() => {
+    if (!replayBookingId || repeatApplied) return;
+    if (repeatFailed) {
+      setRepeatApplied(true); // gone, or not theirs — carry on with an empty wizard
+      return;
+    }
+    if (!repeatSource || !vehicles || !addresses || !services.length || !vehicleTypes?.length) return;
+    if (repeatGroupId && !repeatGroup) return;
+    if (mySubscriptions === undefined) return;
+    setRepeatApplied(true);
+
+    // Cars in the order they were washed, because that's the order that
+    // prices them the same way (the first-visit offer lands on one car).
+    const before: Booking[] = repeatGroup?.length ? repeatGroup : [repeatSource];
+    const usable = before.map(replayCar).filter(Boolean) as NonNullable<ReturnType<typeof replayCar>>[];
+    if (!usable.length) {
+      pushToast({
+        tone: "error",
+        title: "Couldn't repeat that booking",
+        message: "That vehicle or service isn't available any more — please choose again.",
+      });
+      return;
+    }
+
+    // The editor always holds the LAST car; the ones before it are already
+    // settled on the visit — the same shape "add more cars" builds. A combo
+    // is single-car only, so it can never be one of the settled ones.
+    const settled = usable.slice(0, -1).filter((c) => !c.comboId);
+    const editing = usable[usable.length - 1];
+    if (usable.length < before.length || settled.length < usable.length - 1) {
+      pushToast({
+        tone: "info",
+        title: "Some of that booking couldn't be repeated",
+        message: "A vehicle or service from it is no longer available — the rest is ready below.",
+      });
+    }
+
+    setExtraCars(
+      settled.map((car) => {
+        const picked = car.serviceIds.map((id) => services.find((s) => s.id === id)).filter(Boolean) as Service[];
+        const qtyFor = (id: string) => car.serviceQty[id] || 1;
+        return {
+          vehicleId: car.vehicle.id,
+          label: `${`${car.vehicle.brand} ${car.vehicle.model}`.trim()} · ${car.vehicle.registration_number}`,
+          vehicleType: car.vehicle.vehicle_type,
+          serviceIds: car.serviceIds,
+          serviceQty: car.serviceQty,
+          serviceLabel: picked.map((s) => s.name + (qtyFor(s.id) > 1 ? ` ×${qtyFor(s.id)}` : "")).join(", "),
+          subtotal: picked.reduce((sum, s) => sum + priceFor(s, car.vehicle.vehicle_type).price * qtyFor(s.id), 0),
+        };
+      })
+    );
+
+    // selectVehicle clears the service picks when the class changes, so the
+    // selection has to be written after it, not before.
+    selectVehicle(editing.vehicle);
+    setComboId(editing.comboId ?? null);
+    setServiceIds(editing.serviceIds);
+    setServiceQty(editing.serviceQty);
+
+    const address = addresses.find((a) => a.id === repeatSource.address_id);
+    if (address) selectAddress(address); // a saved address never re-asks for the map
+    setNotes(repeatSource.customer_notes || "");
+    setAltContactName(repeatSource.alternate_contact_name || "");
+    setAltContactPhone(repeatSource.alternate_contact_phone || "");
+
+    // A monthly pass belongs to one car and one wash — if this car still has
+    // one covering it, spend that instead of charging for the wash again.
+    const pass = settled.length ? undefined : passForCar(editing.vehicle.id, editing.serviceIds);
+    if (pass) setSubscriptionId(pass);
+    if (editBookingId) {
+      // Editing: the old date and slot come along too, and the wizard opens
+      // on the review step — every earlier step is one tap away on the rail.
+      setDate(String(repeatSource.scheduled_date).slice(0, 10));
+      setSlot(repeatSource.scheduled_slot);
+      if (repeatSource.payment_method === "online" || repeatSource.payment_method === "cash") setPaymentMethod(repeatSource.payment_method);
+      setEditing({ id: repeatSource.id, groupId: repeatSource.booking_group_id || null, number: repeatSource.booking_number });
+      setStep(pass ? 1 : 2);
+      return;
+    }
+    // Everything is chosen but the date and slot: go straight to them. (A
+    // pass booking has no vehicle step, so its address step is index 0.)
+    setStep(pass ? 0 : 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayBookingId, repeatApplied, repeatFailed, repeatSource, repeatGroup, repeatGroupId, vehicles, addresses, servicesData, vehicleTypes, combos, mySubscriptions]);
+
+  // A "Book now" on a specific service: start the catalogue on it, once,
+  // if it's offered for the vehicle in the editor.
+  useEffect(() => {
+    if (!wantedServiceId || replayBookingId || planMode || serviceIds.length || !groups.length) return;
+    const group = groups.find((g) => g.variants.some((v) => v.id === wantedServiceId));
+    if (group) setServiceIds([group.primary.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantedServiceId, groups]);
+
 
   const applyCoupon = async () => {
     setCouponError("");
@@ -430,13 +951,11 @@ export default function NewBookingPage() {
   };
 
   const hasSelection = !!selectedBase || !!selectedCombo; // an add-on never rides alone
-  const stepValid = [
-    !!carNumber && hasSelection,
-    // A saved address already carries its own coordinates; otherwise the
-    // PIN is the address (typed line only in the no-maps fallback).
-    (selectedAddressId ? true : mapsDown ? !!addressLine : !!location) && !!city && !!state && !!pincode && !!date && !!slot,
-    true,
-  ][step];
+  // A saved address already carries its own coordinates; otherwise the PIN
+  // is the address (typed line only in the no-maps fallback).
+  const addressStepValid =
+    (selectedAddressId ? true : mapsDown ? !!addressLine : !!location) && !!city && !!state && !!pincode && !!date && !!slot;
+  const stepValid = { vehicle: !!carNumber && hasSelection, address: addressStepValid, review: true }[stepKey] ?? true;
 
   // What's chosen so far, as one quiet line above the action — replaces
   // the old summary sidebar (the reference layout has no third column).
@@ -445,16 +964,83 @@ export default function NewBookingPage() {
     : selectedServices.length
       ? selectedServices.map((s) => s.name + (qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : "")).join(", ")
       : "";
-  const summaryLine = [chosenService, date && slot ? `${date} · ${slot}` : "", chosenService ? `${totalDuration} min` : ""]
+  // Service DURATION is never shown to a customer (founder call) — it
+  // drives scheduling server-side only. This line is what's chosen and when.
+  const summaryLine = [
+    extraCars.length ? `${extraCars.length + (chosenService ? 1 : 0)} vehicles` : chosenService,
+    date && slot ? `${date} · ${slot}` : "",
+  ]
     .filter(Boolean)
     .join("  ·  ");
 
+  // The add-on kit, hoisted so it can render in TWO places: after the
+  // main service on a normal booking, and on the confirm step of a PASS
+  // booking — where there is no service to pick, only extras to add.
+  const addonsBlock = (
+    <>
+                    {/* Add-ons — only the ones valid for what's selected */}
+                    {selectedBase && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) && (
+                      <div className="mt-4">
+                        <p className="mb-2 text-sm font-medium text-black">Add-ons</p>
+                        <div className="space-y-2.5">
+                          {kit.simple.map((s) => {
+                            const on = serviceIds.includes(s.id);
+                            const { price, firstTime } = priceFor(s, vehicleType);
+                            const shown = isFirstOrderGuess && firstTime != null ? firstTime : price;
+                            return (
+                              <button
+                                key={s.id}
+                                onClick={() => toggleSimpleAddon(s.id)}
+                                className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-sm transition-colors ${
+                                  on ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
+                                }`}
+                              >
+                                <span className="font-medium text-[var(--color-text-primary)]">+ {s.name}</span>
+                                <span className="font-mono-num text-[var(--color-text-primary)]">₹{shown}</span>
+                              </button>
+                            );
+                          })}
+
+                          {!bookingIsBike && kit.addBike && (
+                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
+                              <div>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType).price} per bike, washed at the same doorstep</p>
+                              </div>
+                              <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
+                            </div>
+                          )}
+
+                          {kit.bikePolish && bikesInBooking > 0 && (
+                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
+                              <div>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">
+                                  ₹{priceFor(kit.bikePolish, vehicleType).price} per bike · up to {bikesInBooking} bike{bikesInBooking > 1 ? "s" : ""}
+                                </p>
+                              </div>
+                              <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+    </>
+  );
+
   const wizardFooter = (
     <div className="space-y-4">
-      {(summaryLine || total > 0) && (
+      {(summaryLine || total > 0 || activeSubscription) && (
         <div className="flex flex-wrap items-end justify-between gap-2">
           <span className="min-w-0 flex-1 truncate text-xs text-gray-500">{summaryLine || "Nothing selected yet"}</span>
-          <span className="font-mono-num text-lg font-bold text-black">₹{total || 0}</span>
+          {activeSubscription && total === 0 ? (
+            <span className="text-sm font-bold text-[var(--color-success)]">Covered by your plan</span>
+          ) : (
+            <span className="font-mono-num text-lg font-bold text-black">
+              ₹{(total || 0) + extrasSubtotal}
+              {activeSubscription && <span className="ml-1.5 text-[11px] font-normal text-gray-400">extra</span>}
+            </span>
+          )}
         </div>
       )}
       <div className="flex items-center justify-between gap-3">
@@ -468,7 +1054,7 @@ export default function NewBookingPage() {
         ) : (
           <Button
             className="min-w-[140px]"
-            isLoading={createMutation.isPending}
+            isLoading={createMutation.isPending || createGroupMutation.isPending || switchHeldMutation.isPending || paying}
             onClick={() => {
               // Checked client-side, BEFORE this multi-step mutation starts
               // creating a vehicle/address — retrying mid-flow after a
@@ -478,10 +1064,27 @@ export default function NewBookingPage() {
                 setVerifyOpen(true);
                 return;
               }
-              createMutation.mutate();
+              // A held booking with nothing changed is finished, not
+              // re-made: retry the payment, or confirm it as cash.
+              if (held && heldIsCurrent) {
+                if (paymentMethod === "online") void attemptPayment(held);
+                else switchHeldMutation.mutate();
+                return;
+              }
+              if (extraCars.length) createGroupMutation.mutate();
+              else createMutation.mutate();
             }}
           >
-            <CheckCircle2 className="h-4 w-4" /> Confirm booking
+            <CheckCircle2 className="h-4 w-4" />
+            {held && heldIsCurrent
+              ? paymentMethod === "online"
+                ? `Retry payment ₹${held.total}`
+                : "Confirm — pay cash on service"
+              : editing
+                ? `Save changes to ${editing.number}`
+                : extraCars.length
+                  ? `Confirm ${extraCars.length + 1} vehicles`
+                  : "Confirm booking"}
           </Button>
         )}
       </div>
@@ -491,47 +1094,140 @@ export default function NewBookingPage() {
   return (
     <div className="space-y-5">
 
-      {planMode && !allUsableSubscriptions.length && (
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[#F3E5B5] bg-[#FAFAFA] p-4 text-sm">
-          <Gift className="h-5 w-5 shrink-0 text-[#E8A900]" />
-          <span className="flex-1 text-gray-600">No usable plan right now — subscribe once and save on every wash, or continue with a normal booking below.</span>
-          <Button size="sm" variant="outline" onClick={() => navigate("/app/subscriptions")}>
-            See plans
-          </Button>
-        </div>
-      )}
-
-      {/* The "book from a subscription" shortcut belongs ONLY to the plan
-          flow (?mode=plan, the + menu's "Book with my plan"). A customer
-          who explicitly chose a normal wash must not have plan cards
-          pushed into their wizard (user call) — if they own a plan that
-          covers this booking, the step-3 "Have a subscription plan?"
-          payment picker still offers it at the right moment. */}
-      {planMode && (
-        <SubscriptionQuickBook
-          subscriptions={allUsableSubscriptions}
-          plans={subscriptionPlans}
-          vehicles={vehicles}
-          addresses={addresses}
-          services={services}
-          autoOpen
-        />
-      )}
-
       <WizardShell
-        eyebrow="Book a service"
+        eyebrow={activeSubscription ? "Book with your plan" : "Book a service"}
         title="Book your wash"
         steps={STEPS}
         current={step}
         onStepClick={(i) => setStep(i)}
         footer={wizardFooter}
       >
-        <WizardStepHeader title={STEPS[step]} description={STEP_HINTS[step]} />
-          {step === 0 && (
+        {/* Paying with a plan is a BANNER on this page, never a second page
+            or a pop-up over it — the customer stays in one flow from the
+            first tap to the confirmation. */}
+        {activeSubscription && (
+          <div className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-3.5 py-3">
+            <Gift className="h-4 w-4 shrink-0 text-[#E8A900]" />
+            <span className="text-sm font-semibold text-black">
+              {passServiceName || planNameOf(activeSubscription) || "Your plan"}
+            </span>
+            {passPlate && <span className="font-mono-num text-xs text-gray-600">{passPlate}</span>}
+            <span className="font-mono-num text-xs text-gray-500">
+              {activeSubscription.remaining_service_count} of {activeSubscription.total_service_count} washes left
+            </span>
+            <button
+              type="button"
+              onClick={() => setSubscriptionId(null)}
+              className="ml-auto text-xs font-bold text-gray-500 underline underline-offset-2 hover:text-black"
+            >
+              Pay normally instead
+            </button>
+          </div>
+        )}
+
+        {/* Arrived from "Book again": say plainly that last time's choices
+            were carried over, so the prefilled selection reads as
+            deliberate rather than as something already half-committed. */}
+        {editing && !held && (
+          <div className="mb-5 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-3.5 py-3">
+            <Pencil className="h-4 w-4 shrink-0 text-[#E8A900]" />
+            <span className="text-sm text-gray-700">
+              Editing <span className="font-mono-num font-semibold text-black">{editing.number}</span> — change anything, then confirm.
+              The original booking is replaced.
+            </span>
+          </div>
+        )}
+
+        {repeatBookingId && !editBookingId && repeatApplied && !!carNumber && (
+          <div className="mb-5 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-3.5 py-3">
+            <RotateCcw className="h-4 w-4 shrink-0 text-[#E8A900]" />
+            <span className="text-sm text-gray-700">
+              Repeating{" "}
+              <span className="font-mono-num font-semibold text-black">{repeatSource?.booking_number || "your last booking"}</span> — same{" "}
+              {extraCars.length ? `${extraCars.length + 1} vehicles` : "vehicle"}, service and address. Just pick a new date and
+              slot.
+            </span>
+          </div>
+        )}
+
+        {/* Arrived via "Book with my plan" but nothing is usable — say so
+            once, here, and let them carry on with a normal booking. */}
+        {planMode && !activeSubscription && !allUsableSubscriptions.length && (
+          <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-3 text-sm">
+            <Gift className="h-4 w-4 shrink-0 text-[#E8A900]" />
+            <span className="flex-1 text-gray-600">No usable plan right now — this will be a normal, paid booking.</span>
+            <Button size="sm" variant="outline" onClick={() => navigate("/app/subscriptions")}>
+              See plans
+            </Button>
+          </div>
+        )}
+
+        <WizardStepHeader
+          title={STEPS[Math.min(step, STEPS.length - 1)]}
+          description={STEP_HINTS[passMode && stepKey === "review" ? "passReview" : stepKey]}
+        />
+
+        {/* More than one usable plan and none chosen yet: ask once, right
+            where the booking starts, instead of a floating card deck. */}
+        {planMode && !activeSubscription && allUsableSubscriptions.length > 1 && stepKey === "vehicle" && (
+          <div className="mb-6">
+            <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Which plan do you want to use?</p>
+            <div className="space-y-2">
+              {allUsableSubscriptions.map((sub) => (
+                <button
+                  key={sub.id}
+                  type="button"
+                  onClick={() => setSubscriptionId(sub.id)}
+                  className="flex w-full items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-3 text-left transition-colors hover:border-[#E8A900]"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-black">{planNameOf(sub) || "Subscription"}</span>
+                    <span className="block text-xs text-gray-500">Valid until {format(sub.end_date)}</span>
+                  </span>
+                  <span className="font-mono-num shrink-0 text-xs font-bold text-black">{sub.remaining_service_count} left</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+          {stepKey === "vehicle" && (
             <div className="space-y-6">
+              {/* Cars already on this visit. They're settled — the editor
+                  below is always configuring one MORE car. */}
+              {!!extraCars.length && (
+                <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3.5">
+                  <p className="text-sm font-semibold text-black">
+                    On this visit ({extraCars.length + (currentCarReady ? 1 : 0)} of {maxCars})
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {extraCars.map((car) => (
+                      <div key={car.vehicleId} className="flex items-center gap-2 text-sm">
+                        <span className="min-w-0 flex-1 truncate text-gray-700">
+                          <span className="font-medium text-black">{car.label}</span>
+                          {car.serviceLabel ? ` · ${car.serviceLabel}` : ""}
+                        </span>
+                        <span className="font-mono-num shrink-0 text-gray-600">₹{car.subtotal}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeCar(car.vehicleId)}
+                          aria-label={`Remove ${car.label} from this visit`}
+                          className="shrink-0 text-xs font-bold text-gray-400 underline underline-offset-2 hover:text-black"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-2 border-t border-[#F3E5B5] pt-2 text-xs text-gray-500">
+                    One visit, one slot — the captain washes them all at the same address.
+                  </p>
+                </div>
+              )}
+
               <div>
                 <p className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
-                  <Car className="h-3.5 w-3.5" /> Your vehicle
+                  <Car className="h-3.5 w-3.5" />
+                  {extraCars.length ? `Next vehicle (${extraCars.length + 1})` : "Your vehicle"}
                 </p>
                 {!!vehicles?.length && (
                   <div className="mb-3">
@@ -666,60 +1362,37 @@ export default function NewBookingPage() {
                       </div>
                     )}
 
-                    {/* Add-ons — only the ones valid for what's selected */}
-                    {selectedBase && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) && (
-                      <div className="mt-4">
-                        <p className="mb-2 text-sm font-medium text-black">Add-ons</p>
-                        <div className="space-y-2.5">
-                          {kit.simple.map((s) => {
-                            const on = serviceIds.includes(s.id);
-                            const { price, firstTime } = priceFor(s, vehicleType);
-                            const shown = isFirstOrderGuess && firstTime != null ? firstTime : price;
-                            return (
-                              <button
-                                key={s.id}
-                                onClick={() => toggleSimpleAddon(s.id)}
-                                className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-sm transition-colors ${
-                                  on ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-gray-200 hover:border-gray-300"
-                                }`}
-                              >
-                                <span className="font-medium text-[var(--color-text-primary)]">+ {s.name}</span>
-                                <span className="font-mono-num text-[var(--color-text-primary)]">₹{shown}</span>
-                              </button>
-                            );
-                          })}
-
-                          {!bookingIsBike && kit.addBike && (
-                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
-                              <div>
-                                <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
-                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType).price} per bike, washed at the same doorstep</p>
-                              </div>
-                              <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
-                            </div>
-                          )}
-
-                          {kit.bikePolish && bikesInBooking > 0 && (
-                            <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
-                              <div>
-                                <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
-                                <p className="text-xs text-[var(--color-text-secondary)]">
-                                  ₹{priceFor(kit.bikePolish, vehicleType).price} per bike · up to {bikesInBooking} bike{bikesInBooking > 1 ? "s" : ""}
-                                </p>
-                              </div>
-                              <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
+                    {addonsBlock}
                   </>
                 )}
               </div>
+
+              {/* One customer, several of their cars, one trip. Adding a car
+                  banks the current selection and clears the editor for the
+                  next one. */}
+              {canAddMoreCars && (
+                <div className="border-t border-gray-100 pt-5">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    disabled={!currentCarReady}
+                    onClick={addCurrentCar}
+                  >
+                    + Add another car to this visit
+                  </Button>
+                  <p className="mt-1.5 text-center text-xs text-gray-500">
+                    {currentCarReady
+                      ? `Up to ${maxCars} cars washed on one visit, at one address.`
+                      : "Pick this car's service first."}
+                  </p>
+                  {addCarError && <p className="mt-1.5 text-center text-xs text-[var(--color-error)]">{addCarError}</p>}
+                </div>
+              )}
             </div>
           )}
 
-          {step === 1 && (
+          {stepKey === "address" && (
             <div className="space-y-5">
               {/* Contact — one compact line from the profile, not two form fields */}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-2.5 text-sm">
@@ -738,15 +1411,7 @@ export default function NewBookingPage() {
                   value={showNewAddressForm ? "__new" : selectedAddressId || ""}
                   onChange={(e) => {
                     if (e.target.value === "__new") {
-                      setShowNewAddressForm(true);
-                      setSelectedAddressId(null);
-                      setAddressLine("");
-                      setLandmark("");
-                      setCity("");
-                      setState("");
-                      setPincode("");
-                      setAddressLat(null);
-                      setAddressLng(null);
+                      startNewAddress();
                       return;
                     }
                     const a = addresses.find((x) => x.id === e.target.value);
@@ -763,35 +1428,63 @@ export default function NewBookingPage() {
                 </Select>
               )}
 
-              <LocationPicker
-                value={location}
-                onUnavailable={() => setMapsDown(true)}
-                onChange={(v) => {
-                  setLocation(v);
-                  setSelectedAddressId(null);
-                  setAddressLat(v.latitude);
-                  setAddressLng(v.longitude);
-                  // Captured silently — never asked again.
-                  setCity(v.city || "Indore");
-                  setState(v.state || "Madhya Pradesh");
-                  if (v.pincode) setPincode(v.pincode);
-                }}
-              />
-              {/* No house/flat text box (founder call): the pin IS the
-                  address, Rapido-style — the captain navigates to those
-                  coordinates. It returns only in the no-maps fallback. */}
-              {!mapsDown && location && (
-                <p className="flex items-start gap-1.5 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3 text-xs text-[var(--color-text-secondary)]">
-                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" />
-                  <span className="min-w-0">
-                    <span className="block font-medium text-black">{location.formatted || [location.area, location.city].filter(Boolean).join(", ")}</span>
-                    Drag the pin if this isn't your exact gate.
-                  </span>
-                </p>
+              {/* A SAVED address was pinned when it was saved — asking for
+                  the pin again on every booking is the thing customers
+                  complained about. Show what we have and move on; the map
+                  is for a NEW address (or a first-time customer) only. */}
+              {savedAddress ? (
+                <div className="flex items-start gap-2.5 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3.5">
+                  <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-black" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-black">
+                      {savedAddress.label ? `${savedAddress.label} — ` : ""}
+                      {savedAddress.line1}
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-gray-500">
+                      {[savedAddress.landmark, savedAddress.city, savedAddress.pincode].filter(Boolean).join(" · ")}
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-1.5 text-xs font-bold text-black underline underline-offset-2"
+                      onClick={startNewAddress}
+                    >
+                      Use a different address
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <LocationPicker
+                    value={location}
+                    onUnavailable={() => setMapsDown(true)}
+                    onChange={(v) => {
+                      setLocation(v);
+                      setSelectedAddressId(null);
+                      setAddressLat(v.latitude);
+                      setAddressLng(v.longitude);
+                      // Captured silently — never asked again.
+                      setCity(v.city || "Indore");
+                      setState(v.state || "Madhya Pradesh");
+                      if (v.pincode) setPincode(v.pincode);
+                    }}
+                  />
+                  {/* No house/flat text box (founder call): the pin IS the
+                      address, Rapido-style — the captain navigates to those
+                      coordinates. It returns only in the no-maps fallback. */}
+                  {!mapsDown && location && (
+                    <p className="flex items-start gap-1.5 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3 text-xs text-[var(--color-text-secondary)]">
+                      <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" />
+                      <span className="min-w-0">
+                        <span className="block font-medium text-black">{location.formatted || [location.area, location.city].filter(Boolean).join(", ")}</span>
+                        Drag the pin if this isn't your exact gate.
+                      </span>
+                    </p>
+                  )}
+                </>
               )}
-              <Input label="Landmark (optional)" placeholder="Near Apollo Hospital" value={landmark} onChange={(e) => { setLandmark(e.target.value); setSelectedAddressId(null); }} />
+              <Input label="Landmark (optional)" placeholder="Near Apollo Hospital" value={landmark} onChange={(e) => setLandmark(e.target.value)} />
 
-              {mapsDown && (
+              {mapsDown && !savedAddress && (
                 <>
                   {/* Manual fallback ONLY when Google Maps can't load. */}
                   <Input
@@ -812,7 +1505,7 @@ export default function NewBookingPage() {
 
               <div className="border-t border-gray-100 pt-5">
                 <p className="mb-3 text-sm font-medium text-[var(--color-text-primary)]">When should we come?</p>
-                {!mapsDown && addressLat == null ? (
+                {!savedAddress && !mapsDown && addressLat == null ? (
                   <p className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3 py-2.5 text-sm text-[var(--color-text-secondary)]">
                     📍 Set your location on the map above (Use my location, search, or tap) — slots appear once we know where to come.
                   </p>
@@ -848,30 +1541,39 @@ export default function NewBookingPage() {
             </div>
           )}
 
-          {step === 2 && (
+          {stepKey === "review" && (
             <div className="space-y-5">
-              {(!!eligibleSubscriptions.length || !!subscriptionHint) && (
-                <div className="rounded-xl border-2 border-dashed border-[var(--color-success)]/40 bg-[var(--color-success)]/5 p-4">
-                  <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-[var(--color-text-primary)]">
-                    <Gift className="h-4 w-4 text-[var(--color-success)]" /> Have a subscription plan?
-                  </p>
-                  {eligibleSubscriptions.length ? (
-                    <SubscriptionPicker
-                      subscriptions={eligibleSubscriptions}
-                      plans={subscriptionPlans}
-                      selectedId={subscriptionId}
-                      onSelect={(id) => {
-                        setSubscriptionId(id);
-                        resetCoupon();
-                      }}
-                    />
-                  ) : (
-                    <p className="text-xs text-[var(--color-text-secondary)]">{subscriptionHint}</p>
-                  )}
+              {/* Pass bookings pick nothing but extras — the wash itself is
+                  already decided by the pass. */}
+              {passMode && (
+                <div className="border-b border-gray-100 pb-5">
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">Want anything extra?</p>
+                  <p className="mt-0.5 text-xs text-gray-500">Optional — added to this visit and paid online with it.</p>
+                  {addonsBlock}
                 </div>
               )}
-
               <div className="space-y-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-4">
+                {/* Cars already on the visit, each named with what it's
+                    having done. Without these the customer sees one service
+                    and a total that doesn't match it. */}
+                {extraCars.map((car) => (
+                  <div key={car.vehicleId}>
+                    <p className="text-xs font-semibold text-black">{car.label}</p>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-[var(--color-text-secondary)]">{car.serviceLabel || "Service"}</span>
+                      <span className="font-mono-num text-[var(--color-text-primary)]">₹{car.subtotal}</span>
+                    </div>
+                  </div>
+                ))}
+
+                {/* ...and the car still in the editor. On a single-car
+                    booking this is the whole list, unchanged. */}
+                {!!extraCars.length && (
+                  <p className="text-xs font-semibold text-black">
+                    {carModel || "Vehicle"}
+                    {carNumber ? ` · ${carNumber.toUpperCase()}` : ""}
+                  </p>
+                )}
                 {selectedCombo ? (
                   <div className="flex justify-between text-sm">
                     <span className="text-[var(--color-text-secondary)]">{selectedCombo.name} (combo)</span>
@@ -893,8 +1595,10 @@ export default function NewBookingPage() {
                   })
                 )}
                 <div className="flex justify-between border-t border-gray-200 pt-2 text-sm">
-                  <span className="text-[var(--color-text-secondary)]">Subtotal</span>
-                  <span className="font-mono-num">₹{subtotal}</span>
+                  <span className="text-[var(--color-text-secondary)]">
+                    Subtotal{extraCars.length ? ` · ${extraCars.length + 1} vehicles` : ""}
+                  </span>
+                  <span className="font-mono-num">₹{subtotal + extrasSubtotal}</span>
                 </div>
                 {subscriptionId ? (
                   <>
@@ -916,13 +1620,17 @@ export default function NewBookingPage() {
                     </div>
                   )
                 )}
-                <div className="flex justify-between border-t border-gray-200 pt-2 text-base font-bold text-[var(--color-text-primary)]">
+                <div
+                  className="flex justify-between border-t border-gray-200 pt-2 text-base font-bold text-[var(--color-text-primary)]"
+                  title={
+                    isFirstOrderGuess
+                      ? "First-time pricing is confirmed only if this vehicle and phone have no earlier booking."
+                      : undefined
+                  }
+                >
                   <span>Total</span>
-                  <span className="font-mono-num">₹{total}</span>
+                  <span className="font-mono-num">₹{total + extrasSubtotal}</span>
                 </div>
-                <p className="pt-1 text-xs text-[var(--color-text-secondary)]">
-                  First-time pricing above is an estimate — it's only confirmed if this vehicle and phone number genuinely have no prior booking on the platform.
-                </p>
               </div>
 
               {!subscriptionId && (
@@ -961,11 +1669,14 @@ export default function NewBookingPage() {
                   </div>
                 </>
               )}
-              {submitError && <p className="text-sm text-[var(--color-error)]">{submitError}</p>}
+
+              {/* The last moment this is still actionable — a captain who
+                  arrives to no water is a wasted trip for both sides. */}
+              <ServicePrepNotice services={visitServices} />
             </div>
           )}
 
-          <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); createMutation.mutate(); }} />
+          <PhoneVerificationModal open={verifyOpen} onClose={() => setVerifyOpen(false)} onVerified={() => { setVerifyOpen(false); if (extraCars.length) createGroupMutation.mutate(); else createMutation.mutate(); }} />
       </WizardShell>
     </div>
   );

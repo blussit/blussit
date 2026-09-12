@@ -38,20 +38,43 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
     enabled: open,
     staleTime: Infinity,
   });
+  // Which channel actually DELIVERED this OTP — not just which one we
+  // tried. The widget script can load fine (widgetReady = true) and still
+  // fail to send (MSG91 account out of balance, its API down, etc.); when
+  // that happens we fall back to our own WhatsApp OTP rather than leaving
+  // the customer stuck on a "send" step that silently never arrives. The
+  // verify step below has to know which channel actually won, since a
+  // widget OTP and a backend OTP are checked completely differently.
+  const [usedWidget, setUsedWidget] = useState(false);
 
   const sendMutation = useMutation({
     mutationFn: async () => {
       if (needsPhone) {
         const phone = validateIndianMobile(newPhone);
         if (!phone) throw new Error("Enter a valid 10-digit mobile number");
-        if (widgetReady) await widgetSendOtp(phone);
-        else await googleAuthApi.addPhoneRequest(phone);
+        if (widgetReady) {
+          try {
+            await widgetSendOtp(phone);
+            setUsedWidget(true);
+            return;
+          } catch {
+            // Falls through to the backend channel below.
+          }
+        }
+        setUsedWidget(false);
+        await googleAuthApi.addPhoneRequest(phone);
         return;
       }
       if (widgetReady && user?.phone) {
-        await widgetSendOtp(user.phone);
-        return;
+        try {
+          await widgetSendOtp(user.phone);
+          setUsedWidget(true);
+          return;
+        } catch {
+          // Falls through to the backend channel below.
+        }
       }
+      setUsedWidget(false);
       await authApi.requestPhoneVerification();
     },
     onSuccess: () => {
@@ -64,13 +87,13 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
   const verifyMutation = useMutation({
     mutationFn: async () => {
       if (needsPhone) {
-        const payload = widgetReady
+        const payload = usedWidget
           ? { phone: targetPhone, access_token: await widgetVerifyOtp(otp.trim()) }
           : { phone: targetPhone, otp: otp.trim() };
         await googleAuthApi.addPhoneConfirm(payload);
         return;
       }
-      if (widgetReady && user?.phone) {
+      if (usedWidget && user?.phone) {
         const token = await widgetVerifyOtp(otp.trim());
         await otpWidgetApi.verifyPhone(token);
         return;
@@ -91,10 +114,14 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
     setStep("send");
     setOtp("");
     setError("");
+    setUsedWidget(false);
     onClose();
   };
 
-  const channelLabel = widgetReady ? "SMS / WhatsApp" : "WhatsApp";
+  // Before sending: what we'll TRY. After sending: what actually delivered
+  // it — those can differ when MSG91 loaded but couldn't send, and the
+  // code silently fell back to WhatsApp.
+  const channelLabel = step === "verify" ? (usedWidget ? "SMS / WhatsApp" : "WhatsApp") : widgetReady ? "SMS / WhatsApp" : "WhatsApp";
 
   return (
     <Modal open={open} onClose={close} title="Verify your phone number">

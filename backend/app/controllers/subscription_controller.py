@@ -4,12 +4,16 @@ from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
 from app.schemas.subscription_schema import (
     AssignSubscriptionRequest,
+    AutoPayRequest,
+    PassQuoteRequest,
+    PlanEnquiryRequest,
     SubscribeRequest,
     SubscriptionPlanCreateRequest,
     SubscriptionPlanUpdateRequest,
     UpgradeSubscriptionRequest,
 )
 from app.services.audit_service import AuditService
+from app.services.plan_enquiry_service import PlanEnquiryService
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 from app.services.subscription_service import SubscriptionPlanService, UserSubscriptionService
 
@@ -46,6 +50,39 @@ class UserSubscriptionController:
         self.service = UserSubscriptionService(db)
         self.audit = AuditService(db)
         self.confirmations = PurchaseConfirmationService(db)
+        self.enquiries = PlanEnquiryService(db)
+
+    async def quote_pass(self, current_user: CurrentUser, payload: PassQuoteRequest):
+        return success(
+            await self.service.quote_pass(current_user.id, payload.plan_id, payload.vehicle_id, payload.service_id)
+        )
+
+    async def submit_enquiry(self, current_user: CurrentUser | None, payload: PlanEnquiryRequest):
+        await self.enquiries.capture(
+            name=payload.name,
+            phone=payload.phone,
+            vehicle_count=payload.vehicle_count,
+            services_wanted=payload.services_wanted,
+            washes_per_month=payload.washes_per_month,
+            preferred_time=payload.preferred_time,
+            notes=payload.notes,
+            customer_id=current_user.id if current_user else None,
+        )
+        return success(None, "Thanks — we'll call you about a plan that fits.")
+
+    async def list_enquiries(self, pagination: PaginationParams):
+        items, total = await self.enquiries.list_for_admin(pagination.page, pagination.page_size)
+        return paginated(items, pagination.page, pagination.page_size, total)
+
+    async def set_enquiry_status(self, current_user: CurrentUser, enquiry_id: str, status: str):
+        from app.core.exceptions import NotFoundException
+
+        if not await self.enquiries.set_status(enquiry_id, status):
+            raise NotFoundException("Enquiry not found")
+        await self.audit.log_action(
+            current_user.id, current_user.role, "UPDATE_PLAN_ENQUIRY", "plan_enquiries", enquiry_id, {"status": status}
+        )
+        return success(None, "Updated")
 
     async def list_mine(self, current_user: CurrentUser):
         return success(await self.service.list_my_subscriptions(current_user.id))
@@ -75,6 +112,14 @@ class UserSubscriptionController:
         result = await self.service.cancel(current_user.id, subscription_id)
         await self.audit.log_action(current_user.id, current_user.role, "CANCEL_SUBSCRIPTION", "user_subscriptions", subscription_id, None)
         return success(result, "Subscription cancelled")
+
+    async def set_auto_pay(self, current_user: CurrentUser, subscription_id: str, payload: AutoPayRequest):
+        result = await self.service.set_auto_pay(current_user.id, subscription_id, payload.enabled)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "SET_SUBSCRIPTION_AUTO_PAY", "user_subscriptions", subscription_id,
+            {"enabled": payload.enabled},
+        )
+        return success(result, "Auto-pay turned on" if payload.enabled else "Auto-pay turned off")
 
     async def upgrade(self, current_user: CurrentUser, subscription_id: str, payload: UpgradeSubscriptionRequest):
         result = await self.service.upgrade(current_user.id, subscription_id, payload.new_plan_id)

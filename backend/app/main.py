@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,7 @@ from app.routes.v1 import (
     notification_routes,
     booking_policy_routes,
     homepage_config_routes,
+    settings_history_routes,
     pricing_routes,
     profile_routes,
     purchase_confirmation_routes,
@@ -47,6 +49,26 @@ from app.routes.v1 import (
 )
 
 logging.basicConfig(level=logging.INFO)
+# WebSocket authentication uses a query token because browsers cannot attach
+# an Authorization header during the handshake. Uvicorn's access logger would
+# otherwise write that token into every request log line.
+
+
+class _RedactAccessTokens(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = re.sub(r"([?&]token=)[^&\s]+", r"\1[REDACTED]", record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                re.sub(r"([?&]token=)[^&\s]+", r"\1[REDACTED]", value) if isinstance(value, str) else value
+                for value in record.args
+            )
+        return True
+
+
+_redact_access_tokens = _RedactAccessTokens()
+logging.getLogger("uvicorn.access").addFilter(_redact_access_tokens)
+logging.getLogger("uvicorn.error").addFilter(_redact_access_tokens)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -67,14 +89,35 @@ app.middleware("http")(rate_limit_middleware)
 
 @app.middleware("http")
 async def security_headers(request, call_next):
-    """User-uploaded files are served from our own origin — nosniff stops a
-    browser from ever executing a mislabeled upload as HTML/script, and the
-    magic-byte check in storage.py stops one being stored in the first
-    place. Belt and braces."""
+    """Baseline hardening on every response, plus a much tighter policy for
+    user-uploaded files.
+
+    Uploads are served from our own origin, so nosniff stops a browser ever
+    executing a mislabeled upload as HTML/script (the magic-byte check in
+    storage.py stops one being stored in the first place — belt and braces)
+    and `default-src 'none'` makes the file inert even if one slipped
+    through. A blanket CSP is deliberately NOT set on API responses: this
+    app also serves the payment-link result page, and the SPA is served by
+    its own host, which is where the page-level CSP belongs.
+
+    HSTS is only sent outside DEBUG — pinning `localhost` to HTTPS would
+    break every developer's browser for months."""
     response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    # Nothing here is meant to be framed — an API or a payment result page
+    # inside someone else's iframe is only ever clickjacking.
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    # Correct because this app serves ONLY JSON and the payment-result page,
+    # none of which need a device. WARNING: the customer app genuinely uses
+    # geolocation (address pin, captain GPS) and the camera (before/after
+    # photos) — if the SPA is ever served from this process, those two must
+    # come out of this list or the booking and captain flows break silently.
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    if not settings.DEBUG:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/uploads/"):
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = "default-src 'none'"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
     return response
 
 app.add_middleware(
@@ -93,6 +136,8 @@ app.mount("/uploads", StaticFiles(directory=str(upload_root())), name="uploads")
 
 
 _reminder_task: asyncio.Task | None = None
+# The repeat-booking nudge runs hourly inside the 60-second loop.
+_REPEAT_SWEEP: dict = {"at": 0.0}
 
 
 async def _reminder_loop() -> None:
@@ -234,6 +279,89 @@ async def _reminder_loop() -> None:
                         f"address while the service is supposedly in progress — please check in.",
                     )
 
+                # Bookings whose customer chose "pay online" and never
+                # finished: the slot has been held for them long enough
+                # (booking policy `payment_window_minutes`) — cancel and
+                # hand it back. They were never confirmed, so nobody but
+                # the customer ever knew about them.
+                from app.schemas.booking_schema import BookingCancelRequest
+
+                expired_reason = BookingCancelRequest(reason="Payment wasn't completed in time, so the slot was released.")
+                expired_groups: set[str] = set()
+                for booking in await booking_service.find_bookings_payment_expired():
+                    try:
+                        group_id = booking.get("booking_group_id")
+                        if group_id:
+                            # A visit expires as one thing — one cancellation,
+                            # one message, one seat handed back.
+                            if group_id in expired_groups:
+                                continue
+                            expired_groups.add(group_id)
+                            await booking_service.cancel_booking_group(group_id, expired_reason, actor_id="system", actor_role="admin")
+                        else:
+                            await booking_service.cancel_booking(str(booking["_id"]), expired_reason, actor_id="system", actor_role="admin")
+                    except Exception:
+                        logger.exception("Could not expire unpaid booking %s", booking.get("booking_number"))
+
+                # One nudge before an unpaid online booking's window closes —
+                # a bank page that timed out shouldn't quietly cost the slot.
+                policy_now = await booking_service.policy_service.get_policy()
+                for booking in await booking_service.find_bookings_payment_reminder_due():
+                    try:
+                        cars = await booking_service._visit_cars(booking)
+                        reference = booking_service._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
+                        wa_name, _ = await booking_service._wa_ctx(booking)
+                        minutes_left = str(int(policy_now.get("payment_reminder_minutes_before", 10)))
+                        await notifications.notify(
+                            booking["customer_id"],
+                            "Finish your payment",
+                            f"{reference} is waiting for payment — finish in the next {minutes_left} minutes to keep your slot, or choose cash on service.",
+                            NotificationType.BOOKING,
+                            str(booking["_id"]),
+                            wa_event="payment_pending",
+                            wa_params=[wa_name, reference, minutes_left],
+                        )
+                        # A tappable "Pay now" / "Cash instead" on top of the
+                        # approved-template text above — only actually lands
+                        # within WhatsApp's 24h session window, which is why
+                        # it rides ALONGSIDE the template rather than
+                        # replacing it. Never lets a failure here mark the
+                        # reminder itself as failed.
+                        try:
+                            from app.services.whatsapp_bot_service import WhatsAppBotService
+
+                            await WhatsAppBotService(db).send_payment_reminder(booking)
+                        except Exception:
+                            logger.exception("Could not send payment-reminder buttons for %s", booking.get("booking_number"))
+                        await booking_service.mark_payment_reminder_sent(str(booking["_id"]))
+                    except Exception:
+                        logger.exception("Could not send payment reminder for %s", booking.get("booking_number"))
+
+                # "Time for a wash?" — hourly, to customers whose last wash was
+                # a while ago and who have nothing booked. Marketing: goes out
+                # on WhatsApp only through the approved template and never to
+                # an opted-out customer (NotificationService.notify).
+                import time as _time
+
+                if policy_now.get("repeat_reminder_enabled", True) and _time.monotonic() - _REPEAT_SWEEP["at"] > 3600:
+                    _REPEAT_SWEEP["at"] = _time.monotonic()
+                    for customer in await booking_service.find_customers_due_repeat_reminder(int(policy_now.get("repeat_reminder_days", 21))):
+                        try:
+                            first = (customer.get("full_name") or "there").split(" ")[0]
+                            await notifications.notify(
+                                str(customer["_id"]),
+                                "Time for a wash?",
+                                "It's been a while since your last BLUSSIT wash — book your next one whenever your car needs it.",
+                                NotificationType.SYSTEM,
+                                None,
+                                wa_event="repeat_booking",
+                                wa_params=[first],
+                                wa_marketing=True,
+                            )
+                            await booking_service.mark_repeat_reminder_sent(str(customer["_id"]))
+                        except Exception:
+                            logger.exception("Could not send repeat-booking reminder to %s", customer.get("_id"))
+
                 # Razorpay payment links (WhatsApp bookings): ask Razorpay
                 # which pending links got paid and settle them — the
                 # reliable half of the two-path design (the browser
@@ -257,14 +385,56 @@ async def _reminder_loop() -> None:
 
                 await PaymentService(db).sync_pending_links(_confirm_link_paid)
 
-                # Subscriptions past end_date become properly EXPIRED — the
-                # stored status used to flip only lazily on read/consume, so
-                # untouched subs sat "active" in the DB forever (and
-                # auto_renew has no payment gateway to act on, so expiry is
-                # the only correct transition). One Mongo-side update_many.
+                # Auto-pay renewals: ask Razorpay which recurring mandates
+                # charged again since the last pass and refresh those plans
+                # for their new cycle (see sync_autopay_renewals). Runs
+                # BEFORE the expiry sweep below so a plan that renewed on
+                # time is never briefly marked expired.
+                await PaymentService(db).sync_autopay_renewals()
+
+                # Passes: a heads-up two days before one ends and a note when
+                # it has — each once — then the actual flip to EXPIRED (the
+                # stored status used to change only lazily on read/consume,
+                # so untouched passes sat "active" in the DB forever).
+                from app.services.subscription_service import find_subscriptions_expiring_soon, mark_expiry_reminder_sent
+                from app.utils.timezone import to_ist as _to_ist
+
+                async def _pass_ctx(sub: dict) -> tuple[str, str, str]:
+                    cid, pid = str(sub.get("customer_id") or ""), str(sub.get("plan_id") or "")
+                    customer = await db.users.find_one({"_id": ObjectId(cid)}) if ObjectId.is_valid(cid) else None
+                    plan = await db.subscription_plans.find_one({"_id": ObjectId(pid)}) if ObjectId.is_valid(pid) else None
+                    first = ((customer or {}).get("full_name") or "there").split(" ")[0]
+                    end = sub.get("end_date")
+                    return first, (plan or {}).get("name") or "Monthly pass", (_to_ist(end).strftime("%d %b") if end else "soon")
+
+                for sub in await find_subscriptions_expiring_soon(db, days=2):
+                    try:
+                        first, plan_name, end_str = await _pass_ctx(sub)
+                        remaining = str(sub.get("remaining_service_count") or 0)
+                        await notifications.notify(
+                            sub["customer_id"], f"{plan_name} ends {end_str}",
+                            f"{remaining} washes left — book them before it ends, or renew to keep going.",
+                            NotificationType.SYSTEM, str(sub["_id"]),
+                            wa_event="subscription_expiring", wa_params=[first, plan_name, end_str, remaining],
+                        )
+                        await mark_expiry_reminder_sent(db, str(sub["_id"]))
+                    except Exception:
+                        logger.exception("Could not send pass-expiry reminder for %s", sub.get("_id"))
+
+                now_utc = _dt.now(_tz.utc)
+                for sub in await db.user_subscriptions.find({"status": "active", "end_date": {"$lt": now_utc}}).to_list(length=200):
+                    try:
+                        first, plan_name, _end = await _pass_ctx(sub)
+                        await notifications.notify(
+                            sub["customer_id"], f"{plan_name} has ended", "Renew any time to keep your car shining.",
+                            NotificationType.SYSTEM, str(sub["_id"]),
+                            wa_event="subscription_expired", wa_params=[first, plan_name],
+                        )
+                    except Exception:
+                        logger.exception("Could not send pass-expired note for %s", sub.get("_id"))
                 await db.user_subscriptions.update_many(
-                    {"status": "active", "end_date": {"$lt": _dt.now(_tz.utc)}},
-                    {"$set": {"status": "expired", "updated_at": _dt.now(_tz.utc)}},
+                    {"status": "active", "end_date": {"$lt": now_utc}},
+                    {"$set": {"status": "expired", "updated_at": now_utc}},
                 )
         except Exception:
             logger.exception("Reminder sweep failed")
@@ -276,7 +446,16 @@ async def on_startup() -> None:
     global _reminder_task
     # Production misconfiguration must fail LOUDLY at boot, not quietly at
     # exploit time: with the default secret anyone can forge an admin JWT.
+    # Which Razorpay keys are loaded is the single most expensive thing to
+    # get wrong in either direction: testing against live moves real money,
+    # and shipping to production on test keys silently takes none.
+    logger.warning("Razorpay is in %s mode", settings.razorpay_mode.upper())
     if not settings.DEBUG:
+        if settings.razorpay_mode == "test":
+            logger.error(
+                "PRODUCTION IS RUNNING ON RAZORPAY TEST KEYS — no real payment can succeed. "
+                "Copy RAZORPAY_LIVE_KEY_ID/SECRET into RAZORPAY_KEY_ID/SECRET."
+            )
         if settings.JWT_SECRET_KEY == "change-this-super-secret-key-in-production":
             raise RuntimeError("Refusing to start: JWT_SECRET_KEY is still the default. Set a real secret in .env.")
         if settings.WHATSAPP_PROVIDER == "meta_cloud" and not settings.WHATSAPP_APP_SECRET:
@@ -382,6 +561,7 @@ app.include_router(vehicle_type_routes.router, prefix=api_prefix)
 app.include_router(pricing_routes.router, prefix=api_prefix)
 app.include_router(booking_policy_routes.router, prefix=api_prefix)
 app.include_router(homepage_config_routes.router, prefix=api_prefix)
+app.include_router(settings_history_routes.router, prefix=api_prefix)
 app.include_router(ws_routes.router, prefix=api_prefix)
 app.include_router(purchase_confirmation_routes.router, prefix=api_prefix)
 app.include_router(whatsapp_webhook_routes.router, prefix=api_prefix)

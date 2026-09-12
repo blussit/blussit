@@ -1,6 +1,21 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { Address, Booking, EquipmentUsed, Vehicle } from "../types";
 
+/** What POST /bookings/group returns: the visit, and every car on it as a
+ *  real booking of its own. */
+export interface BookingGroupResult {
+  booking_group_id: string;
+  bookings: Booking[];
+  vehicle_count: number;
+  total_amount: number;
+  /** How long the whole visit runs — all the cars' service time summed. */
+  total_duration_minutes: number;
+  service_center_id: string;
+  scheduled_date: string;
+  scheduled_slot: string;
+  confirmation_token?: string;
+}
+
 export interface CreateBookingPayload {
   vehicle_id: string;
   address_id: string;
@@ -107,6 +122,41 @@ export const bookingApi = {
 
   reassignCaptain: (id: string, captainId: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/reassign-captain`, { captain_id: captainId }).then((r) => r.data.data),
+
+  /** Every vehicle on one visit, enriched like a single booking. */
+  getGroup: (groupId: string) =>
+    apiClient.get<ApiSuccess<Booking[]>>(`/bookings/group/${groupId}`).then((r) => r.data.data),
+
+  /** One decision for the whole visit. */
+  switchGroupToCash: (groupId: string) =>
+    apiClient.post<ApiSuccess<{ switched_count: number }>>(`/bookings/group/${groupId}/switch-to-cash`).then((r) => r.data.data),
+
+  cancelGroup: (groupId: string, reason: string) =>
+    apiClient.post<ApiSuccess<{ cancelled_count: number }>>(`/bookings/group/${groupId}/cancel`, { reason }).then((r) => r.data.data),
+
+  /** Several of the customer's own vehicles washed on ONE visit: one
+   *  address, one slot, one captain, one payment — and ONE slot seat,
+   *  because it's a single trip. */
+  createGroup: (payload: {
+    vehicles: { vehicle_id: string; service_ids: string[]; service_quantities?: Record<string, number>; subscription_id?: string }[];
+    address_id: string;
+    scheduled_date: string;
+    scheduled_slot: string;
+    hold_key?: string;
+    payment_method?: string;
+    coupon_code?: string;
+    customer_notes?: string;
+    alternate_contact_name?: string;
+    alternate_contact_phone?: string;
+  }) =>
+    apiClient
+      .post<ApiSuccess<BookingGroupResult>>("/bookings/group", payload)
+      .then((r) => r.data.data),
+
+  /** "I couldn't finish paying online — let me pay the captain instead."
+   *  Confirms a still-unpaid booking as a cash booking. */
+  switchToCash: (id: string) =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/switch-to-cash`).then((r) => r.data.data),
 
   cancel: (id: string, reason: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/cancel`, { reason }).then((r) => r.data.data),

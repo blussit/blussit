@@ -97,6 +97,7 @@ export default function ManagerCaptainsPage() {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const [detailFor, setDetailFor] = useState<User | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["center-captains-page", centerId],
@@ -564,7 +565,11 @@ export default function ManagerCaptainsPage() {
                         {kyc.submitted_at && <span className="text-xs text-[var(--color-text-secondary)]">Submitted {formatDateTime(kyc.submitted_at)}</span>}
                       </div>
                       <div className="flex flex-wrap items-start gap-4 text-sm">
-                        {kyc.photo_url && <img src={kyc.photo_url} alt="Captain" className="h-20 w-20 rounded-xl object-cover" />}
+                        {kyc.photo_url && (
+                          <button type="button" onClick={() => setPreviewPhoto({ url: kyc.photo_url!, name: detailFor.full_name })} className="shrink-0 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
+                            <img src={kyc.photo_url} alt={`View ${detailFor.full_name}`} className="h-20 w-20 rounded-xl object-cover" />
+                          </button>
+                        )}
                         <div className="min-w-0 space-y-1.5">
                           <p><span className="text-[var(--color-text-secondary)]">Aadhaar:</span> <span className="font-mono-num">{kyc.aadhaar_number || "—"}</span>{" "}
                             {kyc.aadhaar_doc_url && <a href={kyc.aadhaar_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">view doc</a>}
@@ -667,6 +672,9 @@ export default function ManagerCaptainsPage() {
             </div>
           );
         })()}
+      </Modal>
+      <Modal open={!!previewPhoto} onClose={() => setPreviewPhoto(null)} title={previewPhoto?.name || "Captain photo"} maxWidth="max-w-xl">
+        {previewPhoto && <img src={previewPhoto.url} alt={previewPhoto.name} className="max-h-[70vh] w-full rounded-xl object-contain" />}
       </Modal>
     </div>
   );

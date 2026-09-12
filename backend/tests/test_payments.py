@@ -245,7 +245,8 @@ async def test_captain_doorstep_settlement(db, cleanup, monkeypatch):
     cleanup.append(("bookings", {"_id": ObjectId(b2)}))
     await db.bookings.update_one({"_id": ObjectId(b2)}, {"$set": {"captain_id": captain_id, "status": "completed"}})
     result = await svc.captain_collect_cash(b2, captain_id)
-    assert result == {"payment_status": "paid", "payment_method": "cash"}
+    assert result["payment_status"] == "paid" and result["payment_method"] == "cash"
+    assert result["vehicles"] == 1 and result["amount"] > 0
     fresh = await db.bookings.find_one({"_id": ObjectId(b2)})
     assert fresh["cash_collected_by"] == captain_id and fresh["payment_status"] == "paid"
 

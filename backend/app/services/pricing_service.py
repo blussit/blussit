@@ -55,11 +55,12 @@ class PricingService:
         config.update(setting.get("value", {}))
         return config
 
-    async def set_pricing_config(self, per_km_rate: float, default_captain_service_fee: float) -> dict:
+    async def set_pricing_config(self, per_km_rate: float, default_captain_service_fee: float, updated_by: str | None = None) -> dict:
         return await self.settings_repo.upsert(
             "pricing_config",
             {"per_km_rate": per_km_rate, "default_captain_service_fee": default_captain_service_fee},
             "Global captain payout configuration",
+            updated_by=updated_by,
         )
 
     async def calculate_split(self, service_price: float, distance_km: float, service_doc: dict | None) -> dict:

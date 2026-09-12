@@ -1,6 +1,18 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+/**
+ * Where the API lives. In a PRODUCTION build a missing VITE_API_BASE_URL is
+ * a deployment mistake — falling back to localhost there would ship a site
+ * that is broken for every visitor while looking fine to the developer who
+ * built it. Same-origin "/api/v1" at least works behind a reverse proxy,
+ * and the console error names the real problem.
+ */
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL;
+if (!configuredBaseUrl && import.meta.env.PROD) {
+  console.error("VITE_API_BASE_URL is not set for this build — falling back to same-origin /api/v1.");
+}
+export const API_BASE_URL =
+  configuredBaseUrl || (import.meta.env.PROD ? "/api/v1" : "http://localhost:8000/api/v1");
 
 export const TOKEN_KEY = "dvc_access_token";
 export const REFRESH_KEY = "dvc_refresh_token";
@@ -39,7 +51,17 @@ apiClient.interceptors.response.use(
   async (error: AxiosError) => {
     const originalRequest = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
 
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    // A 401 from an AUTH endpoint means "those credentials are wrong", not
+    // "your session expired". Running the session-expiry path on it did a
+    // full `window.location.href` reload of /login, which wiped the React
+    // state holding the error — so a wrong password looked like the page
+    // just blinked, with no explanation at all. Let those reject normally
+    // and the form shows its own message.
+    const isAuthAttempt = /\/auth\/(login|register|refresh|google|otp-login|otp\/|booking-access|forgot-password|reset-password|verify-phone)/.test(
+      originalRequest?.url || ""
+    );
+
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isAuthAttempt) {
       const refreshToken = tokenStorage.getRefresh();
       if (!refreshToken) {
         tokenStorage.clear();

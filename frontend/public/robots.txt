@@ -1,0 +1,16 @@
+# BLUSSIT — https://blussit.com
+User-agent: *
+Allow: /
+
+# Signed-in areas: nothing here is useful to a crawler and some of it is
+# per-customer. Kept out of the index (they're auth-gated regardless).
+Disallow: /app
+Disallow: /captain
+Disallow: /manager
+Disallow: /admin
+Disallow: /thank-you
+Disallow: /login
+Disallow: /register
+Disallow: /forgot-password
+
+Sitemap: https://blussit.com/sitemap.xml

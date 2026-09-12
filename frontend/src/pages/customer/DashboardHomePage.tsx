@@ -12,6 +12,7 @@ import { subscriptionApi } from "../../api/engagement";
 import { Badge, Card, CardBody, CardHeader, EmptyState, PageLoader, StatCard, StatusBadge } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
 import { format } from "../../lib/date";
+import { toSlabs } from "../../lib/bookingGroups";
 
 const QUICK_LINKS = [
   { label: "My vehicles", sub: "Add or manage your cars & bikes", to: "/app/vehicles", icon: Car },
@@ -34,8 +35,14 @@ export default function CustomerDashboardPage() {
   });
 
   const activeSubs = (subscriptions || []).filter((s) => s.status === "active");
-  const upcoming = (bookings?.data || []).filter((b) => !["completed", "cancelled"].includes(b.status));
-  const next = upcoming[0];
+  // Cars on one visit read as ONE booking everywhere they're listed.
+  const slabs = toSlabs(bookings?.data || []);
+  const upcoming = slabs.filter((slab) => !["completed", "cancelled"].includes(slab.status));
+  const nextSlab = upcoming[0];
+  const next = nextSlab?.primary;
+  // A booking whose online payment was never finished isn't confirmed and
+  // will lose its slot — the one thing on this page worth interrupting for.
+  const unpaid = upcoming.find((slab) => slab.status === "awaiting_payment")?.primary;
 
   return (
     <div className="customer-dashboard space-y-5 bg-white [&_a]:cursor-pointer [&_button]:cursor-pointer">
@@ -115,16 +122,24 @@ export default function CustomerDashboardPage() {
         <div>
           <h1 className="font-display text-[26px] font-bold leading-tight tracking-[-0.025em] text-black">Welcome back, {user?.full_name?.split(" ")[0]}</h1>
           <p className="mt-1 text-sm text-gray-500">
-            {next
-              ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
-              : "Book a doorstep wash whenever you're ready."}
+            {unpaid
+              ? `Booking ${unpaid.booking_number} isn't confirmed yet — its payment wasn't completed.`
+              : next
+                ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
+                : "Book a doorstep wash whenever you're ready."}
           </p>
         </div>
         <button
-          onClick={() => navigate("/app/book")}
+          onClick={() => navigate(unpaid ? `/app/bookings/${unpaid.id}` : "/app/book")}
           className="group inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#E8A900] px-5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-[#D99A00] hover:-translate-y-0.5 !shadow-none hover:!shadow-none"
         >
-          <CalendarPlus className="h-4 w-4" /> Book a service
+          {unpaid ? (
+            <>Finish payment</>
+          ) : (
+            <>
+              <CalendarPlus className="h-4 w-4" /> Book a service
+            </>
+          )}
           <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
         </button>
       </div>
@@ -186,38 +201,56 @@ export default function CustomerDashboardPage() {
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#E8A900] text-white">
                         <Clock className="h-4 w-4" />
                       </span>
-                      <div>
-                        <p className="font-mono-num text-sm font-bold text-black">{next.booking_number}</p>
+                      {/* Service leads, then when — the booking id and the
+                          vehicle sit underneath as reference detail. */}
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold text-black">
+                          {nextSlab!.serviceLabel}
+                          {nextSlab!.isVisit ? ` · ${nextSlab!.vehicleCount} vehicles` : ""}
+                        </p>
                         <p className="text-sm text-gray-600">
                           {format(next.scheduled_date)} · {next.scheduled_slot}
-                          {(next.combo_name || next.service_names?.length) ? ` · ${next.combo_name || next.service_names?.join(", ")}` : ""}
+                        </p>
+                        <p className="mt-0.5 truncate text-xs text-gray-400">
+                          <span className="font-mono-num">{next.booking_number}</span>
+                          {nextSlab!.vehicleLabel ? ` · ${nextSlab!.vehicleLabel}` : ""}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
-                      <StatusBadge status={next.status} />
+                      <StatusBadge status={nextSlab!.status} />
                       <ArrowRight className="h-4 w-4 text-black" />
                     </div>
                   </button>
                 )}
                 <div className="divide-y divide-gray-100">
-                  {bookings.data
-                    .filter((b) => b.id !== next?.id)
+                  {slabs
+                    .filter((slab) => slab.key !== nextSlab?.key)
                     .slice(0, 4)
-                    .map((b) => (
-                      <button key={b.id} onClick={() => navigate(`/app/bookings/${b.id}`)} className="flex w-full items-center justify-between gap-4 py-3 text-left">
-                        <div>
-                          <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
+                    .map((slab) => {
+                      const b = slab.primary;
+                      return (
+                      <button key={slab.key} onClick={() => navigate(`/app/bookings/${b.id}`)} className="flex w-full items-center justify-between gap-4 py-3 text-left">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-black">
+                            {slab.serviceLabel}
+                            {slab.isVisit ? ` · ${slab.vehicleCount} vehicles` : ""}
+                          </p>
                           <p className="text-xs text-[var(--color-text-secondary)]">
                             {format(b.scheduled_date)} · {b.scheduled_slot}
                           </p>
+                          <p className="mt-0.5 truncate text-xs text-gray-400">
+                            <span className="font-mono-num">{b.booking_number}</span>
+                            {slab.vehicleLabel ? ` · ${slab.vehicleLabel}` : ""}
+                          </p>
                         </div>
                         <div className="flex items-center gap-4">
-                          <Badge tone="neutral" className="hidden font-mono-num sm:inline-flex">₹{b.total_amount}</Badge>
-                          <StatusBadge status={b.status} />
+                          <Badge tone="neutral" className="hidden font-mono-num sm:inline-flex">₹{slab.totalAmount}</Badge>
+                          <StatusBadge status={slab.status} />
                         </div>
                       </button>
-                    ))}
+                      );
+                    })}
                 </div>
               </div>
             )}
@@ -251,7 +284,7 @@ export default function CustomerDashboardPage() {
                     </div>
                     <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Valid until {format(s.end_date)}</p>
                     <button
-                      onClick={() => navigate("/app/book?mode=plan")}
+                      onClick={() => navigate(`/app/book?subscription=${s.id}`)}
                       className="mt-4 inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 transition-all hover:border-gray-400 hover:bg-gray-50 hover:-translate-y-0.5"
                     >
                       <Gift className="h-4 w-4 text-[#E8A900]" /> Book with plan

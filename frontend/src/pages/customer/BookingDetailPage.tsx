@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Phone, Star } from "lucide-react";
+import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Pencil, Phone, RotateCcw, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
@@ -43,6 +43,19 @@ export default function BookingDetailPage() {
     refetchInterval: 45000,
   });
 
+  // A car booked as part of a multi-vehicle visit is only half the story on
+  // its own — the customer booked ONE thing and expects to see all of it.
+  const groupId = booking?.booking_group_id || null;
+  const { data: visitBookings } = useQuery({
+    queryKey: ["booking-group", groupId],
+    queryFn: () => bookingApi.getGroup(groupId as string),
+    enabled: !!groupId,
+    refetchInterval: 45000,
+  });
+  const visit = groupId && visitBookings?.length ? visitBookings : null;
+  /** The whole visit's outstanding amount — what the customer actually owes. */
+  const visitTotal = (visit || (booking ? [booking] : [])).reduce((sum, b) => sum + (b.total_amount || 0), 0);
+
   useLiveChannel(id ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
   });
@@ -83,9 +96,16 @@ export default function BookingDetailPage() {
   };
 
   const cancelMutation = useMutation({
-    mutationFn: () => bookingApi.cancel(id as string, cancelReason),
+    // Returns different shapes for a visit vs a single booking; the caller
+    // only cares that it succeeded, so normalise to void.
+    mutationFn: async (): Promise<void> => {
+      if (groupId) await bookingApi.cancelGroup(groupId, cancelReason);
+      else await bookingApi.cancel(id as string, cancelReason);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["booking", id] });
+      queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
       setCancelOpen(false);
       setCancelReason("");
     },
@@ -132,6 +152,16 @@ export default function BookingDetailPage() {
     },
   });
 
+  const switchToCashMutation = useMutation({
+    mutationFn: () => bookingApi.switchToCash(id as string),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      setError("");
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
   const deleteReviewMutation = useMutation({
     mutationFn: () => reviewApi.remove(myReview!.id),
     onSuccess: () => {
@@ -155,7 +185,12 @@ export default function BookingDetailPage() {
   })();
   const insideCancelLock = Date.now() > slotStartMs - 4 * 60 * 60 * 1000;
   const unassigned = ["pending", "rescheduled"].includes(booking.status);
-  const canCancel = isCustomer && unassigned && !insideCancelLock;
+  // Not a real booking yet: the customer chose to pay online and hasn't
+  // finished. Nothing was dispatched and no money was taken, so the
+  // 4-hour lock (which protects a dispatched job) doesn't apply — matching
+  // the backend, which lets them walk away from it at any time.
+  const awaitingPayment = booking.status === "awaiting_payment";
+  const canCancel = isCustomer && (awaitingPayment || (unassigned && !insideCancelLock));
   const cancelLockHint =
     isCustomer && !["completed", "cancelled"].includes(booking.status) && !canCancel
       ? !unassigned
@@ -166,7 +201,8 @@ export default function BookingDetailPage() {
   // or mid-service, rescheduling would pull the booking out from under
   // real, unfinished work with no notice; cancel or wait it out instead.
   const canReschedule =
-    isCustomer && !["completed", "cancelled", "captain_on_the_way", "service_started"].includes(booking.status);
+    isCustomer &&
+    !["completed", "cancelled", "captain_on_the_way", "service_started", "awaiting_payment"].includes(booking.status);
   const cancelReasonValid = cancelReason.trim().length >= 3;
 
   return (
@@ -181,6 +217,47 @@ export default function BookingDetailPage() {
         </div>
         <StatusBadge status={booking.status} />
       </div>
+
+      {/* The whole point of the awaiting-payment state: say plainly that
+          this isn't booked yet, and give the two ways out — finish paying,
+          or have the captain collect cash instead. */}
+      {isCustomer && awaitingPayment && (
+        <Card className="border-2 border-[#E8A900] bg-[#FFFCF0]">
+          <CardBody className="!p-5">
+            <p className="font-display text-base font-bold text-black">Payment not completed</p>
+            <p className="mt-1 text-sm text-gray-600">
+              We're holding your {booking.scheduled_slot} slot, but {visit ? "this visit isn't" : "this booking isn't"}{" "}
+              confirmed until the payment goes through. Finish paying, or have the captain collect the cash at your
+              doorstep.
+              {visit ? ` One payment covers all ${visit.length} vehicles.` : ""}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2.5">
+              <Button
+                isLoading={payMutation.isPending}
+                onClick={() => payMutation.mutate()}
+                className="bg-[#E8A900] hover:bg-[#D99A00]"
+              >
+                Pay ₹{visitTotal} online
+              </Button>
+              <Button
+                variant="outline"
+                isLoading={switchToCashMutation.isPending}
+                onClick={() => switchToCashMutation.mutate()}
+              >
+                Pay cash on service instead
+              </Button>
+              {/* Nothing is committed yet, so everything is still open —
+                  the wizard reopens with every choice filled in. */}
+              <Button variant="ghost" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
+                <Pencil className="h-4 w-4" /> Edit booking
+              </Button>
+            </div>
+            <p className="mt-3 text-xs text-gray-400">
+              If you do neither, we'll release the slot shortly so someone else can book it.
+            </p>
+          </CardBody>
+        </Card>
+      )}
 
       {/* Who's coming to your door — the captain's public card, shown the
           moment one is assigned (photo, staff id, phone). */}
@@ -233,19 +310,51 @@ export default function BookingDetailPage() {
             <span className="text-[var(--color-text-secondary)]">Payment method</span>
             <span className="capitalize">{booking.payment_method.replace(/_/g, " ")}</span>
           </div>
-          <div className="flex justify-between">
-            <span className="text-[var(--color-text-secondary)]">Subtotal</span>
-            <span className="font-mono-num">₹{booking.subtotal}</span>
-          </div>
-          {booking.discount_amount > 0 && (
-            <div className="flex justify-between text-[var(--color-success)]">
-              <span>Discount</span>
-              <span className="font-mono-num">-₹{booking.discount_amount}</span>
+
+          {/* A visit is one booking to the customer, so the summary shows
+              every vehicle on it — not just whichever car's page they
+              happened to open. */}
+          {visit ? (
+            <div className="space-y-2 border-t border-gray-100 pt-3">
+              {visit.map((car) => (
+                <div key={car.id}>
+                  <p className="flex items-center gap-2 text-xs font-semibold text-black">
+                    {car.vehicle_snapshot
+                      ? `${car.vehicle_snapshot.brand} ${car.vehicle_snapshot.model} · ${car.vehicle_snapshot.registration_number}`
+                      : "Vehicle"}
+                    {car.id === booking.id && (
+                      <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">
+                        this page
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-secondary)]">
+                      {car.combo_name || car.service_names?.join(", ") || "Service"}
+                      <span className="font-mono-num ml-1.5 text-xs text-gray-400">{car.booking_number}</span>
+                    </span>
+                    <span className="font-mono-num">₹{car.total_amount}</span>
+                  </div>
+                </div>
+              ))}
             </div>
+          ) : (
+            <>
+              <div className="flex justify-between">
+                <span className="text-[var(--color-text-secondary)]">Subtotal</span>
+                <span className="font-mono-num">₹{booking.subtotal}</span>
+              </div>
+              {booking.discount_amount > 0 && (
+                <div className="flex justify-between text-[var(--color-success)]">
+                  <span>Discount</span>
+                  <span className="font-mono-num">-₹{booking.discount_amount}</span>
+                </div>
+              )}
+            </>
           )}
           <div className="flex justify-between border-t border-gray-100 pt-3 text-base font-bold">
-            <span>Total</span>
-            <span className="font-mono-num">₹{booking.total_amount}</span>
+            <span>Total{visit ? ` · ${visit.length} vehicles` : ""}</span>
+            <span className="font-mono-num">₹{visitTotal}</span>
           </div>
         </CardBody>
       </Card>
@@ -385,15 +494,24 @@ export default function BookingDetailPage() {
         {isCustomer &&
           booking.payment_status === "pending" &&
           booking.status !== "cancelled" &&
+          !awaitingPayment && // the panel above already offers this, with context
           booking.total_amount > 0 && (
             <Button
               isLoading={payMutation.isPending}
               onClick={() => payMutation.mutate()}
               className="bg-[#E8A900] hover:bg-[#D99A00]"
             >
-              Pay ₹{booking.total_amount} online
+              Pay ₹{visitTotal} online
             </Button>
           )}
+        {/* Editable while it can still be cancelled online (unassigned and
+            outside the 4-hour lock): the wizard reopens with everything
+            filled in, and confirming replaces this booking. */}
+        {canCancel && !awaitingPayment && (
+          <Button variant="outline" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
+            <Pencil className="h-4 w-4" /> Edit booking
+          </Button>
+        )}
         {canReschedule && (
           <Button variant="outline" onClick={() => setRescheduleOpen(true)}>
             Reschedule
@@ -431,9 +549,18 @@ export default function BookingDetailPage() {
             </Button>
           </>
         )}
-        {isCustomer && booking.status === "completed" && (
-          <Button variant="outline" onClick={() => navigate("/app/book")}>
-            Rebook
+        {/* Book the same thing again: the wizard replays the vehicle, the
+            services and the address from this booking and asks only for a
+            new date and slot. Offered on a finished wash and on a cancelled
+            one — a cancellation is the other moment a customer wants
+            exactly this booking back, and re-picking it by hand is the
+            whole friction. */}
+        {isCustomer && ["completed", "cancelled"].includes(booking.status) && (
+          <Button
+            variant={booking.status === "cancelled" ? "primary" : "outline"}
+            onClick={() => navigate(`/app/book?repeat=${booking.id}`)}
+          >
+            <RotateCcw className="h-4 w-4" /> Book again{visit ? ` · ${visit.length} vehicles` : ""}
           </Button>
         )}
       </div>

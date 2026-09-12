@@ -67,11 +67,15 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
   });
 
   if (!booking) return null;
-  const amount = booking.total_amount;
+  // The backend answers for the VISIT this booking is on: what's still
+  // owed across every car, and how many cars that is.
+  const vehicles = live?.vehicles ?? 1;
+  const amount = cashMutation.data?.amount ?? (live?.amount != null && live.amount > 0 ? live.amount : booking.total_amount);
+  const reference = vehicles > 1 ? t("captain.payment.vehicles").replace("{n}", String(vehicles)) : booking.booking_number;
   const settled = paid || cashMutation.isSuccess;
 
   return (
-    <Modal open={!!booking} onClose={onClose} title={settled ? t("captain.payment.done") : `${t("captain.payment.amount")} ₹${amount}`}>
+    <Modal open={!!booking} onClose={onClose} title={settled ? t("captain.payment.done") : `${t("captain.payment.amount")} ₹${amount}${vehicles > 1 ? ` · ${reference}` : ""}`}>
       {settled ? (
         <div className="py-6 text-center">
           <CheckCircle2 className="mx-auto h-14 w-14 text-[var(--color-success)]" />
@@ -79,7 +83,7 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
             ₹{amount} {cashMutation.isSuccess || live?.payment_method === "cash" ? t("captain.payment.received_cash") : t("captain.payment.paid_online")} ✅
           </p>
           <p className="mt-1 text-sm text-gray-600">
-            {t("captain.payment.settled_desc").replace("{booking_number}", booking.booking_number)}
+            {t("captain.payment.settled_desc").replace("{booking_number}", reference)}
           </p>
           <button onClick={onClose} className="mt-5 w-full rounded-full bg-black py-3 text-sm font-semibold text-white">{t("captain.common.close")}</button>
         </div>

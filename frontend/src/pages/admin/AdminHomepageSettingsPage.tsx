@@ -4,6 +4,7 @@ import { Megaphone, Save } from "lucide-react";
 import { adminHomepageConfigApi } from "../../api/admin";
 import { Button, Card, CardBody, Input, PageLoader } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { SettingsHistory } from "../../components/admin/SettingsHistory";
 
 export default function AdminHomepageSettingsPage() {
   const queryClient = useQueryClient();
@@ -60,6 +61,7 @@ export default function AdminHomepageSettingsPage() {
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           The hero badge, headline, subtext and promo banner on the landing page live here — saved changes appear on the site immediately.
         </p>
+        <SettingsHistory settingKey="homepage_config" labels={{ hero_badge_text: "Badge text", hero_headline: "Headline", hero_subtext: "Subtext", banner_active: "Banner shown", banner_text: "Banner text" }} />
       </div>
 
       <Card>

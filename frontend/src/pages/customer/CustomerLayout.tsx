@@ -14,11 +14,14 @@ const navItems: NavItem[] = [
 ];
 
 // Mobile bottom tab bar — index 2 is the raised gold "Book" action.
+// Plans takes the fourth slot, not Support (founder call): buying or using
+// a pass is a recurring reason to open the app, while Support is a rare
+// reactive visit — it stays one tap away in the sidebar and the profile.
 const bottomNav: NavItem[] = [
   { label: "Home", to: "/app", icon: Home, end: true },
   { label: "Bookings", to: "/app/bookings", icon: ListChecks },
   { label: "Book", to: "/app/book", icon: Plus },
-  { label: "Support", to: "/app/support", icon: LifeBuoy },
+  { label: "Plans", to: "/app/subscriptions", icon: Gift },
   { label: "Profile", to: "/app/profile", icon: User },
 ];
 

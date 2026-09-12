@@ -32,7 +32,13 @@ class NotificationService:
         reference_id: str | None = None,
         wa_event: str | None = None,
         wa_params: list[str] | None = None,
+        wa_marketing: bool = False,
     ) -> None:
+        """`wa_marketing`: the WhatsApp half is a MARKETING template ("book
+        again", "we miss you"). Those go out only through their approved
+        template and only to customers who haven't opted out — never via
+        the generic utility fallback, which would be spam wearing a
+        utility badge. The in-app notification is written regardless."""
         await self.repo.create(
             {
                 "user_id": user_id,
@@ -45,6 +51,8 @@ class NotificationService:
         )
         user = await self.user_repo.find_by_id(user_id)
         phone = (user or {}).get("phone")
+        if wa_marketing and (user or {}).get("marketing_opt_out"):
+            return
         if phone:
             # Best-effort — a WhatsApp delivery failure must never break
             # the caller's actual business action (a booking/complaint
@@ -68,6 +76,8 @@ class NotificationService:
                 except Exception:  # noqa: BLE001 — automation must never block the fallback
                     logger.exception("WhatsApp event-template send failed (event=%s, user=%s) — falling back to generic", wa_event, user_id)
                     sent = False
+            if wa_marketing:
+                return  # approved template or nothing — no utility fallback for marketing
             if not sent:
                 delivered = await self.whatsapp.send_generic(phone, title, message)
                 if not delivered:
