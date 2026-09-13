@@ -152,6 +152,25 @@ export function LocationPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Fires the INSTANT this step is shown — deliberately not nested inside
+  // the Google Maps loading effect below, so the browser's location
+  // permission prompt (and, once granted, the fix itself) is already in
+  // flight in the background while the map SDK is still downloading,
+  // rather than only starting after the map finishes loading. Whichever
+  // finishes second (map or fix) is the one that actually drops the pin.
+  const gpsFixRef = useRef<{ lat: number; lng: number } | null>(null);
+  useEffect(() => {
+    if (value) return; // an existing pin (edit/repeat booking) is never overridden
+    acquireBestFix(
+      (lat, lng) => {
+        gpsFixRef.current = { lat, lng };
+        if (objects.current.map) settle(lat, lng, true); // map was ready first
+      },
+      () => setGpsError("Location access is off — search your area below or tap the map."),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -164,10 +183,14 @@ export function LocationPicker({
         onUnavailable?.();
         return;
       }
-      const start = value ? { lat: value.latitude, lng: value.longitude } : INDORE;
+      // The background fix above may already have landed by the time the
+      // map finishes loading — open directly on it instead of panning
+      // away from a generic city view a moment later.
+      const gotFixFirst = !value && !!gpsFixRef.current;
+      const start = value ? { lat: value.latitude, lng: value.longitude } : gpsFixRef.current ?? INDORE;
       const map = new mapsLib.Map(mapRef.current, {
         center: start,
-        zoom: value ? 17 : 13,
+        zoom: value || gotFixFirst ? 17 : 13,
         mapId: "blussit-location",
         disableDefaultUI: true,
         zoomControl: true,
@@ -195,15 +218,9 @@ export function LocationPicker({
       }
       setStatus("ready");
       if (searchRef.current && value) searchRef.current.value = shortLabel(value);
-
-      // First open with no value: try GPS right away (best-effort — a
-      // denial just leaves the search/tap paths).
-      if (!value) {
-        acquireBestFix(
-          (lat, lng) => settle(lat, lng, true),
-          () => setGpsError("Location access is off — search your area below or tap the map."),
-        );
-      }
+      // Resolve the actual address (reverse-geocode + onChange) for a fix
+      // that beat the map here — settle() needs the marker above to exist.
+      if (gotFixFirst && gpsFixRef.current) settle(gpsFixRef.current.lat, gpsFixRef.current.lng);
     })();
     return () => {
       cancelled = true;

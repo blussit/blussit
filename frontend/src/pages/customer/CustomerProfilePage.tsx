@@ -202,7 +202,7 @@ export default function CustomerProfilePage() {
             icon={LogOut}
             label="Log out"
             onClick={async () => {
-              if (await confirm({ title: "Log out?", message: "You'll need your password (or an OTP) to sign back in.", tone: "danger" })) logout();
+              if (await confirm({ title: "Log out?", message: "You'll need your password (or an OTP) to sign back in.", tone: "default", confirmLabel: "Log out" })) logout();
             }}
             danger
             last

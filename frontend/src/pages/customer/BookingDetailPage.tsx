@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Pencil, Phone, RotateCcw, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { reviewApi } from "../../api/engagement";
+import { complaintApi, reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { Button, Card, CardBody, CardHeader, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
@@ -31,6 +31,13 @@ export default function BookingDetailPage() {
   const [serviceRating, setServiceRating] = useState(5);
   const [serviceComment, setServiceComment] = useState("");
   const [error, setError] = useState("");
+  // "Need help?" opens the request form right here — it used to navigate
+  // to the standalone Support page, which meant the "x" close button left
+  // the customer stranded there instead of back on their booking.
+  const [supportOpen, setSupportOpen] = useState(false);
+  const [supportSubject, setSupportSubject] = useState("");
+  const [supportDescription, setSupportDescription] = useState("");
+  const [supportError, setSupportError] = useState("");
 
   const bookingQueryKey = ["booking", id];
   const { data: booking, isLoading } = useQuery({
@@ -55,6 +62,12 @@ export default function BookingDetailPage() {
   const visit = groupId && visitBookings?.length ? visitBookings : null;
   /** The whole visit's outstanding amount — what the customer actually owes. */
   const visitTotal = (visit || (booking ? [booking] : [])).reduce((sum, b) => sum + (b.total_amount || 0), 0);
+  // Status timeline + before/after photos: every car on the visit, not
+  // just whichever one this page happens to be for.
+  const trailCars = visit || (booking ? [booking] : []);
+  const multiCar = trailCars.length > 1;
+  const carLabel = (car: (typeof trailCars)[number]) =>
+    car.vehicle_snapshot ? `${car.vehicle_snapshot.brand} ${car.vehicle_snapshot.model} · ${car.vehicle_snapshot.registration_number}` : "Vehicle";
 
   useLiveChannel(id ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
@@ -171,6 +184,19 @@ export default function BookingDetailPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  const supportSubjectValid = supportSubject.trim().length >= 3;
+  const supportDescriptionValid = supportDescription.trim().length >= 5;
+  const supportMutation = useMutation({
+    mutationFn: () => complaintApi.create({ booking_id: id as string, subject: supportSubject.trim(), description: supportDescription.trim() }),
+    onSuccess: () => {
+      setSupportOpen(false);
+      setSupportSubject("");
+      setSupportDescription("");
+      setSupportError("");
+    },
+    onError: (err) => setSupportError(getErrorMessage(err)),
+  });
+
   if (isLoading || !booking) return <PageLoader />;
 
   // Cancellation policy phase 1 (mirrors the backend's enforcement):
@@ -212,8 +238,12 @@ export default function BookingDetailPage() {
           <ChevronLeft className="h-5 w-5" />
         </button>
         <div>
-          <h1 className="font-mono-num text-xl font-bold text-[var(--color-text-primary)]">{booking.booking_number}</h1>
-          <p className="text-sm text-[var(--color-text-secondary)]">{formatDateTime(booking.created_at)}</p>
+          <h1 className="text-xl font-bold text-[var(--color-text-primary)]">
+            {booking.combo_name || booking.service_names?.join(", ") || "Service"}
+          </h1>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            <span className="font-mono-num text-xs">{booking.booking_number}</span> · {formatDateTime(booking.created_at)}
+          </p>
         </div>
         <StatusBadge status={booking.status} />
       </div>
@@ -224,7 +254,7 @@ export default function BookingDetailPage() {
       {isCustomer && awaitingPayment && (
         <Card className="border-2 border-[#E8A900] bg-[#FFFCF0]">
           <CardBody className="!p-5">
-            <p className="font-display text-base font-bold text-black">Payment not completed</p>
+            <p className="font-display text-base font-bold text-black">Payment Not Completed</p>
             <p className="mt-1 text-sm text-gray-600">
               We're holding your {booking.scheduled_slot} slot, but {visit ? "this visit isn't" : "this booking isn't"}{" "}
               confirmed until the payment goes through. Finish paying, or have the captain collect the cash at your
@@ -237,19 +267,19 @@ export default function BookingDetailPage() {
                 onClick={() => payMutation.mutate()}
                 className="bg-[#E8A900] hover:bg-[#D99A00]"
               >
-                Pay ₹{visitTotal} online
+                Pay ₹{visitTotal} Online
               </Button>
               <Button
                 variant="outline"
                 isLoading={switchToCashMutation.isPending}
                 onClick={() => switchToCashMutation.mutate()}
               >
-                Pay cash on service instead
+                Pay Cash On Service Instead
               </Button>
-              {/* Nothing is committed yet, so everything is still open —
+              {/* Nothing is booked yet, so everything is still open —
                   the wizard reopens with every choice filled in. */}
               <Button variant="ghost" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
-                <Pencil className="h-4 w-4" /> Edit booking
+                <Pencil className="h-4 w-4" /> Edit Booking
               </Button>
             </div>
             <p className="mt-3 text-xs text-gray-400">
@@ -299,7 +329,7 @@ export default function BookingDetailPage() {
 
       <Card>
         <CardHeader>
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Booking summary</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Booking Summary</h2>
         </CardHeader>
         <CardBody className="space-y-3 text-sm">
           <div className="flex justify-between">
@@ -308,7 +338,7 @@ export default function BookingDetailPage() {
           </div>
           <div className="flex justify-between">
             <span className="text-[var(--color-text-secondary)]">Payment method</span>
-            <span className="capitalize">{booking.payment_method.replace(/_/g, " ")}</span>
+            <span className="capitalize">{(booking.payment_method || "—").replace(/_/g, " ")}</span>
           </div>
 
           {/* A visit is one booking to the customer, so the summary shows
@@ -359,29 +389,46 @@ export default function BookingDetailPage() {
         </CardBody>
       </Card>
 
-      {!!booking.status_history?.length && (
+      {/* A multi-vehicle visit shows EVERY car's own timeline, one after
+          another — the customer booked one visit and expects to see all of
+          it, not just whichever car's page they happened to open (same
+          "this page" labeling as the Booking Summary above). */}
+      {trailCars.some((car) => !!car.status_history?.length) && (
         <Card>
           <CardHeader>
             <h2 className="font-semibold text-[var(--color-text-primary)]">Status timeline</h2>
           </CardHeader>
-          <CardBody>
-            <div className="space-y-4">
-              {booking.status_history.map((h, i) => (
-                <div key={i} className="flex gap-3">
-                  <div className="flex flex-col items-center">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                    </span>
-                    {i < (booking.status_history?.length || 0) - 1 && <div className="mt-1 h-full w-px flex-1 bg-gray-200" />}
+          <CardBody className="space-y-6">
+            {trailCars.map(
+              (car) =>
+                !!car.status_history?.length && (
+                  <div key={car.id}>
+                    {multiCar && (
+                      <p className="mb-3 flex items-center gap-2 text-xs font-semibold text-black">
+                        {carLabel(car)}
+                        {car.id === booking.id && <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">this page</span>}
+                      </p>
+                    )}
+                    <div className="space-y-4">
+                      {car.status_history!.map((h, i) => (
+                        <div key={i} className="flex gap-3">
+                          <div className="flex flex-col items-center">
+                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </span>
+                            {i < (car.status_history?.length || 0) - 1 && <div className="mt-1 h-full w-px flex-1 bg-gray-200" />}
+                          </div>
+                          <div className="pb-4">
+                            <p className="text-sm font-medium capitalize text-[var(--color-text-primary)]">{h.status.replace(/_/g, " ")}</p>
+                            {h.note && <p className="text-xs text-[var(--color-text-secondary)]">{h.note}</p>}
+                            <p className="mt-0.5 text-xs text-gray-400">{formatDateTime(h.created_at)}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <div className="pb-4">
-                    <p className="text-sm font-medium capitalize text-[var(--color-text-primary)]">{h.status.replace(/_/g, " ")}</p>
-                    {h.note && <p className="text-xs text-[var(--color-text-secondary)]">{h.note}</p>}
-                    <p className="mt-0.5 text-xs text-gray-400">{formatDateTime(h.created_at)}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
+                )
+            )}
           </CardBody>
         </Card>
       )}
@@ -414,49 +461,62 @@ export default function BookingDetailPage() {
         </Card>
       )}
 
-      {(booking.heading_at || booking.before_photo || booking.after_photo) && (
+      {trailCars.some((car) => car.heading_at || car.before_photo || car.after_photo) && (
         <Card>
           <CardHeader>
-            <h2 className="font-semibold text-[var(--color-text-primary)]">Service transparency trail</h2>
+            <h2 className="font-semibold text-[var(--color-text-primary)]">Status</h2>
           </CardHeader>
-          <CardBody className="space-y-5">
-            {booking.heading_at && (
-              <div className="flex items-start gap-3 text-sm">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
-                  <Navigation className="h-4 w-4" />
-                </span>
-                <div>
-                  <p className="font-medium text-[var(--color-text-primary)]">Captain started heading over</p>
-                  <p className="text-xs text-[var(--color-text-secondary)]">{formatDateTime(booking.heading_at)}</p>
-                  {booking.heading_location && (
-                    <p className="mt-0.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                      <MapPin className="h-3 w-3" /> {booking.heading_location.latitude.toFixed(5)}, {booking.heading_location.longitude.toFixed(5)}
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
+          <CardBody className="space-y-6">
+            {trailCars.map(
+              (car) =>
+                (car.heading_at || car.before_photo || car.after_photo) && (
+                  <div key={car.id} className={multiCar ? "space-y-4 border-b border-gray-100 pb-6 last:border-b-0 last:pb-0" : "space-y-5"}>
+                    {multiCar && (
+                      <p className="flex items-center gap-2 text-xs font-semibold text-black">
+                        {carLabel(car)}
+                        {car.id === booking.id && <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">this page</span>}
+                      </p>
+                    )}
+                    {car.heading_at && (
+                      <div className="flex items-start gap-3 text-sm">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+                          <Navigation className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <p className="font-medium text-[var(--color-text-primary)]">Captain started heading over</p>
+                          <p className="text-xs text-[var(--color-text-secondary)]">{formatDateTime(car.heading_at)}</p>
+                          {car.heading_location && (
+                            <p className="mt-0.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
+                              <MapPin className="h-3 w-3" /> {car.heading_location.latitude.toFixed(5)}, {car.heading_location.longitude.toFixed(5)}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {booking.before_photo && (
-                <div>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Before service</p>
-                  <img src={booking.before_photo.image_url} alt="Before service" className="h-40 w-full rounded-xl object-cover" />
-                  <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                    <MapPin className="h-3 w-3" /> {formatDateTime(booking.before_photo.captured_at)}
-                  </p>
-                </div>
-              )}
-              {booking.after_photo && (
-                <div>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">After service</p>
-                  <img src={booking.after_photo.image_url} alt="After service" className="h-40 w-full rounded-xl object-cover" />
-                  <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                    <MapPin className="h-3 w-3" /> {formatDateTime(booking.after_photo.captured_at)}
-                  </p>
-                </div>
-              )}
-            </div>
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      {car.before_photo && (
+                        <div>
+                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Before service</p>
+                          <img src={car.before_photo.image_url} alt="Before service" className="h-40 w-full rounded-xl object-cover" />
+                          <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
+                            <MapPin className="h-3 w-3" /> {formatDateTime(car.before_photo.captured_at)}
+                          </p>
+                        </div>
+                      )}
+                      {car.after_photo && (
+                        <div>
+                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">After service</p>
+                          <img src={car.after_photo.image_url} alt="After service" className="h-40 w-full rounded-xl object-cover" />
+                          <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
+                            <MapPin className="h-3 w-3" /> {formatDateTime(car.after_photo.captured_at)}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+            )}
 
             {/* Captain payout / platform margin — internal financial detail,
                 never shown to the customer or the captain themselves, only
@@ -501,17 +561,9 @@ export default function BookingDetailPage() {
               onClick={() => payMutation.mutate()}
               className="bg-[#E8A900] hover:bg-[#D99A00]"
             >
-              Pay ₹{visitTotal} online
+              Pay ₹{visitTotal} Online
             </Button>
           )}
-        {/* Editable while it can still be cancelled online (unassigned and
-            outside the 4-hour lock): the wizard reopens with everything
-            filled in, and confirming replaces this booking. */}
-        {canCancel && !awaitingPayment && (
-          <Button variant="outline" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
-            <Pencil className="h-4 w-4" /> Edit booking
-          </Button>
-        )}
         {canReschedule && (
           <Button variant="outline" onClick={() => setRescheduleOpen(true)}>
             Reschedule
@@ -519,11 +571,17 @@ export default function BookingDetailPage() {
         )}
         {canCancel && (
           <Button variant="danger" onClick={() => setCancelOpen(true)}>
-            Cancel booking
+            Cancel Booking
           </Button>
         )}
         {isCustomer && (
-          <Button variant="outline" onClick={() => navigate(`/app/support?booking=${booking.id}`)}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setSupportError("");
+              setSupportOpen(true);
+            }}
+          >
             <LifeBuoy className="h-4 w-4" /> Need help?
           </Button>
         )}
@@ -565,7 +623,7 @@ export default function BookingDetailPage() {
         )}
       </div>
 
-      <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="Cancel booking">
+      <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="Cancel Booking">
         <div className="space-y-4">
           <Input
             label="Reason for cancellation"
@@ -586,7 +644,7 @@ export default function BookingDetailPage() {
         </div>
       </Modal>
 
-      <Modal open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} title="Reschedule booking">
+      <Modal open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} title="Reschedule Booking">
         <div className="space-y-4">
           <p className="text-sm text-[var(--color-text-secondary)]">
             This clears the current captain — you'll need a new one assigned to the new time.
@@ -631,6 +689,35 @@ export default function BookingDetailPage() {
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button className="w-full" isLoading={reviewMutation.isPending} onClick={() => reviewMutation.mutate()}>
             {myReview ? "Save changes" : "Submit review"}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal open={supportOpen} onClose={() => setSupportOpen(false)} title="Raise a support request">
+        <div className="space-y-4">
+          <p className="rounded-xl bg-[#FAFAFA] p-3 text-xs text-gray-600">
+            This is linked to booking <span className="font-mono-num font-semibold">{booking.booking_number}</span> so it reaches the team that served you.
+          </p>
+          <Input
+            label="What went wrong?"
+            value={supportSubject}
+            onChange={(e) => setSupportSubject(e.target.value)}
+            hint={!supportSubjectValid ? "At least 3 characters." : undefined}
+          />
+          <Input
+            label="Tell us a bit more"
+            value={supportDescription}
+            onChange={(e) => setSupportDescription(e.target.value)}
+            hint={!supportDescriptionValid ? "At least 5 characters." : undefined}
+          />
+          {supportError && <p className="text-sm text-[var(--color-error)]">{supportError}</p>}
+          <Button
+            className="w-full"
+            disabled={!supportSubjectValid || !supportDescriptionValid}
+            isLoading={supportMutation.isPending}
+            onClick={() => supportMutation.mutate()}
+          >
+            Submit request
           </Button>
         </div>
       </Modal>

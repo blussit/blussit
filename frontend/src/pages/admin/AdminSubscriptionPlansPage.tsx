@@ -7,18 +7,19 @@ import { adminSubscriptionPlanApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { passFromPrice, passHeadlinePrice } from "../../lib/passPricing";
 import type { SubscriptionPlan } from "../../types";
 
 const emptyForm = {
   name: "",
   description: "",
   billing_cycle: "monthly" as "monthly" | "quarterly" | "yearly",
-  price: 0,
-  discounted_price: "",
-  vehicle_type_prices: {} as Record<string, string>,
   // "<serviceId>:<vehicleTypeId>" -> flat monthly pass price. A value here
   // is the WHOLE monthly price for that wash type on that vehicle type and
-  // beats the computed one; blank falls back to the calculation.
+  // beats the computed one; blank falls back to the calculation. This is
+  // the ONLY place a price is actually set — what a customer pays always
+  // comes from here (or the discount % below), never from a separate flat
+  // "plan price" field, so that field was dropped from this form entirely.
   service_pass_prices: {} as Record<string, string>,
   plan_discount_percent: "",
   included_service_ids: [] as string[],
@@ -57,14 +58,6 @@ function totalOf(quotas: Record<string, string>): number {
   return Object.values(quotas).reduce((sum, v) => sum + (Number(v) || 0), 0);
 }
 
-function toNumberMap(input: Record<string, string>): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (v.trim() !== "") out[k] = Number(v);
-  }
-  return out;
-}
-
 export default function AdminSubscriptionPlansPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
@@ -96,15 +89,24 @@ export default function AdminSubscriptionPlansPage() {
     // which is the normal path now that a plan names its covered
     // service(s) explicitly instead of needing a category breakdown.
     const total_service_count = totalOf(form.category_quotas) > 0 ? totalOf(form.category_quotas) : Math.max(form.total_service_count, 1);
+    const service_pass_prices = nestPassPrices(form.service_pass_prices);
+    // The API still stores a flat "price" (legacy field, unrelated to what
+    // a pass buyer actually pays), so it's derived here from the real
+    // pricing inputs above instead of asking the admin to type it twice —
+    // the lowest resolvable monthly figure, or 1 if nothing's priced yet.
+    const derivedPrice =
+      passFromPrice(
+        { included_service_ids: form.included_service_ids, service_pass_prices, plan_discount_percent: Number(form.plan_discount_percent) || 0, total_service_count, vehicle_types: form.vehicle_types } as SubscriptionPlan,
+        services,
+        vehicleTypes
+      ) ?? 1;
     return {
       name: form.name,
       description: form.description || undefined,
       billing_cycle: form.billing_cycle,
-      price: form.price,
-      discounted_price: form.discounted_price ? Number(form.discounted_price) : undefined,
-      vehicle_type_prices: toNumberMap(form.vehicle_type_prices),
+      price: derivedPrice,
       plan_discount_percent: Number(form.plan_discount_percent) || 0,
-      service_pass_prices: nestPassPrices(form.service_pass_prices),
+      service_pass_prices,
       included_service_ids: form.included_service_ids,
       category_quotas,
       total_service_count,
@@ -163,15 +165,10 @@ export default function AdminSubscriptionPlansPage() {
     setEditing(plan);
     const quotas: Record<string, string> = {};
     for (const [k, v] of Object.entries(plan.category_quotas || {})) quotas[k] = String(v);
-    const typePrices: Record<string, string> = {};
-    for (const [k, v] of Object.entries(plan.vehicle_type_prices || {})) typePrices[k] = String(v);
     setForm({
       name: plan.name,
       description: "",
       billing_cycle: plan.billing_cycle,
-      price: plan.price,
-      discounted_price: plan.discounted_price != null ? String(plan.discounted_price) : "",
-      vehicle_type_prices: typePrices,
       service_pass_prices: flattenPassPrices(plan.service_pass_prices),
       plan_discount_percent: plan.plan_discount_percent != null ? String(plan.plan_discount_percent) : "",
       included_service_ids: plan.included_service_ids || [],
@@ -205,7 +202,13 @@ export default function AdminSubscriptionPlansPage() {
         columns={[
           { header: "Name", accessor: (p) => p.name },
           { header: "Cycle", accessor: (p) => <span className="capitalize">{p.billing_cycle}</span> },
-          { header: "Price", accessor: (p) => <span className="font-mono-num">₹{p.discounted_price ?? p.price}</span> },
+          {
+            header: "Price",
+            accessor: (p) => {
+              const from = passHeadlinePrice(p, services, vehicleTypes);
+              return from != null ? <span className="font-mono-num">From ₹{from}</span> : <span className="text-xs text-[var(--color-text-secondary)]">—</span>;
+            },
+          },
           {
             header: "Covers",
             accessor: (p) =>
@@ -282,41 +285,6 @@ export default function AdminSubscriptionPlansPage() {
             <option value="quarterly">Quarterly</option>
             <option value="yearly">Yearly</option>
           </Select>
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="Price (₹)" type="number" step={20} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
-            <Input
-              label="Discounted price (optional)"
-              type="number"
-              step={20}
-              value={form.discounted_price}
-              onChange={(e) => setForm({ ...form, discounted_price: e.target.value })}
-            />
-          </div>
-
-          {!!vehicleTypes?.length && (
-            <div className="rounded-xl border border-dashed border-gray-300 p-4">
-              <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Per-vehicle-type pricing (optional)</p>
-              <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-                This same plan can cost different amounts by vehicle type — e.g. ₹399 for a hatchback, ₹449 for a sedan. Leave
-                blank to charge the flat price above for that type.
-              </p>
-              <div className="space-y-2">
-                {vehicleTypes.map((t) => (
-                  <div key={t.id} className="grid grid-cols-[1fr_120px] items-center gap-3">
-                    <span className="text-sm text-[var(--color-text-primary)]">{t.name}</span>
-                    <Input
-                      type="number"
-                      step={20}
-                      placeholder={`₹${form.price || 0}`}
-                      value={form.vehicle_type_prices[t.id] || ""}
-                      onChange={(e) => setForm({ ...form, vehicle_type_prices: { ...form.vehicle_type_prices, [t.id]: e.target.value } })}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           <div className="rounded-xl border-2 border-dashed border-[var(--color-primary)]/40 p-4">
             <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Which washes this pass is sold for</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">

@@ -5,7 +5,7 @@ import { CheckCircle2, Droplets, ParkingCircle, ShieldCheck, Sparkles, Wrench } 
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
 import { catalogApi } from "../../api/catalog";
-import { parseIncludes } from "../../components/public/landing/shared";
+import { parseIncludes, titleCase } from "../../components/public/landing/shared";
 
 /**
  * What our wash does, what it doesn't, and what the customer has to have
@@ -33,7 +33,7 @@ export default function ServicePolicyPage() {
     return true;
   });
   const addons = services.filter((s) => s.is_addon);
-  const displayName = (s: { name: string; variant_group?: string | null }) => (s.variant_group ? s.name.split("(")[0].trim() : s.name);
+  const displayName = (s: { name: string; variant_group?: string | null }) => titleCase(s.variant_group ? s.name.split("(")[0].trim() : s.name);
 
   const themeScope = {
     "--color-primary": "#000000",
@@ -46,14 +46,14 @@ export default function ServicePolicyPage() {
 
       <main className="container-page py-12 sm:py-16">
         <div className="mx-auto max-w-2xl">
-          <h1 className="font-display text-3xl font-bold text-black sm:text-4xl">Service policy</h1>
+          <h1 className="font-display text-3xl font-bold text-black sm:text-4xl">Service Policy</h1>
           <p className="mt-2 text-[15px] text-neutral-600">
-            What to have ready before we arrive, and what a wash covers.
+            This page explains what we clean, what we do not clean, and what you need to keep ready.
           </p>
 
           {mains.length > 0 && (
-            <Section icon={Wrench} title="What each service includes">
-              <p>Every wash is done at your doorstep by a trained captain, with before and after photos on your booking.</p>
+            <Section icon={Wrench} title="What Each Service Includes">
+              <p>Every wash is done at your doorstep by a trained captain. We add before and after photos to your booking.</p>
               <ul className="mt-3 space-y-4">
                 {mains.map((s) => {
                   const { summary, items } = parseIncludes(s.description);
@@ -67,14 +67,14 @@ export default function ServicePolicyPage() {
                         <ul className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                           {items.map((item) => (
                             <li key={item} className="flex items-start gap-2 text-sm text-neutral-700">
-                              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#B08A00]" /> {item}
+                              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#B08A00]" /> {titleCase(item)}
                             </li>
                           ))}
                         </ul>
                       ) : summary ? (
-                        <p className="mt-1.5 text-sm text-neutral-700">{summary}</p>
+                        <p className="mt-1.5 text-sm text-neutral-700">{titleCase(summary)}</p>
                       ) : (
-                        <p className="mt-1.5 text-sm text-neutral-500">Details coming soon.</p>
+                        <p className="mt-1.5 text-sm text-neutral-500">Details Coming Soon.</p>
                       )}
                     </li>
                   );
@@ -83,77 +83,63 @@ export default function ServicePolicyPage() {
               {addons.length > 0 && (
                 <p className="mt-3 text-sm">
                   <span className="font-semibold text-black">Extras you can add to any wash: </span>
-                  {addons.map((a) => a.name).join(", ")}.
+                  {addons.map((a) => titleCase(a.name)).join(", ")}.
                 </p>
               )}
             </Section>
           )}
 
-          <Section icon={ParkingCircle} title="Parking is yours to arrange">
+          <Section icon={ParkingCircle} title="Parking Is Your Responsibility">
             <p>
-              Please park the vehicle yourself, in a spot where it can be washed. Our captain services the vehicle
-              exactly where you have parked it — we never move, drive or re-park it.
+              Please park the vehicle in a place where it can be washed safely. Our captain cleans the vehicle where it is parked.
             </p>
             <p>
-              Parking fees, tickets, clamping, towing and any dispute with your society, building or local authority
-              over where the vehicle is parked remain yours.
+              Our captain does not move, drive or re-park your vehicle. Parking fees, tickets, towing, clamping and building disputes are the customer's responsibility.
             </p>
           </Section>
 
-          <Section icon={Droplets} title="Water-based washes: water and power from you">
+          <Section icon={Droplets} title="Water-Based Washes">
             <p>
-              For any wash that uses water — jet wash, foam wash, star wash, deep cleaning, bike wash — the water and
-              the electricity come from your supply.
+              For Jet Wash, Foam Wash, Star Wash, Deep Cleaning and Bike Wash, please keep water and electricity ready.
             </p>
             <p>
-              Please have both available and reachable at the vehicle <strong>by the time the captain arrives</strong>.
-              A captain who arrives to no water can't start the wash, and the slot is held for the booking either way.
+              If water or electricity is not available when the captain arrives, the service may not start and the slot will still count as booked.
             </p>
           </Section>
 
-          <Section icon={Sparkles} title="Waterless washes: park in the shade">
+          <Section icon={Sparkles} title="Waterless Washes">
             <p>
-              A waterless wash uses a chemical rather than running water, so the vehicle needs to be parked in a shaded
-              or covered spot. Direct sun makes the product dry on the paint before it can be worked off.
+              A waterless wash needs a shaded or covered parking spot. Direct sunlight can dry the product too quickly.
             </p>
             <p>
-              The inner wheel area cannot be cleaned in a waterless wash — the chemical isn't made for it. Book a
-              water-based wash if that's what you need done.
+              A waterless wash does not clean the inner wheel area. Please book a water-based wash if you need that area cleaned.
             </p>
           </Section>
 
-          <Section icon={Sparkles} title="What a wash does not do">
+          <Section icon={Sparkles} title="What A Wash Does Not Do">
             <ul className="list-disc space-y-1.5 pl-5">
-              <li>
-                <strong>Scratches are not removed.</strong> A wash cleans the vehicle; it does not repair, polish out or
-                touch up scratches, dents or paint damage.
-              </li>
-              <li>
-                <strong>The surrounding area is not cleaned.</strong> Mud, dust and dirt coming off the vehicle are not
-                collected, and the parking spot or floor around it is not washed down afterwards.
-              </li>
+              <li>A wash does not remove scratches, dents or paint damage.</li>
+              <li>A wash does not clean the parking floor or surrounding area.</li>
+              <li>Please remove valuables and loose items before the service starts.</li>
             </ul>
           </Section>
 
-          <Section icon={ShieldCheck} title="The vehicle's existing condition">
+          <Section icon={ShieldCheck} title="Vehicle Condition">
             <p>
-              Your captain photographs the vehicle before starting and after finishing, and both photos are attached to
-              your booking. Those photos are the record of what the vehicle looked like when we arrived.
+              Your captain takes photos before and after the service. These photos are attached to your booking.
             </p>
             <p>
-              Damage, marks or missing items that were already there before the service are not ours, inside or out.
-              Please remove valuables and loose items from the vehicle before the captain arrives.
+              Existing marks, scratches, damage or missing items are not caused by Blussit.
             </p>
             <p>
-              If you believe something happened <em>during</em> the service, raise it from the booking in your account —
-              it goes to the manager of the branch that served you, with the before and after photos attached.
+              If you think something happened during the service, raise a support request from your booking. Our team will review it.
             </p>
           </Section>
 
           <p className="mt-10 text-sm text-neutral-600">
-            Cancellations and rescheduling are covered separately in our{" "}
+            Cancellations and rescheduling are explained in our{" "}
             <Link to="/cancellation-policy" className="font-semibold text-black underline underline-offset-2">
-              cancellation policy
+              Cancellation Policy
             </Link>
             .
           </p>

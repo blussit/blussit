@@ -1,6 +1,6 @@
 import { API_BASE_URL, apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
-import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption } from "../types";
+import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption } from "../types";
 
 export const adminPricingApi = {
   get: () => apiClient.get<ApiSuccess<PricingConfig>>("/pricing-config").then((r) => r.data.data),
@@ -33,6 +33,13 @@ export const adminHomepageConfigApi = {
 export const adminContactMessageApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<ContactMessage>>("/contact", { params }).then((r) => r.data),
+};
+
+export const adminPlanEnquiryApi = {
+  list: (params?: { page?: number; page_size?: number }) =>
+    apiClient.get<ApiPaginated<PlanEnquiry>>("/subscriptions/enquiries", { params }).then((r) => r.data),
+  setStatus: (id: string, status: PlanEnquiry["status"]) =>
+    apiClient.post(`/subscriptions/enquiries/${id}/status`, null, { params: { status } }),
 };
 
 export const adminComboOfferApi = {
@@ -362,6 +369,10 @@ export const whatsappCrmApi = {
   analytics: (days = 30) => apiClient.get<ApiSuccess<Record<string, never> & Record<string, unknown>>>("/whatsapp/crm/analytics", { params: { days } }).then((r) => r.data.data),
   templates: () => apiClient.get<ApiSuccess<WaTemplate[]>>("/whatsapp/crm/templates").then((r) => r.data.data),
   syncTemplates: () => apiClient.post<ApiSuccess<{ synced: number }>>("/whatsapp/crm/templates/sync").then((r) => r.data.data),
+  // Submits every standard BLUSSIT template that doesn't exist on the
+  // WABA yet (including the booking-deep-link ones) — safe to click any
+  // time; anything already submitted/approved is left untouched.
+  bootstrapTemplates: () => apiClient.post<ApiSuccess<{ name: string; status: string; note?: string }[]>>("/whatsapp/crm/templates/bootstrap").then((r) => r.data.data),
   createTemplate: (payload: { name: string; category: string; language: string; body: string; button_text?: string; button_url?: string }) =>
     apiClient.post("/whatsapp/crm/templates", payload),
   setTemplateDisabled: (name: string, paused: boolean) => apiClient.patch(`/whatsapp/crm/templates/${name}/disabled`, { paused }),

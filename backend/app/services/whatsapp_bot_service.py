@@ -20,13 +20,11 @@ system:
 
 Account management per WhatsApp number: the sender's wa_id IS a verified
 phone number (Meta verified it when the WhatsApp account was created), so
-the bot links it to the existing customer account with that phone, or
-auto-creates one (random password, must_change_password=True so the
-customer claims it via the normal forgot-password flow — whose OTP goes to
-this same WhatsApp). Messaging from the number is treated as proof of
-phone ownership: phone_verified is set True, which is exactly what the
-app's own OTP gate checks — so the gate stays intact for web users while
-WhatsApp users pass through it legitimately rather than around it.
+the bot links it to the existing customer account with that phone. For a
+brand-new number, it asks for the customer's name before creating the
+account (random password, must_change_password=True). Website booking can
+then recover that account by OTP, without asking for a password the
+customer never chose.
 
 Conversation state lives in the whatsapp_conversations collection (one doc
 per wa_id); processed message ids are recorded in whatsapp_message_dedup
@@ -201,11 +199,11 @@ class WhatsAppBotService:
             update["phone"] = self._local_phone(wa_id)
         await self.conversations.update_one({"wa_id": wa_id}, {"$set": update, "$setOnInsert": {"wa_id": wa_id}}, upsert=True)
 
-    async def _ensure_customer(self, wa_id: str, profile_name: str | None) -> tuple[str, bool]:
-        """Links this WhatsApp number to its customer account, creating one
-        if none exists. Returns (customer_id, is_new). Either way the
-        account ends up phone_verified — messaging us from the number is
-        the proof of ownership the OTP gate exists to establish."""
+    async def _ensure_customer(self, wa_id: str, profile_name: str | None, supplied_name: str | None = None) -> tuple[str | None, bool]:
+        """Links this WhatsApp number to its customer account. A brand-new
+        number is created only after the customer has typed their name.
+        Either way, the account ends up phone_verified because messaging
+        us from that number proves phone ownership."""
         phone = self._local_phone(wa_id)
         user = await self.users.find_by_phone(phone)
         if not user and phone != wa_id:
@@ -216,23 +214,35 @@ class WhatsAppBotService:
             await self.users.update_by_id(str(user["_id"]), {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
             return str(user["_id"]), False
 
-        name = (profile_name or "").strip() or "WhatsApp Customer"
+        name = (supplied_name or "").strip()
+        if not name:
+            return None, True
         password = "".join(random.choices(string.ascii_letters + string.digits, k=16))
         prefix = "".join(ch for ch in name.upper() if ch.isalpha())[:4] or "USER"
-        created = await self.users.create({
-            "full_name": name,
-            "phone": phone,
-            "password_hash": hash_password(password),
-            "role": UserRole.CUSTOMER.value,
-            "status": UserStatus.ACTIVE.value,
-            "referral_code": f"{prefix}{''.join(random.choices(string.digits, k=4))}",
-            # The random password above is never shown to anyone — the
-            # customer claims web/app access via the normal forgot-password
-            # flow, whose OTP lands on this very WhatsApp number.
-            "must_change_password": True,
-            "phone_verified": True,
-            "phone_verified_at": datetime.now(timezone.utc),
-        })
+        try:
+            created = await self.users.create({
+                "full_name": name,
+                "phone": phone,
+                "password_hash": hash_password(password),
+                "role": UserRole.CUSTOMER.value,
+                "status": UserStatus.ACTIVE.value,
+                "referral_code": f"{prefix}{''.join(random.choices(string.digits, k=4))}",
+                # The random password above is never shown to anyone —
+                # website booking uses OTP login for customer accounts, so
+                # customers are not forced into "forgot password" just
+                # because they first spoke to us on WhatsApp.
+                "must_change_password": True,
+                "phone_verified": True,
+                "phone_verified_at": datetime.now(timezone.utc),
+            })
+        except DuplicateKeyError:
+            user = await self.users.find_by_phone(phone)
+            if not user and phone != wa_id:
+                user = await self.users.find_by_phone(wa_id)
+            if user:
+                await self.users.update_by_id(str(user["_id"]), {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
+                return str(user["_id"]), False
+            raise
         return str(created["_id"]), True
 
     @staticmethod
@@ -278,6 +288,23 @@ class WhatsAppBotService:
         customer_id = convo.get("customer_id")
         if not customer_id:
             customer_id, is_new = await self._ensure_customer(wa_id, profile_name)
+            if not customer_id:
+                data = convo.get("data") or {}
+                if convo.get("state") == "collect_name":
+                    name_text = str(value).strip()
+                    if kind != "text" or len(name_text) < 2 or name_text.lower() in _GREETING_WORDS:
+                        await self.wa.send_text(phone, "Please reply with your name so we can save your booking correctly.")
+                        await self._set_state(wa_id, "collect_name", data)
+                        return
+                    customer_id, is_new = await self._ensure_customer(wa_id, profile_name, name_text)
+                    convo["customer_id"] = customer_id
+                    await self._set_state(wa_id, None, {}, customer_id=customer_id)
+                    await self.wa.send_text(phone, f"Thanks {name_text.split()[0]}! Your WhatsApp number is verified. ✅")
+                    await self._send_menu(wa_id, phone)
+                    return
+                await self._set_state(wa_id, "collect_name", {})
+                await self.wa.send_text(phone, "Welcome to Blussit! Please tell us your name to get started.")
+                return
             convo["customer_id"] = customer_id
             # Persist the number→account link on the conversation doc
             # itself, immediately — this IS the per-WhatsApp-number account
@@ -288,8 +315,7 @@ class WhatsAppBotService:
             if is_new:
                 await self.wa.send_text(
                     phone,
-                    "Welcome to Blussit! 🚗✨ We've set up your account against this number — "
-                    "you can also log in on our website any time using *Forgot password*.",
+                    "Welcome to Blussit! Your WhatsApp number is verified. ✅",
                 )
 
         state = convo.get("state")
@@ -922,7 +948,10 @@ class WhatsAppBotService:
                 # triggers): it confirms the booking, enters the manager's
                 # queue, and sends the normal booking-confirmed message.
                 try:
-                    await self.booking_service.switch_to_cash(booking_id, customer_id)
+                    # notify_background=False — the very next line sends
+                    # this thread's own confirmation text, which must not
+                    # race the announcement's WhatsApp send.
+                    await self.booking_service.switch_to_cash(booking_id, customer_id, notify_background=False)
                 except AppException as exc:
                     await self.wa.send_text(phone, f"Couldn't switch this to cash: {exc.message}")
                     return
@@ -1022,6 +1051,12 @@ class WhatsAppBotService:
                     customer_notes="Booked via WhatsApp",
                 ),
                 source="whatsapp",
+                # The bot immediately sends its own follow-up messages
+                # below ("Booking confirmed!", "How would you like to
+                # pay?") — the announcement's own WhatsApp send has to
+                # actually finish first, or the customer can see them
+                # arrive out of order (see _announce_confirmed_booking).
+                notify_background=False,
             )
         except AppException as exc:
             # Most common real cause: the slot filled up (web + WhatsApp

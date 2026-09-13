@@ -51,3 +51,28 @@ export function passFromPrice(
   }
   return candidates.length ? Math.min(...candidates) : null;
 }
+
+/**
+ * The one headline number every "Monthly Pass" card shows, wherever it
+ * appears (homepage teaser, the customer's own "Get a pass" purchase
+ * page): the Waterless Service × Hatchback price — the founder's chosen
+ * "entry" figure — never the literal cheapest thing on the plan (which
+ * can be a much-cheaper bike wash riding on the same document and would
+ * make every pass look far cheaper than what almost every buyer, on a
+ * car, actually pays). Pulled live from whatever the admin has set for
+ * that exact (Waterless, Hatchback) combination; falls back to the
+ * general lowest price only if a plan genuinely doesn't sell Waterless
+ * for a Hatchback, so a card is never left blank.
+ */
+export function passHeadlinePrice(
+  plan: SubscriptionPlan,
+  services: Service[],
+  vehicleTypes: VehicleTypeOption[] | undefined
+): number | null {
+  const hatchbackType = (vehicleTypes ?? []).find((t) => /hatchback/i.test(t.name));
+  const waterlessService = services.find((s) => /waterless/i.test(s.name) && !s.is_addon);
+  if (hatchbackType && waterlessService && (plan.included_service_ids || []).includes(waterlessService.id)) {
+    return passPriceFor(plan, waterlessService, hatchbackType.id);
+  }
+  return passFromPrice(plan, services, vehicleTypes);
+}

@@ -137,7 +137,7 @@ export default function CustomerDashboardPage() {
             <>Finish payment</>
           ) : (
             <>
-              <CalendarPlus className="h-4 w-4" /> Book a service
+              <CalendarPlus className="h-4 w-4" /> Book A Service
             </>
           )}
           <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
@@ -186,7 +186,7 @@ export default function CustomerDashboardPage() {
                 description="Book your first doorstep service to see it here."
                 action={
                   <button onClick={() => navigate("/app/book")} className="inline-flex items-center gap-2 rounded-lg bg-[#111827] px-4 py-2 text-[13px] font-semibold text-white hover:bg-[#1F2937]">
-                    Book now <ArrowRight className="h-4 w-4" />
+                    Book Now <ArrowRight className="h-4 w-4" />
                   </button>
                 }
               />

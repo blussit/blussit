@@ -6,6 +6,7 @@ import { Banknote, CheckCircle2, ChevronLeft, QrCode } from "lucide-react";
 import { paymentApi } from "../../api/payment";
 import { Modal } from "../ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { translateCaptainError } from "../../lib/captainErrorTranslations";
 import type { Booking } from "../../types";
 
 /**
@@ -17,7 +18,7 @@ import type { Booking } from "../../types";
  * Razorpay directly) so the ✅ lands seconds after the customer pays.
  */
 export function CollectPaymentModal({ booking, onClose }: { booking: Booking | null; onClose: () => void }) {
-  const { t } = useCaptainTranslation();
+  const { t, language } = useCaptainTranslation();
   const queryClient = useQueryClient();
   const [view, setView] = useState<"choose" | "qr">("choose");
   const [cashArmed, setCashArmed] = useState(false);
@@ -54,7 +55,7 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
       queryClient.invalidateQueries({ queryKey: ["my-jobs"] });
       queryClient.invalidateQueries({ queryKey: ["collect-status", booking?.id] });
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setError(translateCaptainError(getErrorMessage(err), language)),
   });
 
   const qrMutation = useMutation({
@@ -63,7 +64,7 @@ export function CollectPaymentModal({ booking, onClose }: { booking: Booking | n
       setQrDataUrl(await QRCode.toDataURL(link.short_url, { width: 280, margin: 1 }));
       setView("qr");
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setError(translateCaptainError(getErrorMessage(err), language)),
   });
 
   if (!booking) return null;

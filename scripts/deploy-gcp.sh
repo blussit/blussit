@@ -75,6 +75,7 @@ require_value R2_PUBLIC_BASE_URL
 require_value PUBLIC_BASE_URL
 
 [[ "$CORS_ORIGINS" == *"https://blussit.com"* ]] || fail "CORS_ORIGINS must include https://blussit.com"
+[[ "$CORS_ORIGINS" == *"https://www.blussit.com"* ]] || fail "CORS_ORIGINS must include https://www.blussit.com"
 [[ "$PUBLIC_BASE_URL" == "https://api.blussit.com" ]] || fail "PUBLIC_BASE_URL must be https://api.blussit.com"
 
 if [[ "$WHATSAPP_PROVIDER" == "meta_cloud" ]]; then
@@ -139,6 +140,18 @@ if ! gcloud iam service-accounts describe "$RUNTIME_SA" --project "$PROJECT_ID" 
     --project "$PROJECT_ID" \
     --display-name="BLUSSIT API Cloud Run runtime" >/dev/null
 fi
+
+# IAM is eventually consistent: a newly-created service account can be
+# returned by create before projects.add-iam-policy-binding can resolve it.
+for attempt in {1..12}; do
+  if gcloud iam service-accounts describe "$RUNTIME_SA" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    break
+  fi
+  if [[ "$attempt" == 12 ]]; then
+    fail "Runtime service account is not visible to IAM yet: $RUNTIME_SA"
+  fi
+  sleep 2
+done
 
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$RUNTIME_SA" \

@@ -4,17 +4,17 @@ import { SectionShell } from "./shared";
 const STEPS = [
   {
     icon: Car,
-    title: "Pick a service",
+    title: "Pick a Service",
     text: "Choose what your car or bike needs and see the price upfront.",
   },
   {
     icon: CalendarClock,
-    title: "Choose time & address",
+    title: "Choose Time & Address",
     text: "Pick a slot that suits you. Home, office or parking — we come there.",
   },
   {
     icon: Armchair,
-    title: "Sit back and relax",
+    title: "Sit Back and Relax",
     text: "Our captain washes your vehicle at your doorstep while you watch.",
   },
 ];

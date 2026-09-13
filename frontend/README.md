@@ -8,12 +8,12 @@ website and all four portals (Customer, Captain, Manager, Super Admin).
 ```bash
 cd frontend
 npm install
-cp .env.example .env   # set VITE_API_BASE_URL if the backend isn't on localhost:8000
+cp .env.example .env   # override VITE_API_BASE_URL only for another API
 npm run dev
 ```
 
-The app expects the backend running at `http://localhost:8000/api/v1` by
-default (see `backend/README.md`).
+Production uses `https://api.blussit.com/api/v1` by default. Local development
+can override it with `VITE_API_BASE_URL=http://localhost:8000/api/v1`.
 
 ## Structure
 

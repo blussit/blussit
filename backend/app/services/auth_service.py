@@ -439,10 +439,18 @@ class AuthService:
     async def booking_access_mode(self, phone: str) -> dict:
         """What should the guest wizard do for this phone?
         - "register": no account -> normal silent registration path.
-        - "otp": account exists but verification is missing/stale (the
-          abandoned-signup case, or 90-day expiry) -> prove ownership by
-          OTP, never by a password that may have never been set.
-        - "password": account exists with fresh verification -> log in.
+        - "otp": no real, chosen password to fall back on (a guest/
+          WhatsApp-auto-created account — must_change_password is true
+          because nobody ever set one on purpose), or a real account whose
+          phone-ownership proof has gone stale -> prove ownership by OTP
+          instead and keep booking smooth. This is what stops "you already
+          have an account" from ever dead-ending someone who never
+          knowingly registered — silently created accounts always take
+          this path, regardless of how recently they were "verified".
+        - "password": a real account (their own chosen password) that was
+          phone-verified recently enough to trust -> log in normally,
+          which is less friction than an OTP round-trip for someone who
+          already knows their password.
         Reveals no more than the register endpoint's 409 already does."""
         from app.utils.phone import validate_indian_mobile
 
@@ -454,6 +462,8 @@ class AuthService:
             return {"mode": "register"}
         if user.get("role") != UserRole.CUSTOMER.value:
             return {"mode": "password"}
+        if user.get("must_change_password"):
+            return {"mode": "otp"}
         return {"mode": "password" if self.phone_verification_fresh(user) else "otp"}
 
     async def otp_login(self, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:

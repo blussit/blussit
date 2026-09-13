@@ -27,6 +27,11 @@ export function CustomPlanEnquiryModal({
   });
   const [error, setError] = useState("");
   const [sent, setSent] = useState(false);
+  // A plain number input fighting `Math.max(1, ...)` on every keystroke
+  // means clearing "1" to type "2" snaps straight back to "1" before the
+  // "2" ever lands — the field LOOKS stuck. Free-typing here (including a
+  // momentarily empty box) and only clamping on blur fixes that.
+  const [vehicleCountText, setVehicleCountText] = useState(String(form.vehicle_count));
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -46,11 +51,11 @@ export function CustomPlanEnquiryModal({
   const valid = form.name.trim().length >= 2 && form.phone.trim().length >= 10 && form.services_wanted.trim().length >= 2;
 
   return (
-    <Modal open={open} onClose={() => { onClose(); setSent(false); }} title="Request a custom plan">
+    <Modal open={open} onClose={() => { onClose(); setSent(false); }} title="Request A Custom Plan">
       {sent ? (
         <div className="space-y-4">
           <p className="text-sm text-gray-700">
-            Thanks — we have your details and we'll call you to work out a plan that fits.
+            Thanks. We Have Your Details And We'll Call You To Work Out A Plan That Fits.
           </p>
           <Button className="w-full" onClick={() => { onClose(); setSent(false); }}>
             Done
@@ -58,21 +63,31 @@ export function CustomPlanEnquiryModal({
         </div>
       ) : (
         <div className="space-y-4">
-          <p className="text-sm text-gray-600">Tell us what you need and we'll price it for you.</p>
+          <p className="text-sm text-gray-600">Tell Us What You Need And We'll Price It For You.</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input label="Your name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+            <Input label="Your Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
             <Input label="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} required />
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input
-              label="How many cars?"
+              label="How Many Cars?"
               type="number"
               min={1}
-              value={form.vehicle_count}
-              onChange={(e) => setForm({ ...form, vehicle_count: Math.max(1, Number(e.target.value) || 1) })}
+              value={vehicleCountText}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setVehicleCountText(raw);
+                const n = Number(raw);
+                if (raw !== "" && Number.isFinite(n) && n >= 1) setForm({ ...form, vehicle_count: n });
+              }}
+              onBlur={() => {
+                const n = Math.max(1, Number(vehicleCountText) || 1);
+                setVehicleCountText(String(n));
+                setForm({ ...form, vehicle_count: n });
+              }}
             />
             <Input
-              label="Washes per month (optional)"
+              label="Washes Per Month (Optional)"
               type="number"
               min={1}
               value={form.washes_per_month ?? ""}
@@ -80,14 +95,14 @@ export function CustomPlanEnquiryModal({
             />
           </div>
           <Input
-            label="Which services?"
+            label="Which Services?"
             placeholder="e.g. Jet Wash for 3 cars, Star Wash for the SUV"
             value={form.services_wanted}
             onChange={(e) => setForm({ ...form, services_wanted: e.target.value })}
             required
           />
           <Input
-            label="Preferred time (optional)"
+            label="Preferred Time (Optional)"
             placeholder="e.g. every Saturday morning"
             value={form.preferred_time}
             onChange={(e) => setForm({ ...form, preferred_time: e.target.value })}

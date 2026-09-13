@@ -2,17 +2,16 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
 /**
  * Where the API lives. In a PRODUCTION build a missing VITE_API_BASE_URL is
- * a deployment mistake — falling back to localhost there would ship a site
- * that is broken for every visitor while looking fine to the developer who
- * built it. Same-origin "/api/v1" at least works behind a reverse proxy,
- * and the console error names the real problem.
+ * a deployment mistake — the live API fallback keeps production builds
+ * pointed at the canonical API subdomain when the hosting provider variable
+ * is missing.
  */
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL;
 if (!configuredBaseUrl && import.meta.env.PROD) {
-  console.error("VITE_API_BASE_URL is not set for this build — falling back to same-origin /api/v1.");
+  console.error("VITE_API_BASE_URL is not set for this build — falling back to the live API.");
 }
 export const API_BASE_URL =
-  configuredBaseUrl || (import.meta.env.PROD ? "/api/v1" : "http://localhost:8000/api/v1");
+  configuredBaseUrl || (import.meta.env.PROD ? "https://api.blussit.com/api/v1" : "http://localhost:8000/api/v1");
 
 export const TOKEN_KEY = "dvc_access_token";
 export const REFRESH_KEY = "dvc_refresh_token";

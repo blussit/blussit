@@ -34,13 +34,20 @@ class BookingController:
 
     async def create(self, current_user: CurrentUser, payload: BookingCreateRequest):
         result = await self.service.create_booking(current_user.id, payload)
+        enriched = await self.service.get_booking(result["id"])
+        service_label = enriched.get("combo_name") or ", ".join(enriched.get("service_names") or [])
         # The public /thank-you page reads this ticket, never the raw
         # booking id (see PurchaseConfirmationModel) — issued here, right
         # after a genuinely successful self-service booking, not by the
         # manager-create path (managers never leave their own dashboard).
         result["confirmation_token"] = await self.confirmations.issue(
             "booking", result["id"], current_user.id,
-            {"booking_number": result.get("booking_number"), "scheduled_date": result.get("scheduled_date"), "scheduled_slot": result.get("scheduled_slot")},
+            {
+                "booking_number": result.get("booking_number"),
+                "scheduled_date": result.get("scheduled_date"),
+                "scheduled_slot": result.get("scheduled_slot"),
+                "service_label": service_label or None,
+            },
         )
         return success(result, "Booking created successfully")
 
@@ -168,6 +175,26 @@ class BookingController:
 
     async def create_group(self, current_user: CurrentUser, payload: BookingGroupCreateRequest):
         result = await self.service.create_booking_group(current_user.id, payload)
+        enriched = await self.service.get_booking_group(
+            result["booking_group_id"], current_user.id, current_user.role, current_user.service_center_id
+        )
+        service_names = [
+            b.get("combo_name") or ", ".join(b.get("service_names") or [])
+            for b in enriched
+            if b.get("combo_name") or b.get("service_names")
+        ]
+        service_label = " + ".join(service_names)
+        result["confirmation_token"] = await self.confirmations.issue(
+            "booking",
+            result["bookings"][0]["id"],
+            current_user.id,
+            {
+                "booking_number": " + ".join(b.get("booking_number", "") for b in result["bookings"]).strip(" +"),
+                "scheduled_date": result.get("scheduled_date"),
+                "scheduled_slot": result.get("scheduled_slot"),
+                "service_label": service_label or None,
+            },
+        )
         await self.audit.log_action(
             current_user.id, current_user.role, "CREATE_BOOKING_GROUP", "bookings",
             result["booking_group_id"], {"vehicles": result["vehicle_count"]},

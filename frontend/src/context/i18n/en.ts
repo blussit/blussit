@@ -215,6 +215,10 @@ export const en = {
   "captain.visit.now": "Now",
   "captain.visit.next": "Next",
   "captain.visit.done": "Done",
+  "captain.visit.pick": "Tap to do next",
   "captain.visit.total": "Visit total",
   "captain.payment.vehicles": "{n} vehicles",
+  "captain.error.geoUnsupported": "Geolocation isn't supported on this device.",
+  "captain.error.geoFailed": "Couldn't get your location. Enable location access and try again.",
+  "captain.modal.explainWhy": "Please explain why.",
 }

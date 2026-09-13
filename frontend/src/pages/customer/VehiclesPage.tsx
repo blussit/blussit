@@ -5,7 +5,7 @@ import { vehicleApi } from "../../api/profile";
 import { vehicleTypeApi } from "../../api/catalog";
 import { Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
-import { PLATE_FORMAT_HINT, validateIndianPlate } from "../../lib/validators";
+import { PLATE_FORMAT_HINT, sanitizeVehicleName, validateIndianPlate } from "../../lib/validators";
 import { useConfirm } from "../../context/ConfirmContext";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
 
@@ -180,8 +180,8 @@ export default function VehiclesPage() {
             ))}
           </Select>
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Brand" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} required />
-            <Input label="Model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} required />
+            <Input label="Brand" value={form.brand} onChange={(e) => setForm({ ...form, brand: sanitizeVehicleName(e.target.value) })} required />
+            <Input label="Model" value={form.model} onChange={(e) => setForm({ ...form, model: sanitizeVehicleName(e.target.value) })} required />
           </div>
           <Input
             label="Registration number"

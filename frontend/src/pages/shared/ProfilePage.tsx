@@ -231,7 +231,7 @@ export default function ProfilePage() {
           <Button
             variant="outline"
             onClick={async () => {
-              if (await confirm({ title: "Log out?", message: "You'll need your password to sign back in." })) logout();
+              if (await confirm({ title: "Log out?", message: "You'll need your password to sign back in.", tone: "default", confirmLabel: "Log out" })) logout();
             }}
           >
             <LogOut className="h-4 w-4" /> Log out

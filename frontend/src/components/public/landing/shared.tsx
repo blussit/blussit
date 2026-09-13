@@ -7,6 +7,22 @@ import type { VehicleTypeOption } from "../../../types";
 
 export const INR = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
 
+const ACRONYMS = new Set(["suv", "xuv", "ev", "upi", "otp", "id"]);
+
+export function titleCase(value: string | null | undefined): string {
+  if (!value) return "";
+  return value
+    .replace(/\bundebody\b/gi, "underbody")
+    .split(/(\s+|[-/])/)
+    .map((part) => {
+      if (/^\s+$|^[-/]$/.test(part)) return part;
+      const lower = part.toLowerCase();
+      if (ACRONYMS.has(lower)) return lower.toUpperCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join("");
+}
+
 export function SectionShell({
   id,
   className = "",

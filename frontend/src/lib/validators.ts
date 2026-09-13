@@ -37,3 +37,11 @@ export function validateIndianMobile(raw: string): string | null {
   else if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
   return digits.length === 10 && "6789".includes(digits[0]) ? digits : null;
 }
+
+/** Vehicle brand/model text ("Maruti Swift", "i20", "Alto K10", "CR-V") —
+ * letters, digits, spaces and hyphens only. Strips anything else (emoji,
+ * punctuation, symbols) as the customer types, instead of letting a junk
+ * character sit in the field until a submit bounces it. */
+export function sanitizeVehicleName(raw: string): string {
+  return (raw || "").replace(/[^a-zA-Z0-9\s-]/g, "");
+}

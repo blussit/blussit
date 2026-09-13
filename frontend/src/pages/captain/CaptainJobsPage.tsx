@@ -13,6 +13,7 @@ import { bookingApi } from "../../api/booking";
 import { staffDirectoryApi } from "../../api/admin";
 import { bookingPolicyApi } from "../../api/catalog";
 import { getErrorMessage } from "../../lib/api-client";
+import { translateCaptainError } from "../../lib/captainErrorTranslations";
 import {
   Button,
   Card,
@@ -61,7 +62,7 @@ const ACTIVE_STATUSES: BookingStatus[] = [
 ];
 
 export default function CaptainJobsPage() {
-  const { t } = useCaptainTranslation();
+  const { t, language } = useCaptainTranslation();
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<string>("");
@@ -75,6 +76,13 @@ export default function CaptainJobsPage() {
   const [collectFor, setCollectFor] = useState<Booking | null>(null);
   const [detailJob, setDetailJob] = useState<Booking | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // On a multi-vehicle visit, which car the captain wants to work next —
+  // defaults to the first not-yet-done one, but he can tap ahead to a
+  // different car (e.g. the customer wants the SUV done first). Keyed by
+  // slab so switching between jobs never leaks a stale pick onto a
+  // different visit; cleared automatically once that car is no longer
+  // pending (its own action finished it, or it's cancelled).
+  const [selectedCarBySlab, setSelectedCarBySlab] = useState<Record<string, string>>({});
 
   // Per-job fee badges only make sense while the wallet system is on.
   const { data: walletPolicy } = useQuery({
@@ -165,7 +173,7 @@ export default function CaptainJobsPage() {
       invalidate();
       closeModal();
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
   const verifyMutation = useMutation({
@@ -182,7 +190,7 @@ export default function CaptainJobsPage() {
       invalidate();
       closeModal();
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
   // "I've reached" carries GPS like every other step — blocking fix first,
@@ -191,7 +199,7 @@ export default function CaptainJobsPage() {
     if (!activeJob) return;
     const reg = regInput.trim();
     if (!navigator.geolocation) {
-      setActionError("Geolocation isn't supported on this device.");
+      setActionError(t("captain.error.geoUnsupported"));
       return;
     }
     setLocating(true);
@@ -212,7 +220,7 @@ export default function CaptainJobsPage() {
         setLocating(false);
         setActionError(
           err.message ||
-            "Couldn't get your location. Enable location access and try again.",
+            t("captain.error.geoFailed"),
         );
       },
       { enableHighAccuracy: true, timeout: 15000 },
@@ -226,7 +234,7 @@ export default function CaptainJobsPage() {
       invalidate();
       closeModal();
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
   const afterPhotoMutation = useMutation({
@@ -251,7 +259,7 @@ export default function CaptainJobsPage() {
       );
       if (visitDone && anyUnpaid) setCollectFor(finished);
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
   const cancelMutation = useMutation({
@@ -261,7 +269,7 @@ export default function CaptainJobsPage() {
       invalidate();
       closeModal();
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
   const reportRiskMutation = useMutation({
@@ -271,7 +279,7 @@ export default function CaptainJobsPage() {
       invalidate();
       closeModal();
     },
-    onError: (e) => setActionError(getErrorMessage(e)),
+    onError: (e) => setActionError(translateCaptainError(getErrorMessage(e), language)),
   });
 
 
@@ -284,7 +292,7 @@ export default function CaptainJobsPage() {
   const confirmHeading = () => {
     if (!activeJob) return;
     if (!navigator.geolocation) {
-      setActionError("Geolocation isn't supported on this device.");
+      setActionError(t("captain.error.geoUnsupported"));
       return;
     }
     setLocating(true);
@@ -301,7 +309,7 @@ export default function CaptainJobsPage() {
         setLocating(false);
         setActionError(
           err.message ||
-            "Couldn't get your location. Enable location access and try again.",
+            t("captain.error.geoFailed"),
         );
       },
       { enableHighAccuracy: true, timeout: 15000 },
@@ -388,8 +396,12 @@ export default function CaptainJobsPage() {
   // card, one trip. Each car still has its own plate check and photos, so
   // "the car he works next" is the first one on the visit not yet done.
   const slabs = toSlabs(visibleJobs);
-  const currentCar = (slab: BookingSlab): Booking =>
-    slab.bookings.find((c) => c.status !== "completed" && c.status !== "cancelled") || slab.primary;
+  const currentCar = (slab: BookingSlab): Booking => {
+    const pending = slab.bookings.filter((c) => c.status !== "completed" && c.status !== "cancelled");
+    const pickedId = selectedCarBySlab[slab.key];
+    const picked = pickedId && pending.find((c) => c.id === pickedId);
+    return picked || pending[0] || slab.primary;
+  };
 
   // The hero: whatever the captain is physically doing right now — an
   // in-motion/in-progress job wins, then the next job he can actually ACT
@@ -418,6 +430,7 @@ export default function CaptainJobsPage() {
       job,
       visit: slab.isVisit ? slab : null,
       action: actionFor(job),
+      onSelectCar: (carId: string) => setSelectedCarBySlab((prev) => ({ ...prev, [slab.key]: carId })),
       canCancel:
         !needsManager(job) &&
         (job.status === "assigned" || job.status === "captain_on_the_way"),
@@ -713,7 +726,7 @@ export default function CaptainJobsPage() {
       >
         <p className="text-sm text-[var(--color-text-secondary)]">
           This sends the booking back to pending so a manager can reassign it.
-          Please explain why.
+          {t("captain.modal.explainWhy")}
         </p>
         <textarea
           className="mt-3 w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"

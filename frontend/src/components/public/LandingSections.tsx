@@ -135,7 +135,7 @@ const HERO_SLIDES = [
     titleAccent: "DOORSTEP",
     description:
       "We come to you. You relax.\nWe make your car shine like new.",
-    image: "/hero-image.webp",
+    image: "/wash-image.png",
     serviceSlug: "",
   },
 
@@ -160,7 +160,7 @@ const HERO_SLIDES = [
       "Interior vacuum",
       "Dashboard polish",
     ],
-    image: "/service-star.webp",
+    image: "/car-wash.png",
     serviceSlug: "star-wash",
   },
 
@@ -3054,7 +3054,7 @@ export function Footer({
                 type="button"
                 className="transition-colors hover:text-white"
               >
-                Terms & Conditions
+                Terms And Conditions
               </button>
             </div>
           </div>
@@ -3063,4 +3063,3 @@ export function Footer({
     </footer>
   );
 }
-

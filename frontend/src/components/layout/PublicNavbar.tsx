@@ -27,14 +27,14 @@ function BlussitLogo() {
       />
 
       <span
-        className="mt-2 text-[9px] font-medium tracking-[3.5px] text-[var(--color-gold)] leading-none"
+        className="mt-1.5 whitespace-nowrap text-[6.5px] font-semibold tracking-[0.12em] text-[var(--color-gold)] leading-none sm:text-[7px]"
         style={{
           fontFamily: "'Montserrat', sans-serif",
           WebkitFontSmoothing: "antialiased",
           MozOsxFontSmoothing: "grayscale",
         }}
       >
-        CLEAN CAR. CLEAR MIND.
+        PREMIUM CAR WASH AT DOORSTEP.
       </span>
     </Link>
   );

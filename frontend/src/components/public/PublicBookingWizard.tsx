@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, BadgeCheck, Car, CheckCircle2, Lock, MapPin, Plus, ShieldCheck, Sparkles } from "lucide-react";
-import { catalogApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
+import { bookingPolicyApi, catalogApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey, coverageApi } from "../../api/catalog";
 import { authApi, guestAuthApi } from "../../api/auth";
 import { bookingApi } from "../../api/booking";
 import { couponApi } from "../../api/engagement";
 import { vehicleApi, addressApi } from "../../api/profile";
-import { Badge, Button, Input, OtpInput, Select, Spinner } from "../ui";
+import { Badge, Button, Input, Modal, OtpInput, Select, Spinner } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
 import { PhoneVerificationModal } from "../shared/PhoneVerificationModal";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
@@ -18,9 +18,9 @@ import { getErrorMessage, tokenStorage } from "../../lib/api-client";
 import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
 import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
-import { validateIndianMobile, validateIndianPlate } from "../../lib/validators";
+import { sanitizeVehicleName, validateIndianMobile, validateIndianPlate } from "../../lib/validators";
 import type { Service } from "../../types";
-import { groupServices, parseIncludes, priceForType } from "./landing/shared";
+import { groupServices, parseIncludes, priceForType, titleCase } from "./landing/shared";
 import { addonKit, bikeTypeIds, variantCount } from "../../lib/serviceMix";
 import { QtyStepper } from "../shared/QtyStepper";
 
@@ -29,7 +29,23 @@ export interface WizardPreselect {
   serviceId?: string;
 }
 
-const STEPS = ["Choose service", "Time & place", "Confirm & verify"];
+/** One already-added car on a multi-vehicle guest visit — everything
+ *  needed to create both the vehicle and its booking once the account
+ *  exists, plus enough to show it back for editing. Mirrors
+ *  NewBookingPage's AddedCar, adapted for a guest who has no saved
+ *  vehicles yet: every car here is brand new. */
+interface GuestAddedCar {
+  vehicleTypeId: string;
+  brandModel: string;
+  regNumber: string;
+  serviceIds: string[];
+  serviceQty: Record<string, number>;
+  serviceLabel: string;
+  subtotal: number;
+}
+
+const STEPS = ["Choose Service", "Time And Place", "Confirm And Verify"];
+const required = (label: string) => `${label} *`;
 
 function priceFor(s: Service, vt: string): number {
   return s.vehicle_type_prices?.[vt] ?? s.price;
@@ -70,6 +86,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const services = useMemo(() => (servicesData?.data || []).filter((s) => s.is_active !== false), [servicesData]);
   const { data: myVehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: isCustomer });
   const { data: myAddresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list, enabled: isCustomer });
+  const { data: bookingPolicy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
 
   const [step, setStep] = useState(0);
   const [vehicleTypeId, setVehicleTypeId] = useState("");
@@ -81,6 +98,16 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const [savedVehicleId, setSavedVehicleId] = useState<string | null>(null);
   const [brandModel, setBrandModel] = useState("");
   const [regNumber, setRegNumber] = useState("");
+  // Multiple vehicles on ONE visit — same capability the logged-in wizard
+  // has, now available before login too. Each entry is a fully-specified
+  // car (type + service + brand/reg) already "settled"; the fields above
+  // (vehicleTypeId/serviceIds/.../brandModel/regNumber) always describe
+  // whichever car is currently being configured — the next one to add,
+  // or the last one that rides along with the main submit.
+  const [extraCars, setExtraCars] = useState<GuestAddedCar[]>([]);
+  const [addCarError, setAddCarError] = useState("");
+  const [showAddCar, setShowAddCar] = useState(false);
+  const maxCars = bookingPolicy?.max_vehicles_per_booking ?? 5;
 
   // Place & time.
   const [pincode, setPincode] = useState("");
@@ -101,10 +128,16 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   // Guest identity.
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
-  const [needLogin, setNeedLogin] = useState(false);
-  // Abandoned-signup / stale-verification recovery: prove the phone by
-  // OTP instead of a password that may never have been set.
+  // Abandoned-signup / stale-verification recovery: OTP is always the
+  // default way back in — it proves phone ownership on the spot, whatever
+  // the account's history. A password is only ever offered as an
+  // alternative INSIDE that same popup, and only when the account
+  // genuinely has one on file (recoveryHasPassword) — an account created
+  // via a guest checkout or the WhatsApp bot never got a real password,
+  // so it never sees that option at all.
   const [needOtp, setNeedOtp] = useState(false);
+  const [recoveryHasPassword, setRecoveryHasPassword] = useState(false);
+  const [useLoginPassword, setUseLoginPassword] = useState(false);
   const [couponCode, setCouponCode] = useState("");
   const [couponDiscount, setCouponDiscount] = useState(0);
   const [couponError, setCouponError] = useState("");
@@ -118,28 +151,33 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const [password, setPassword] = useState("");
 
   const [verifyOpen, setVerifyOpen] = useState(false);
+  const [autoSendVerification, setAutoSendVerification] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const createdRef = useRef<{ vehicleId?: string; addressId?: string }>({});
   // A booking that exists but isn't paid — "Pay online" was chosen and the
   // checkout was closed. It stays held (the payment window) while the
   // customer retries, switches to cash, or changes something; they are
   // NOT sent anywhere else. Guests included: by now they're signed in.
-  const [held, setHeld] = useState<{ id: string; token?: string; number: string; total: number } | null>(null);
+  const [held, setHeld] = useState<{ id: string; groupId?: string; token?: string; number: string; total: number; signature: string } | null>(null);
   const [paying, setPaying] = useState(false);
 
-  const openCheckout = async (h: { id: string; token?: string }) => {
+  const openCheckout = async (h: { id: string; groupId?: string; token?: string; number?: string }) => {
     setPaying(true);
     setError("");
     try {
-      await payWithRazorpay({ purpose: "booking", booking_id: h.id }, { name: name || user?.full_name, contact: phone || user?.phone });
+      await payWithRazorpay(
+        h.groupId ? { purpose: "booking_group", booking_group_id: h.groupId } : { purpose: "booking", booking_id: h.id },
+        { name: name || user?.full_name, contact: phone || user?.phone }
+      );
     } catch (payErr) {
       setPaying(false);
       if (!(payErr instanceof PaymentCancelled)) setError(getErrorMessage(payErr));
       return false;
     }
     setPaying(false);
-    navigate(`/thank-you?token=${h.token}`);
+    navigate(`/thank-you?token=${h.token}`, { state: bookingConfirmationState(h.number) });
     return true;
   };
   const payHeldInCash = async () => {
@@ -147,8 +185,9 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     setPaying(true);
     setError("");
     try {
-      await bookingApi.switchToCash(held.id);
-      navigate(`/thank-you?token=${held.token}`);
+      if (held.groupId) await bookingApi.switchGroupToCash(held.groupId);
+      else await bookingApi.switchToCash(held.id);
+      navigate(`/thank-you?token=${held.token}`, { state: bookingConfirmationState(held.number) });
     } catch (err) {
       setPaying(false);
       setError(getErrorMessage(err));
@@ -157,7 +196,8 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   const releaseHeld = async () => {
     if (!held) return;
     try {
-      await bookingApi.cancel(held.id, "Changed before paying");
+      if (held.groupId) await bookingApi.cancelGroup(held.groupId, "Changed before paying");
+      else await bookingApi.cancel(held.id, "Changed before paying");
     } catch {
       // Already released by the payment window — nothing to undo.
     }
@@ -172,6 +212,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     if (preselect.serviceId) setServiceIds([preselect.serviceId]);
     setStep(0);
   }, [preselect]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [step]);
 
   // Logged-in customers start prefilled from their default vehicle/address —
   // ONCE, when their data first arrives.
@@ -224,6 +268,9 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   // lines (₹99 + ₹60 each additional); a car booking's bikes are all extras.
   const bikesInBooking = bookingIsBike ? bikeCount + extraBikes : extraBikes;
   const qtyOf = (id: string) => serviceQty[id] || 1;
+  const vehicleNumberLabel = bookingIsBike ? "Bike Number" : "Car Number";
+  const vehicleModelLabel = bookingIsBike ? "Bike Model" : "Car Model";
+  const vehicleModelPlaceholder = bookingIsBike ? "E.g. Royal Enfield Classic" : "E.g. Hyundai i20";
   const total = selectedServices.reduce((sum, s) => sum + priceFor(s, vehicleTypeId) * qtyOf(s.id), 0);
   // A guest IS (almost always) a first-time customer — quote the
   // first-wash price up front instead of promising a discount while
@@ -237,6 +284,106 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
   // What the customer is actually being asked to pay before any coupon —
   // the first-wash price when it applies, otherwise the list total.
   const payableTotal = hasFirstWashOffer ? firstWashTotal : total;
+  function bookingConfirmationState(bookingNumber?: string) {
+    return {
+      type: "booking" as const,
+      booking_number: bookingNumber,
+      scheduled_date: date,
+      scheduled_slot: slot,
+      service_label: selectedServices.map((s) => titleCase(s.name)).join(", "),
+    };
+  }
+
+  // A fingerprint of everything that decides what gets booked — if the
+  // customer goes back (including via the wizard's clickable step rail,
+  // which — unlike the Back button — doesn't call releaseHeld()) and
+  // changes anything, the held booking/visit from before no longer
+  // matches this and must never be silently reused for payment; a fresh
+  // one reflecting the edit has to be created instead. Mirrors
+  // NewBookingPage's currentSignature()/heldIsCurrent exactly.
+  const currentSignature = () =>
+    JSON.stringify({
+      vt: vehicleTypeId,
+      services: serviceIds,
+      qty: serviceQty,
+      car: regNumber.trim().toUpperCase(),
+      extras: extraCars.map((c) => [c.vehicleTypeId, c.regNumber, c.serviceIds, c.serviceQty]),
+      date,
+      slot,
+      address: savedAddressId || line1,
+      pin: pinned ? [pinned.latitude, pinned.longitude] : null,
+      coupon: couponDiscount > 0 ? couponCode : null,
+      pay: paymentMethod,
+    });
+  const heldIsCurrent = !!held && held.signature === currentSignature();
+
+  // Multiple vehicles, one visit — same capability NewBookingPage has for
+  // a logged-in customer, now available before login too.
+  const canAddMoreCars = extraCars.length + 1 < maxCars;
+  const currentCarReady = !!vehicleTypeId && hasMain && brandModel.trim().length >= 2 && !!validateIndianPlate(regNumber);
+
+  const addCurrentCar = () => {
+    setAddCarError("");
+    const plate = validateIndianPlate(regNumber);
+    if (!plate) {
+      setAddCarError("Enter a valid registration number for this vehicle first.");
+      return;
+    }
+    if (extraCars.some((c) => c.regNumber === plate)) {
+      setAddCarError("That vehicle is already on this visit.");
+      return;
+    }
+    setExtraCars((cars) => [
+      ...cars,
+      {
+        vehicleTypeId,
+        brandModel: brandModel.trim(),
+        regNumber: plate,
+        serviceIds: [...serviceIds],
+        serviceQty: { ...serviceQty },
+        serviceLabel: selectedServices.map((s) => titleCase(s.name)).join(", "),
+        subtotal: total,
+      },
+    ]);
+    setShowAddCar(true);
+    // Clear the editor for the NEXT vehicle — very likely a different
+    // type needing different services.
+    setVehicleTypeId("");
+    setBrandModel("");
+    setRegNumber("");
+    setServiceIds([]);
+    setServiceQty({});
+    // The vehicle-type picker for that next car is back at the TOP of the
+    // step — without this the page stays scrolled down near the button
+    // that was just clicked, now looking at empty space where the
+    // (collapsed, type-not-chosen-yet) service section used to be.
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const removeCar = (regNumber: string) => setExtraCars((cars) => cars.filter((c) => c.regNumber !== regNumber));
+
+  /** "Accidentally added the wrong car/service" recovery — pulls that car
+   *  back out of the settled list and loads it back into the editor
+   *  fields above, so fixing a mistake is "change it and re-add", not
+   *  "remove and start over". */
+  const editCar = (regNumberToEdit: string) => {
+    const car = extraCars.find((c) => c.regNumber === regNumberToEdit);
+    if (!car) return;
+    setExtraCars((cars) => cars.filter((c) => c.regNumber !== regNumberToEdit));
+    setAddCarError("");
+    setVehicleTypeId(car.vehicleTypeId);
+    setBrandModel(car.brandModel);
+    setRegNumber(car.regNumber);
+    setServiceIds(car.serviceIds);
+    setServiceQty(car.serviceQty);
+  };
+
+  const extrasSubtotal = extraCars.reduce((sum, c) => sum + c.subtotal, 0);
+  // Once the guest has opted into a multi-vehicle visit, the current
+  // car's plate/model is collected right here in step 1 (same as every
+  // other car on the visit) instead of step 3 — a single-vehicle guest
+  // never sees this and keeps the exact flow they have today.
+  const multiCarMode = showAddCar || extraCars.length > 0;
 
   const setUnitQty = (svc: Service | null, n: number) => {
     if (!svc) return;
@@ -326,14 +473,77 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedAddressId, pincode]);
 
-  const step1Valid = !!vehicleTypeId && hasMain;
+  // Once at least one vehicle is already on the visit, the open editor is
+  // an OPTIONAL extra car, not a required one — without this, adding a
+  // car and simply wanting to continue with just that one was impossible:
+  // the freshly-cleared "next vehicle" editor made this step look
+  // unfinished forever.
+  const step1Valid = extraCars.length > 0 ? true : !!vehicleTypeId && hasMain;
   // Rapido model: the PIN is the address. A typed house/flat line is only
   // required in the no-maps fallback, where there's no pin to stand in.
   const step2Valid =
     coverage === "covered" && !!date && !!slot && (savedAddressId ? true : mapsUp ? !!pinned : line1.trim().length >= 3);
-  const vehicleValid = savedVehicleId ? true : brandModel.trim().length >= 2 && validateIndianPlate(regNumber) !== null;
-  const identityValid = user ? true : name.trim().length >= 2 && validateIndianMobile(phone) !== null;
-  const step3Valid = vehicleValid && identityValid && (!needLogin || password.length >= 8);
+  const validateStep = (targetStep = step) => {
+    const next: Record<string, string> = {};
+    if (targetStep === 0 && extraCars.length === 0) {
+      // No vehicle added yet, so the open editor IS the (only) car —
+      // required. Once at least one is already on the visit, this editor
+      // becomes a purely optional "add one more" — Continue works fine
+      // with what's already added, and a half-filled attempt at another
+      // car is simply dropped rather than blocking anything.
+      if (!vehicleTypeId) next.vehicleType = "Choose Your Vehicle Type.";
+      if (!hasMain) next.service = "Choose One Service.";
+      if (multiCarMode) {
+        if (brandModel.trim().length < 2) next.brandModel = `Enter ${vehicleModelLabel}.`;
+        if (!validateIndianPlate(regNumber)) next.regNumber = "Enter A Valid Registration Number.";
+      }
+    }
+    if (targetStep === 1) {
+      if (!savedAddressId && mapsUp && !pinned) next.location = "Drop The Pin On Your Service Address.";
+      if (!savedAddressId && !mapsUp && line1.trim().length < 3) next.address = "Enter Your Address.";
+      if (coverage !== "covered") next.location = next.location || "Choose A Service Address In Our Coverage Area.";
+      if (!date) next.date = "Choose A Date.";
+      if (!slot) next.slot = "Choose A Time Slot.";
+    }
+    if (targetStep === 2) {
+      // Multi-car mode already asked (and validated) this back in step 1.
+      if (!savedVehicleId && !multiCarMode && brandModel.trim().length < 2) next.brandModel = `Enter ${vehicleModelLabel}.`;
+      if (!savedVehicleId && !multiCarMode && !validateIndianPlate(regNumber)) next.regNumber = "Enter A Valid Registration Number.";
+      if (!user && name.trim().length < 2) next.name = "Enter Your Full Name.";
+      if (!user && !validateIndianMobile(phone)) next.phone = "Enter A Valid 10-Digit WhatsApp Number.";
+    }
+    setFieldErrors(next);
+    return Object.keys(next).length === 0;
+  };
+
+  const goNext = () => {
+    setError("");
+    if (validateStep(step)) setStep((s) => s + 1);
+  };
+
+  const submitFromButton = () => {
+    setError("");
+    if (!step1Valid) {
+      setStep(0);
+      setTimeout(() => validateStep(0), 0);
+      return;
+    }
+    if (!step2Valid) {
+      setStep(1);
+      setTimeout(() => validateStep(1), 0);
+      return;
+    }
+    if (!validateStep(2)) return;
+    // A held booking with nothing changed is finished, not re-made: retry
+    // the payment, or confirm it as cash. If anything was edited since it
+    // was held (including via the step rail, which — unlike Back —
+    // doesn't release it), it's stale: quietly let it go and create a
+    // fresh booking that actually reflects the edit, instead of paying
+    // for/confirming the old one.
+    if (held && heldIsCurrent) void (paymentMethod === "online" ? openCheckout(held) : payHeldInCash());
+    else if (held) void releaseHeld().then(() => submit());
+    else void submit();
+  };
 
   /** The whole pipeline, resumable and idempotent: every stage checks
    * whether its work already happened (crucial when the OTP modal pauses
@@ -345,48 +555,44 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       // 1. An account to book under.
       let currentUser = user ?? otpUserRef.current;
       if (!currentUser) {
-        if (needLogin) {
-          currentUser = await login(validateIndianMobile(phone) || phone.trim(), password);
-        } else {
-          try {
-            // Through AuthContext so the whole app (including the OTP
-            // modal, which reads the logged-in user's phone) sees the new
-            // session immediately. Random password — the customer claims
-            // full access later via forgot-password → WhatsApp OTP.
-            currentUser = await register({ full_name: name.trim(), phone: validateIndianMobile(phone) || phone.trim(), password: randomPassword(), guest: true });
-          } catch (err) {
-            if (getErrorMessage(err).toLowerCase().includes("already exists")) {
-              const phoneN = validateIndianMobile(phone) || phone.trim();
-              const access = await guestAuthApi.bookingAccess(phoneN).catch(() => ({ mode: "password" as const }));
-              if (access.mode === "otp") {
-                // Unverified/stale account (e.g. an earlier abandoned
-                // signup): its password was never really set — send a
-                // code instead of dead-ending on a password prompt.
-                const widgetOk = await ensureOtpWidget();
-                let sentViaWidget = false;
-                if (widgetOk) {
-                  try {
-                    await widgetSendOtp(phoneN);
-                    sentViaWidget = true;
-                  } catch {
-                    // The widget loaded but couldn't actually send (e.g.
-                    // MSG91's account is out of balance) — fall back to
-                    // our own WhatsApp OTP instead of leaving the customer
-                    // stuck on a code that will never arrive.
-                  }
-                }
-                if (!sentViaWidget) await authApi.forgotPassword(phoneN);
-                setOtpViaWidget(sentViaWidget);
-                setNeedOtp(true);
-                setError("");
-                return;
+        try {
+          // Through AuthContext so the whole app (including the OTP
+          // modal, which reads the logged-in user's phone) sees the new
+          // session immediately. Random password — the customer claims
+          // full access later via forgot-password → WhatsApp OTP.
+          currentUser = await register({ full_name: name.trim(), phone: validateIndianMobile(phone) || phone.trim(), password: randomPassword(), guest: true });
+        } catch (err) {
+          if (getErrorMessage(err).toLowerCase().includes("already exists")) {
+            const phoneN = validateIndianMobile(phone) || phone.trim();
+            const access = await guestAuthApi.bookingAccess(phoneN).catch(() => ({ mode: "otp" as const }));
+            // OTP is always the default recovery path, whether or not this
+            // account has a real password — proving the phone again is no
+            // more friction than typing a password, and it's the ONLY way
+            // in for an account that never had one (guest/WhatsApp-made).
+            // A real password is offered as an alternative inside the same
+            // popup only when one genuinely exists (recoveryHasPassword).
+            setRecoveryHasPassword(access.mode === "password");
+            setUseLoginPassword(false);
+            const widgetOk = await ensureOtpWidget();
+            let sentViaWidget = false;
+            if (widgetOk) {
+              try {
+                await widgetSendOtp(phoneN);
+                sentViaWidget = true;
+              } catch {
+                // The widget loaded but couldn't actually send (e.g.
+                // MSG91's account is out of balance) — fall back to
+                // our own WhatsApp OTP instead of leaving the customer
+                // stuck on a code that will never arrive.
               }
-              setNeedLogin(true);
-              setError("This number already has an account — enter your password to continue (or use Forgot password on the login page).");
-              return;
             }
-            throw err;
+            if (!sentViaWidget) await authApi.requestOtp(phoneN);
+            setOtpViaWidget(sentViaWidget);
+            setNeedOtp(true);
+            setError("");
+            return;
           }
+          throw err;
         }
       }
       if (currentUser.role !== "customer") {
@@ -394,25 +600,31 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         return;
       }
 
-      // 2. The vehicle.
-      let vehicleId = savedVehicleId || createdRef.current.vehicleId;
-      if (!vehicleId) {
-        const existing = await vehicleApi.list();
-        const match = existing.find((v) => v.registration_number.toUpperCase() === regNumber.trim().toUpperCase());
-        if (match) {
-          vehicleId = match.id;
-        } else {
-          const [brand, ...rest] = brandModel.trim().split(/\s+/);
-          const created = await vehicleApi.create({
-            vehicle_type: vehicleTypeId,
-            brand: brand || "Vehicle",
-            model: rest.join(" ") || brand || "—",
-            registration_number: regNumber.trim().toUpperCase(),
-            is_default: existing.length === 0,
-          });
-          vehicleId = created.id;
+      // 2. The vehicle. Skipped entirely when at least one car is already
+      // on the visit and this "next vehicle" editor was left empty — it's
+      // an optional extra, not a required one (see step1Valid/validateStep).
+      const includeCurrentCar = extraCars.length === 0 || currentCarReady;
+      let vehicleId = "";
+      if (includeCurrentCar) {
+        vehicleId = savedVehicleId || createdRef.current.vehicleId || "";
+        if (!vehicleId) {
+          const existing = await vehicleApi.list();
+          const match = existing.find((v) => v.registration_number.toUpperCase() === regNumber.trim().toUpperCase());
+          if (match) {
+            vehicleId = match.id;
+          } else {
+            const [brand, ...rest] = brandModel.trim().split(/\s+/);
+            const created = await vehicleApi.create({
+              vehicle_type: vehicleTypeId,
+              brand: brand || "Vehicle",
+              model: rest.join(" ") || brand || "—",
+              registration_number: regNumber.trim().toUpperCase(),
+              is_default: existing.length === 0,
+            });
+            vehicleId = created.id;
+          }
+          createdRef.current.vehicleId = vehicleId;
         }
-        createdRef.current.vehicleId = vehicleId;
       }
 
       // 3. The address.
@@ -449,18 +661,73 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       if (!resumedAfterVerify) {
         const me = await authApi.me();
         if (!me.phone_verified || me.phone_verification_stale) {
+          setAutoSendVerification(true);
           setVerifyOpen(true);
           return; // resumes via onVerified → submit(true)
         }
       }
 
-      // 5. The booking itself — the same API, capacity checks, and
-      // WhatsApp confirmation as every other booking in the system.
+      // 5. The booking(s) — same API, same capacity checks, same WhatsApp
+      // confirmation as every other booking in the system. Multiple
+      // vehicles on this visit means every extra car needs its own real
+      // vehicle record too (each was collected as plain fields in step 1
+      // — nobody had an account yet to save them under until just now).
+      // The "current" editor only rides along when it was actually
+      // completed (includeCurrentCar) — left empty, it's simply dropped.
+      const allCars: { vehicleId: string; serviceIds: string[]; serviceQty: Record<string, number> }[] = [];
+      if (extraCars.length) {
+        // Sequential, not parallel — each create can change what "already
+        // exists" means for the next one, and there's no real time
+        // pressure for 2-5 cars.
+        for (const car of extraCars) {
+          const existing = await vehicleApi.list();
+          const match = existing.find((v) => v.registration_number.toUpperCase() === car.regNumber);
+          const carVehicleId =
+            match?.id ||
+            (
+              await vehicleApi.create({
+                vehicle_type: car.vehicleTypeId,
+                brand: car.brandModel.trim().split(/\s+/)[0] || "Vehicle",
+                model: car.brandModel.trim().split(/\s+/).slice(1).join(" ") || car.brandModel.trim() || "—",
+                registration_number: car.regNumber,
+                is_default: false,
+              })
+            ).id;
+          allCars.push({ vehicleId: carVehicleId, serviceIds: car.serviceIds, serviceQty: car.serviceQty });
+        }
+      }
+      if (includeCurrentCar) allCars.push({ vehicleId, serviceIds, serviceQty });
+
+      if (allCars.length > 1) {
+        const visit = await bookingApi.createGroup({
+          vehicles: allCars.map((c) => ({ vehicle_id: c.vehicleId, service_ids: c.serviceIds, service_quantities: c.serviceQty })),
+          address_id: addressId,
+          scheduled_date: date,
+          scheduled_slot: slot,
+          hold_key: getSlotHolderKey(),
+          payment_method: paymentMethod,
+          coupon_code: couponCode.trim() || undefined,
+        });
+        const visitNumber = visit.bookings.map((b) => b.booking_number).join(" + ");
+        const unpaid = visit.bookings.some((b) => b.status === "awaiting_payment");
+        if (unpaid && visit.total_amount > 0) {
+          const h = { id: visit.bookings[0].id, groupId: visit.booking_group_id, token: visit.confirmation_token, number: visitNumber, total: visit.total_amount, signature: currentSignature() };
+          setHeld(h);
+          await openCheckout(h);
+          return;
+        }
+        navigate(`/thank-you?token=${visit.confirmation_token}`, { state: bookingConfirmationState(visitNumber) });
+        return;
+      }
+      // Exactly one car in the end — whether that's the "current" editor
+      // (the common case) or the sole extraCars entry (current was left
+      // empty and simply dropped) — a single normal booking, same as ever.
+      const solo = allCars[0];
       const booking = await bookingApi.create({
-        vehicle_id: vehicleId,
+        vehicle_id: solo.vehicleId,
         address_id: addressId,
-        service_ids: serviceIds,
-        service_quantities: serviceQty,
+        service_ids: solo.serviceIds,
+        service_quantities: solo.serviceQty,
         scheduled_date: date,
         scheduled_slot: slot,
         coupon_code: couponCode.trim() || undefined,
@@ -473,12 +740,12 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
       // held: retry, pay cash instead, or change something — every option
       // stays on this page. Only a completed payment moves them on.
       if (paymentMethod === "online" && booking.total_amount > 0) {
-        const h = { id: booking.id, token: booking.confirmation_token, number: booking.booking_number, total: booking.total_amount };
+        const h = { id: booking.id, token: booking.confirmation_token, number: booking.booking_number, total: booking.total_amount, signature: currentSignature() };
         setHeld(h);
         await openCheckout(h);
         return;
       }
-      navigate(`/thank-you?token=${booking.confirmation_token}`);
+      navigate(`/thank-you?token=${booking.confirmation_token}`, { state: bookingConfirmationState(booking.booking_number) });
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -527,8 +794,8 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         {!bookingIsBike && kit.addBike && (
           <div className="flex items-center justify-between rounded-xl border-2 border-gray-200 bg-white px-3.5 py-2.5 text-sm">
             <div>
-              <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
-              <p className="text-xs text-[var(--color-text-secondary)]">₹{priceForType(kit.addBike, vehicleTypeId).price} per bike, washed at the same doorstep</p>
+              <p className="font-medium text-[var(--color-text-primary)]">+ Add Bikes To This Visit</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">₹{priceForType(kit.addBike, vehicleTypeId).price} Per Bike, Washed At The Same Doorstep</p>
             </div>
             <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
           </div>
@@ -538,7 +805,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             <div>
               <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
               <p className="text-xs text-[var(--color-text-secondary)]">
-                ₹{priceForType(kit.bikePolish, vehicleTypeId).price} per bike · up to {bikesInBooking}
+                ₹{priceForType(kit.bikePolish, vehicleTypeId).price} Per Bike · Up To {bikesInBooking}
               </p>
             </div>
             <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
@@ -567,30 +834,23 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
         <span className="hidden sm:block" />
       )}
       {step < 2 ? (
-        <Button size="lg" className="w-full sm:w-auto sm:min-w-[150px]" disabled={step === 0 ? !step1Valid : !step2Valid} onClick={() => setStep((s) => s + 1)}>
+        <Button size="lg" className="w-full sm:w-auto sm:min-w-[150px]" onClick={goNext}>
           Continue <ArrowRight className="h-4 w-4" />
         </Button>
       ) : (
         <Button
           size="lg"
           className="w-full sm:w-auto sm:min-w-[150px]"
-          disabled={!step3Valid}
           isLoading={submitting || paying}
-          onClick={() => {
-            // A held booking (an earlier "pay online" that didn't finish)
-            // just gets retried — same page, same button. Switching to
-            // cash here confirms it as cash directly, no new booking made.
-            if (held) void (paymentMethod === "online" ? openCheckout(held) : payHeldInCash());
-            else void submit();
-          }}
+          onClick={submitFromButton}
         >
-          {held
+          {held && heldIsCurrent
             ? paymentMethod === "online"
-              ? `Retry payment ₹${held.total}`
-              : "Confirm — pay cash on service"
+              ? `Retry Payment ₹${held.total}`
+              : "Confirm And Pay Cash On Service"
             : user?.phone_verified
-              ? "Confirm booking"
-              : "Verify & book"}{" "}
+              ? "Confirm Booking"
+              : "Verify And Book"}{" "}
           <ArrowRight className="h-4 w-4" />
         </Button>
       )}
@@ -599,8 +859,8 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
 
   return (
     <WizardShell
-      eyebrow="Book a service"
-      title="Book your wash"
+      eyebrow="Book A Service"
+      title="Book Your Wash"
       steps={STEPS}
       current={step}
       onStepClick={(i) => setStep(i)}
@@ -613,12 +873,60 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
     >
       <WizardStepHeader title={STEPS[step]} />
       <div>
-        {/* ---- STEP 1 — Choose service ---- */}
+        {/* ---- STEP 1 — Choose Service ---- */}
         {step === 0 && (
           <div className="space-y-6">
+            {/* Multiple vehicles on one visit — same "On this visit" list
+                and Edit/Remove the logged-in wizard has, now before login
+                too. Guest-only: a logged-in customer here already has the
+                full NewBookingPage flow for this. */}
+            {!user && !!extraCars.length && (
+              <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3.5">
+                <p className="text-sm font-semibold text-black">
+                  On this visit ({extraCars.length + (currentCarReady ? 1 : 0)} of {maxCars})
+                </p>
+                <div className="mt-2 space-y-1.5">
+                  {extraCars.map((car) => (
+                    <div key={car.regNumber} className="flex items-center gap-2 text-sm">
+                      <span className="min-w-0 flex-1 truncate text-gray-700">
+                        <span className="font-medium text-black">{car.brandModel} · {car.regNumber}</span>
+                        {car.serviceLabel ? ` · ${car.serviceLabel}` : ""}
+                      </span>
+                      <span className="font-mono-num shrink-0 text-gray-600">₹{car.subtotal}</span>
+                      <button
+                        type="button"
+                        onClick={() => editCar(car.regNumber)}
+                        aria-label={`Edit ${car.brandModel} on this visit`}
+                        className="shrink-0 text-xs font-bold text-gray-500 underline underline-offset-2 hover:text-black"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeCar(car.regNumber)}
+                        aria-label={`Remove ${car.brandModel} from this visit`}
+                        className="shrink-0 text-xs font-bold text-gray-400 underline underline-offset-2 hover:text-black"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 border-t border-[#F3E5B5] pt-2 text-xs text-gray-500">
+                  One visit, one slot — the captain washes them all at the same address.
+                </p>
+              </div>
+            )}
+
             <div>
               <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">
-                {isCustomer && myVehicles?.length ? "Which vehicle?" : "What do you drive?"}
+                {required(
+                  extraCars.length
+                    ? `Next Vehicle (${extraCars.length + 1})`
+                    : isCustomer && myVehicles?.length
+                      ? "Which Vehicle?"
+                      : "What Do You Drive?"
+                )}
               </p>
               {isCustomer && myVehicles?.length ? (
                 <div className="flex flex-wrap gap-2">
@@ -658,7 +966,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                       <option value="">Select your vehicle type</option>
                       {(vehicleTypes || []).map((t) => (
                         <option key={t.id} value={t.id}>
-                          {t.name}
+                          {titleCase(t.name)}
                         </option>
                       ))}
                     </Select>
@@ -673,10 +981,11 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                           vehicleTypeId === t.id ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-primary)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
                         }`}
                       >
-                        {t.name}
+                        {titleCase(t.name)}
                       </button>
                     ))}
                   </div>
+                  {fieldErrors.vehicleType && <p className="mt-2 text-xs font-medium text-[var(--color-error)]">{fieldErrors.vehicleType}</p>}
                 </>
               )}
             </div>
@@ -684,7 +993,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             {vehicleTypeId && (
               <div className="space-y-6">
                 <div>
-                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">Pick your service</p>
+                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">{required("Pick Your Service")}</p>
                   <p className="mb-2.5 mt-0.5 text-xs text-[var(--color-text-secondary)]">One service per vehicle — extras can be added below.</p>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     {mainGroups.map((g) => {
@@ -719,14 +1028,14 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                             className="flex w-full items-start justify-between gap-3 text-left"
                           >
                             <span className="min-w-0">
-                              <span className="block font-semibold text-[var(--color-text-primary)]">{g.primary.name}</span>
+                              <span className="block font-semibold text-[var(--color-text-primary)]">{titleCase(g.primary.name)}</span>
                               {/* No service time here (founder call) — a
                                   duration on the picker reads as a promise
                                   before we even know the vehicle. */}
-                              <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">at your doorstep</span>
+                              <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">At Your Doorstep</span>
                               {(includes.items.length > 0 || includes.summary) && (
                                 <span className="mt-1.5 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
-                                  {includes.items.length > 0 ? includes.items.join(" · ") : includes.summary}
+                                  {includes.items.length > 0 ? includes.items.map(titleCase).join(" · ") : titleCase(includes.summary)}
                                 </span>
                               )}
                             </span>
@@ -742,9 +1051,9 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                           {active && bookingIsBike && kit.addBike && (
                             <div className="mt-3 flex items-center justify-between border-t border-black/5 pt-3">
                               <span className="text-xs font-medium text-[var(--color-text-secondary)]">
-                                How many bikes?
+                                How Many Bikes?
                                 <span className="block text-[11px] font-normal">
-                                  First bike ₹{priceForType(g.primary, vehicleTypeId).price}, ₹{priceForType(kit.addBike, vehicleTypeId).price} each additional
+                                  First Bike ₹{priceForType(g.primary, vehicleTypeId).price}, ₹{priceForType(kit.addBike, vehicleTypeId).price} Each Additional
                                 </span>
                               </span>
                               <QtyStepper value={bikesInBooking} min={1} max={10} onChange={(n) => setExtraBikes(Math.max(0, n - bikeCount))} />
@@ -752,7 +1061,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                           )}
                           {multi && !bookingIsBike && (
                             <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-black/5 pt-3">
-                              <span className="mr-1 text-xs font-medium text-[var(--color-text-secondary)]">Choose an option</span>
+                              <span className="mr-1 text-xs font-medium text-[var(--color-text-secondary)]">Choose An Option</span>
                               {g.variants.map((v) => {
                                 const on = current.id === v.id;
                                 return (
@@ -766,7 +1075,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                                         : "border-gray-200 bg-white text-[var(--color-text-secondary)] hover:border-gray-300"
                                     }`}
                                   >
-                                    {v.variant_label ?? v.name} · ₹{priceForType(v, vehicleTypeId).price}
+                                    {titleCase(v.variant_label ?? v.name)} · ₹{priceForType(v, vehicleTypeId).price}
                                   </button>
                                 );
                               })}
@@ -780,9 +1089,56 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
 
                 {addonChips && (
                   <div>
-                    <p className="text-sm font-semibold text-[var(--color-text-primary)]">Add-ons (optional)</p>
+                    <p className="text-sm font-semibold text-[var(--color-text-primary)]">Add-Ons (Optional)</p>
                     <p className="mb-2.5 mt-0.5 text-xs text-[var(--color-text-secondary)]">Extras done in the same visit.</p>
                     {addonChips}
+                  </div>
+                )}
+                {fieldErrors.service && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.service}</p>}
+
+                {/* Multi-vehicle mode: this car's plate/model is collected
+                    right here (same step as its service), not deferred to
+                    step 3 — exactly like every other car on the visit.
+                    A single-vehicle guest never sees this; it still asks
+                    in step 3 as before. */}
+                {!user && hasMain && multiCarMode && (
+                  <div className="rounded-lg border border-dashed border-gray-200 p-3">
+                    <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">{required("This Vehicle")}</p>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Input
+                        label={required(vehicleModelLabel)}
+                        value={brandModel}
+                        onChange={(e) => setBrandModel(sanitizeVehicleName(e.target.value))}
+                        placeholder={vehicleModelPlaceholder}
+                      />
+                      <Input
+                        label={required(vehicleNumberLabel)}
+                        value={regNumber}
+                        onChange={(e) => setRegNumber(e.target.value.toUpperCase())}
+                        placeholder="MP09AB1234"
+                      />
+                    </div>
+                    {addCarError && <p className="mt-2 text-xs font-medium text-[var(--color-error)]">{addCarError}</p>}
+                  </div>
+                )}
+
+                {!user && hasMain && (
+                  <div>
+                    {multiCarMode ? (
+                      canAddMoreCars && (
+                        <Button type="button" variant="outline" size="sm" disabled={!currentCarReady} onClick={addCurrentCar}>
+                          <Plus className="h-3.5 w-3.5" /> Add This Vehicle To The Visit
+                        </Button>
+                      )
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowAddCar(true)}
+                        className="flex items-center gap-1.5 text-xs font-semibold text-black underline underline-offset-2 hover:opacity-70"
+                      >
+                        <Plus className="h-3.5 w-3.5" /> Add another vehicle to this visit
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -790,12 +1146,12 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
           </div>
         )}
 
-        {/* ---- STEP 2 — Time & place ---- */}
+        {/* ---- STEP 2 — Time And Place ---- */}
         {step === 1 && (
           <div className="space-y-6">
             {isCustomer && myAddresses?.length ? (
               <div>
-                <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">Where should we come?</p>
+                <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">{required("Where Should We Come?")}</p>
                 <div className="flex flex-wrap gap-2">
                   {myAddresses.map((a) => (
                     <button
@@ -823,7 +1179,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                     }}
                     className={`rounded-xl border-2 px-4 py-2.5 text-sm ${savedAddressId === null ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-dashed border-gray-300 text-[var(--color-text-secondary)]"}`}
                   >
-                    + New address
+                    + New Address
                   </button>
                 </div>
               </div>
@@ -866,14 +1222,14 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             {!savedAddressId && coverage === "covered" && (
               <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3">
                 <p className="flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
-                  <BadgeCheck className="h-3.5 w-3.5" /> We serve this area!
+                  <BadgeCheck className="h-3.5 w-3.5" /> We Serve This Area!
                 </p>
                 {pinned && (
                   <p className="mt-1.5 flex items-start gap-1.5 text-xs text-[var(--color-text-secondary)]">
                     <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" />
                     <span className="min-w-0">
                       <span className="block font-medium text-black">{pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")}</span>
-                      Drag the pin above if this isn't your exact gate — the captain drives to this point.
+                      Drag The Pin Above If This Isn't Your Exact Gate. The Captain Drives To This Point.
                     </span>
                   </p>
                 )}
@@ -887,10 +1243,11 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 {!mapsUp && (
                   <Input
                     label="Address"
+                    error={fieldErrors.address}
                     value={line1}
                     onChange={(e) => setLine1(e.target.value)}
-                    placeholder="House / flat, street, area"
-                    hint="Maps are unavailable right now — type the address instead."
+                    placeholder="House / Flat, Street, Area"
+                    hint="Maps Are Unavailable Right Now. Type The Address Instead."
                   />
                 )}
                 {!mapsUp && (
@@ -903,7 +1260,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                       setCoverage("idle");
                     }}
                     onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && checkCoverage(pincode.trim())}
-                    placeholder="e.g. 452001"
+                    placeholder="E.g. 452001"
                   />
                 )}
               </>
@@ -921,134 +1278,50 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             {coverage === "covered" && (
               <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} enableHold />
             )}
+            {(fieldErrors.location || fieldErrors.date || fieldErrors.slot) && (
+              <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.location || fieldErrors.date || fieldErrors.slot}</p>
+            )}
           </div>
         )}
 
-        {/* ---- STEP 3 — Confirm & verify ---- */}
+        {/* ---- STEP 3 — Confirm And Verify ---- */}
         {step === 2 && (
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_320px]">
             <div className="space-y-5">
-              {!savedVehicleId && (
+              {/* Multi-car mode already asked this back in step 1, right
+                  alongside that car's service — asking again here would
+                  just be the same question twice. */}
+              {!savedVehicleId && !multiCarMode && (
                 <div>
-                  <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">Your vehicle</p>
+                  <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">{required("Your Vehicle")}</p>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Input label="Brand & model" value={brandModel} onChange={(e) => setBrandModel(e.target.value)} placeholder="e.g. Maruti Swift" />
-                    <Input label="Registration number" value={regNumber} onChange={(e) => setRegNumber(e.target.value.toUpperCase())} placeholder="MP09AB1234" />
+                    <Input label={required(vehicleModelLabel)} error={fieldErrors.brandModel} value={brandModel} onChange={(e) => setBrandModel(sanitizeVehicleName(e.target.value))} placeholder={vehicleModelPlaceholder} />
+                    <Input label={required(vehicleNumberLabel)} error={fieldErrors.regNumber} value={regNumber} onChange={(e) => setRegNumber(e.target.value.toUpperCase())} placeholder="MP09AB1234" />
                   </div>
                 </div>
               )}
 
               {!user && (
                 <div>
-                  <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">Your details</p>
+                  <p className="mb-2.5 text-sm font-semibold text-[var(--color-text-primary)]">{required("Your Details")}</p>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Input label="Full name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+                    <Input label={required("Full Name")} error={fieldErrors.name} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your Name" />
                     <Input
-                      label="WhatsApp number"
+                      label={required("WhatsApp Number")}
+                      error={fieldErrors.phone}
                       value={phone}
                       maxLength={10}
-                      onChange={(e) => {
-                        setPhone(e.target.value.replace(/\D/g, ""));
-                        setNeedLogin(false);
-                      }}
-                      placeholder="10-digit mobile"
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))}
+                      placeholder="10-Digit Mobile"
                       hint="We'll send a one-time verification code here — no password needed."
                     />
                   </div>
-                  {needOtp && (
-                    <div className="mt-3 rounded-xl bg-[var(--color-secondary-light)] p-4">
-                      <p className="text-sm text-[var(--color-text-primary)]">
-                        Welcome back! We sent a verification code to <span className="font-semibold">{phone}</span> — enter it to continue.
-                      </p>
-                      <div className="mt-2">
-                        <p className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">Verification code</p>
-                        <OtpInput value={loginOtp} onChange={setLoginOtp} />
-                      </div>
-                      <Button
-                        className="mt-3 w-full"
-                        disabled={loginOtp.trim().length < 6}
-                        isLoading={submitting}
-                        onClick={async () => {
-                          setError("");
-                          setSubmitting(true);
-                          try {
-                            const phoneN = validateIndianMobile(phone) || phone.trim();
-                            const payload = otpViaWidget
-                              ? { phone: phoneN, access_token: await widgetVerifyOtp(loginOtp.trim()) }
-                              : { phone: phoneN, otp: loginOtp.trim() };
-                            const result = await guestAuthApi.otpLogin(payload);
-                            tokenStorage.set(result.access_token, result.refresh_token);
-                            otpUserRef.current = result.user;
-                            await refreshUser();
-                            setNeedOtp(false);
-                            setSubmitting(false);
-                            void submit(true);
-                          } catch (err) {
-                            setSubmitting(false);
-                            setError(getErrorMessage(err));
-                          }
-                        }}
-                      >
-                        Verify &amp; continue booking
-                      </Button>
-                      <div className="mt-2 flex items-center justify-between text-xs">
-                        <button
-                          type="button"
-                          className="font-medium text-[var(--color-primary)] hover:underline"
-                          onClick={async () => {
-                            setError("");
-                            const phoneN = validateIndianMobile(phone) || phone.trim();
-                            try {
-                              if (otpViaWidget) await widgetSendOtp(phoneN);
-                              else await authApi.forgotPassword(phoneN);
-                            } catch (err) {
-                              if (!otpViaWidget) {
-                                setError(getErrorMessage(err));
-                                return;
-                              }
-                              // The widget failed again — fall back to
-                              // WhatsApp rather than let "Resend" keep
-                              // failing the same way forever.
-                              try {
-                                await authApi.forgotPassword(phoneN);
-                                setOtpViaWidget(false);
-                              } catch (fallbackErr) {
-                                setError(getErrorMessage(fallbackErr));
-                              }
-                            }
-                          }}
-                        >
-                          Resend code
-                        </button>
-                        <button
-                          type="button"
-                          className="font-medium text-[var(--color-text-secondary)] hover:underline"
-                          onClick={() => {
-                            setNeedOtp(false);
-                            setLoginOtp("");
-                            setError("");
-                          }}
-                        >
-                          Use a different number
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {needLogin && (
-                    <div className="mt-3 rounded-xl bg-[var(--color-secondary-light)] p-4">
-                      <p className="text-sm text-[var(--color-text-primary)]">Welcome back! This number already has an account.</p>
-                      <Input label="Password" type="password" className="mt-2" value={password} onChange={(e) => setPassword(e.target.value)} />
-                      <a href="/forgot-password" className="mt-1.5 inline-block text-xs font-medium text-[var(--color-primary)] hover:underline">
-                        Forgot password?
-                      </a>
-                    </div>
-                  )}
                 </div>
               )}
 
               {user && (
                 <div className="flex items-center gap-2 rounded-xl bg-[var(--color-accent-light)] px-4 py-3 text-sm text-[var(--color-text-primary)]">
-                  <BadgeCheck className="h-4 w-4 text-[var(--color-success)]" /> Booking as <span className="font-semibold">{user.full_name}</span>
+                  <BadgeCheck className="h-4 w-4 text-[var(--color-success)]" /> Booking As <span className="font-semibold">{user.full_name}</span>
                   {user.phone_verified && <Badge tone="success">Verified</Badge>}
                 </div>
               )}
@@ -1059,13 +1332,26 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             {/* Summary */}
             <div className="h-fit rounded-2xl bg-[var(--color-surface)] p-5">
               <p className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-[var(--color-text-primary)]">
-                <Sparkles className="h-4 w-4 text-[var(--color-secondary)]" /> Your booking
+                <Sparkles className="h-4 w-4 text-[var(--color-secondary)]" /> Your Booking
               </p>
               <dl className="space-y-2 text-sm">
+                {!!extraCars.length && (
+                  <div className="border-b border-gray-200 pb-2">
+                    <dt className="mb-1 text-[var(--color-text-secondary)]">{extraCars.length} Other Vehicle{extraCars.length > 1 ? "s" : ""} On This Visit</dt>
+                    {extraCars.map((car) => (
+                      <div key={car.regNumber} className="flex justify-between text-xs">
+                        <dd className="text-[var(--color-text-secondary)]">
+                          {car.brandModel} · {car.regNumber}
+                        </dd>
+                        <dd className="font-mono-num">₹{car.subtotal}</dd>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {selectedServices.map((s) => (
                   <div key={s.id} className="flex justify-between">
                     <dt className="text-[var(--color-text-secondary)]">
-                      {s.name}
+                      {titleCase(s.name)}
                       {qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : ""}
                     </dt>
                     <dd className="font-mono-num font-medium">₹{priceFor(s, vehicleTypeId) * qtyOf(s.id)}</dd>
@@ -1073,7 +1359,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                 ))}
                 {addonChips && (
                   <div className="border-t border-gray-200 pt-2">
-                    <dt className="mb-2 text-[var(--color-text-secondary)]">Add extras to this visit</dt>
+                    <dt className="mb-2 text-[var(--color-text-secondary)]">Add Extras To This Visit</dt>
                     <dd>{addonChips}</dd>
                   </div>
                 )}
@@ -1096,10 +1382,10 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                   </div>
                 )}
                 <div className="flex justify-between border-t border-gray-200 pt-2 text-base">
-                  <dt className="font-semibold">Total</dt>
+                  <dt className="font-semibold">Total{extraCars.length ? ` · ${extraCars.length + 1} Vehicles` : ""}</dt>
                   <dd className="text-right">
-                    {hasFirstWashOffer && <span className="mr-2 font-mono-num text-sm text-gray-400 line-through">₹{total}</span>}
-                    <span className="font-mono-num font-bold">₹{Math.max(payableTotal - couponDiscount, 0)}</span>
+                    {hasFirstWashOffer && <span className="mr-2 font-mono-num text-sm text-gray-400 line-through">₹{total + extrasSubtotal}</span>}
+                    <span className="font-mono-num font-bold">₹{Math.max(payableTotal - couponDiscount, 0) + extrasSubtotal}</span>
                   </dd>
                 </div>
               </dl>
@@ -1113,7 +1399,7 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
             {/* Coupon — a real labelled field with its own Apply button and
                 plain feedback, instead of a nameless box in the price list. */}
             <div>
-              <p className="mb-1.5 text-sm font-medium text-black">Have a coupon code?</p>
+              <p className="mb-1.5 text-sm font-medium text-black">Have A Coupon Code?</p>
               <div className="flex gap-2">
                 <Input
                   value={couponCode}
@@ -1126,22 +1412,22 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
                   className="uppercase"
                 />
                 <Button type="button" variant="outline" className="shrink-0" disabled={!couponCode.trim() || couponApplying} onClick={applyCoupon}>
-                  {couponApplying ? "Checking…" : "Apply"}
+                  {couponApplying ? "Checking..." : "Apply"}
                 </Button>
               </div>
               {couponError && <p className="mt-1 text-xs text-[var(--color-error)]">{couponError}</p>}
               {couponDiscount > 0 && (
-                <p className="mt-1 text-xs font-medium text-[var(--color-success)]">Coupon applied — ₹{couponDiscount} off.</p>
+                <p className="mt-1 text-xs font-medium text-[var(--color-success)]">Coupon Applied. ₹{couponDiscount} Off.</p>
               )}
             </div>
 
             {/* Cash or online — asked once, right before booking. */}
             <div>
-              <p className="mb-1.5 text-sm font-medium text-black">How would you like to pay?</p>
+              <p className="mb-1.5 text-sm font-medium text-black">{required("How Would You Like To Pay?")}</p>
               <div className="flex gap-2">
                 {([
-                  { value: "cash" as const, label: "Cash on service", hint: "Pay the captain at your door" },
-                  { value: "online" as const, label: "Pay online now", hint: "UPI, cards, netbanking" },
+                  { value: "cash" as const, label: "Cash On Service", hint: "Pay The Captain At Your Door" },
+                  { value: "online" as const, label: "Pay Online Now", hint: "UPI, Cards, Netbanking" },
                 ]).map((m) => (
                   <button
                     key={m.value}
@@ -1170,12 +1456,167 @@ export function PublicBookingWizard({ preselect }: { preselect: WizardPreselect 
 
       <PhoneVerificationModal
         open={verifyOpen}
-        onClose={() => setVerifyOpen(false)}
+        autoSend={autoSendVerification}
+        onClose={() => {
+          setVerifyOpen(false);
+          setAutoSendVerification(false);
+        }}
         onVerified={() => {
           setVerifyOpen(false);
+          setAutoSendVerification(false);
           void submit(true);
         }}
       />
+
+      {/* This number already has an account — OTP is always the default
+          way back in (it's the ONLY way in for a guest/WhatsApp-made
+          account with no real password); a real password is offered as a
+          switch inside this same popup, only when the account actually
+          has one. Nothing here ever mentions "forgot password" — that's
+          a dead end for the accounts that hit this the most. */}
+      <Modal
+        open={needOtp}
+        onClose={() => {
+          setNeedOtp(false);
+          setLoginOtp("");
+          setPassword("");
+          setUseLoginPassword(false);
+          setError("");
+        }}
+        title="Verify It's You"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-[var(--color-text-secondary)]">This number already has an account with us — verify it's you to continue this booking.</p>
+          {!useLoginPassword ? (
+            <>
+              <p className="text-sm text-[var(--color-text-primary)]">
+                We sent a code to <span className="font-semibold">{phone}</span>.
+              </p>
+              <div>
+                <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">{required("Verification Code")}</p>
+                <OtpInput value={loginOtp} onChange={setLoginOtp} />
+              </div>
+              {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+              <Button
+                className="w-full"
+                disabled={loginOtp.trim().length < 6}
+                isLoading={submitting}
+                onClick={async () => {
+                  setError("");
+                  setSubmitting(true);
+                  try {
+                    const phoneN = validateIndianMobile(phone) || phone.trim();
+                    const payload = otpViaWidget
+                      ? { phone: phoneN, access_token: await widgetVerifyOtp(loginOtp.trim()) }
+                      : { phone: phoneN, otp: loginOtp.trim() };
+                    const result = await guestAuthApi.otpLogin(payload);
+                    tokenStorage.set(result.access_token, result.refresh_token);
+                    otpUserRef.current = result.user;
+                    await refreshUser();
+                    setNeedOtp(false);
+                    setSubmitting(false);
+                    void submit(true);
+                  } catch (err) {
+                    setSubmitting(false);
+                    setError(getErrorMessage(err));
+                  }
+                }}
+              >
+                Verify And Continue Booking
+              </Button>
+              <div className="flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  className="font-medium text-[var(--color-primary)] hover:underline"
+                  onClick={async () => {
+                    setError("");
+                    const phoneN = validateIndianMobile(phone) || phone.trim();
+                    try {
+                      if (otpViaWidget) await widgetSendOtp(phoneN);
+                      else await authApi.requestOtp(phoneN);
+                    } catch (err) {
+                      if (!otpViaWidget) {
+                        setError(getErrorMessage(err));
+                        return;
+                      }
+                      // The widget failed again — fall back to WhatsApp
+                      // rather than let "Resend" keep failing the same way.
+                      try {
+                        await authApi.requestOtp(phoneN);
+                        setOtpViaWidget(false);
+                      } catch (fallbackErr) {
+                        setError(getErrorMessage(fallbackErr));
+                      }
+                    }
+                  }}
+                >
+                  Resend Code
+                </button>
+                <button
+                  type="button"
+                  className="font-medium text-[var(--color-text-secondary)] hover:underline"
+                  onClick={() => {
+                    setNeedOtp(false);
+                    setLoginOtp("");
+                    setError("");
+                  }}
+                >
+                  Use A Different Number
+                </button>
+              </div>
+              {recoveryHasPassword && (
+                <button
+                  type="button"
+                  className="w-full text-center text-xs font-medium text-[var(--color-primary)] hover:underline"
+                  onClick={() => {
+                    setUseLoginPassword(true);
+                    setError("");
+                  }}
+                >
+                  Have a password instead? Log in with it
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <Input label={required("Password")} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+              {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+              <Button
+                className="w-full"
+                disabled={password.length < 8}
+                isLoading={submitting}
+                onClick={async () => {
+                  setError("");
+                  setSubmitting(true);
+                  try {
+                    const phoneN = validateIndianMobile(phone) || phone.trim();
+                    otpUserRef.current = await login(phoneN, password);
+                    setNeedOtp(false);
+                    setSubmitting(false);
+                    void submit(true);
+                  } catch (err) {
+                    setSubmitting(false);
+                    setError(getErrorMessage(err));
+                  }
+                }}
+              >
+                Log In And Continue Booking
+              </Button>
+              <button
+                type="button"
+                className="w-full text-center text-xs font-medium text-[var(--color-text-secondary)] hover:underline"
+                onClick={() => {
+                  setUseLoginPassword(false);
+                  setPassword("");
+                  setError("");
+                }}
+              >
+                Use verification code instead
+              </button>
+            </>
+          )}
+        </div>
+      </Modal>
     </WizardShell>
   );
 }

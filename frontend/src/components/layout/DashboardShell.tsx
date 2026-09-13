@@ -275,8 +275,8 @@ export function DashboardShell({
                 alt="BLUSSIT"
                 className="h-auto w-[158px] object-contain object-left"
               />
-              <span className="mt-0.5 text-[6.5px] font-bold uppercase tracking-[0.22em] text-[#E8A900]">
-                Clean Car. Clean Mind.
+              <span className="mt-0.5 whitespace-nowrap text-[6.5px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
+                Premium Car Wash At Doorstep.
               </span>
             </Link>
           ) : (
@@ -368,8 +368,8 @@ export function DashboardShell({
                 alt="BLUSSIT"
                 className="h-auto w-[104px] object-contain"
               />
-              <span className="mt-0.5 text-[6px] font-bold uppercase tracking-[0.22em] text-[#E8A900]">
-                Clean Car. Clean Mind.
+              <span className="mt-0.5 whitespace-nowrap text-[5px] font-bold uppercase tracking-[0.08em] text-[#E8A900]">
+                Premium Car Wash At Doorstep.
               </span>
             </Link>
           ) : (
@@ -499,12 +499,12 @@ export function DashboardShell({
             // The raised gold center button exists only for portals that
             // pass a centerMenu (the customer's "Book" sheet) — a plain
             // 3/4-tab bar (captain) renders every item as a normal tab.
-            centerMenu && i === 2 ? (
+            i === 2 ? (
               <div key={item.to} className="flex items-center justify-center">
                 <button
                   type="button"
                   aria-label={item.label}
-                  onClick={() => setCenterMenuOpen(true)}
+                  onClick={() => (centerMenu ? setCenterMenuOpen(true) : navigate(item.to))}
                   className="-mt-7 flex h-[52px] w-[52px] items-center justify-center rounded-full border-4 border-white bg-[#E8A900] text-white shadow-[0_10px_22px_rgba(232,169,0,0.4)]"
                 >
                   <item.icon className="h-6 w-6" strokeWidth={2.4} />
@@ -545,7 +545,7 @@ export function DashboardShell({
           <div className="absolute inset-x-0 bottom-0 rounded-t-3xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-[0_-12px_40px_rgba(0,0,0,0.18)]">
             <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-gray-100" />
             <p className="mb-3 font-display text-lg font-bold text-black">
-              How do you want to book?
+              How Do You Want To Book?
             </p>
             <div className="space-y-2.5">
               {centerMenu.map((opt) => (

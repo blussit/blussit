@@ -4,7 +4,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, RefreshCw, Search } from "lucide-react";
+import { Plus, RefreshCw, Rocket, Search } from "lucide-react";
 import { Badge, Button, Card, CardBody, CardHeader, Input, Modal, Select, Spinner } from "../../ui";
 import { whatsappCrmApi } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
@@ -25,6 +25,10 @@ export function TemplatesView() {
   const [createOpen, setCreateOpen] = useState(false);
   const sync = useMutation({
     mutationFn: whatsappCrmApi.syncTemplates,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["wa-templates"] }),
+  });
+  const bootstrap = useMutation({
+    mutationFn: whatsappCrmApi.bootstrapTemplates,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["wa-templates"] }),
   });
   const toggle = useMutation({
@@ -57,6 +61,14 @@ export function TemplatesView() {
         <div className="flex gap-2">
           <Button variant="secondary" isLoading={sync.isPending} onClick={() => sync.mutate()}>
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Sync status
+          </Button>
+          <Button
+            variant="secondary"
+            isLoading={bootstrap.isPending}
+            onClick={() => bootstrap.mutate()}
+            title="Submits every standard BLUSSIT template not already on WhatsApp yet, including the ones whose button links straight to the specific booking"
+          >
+            <Rocket className="mr-1.5 h-3.5 w-3.5" /> Submit missing templates
           </Button>
           <Button onClick={() => setCreateOpen(true)}>
             <Plus className="mr-1.5 h-3.5 w-3.5" /> Create template

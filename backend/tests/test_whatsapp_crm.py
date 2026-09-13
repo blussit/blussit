@@ -144,7 +144,9 @@ async def test_event_template_gating_and_fallback(db, cleanup):
 async def test_assignment_requires_staff_role(db, cleanup):
     wa_id, phone = "918887771006", "8887771006"
     _cleanup_wa(cleanup, wa_id, phone)
-    await WhatsAppBotService(db).handle_webhook(wa_payload(wa_id, text="hi"))
+    bot = WhatsAppBotService(db)
+    await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    await bot.handle_webhook(wa_payload(wa_id, text="Assign Tester"))  # brand-new number: name first
     crm = WhatsAppCrmService(db)
     customer = await db.users.find_one({"phone": phone})
     with pytest.raises(BadRequestException, match="admin or manager"):

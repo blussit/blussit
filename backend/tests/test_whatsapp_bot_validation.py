@@ -52,6 +52,7 @@ def _register_wa_cleanup(cleanup, wa_id, phone):
 
 async def _to_reg_step(bot, db, wa_id, hatchback):
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    await bot.handle_webhook(wa_payload(wa_id, text="WA Tester"))  # brand-new number: name first
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
     await bot.handle_webhook(wa_payload(wa_id, reply=f"vt:{hatchback}"))
     await bot.handle_webhook(wa_payload(wa_id, text="Maruti Swift"))
@@ -107,6 +108,7 @@ async def test_two_strikes_hand_off_to_admin_and_pause_bot(rig, db, cleanup):
         cleanup.append(("notifications", {"user_id": str(admin["_id"]), "title": "WhatsApp customer needs help"}))
     bot = WhatsAppBotService(db)
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    await bot.handle_webhook(wa_payload(wa_id, text="Strike Tester"))
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
     # choose_vehicle/new-vehicle-type step; garbage twice -> human handoff.
     await bot.handle_webhook(wa_payload(wa_id, text="what is the meaning of life"))
@@ -129,6 +131,7 @@ async def test_out_of_menu_question_pings_admin_but_keeps_menu(rig, db, cleanup)
         cleanup.append(("notifications", {"user_id": str(admin["_id"]), "title": "WhatsApp customer needs help"}))
     bot = WhatsAppBotService(db)
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    await bot.handle_webhook(wa_payload(wa_id, text="Question Tester"))
     await bot.handle_webhook(wa_payload(wa_id, text="do you also clean sofas at home?"))
     outs = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(length=3)
     assert any("team has been notified" in (o.get("message") or "") for o in outs)

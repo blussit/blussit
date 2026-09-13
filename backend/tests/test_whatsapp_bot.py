@@ -111,8 +111,16 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     wa_id, phone = "918887770001", "8887770001"
     _register_wa_cleanup(cleanup, wa_id, phone)
 
-    # 1. First contact — account auto-created, menu offered.
+    # 1. First contact — a brand-new number is asked for their name before
+    # anything else (never silently taken from the WhatsApp profile, which
+    # can be a nickname/emoji/company name); no account exists yet.
     await bot.handle_webhook(wa_payload(wa_id, text="hi", name="Ravi Kumar"))
+    assert await db.users.find_one({"phone": phone}) is None
+    out = await last_out(db, phone)
+    assert "name" in out["message"].lower()
+
+    # 2. Supplying the name creates the account and only THEN shows the menu.
+    await bot.handle_webhook(wa_payload(wa_id, text="Ravi Kumar"))
     user = await db.users.find_one({"phone": phone})
     assert user is not None
     cleanup.append(("users", {"_id": user["_id"]}))
@@ -209,11 +217,19 @@ async def test_duplicate_webhook_delivery_is_ignored(rig, db, cleanup):
 
     payload = wa_payload(wa_id, text="hi", wamid="wamid.TESTDUPLICATE01")
     first = await bot.handle_webhook(payload)
-    user = await db.users.find_one({"phone": phone})
-    cleanup.append(("users", {"_id": user["_id"]}))
     second = await bot.handle_webhook(payload)  # Meta redelivery, byte-identical
     assert first["processed"] == 1
     assert second["processed"] == 0
+    # The greeting alone never creates an account — only the name reply does.
+    assert await db.users.count_documents({"phone": phone}) == 0
+
+    name_payload = wa_payload(wa_id, text="Duplicate Tester", wamid="wamid.TESTDUPLICATE02")
+    third = await bot.handle_webhook(name_payload)
+    user = await db.users.find_one({"phone": phone})
+    cleanup.append(("users", {"_id": user["_id"]}))
+    fourth = await bot.handle_webhook(name_payload)  # redelivery of the name message too
+    assert third["processed"] == 1
+    assert fourth["processed"] == 0
     # And no duplicate side effects: still exactly one account.
     assert await db.users.count_documents({"phone": phone}) == 1
 
@@ -281,6 +297,7 @@ async def test_cancel_resets_the_conversation(rig, db, cleanup):
     _register_wa_cleanup(cleanup, wa_id, phone)
 
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    await bot.handle_webhook(wa_payload(wa_id, text="Cancel Tester"))
     user = await db.users.find_one({"phone": phone})
     cleanup.append(("users", {"_id": user["_id"]}))
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
@@ -316,9 +333,15 @@ async def test_webhook_verification_and_signature(monkeypatch, db):
     assert verify_webhook_signature(body, good) is True
     assert verify_webhook_signature(body, "sha256=deadbeef") is False
     assert verify_webhook_signature(body, None) is False
-    # No secret configured (dev) → checking is off.
+    # No secret configured: dev keeps the old convenience of accepting
+    # unsigned payloads, but production FAILS CLOSED — an unsigned webhook
+    # with no secret to check would otherwise let anyone who learns the
+    # URL impersonate any customer by phone number.
     monkeypatch.setattr(settings, "WHATSAPP_APP_SECRET", "")
+    monkeypatch.setattr(settings, "DEBUG", True)
     assert verify_webhook_signature(body, None) is True
+    monkeypatch.setattr(settings, "DEBUG", False)
+    assert verify_webhook_signature(body, None) is False
 
 
 @pytest.mark.asyncio

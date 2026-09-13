@@ -227,8 +227,8 @@ export function PassPurchaseSheet({
             {!menu.length && (
               <p className="text-xs text-gray-500">
                 {chosenVehicle
-                  ? `No service on this pass is offered for a ${chosenVehicle.brand} ${chosenVehicle.model}. Try another car, or request a custom plan.`
-                  : "Pick a car first."}
+                  ? `No Service On This Pass Is Offered For A ${chosenVehicle.brand} ${chosenVehicle.model}. Try Another Car, Or Request A Custom Plan.`
+                  : "Pick A Car First."}
               </p>
             )}
           </div>

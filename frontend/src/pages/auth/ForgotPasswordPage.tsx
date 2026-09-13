@@ -125,8 +125,8 @@ export default function ForgotPasswordPage() {
                 alt="BLUSSIT"
                 className="h-auto w-[142px] object-contain"
               />
-              <span className="mt-0.5 text-[8px] font-bold uppercase tracking-[0.24em] text-[#E8A900]">
-                Clean Car. Clean Mind.
+              <span className="mt-0.5 whitespace-nowrap text-[7px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
+                Premium Car Wash At Doorstep.
               </span>
             </Link>
             {step === "request" && (
@@ -227,6 +227,9 @@ export default function ForgotPasswordPage() {
                         {showPassword ? <EyeOffIcon /> : <EyeIcon />}
                       </button>
                     </div>
+                    {newPassword.length > 0 && newPassword.length < 8 && (
+                      <span className="mt-1 block text-[11px] font-medium text-[var(--color-error)]">Enter at least 8 characters.</span>
+                    )}
                   </label>
                   {error && (
                     <div className="mt-2.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">
@@ -235,7 +238,7 @@ export default function ForgotPasswordPage() {
                   )}
                   <button
                     type="submit"
-                    disabled={isLoading}
+                    disabled={isLoading || newPassword.length < 8}
                     className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] hover:shadow-[0_10px_24px_rgba(245,180,0,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <span>{isLoading ? "Resetting..." : "Reset password"}</span>
@@ -378,4 +381,3 @@ function EyeOffIcon() {
     </svg>
   );
 }
-

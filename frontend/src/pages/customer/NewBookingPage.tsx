@@ -19,6 +19,7 @@ import { useToast } from "../../context/ToastContext";
 import { format } from "../../lib/date";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { estimatePlanTopUp, subscriptionCoversType } from "../../lib/planTier";
+import { sanitizeVehicleName } from "../../lib/validators";
 import { QtyStepper } from "../../components/shared/QtyStepper";
 import type { Address, Booking, ComboOffer, Service, VehicleType } from "../../types";
 
@@ -55,7 +56,6 @@ const PASS_STEPS = ["Address & Time", "Add-ons & Confirm"] as const;
 const STEP_HINTS: Record<string, string> = {
   vehicle: "Which vehicle and what service.",
   address: "Where and when should we come?",
-  review: "Check the price and choose how to pay — including any subscription plan you own.",
   passReview: "Add anything extra, then confirm — the wash itself is on your pass.",
 };
 
@@ -405,6 +405,9 @@ export default function NewBookingPage() {
   // come purely from the add-bike line.
   const bikesInBooking = bookingIsBike ? bikeCount + extraBikes : extraBikes;
   const qtyOf = (id: string) => serviceQty[id] || 1;
+  const vehicleNumberLabel = bookingIsBike ? "Bike Number" : "Car Number";
+  const vehicleModelLabel = bookingIsBike ? "Bike Model (Optional)" : "Car Model (Optional)";
+  const vehicleModelPlaceholder = bookingIsBike ? "E.g. Royal Enfield Classic" : "E.g. Hyundai i20";
 
   const subtotal = useMemo(() => {
     if (selectedCombo) {
@@ -518,6 +521,26 @@ export default function NewBookingPage() {
 
   const removeCar = (vehicleId: string) => setExtraCars((cars) => cars.filter((c) => c.vehicleId !== vehicleId));
 
+  // "Accidentally added the wrong car/service" recovery: pulls that car
+  // back OUT of the settled visit list and loads it back into the editor
+  // above — same vehicle, same services — so fixing a mistake is "change
+  // it and re-add", not "remove and start that car over from scratch".
+  const editCar = (vehicleId: string) => {
+    const car = extraCars.find((c) => c.vehicleId === vehicleId);
+    if (!car) return;
+    setExtraCars((cars) => cars.filter((c) => c.vehicleId !== vehicleId));
+    setAddCarError("");
+    // resolveCurrentVehicleId always saves a brand-new car before it can
+    // land in extraCars, so it's always findable here — selectVehicle
+    // restores the vehicle type/registration/model together correctly.
+    const v = vehicles?.find((x) => x.id === vehicleId);
+    if (v) selectVehicle(v);
+    else setVehicleType(car.vehicleType);
+    setServiceIds(car.serviceIds);
+    setServiceQty(car.serviceQty);
+    setComboId(null);
+  };
+
   const extrasSubtotal = extraCars.reduce((sum, c) => sum + c.subtotal, 0);
   /** Every service across the whole visit — one waterless car means the
    *  whole visit needs a shaded spot, so the prep checklist reads them all. */
@@ -547,6 +570,17 @@ export default function NewBookingPage() {
       alt: [altContactName, altContactPhone],
     });
   const heldIsCurrent = !!held && held.signature === currentSignature();
+  const bookingConfirmationState = (bookingNumber?: string, serviceLabel?: string) => ({
+    type: "booking" as const,
+    booking_number: bookingNumber,
+    scheduled_date: date,
+    scheduled_slot: slot,
+    service_label:
+      serviceLabel ||
+      (selectedCombo
+        ? selectedCombo.name
+        : selectedServices.map((s) => s.name + (qtyOf(s.id) > 1 ? ` ×${qtyOf(s.id)}` : "")).join(", ")),
+  });
 
   /** Open Razorpay for a held booking and STAY on this page if it doesn't
    *  complete — the customer can retry, pick cash, or change something.
@@ -574,7 +608,7 @@ export default function NewBookingPage() {
     setPaying(false);
     setHeld(null);
     queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-    navigate(h.token ? `/thank-you?token=${h.token}` : "/app/bookings");
+    navigate(h.token ? `/thank-you?token=${h.token}` : "/app/bookings", { state: bookingConfirmationState(h.number) });
     return true;
   };
 
@@ -609,7 +643,7 @@ export default function NewBookingPage() {
       const h = held;
       setHeld(null);
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-      navigate(h?.token ? `/thank-you?token=${h.token}` : "/app/bookings");
+      navigate(h?.token ? `/thank-you?token=${h.token}` : "/app/bookings", { state: bookingConfirmationState(h?.number) });
     },
     onError: (err) => pushToast({ tone: "error", title: "Couldn't switch to cash", message: getErrorMessage(err) }),
   });
@@ -664,7 +698,9 @@ export default function NewBookingPage() {
         await attemptPayment(h);
         return;
       }
-      navigate(visit.confirmation_token ? `/thank-you?token=${visit.confirmation_token}` : "/app/bookings");
+      navigate(visit.confirmation_token ? `/thank-you?token=${visit.confirmation_token}` : "/app/bookings", {
+        state: bookingConfirmationState(visit.bookings.map((b) => b.booking_number).join(" + ")),
+      });
     },
     onError: (err) => pushToast({ tone: "error", title: "Couldn't book this visit", message: getErrorMessage(err) }),
   });
@@ -720,7 +756,7 @@ export default function NewBookingPage() {
       // A fixed, opaque, single-purpose token (not the raw booking id) so
       // the confirmation page can't be reached by guessing or bookmarking
       // a URL — see PurchaseConfirmationModel / ThankYouPage.
-      navigate(`/thank-you?token=${booking.confirmation_token}`);
+      navigate(`/thank-you?token=${booking.confirmation_token}`, { state: bookingConfirmationState(booking.booking_number) });
     },
     onError: (err) => {
       pushToast({ tone: "error", title: "Couldn't confirm this booking", message: getErrorMessage(err) });
@@ -955,7 +991,31 @@ export default function NewBookingPage() {
   // is the address (typed line only in the no-maps fallback).
   const addressStepValid =
     (selectedAddressId ? true : mapsDown ? !!addressLine : !!location) && !!city && !!state && !!pincode && !!date && !!slot;
+  // The currently-open editor is always the LAST car on the visit (the
+  // one the main "Continue"/"Confirm" flow itself submits) — "Add another
+  // vehicle" settles it into the list above and opens a fresh one for the
+  // next car, so this must stay filled in regardless of how many are
+  // already settled. Clicked "Add" one too many times by mistake? Edit
+  // pulls that car straight back into this editor instead.
   const stepValid = { vehicle: !!carNumber && hasSelection, address: addressStepValid, review: true }[stepKey] ?? true;
+  // "Continue" simply being disabled never told anyone WHY — this is the
+  // one thing actually missing, in plain language, so a tap on a disabled
+  // button isn't a dead end.
+  const continueBlockedReason = (() => {
+    if (stepValid) return null;
+    if (stepKey === "vehicle") {
+      if (!hasSelection) return "Choose at least one service to continue.";
+      if (!carNumber) return "Enter your vehicle's registration number to continue.";
+    }
+    if (stepKey === "address") {
+      if (!selectedAddressId && mapsDown && !addressLine) return "Enter your service address to continue.";
+      if (!selectedAddressId && !mapsDown && !location) return "Drop a pin on your service address to continue.";
+      if (!city || !state || !pincode) return "We need a valid, serviceable address to continue.";
+      if (!date) return "Choose a date to continue.";
+      if (!slot) return "Choose a time slot to continue.";
+    }
+    return null;
+  })();
 
   // What's chosen so far, as one quiet line above the action — replaces
   // the old summary sidebar (the reference layout has no third column).
@@ -1004,8 +1064,8 @@ export default function NewBookingPage() {
                           {!bookingIsBike && kit.addBike && (
                             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
                               <div>
-                                <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
-                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType).price} per bike, washed at the same doorstep</p>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ Add Bikes To This Visit</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType).price} Per Bike, Washed At The Same Doorstep</p>
                               </div>
                               <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
                             </div>
@@ -1016,7 +1076,7 @@ export default function NewBookingPage() {
                               <div>
                                 <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
                                 <p className="text-xs text-[var(--color-text-secondary)]">
-                                  ₹{priceFor(kit.bikePolish, vehicleType).price} per bike · up to {bikesInBooking} bike{bikesInBooking > 1 ? "s" : ""}
+                                  ₹{priceFor(kit.bikePolish, vehicleType).price} Per Bike · Up To {bikesInBooking} Bike{bikesInBooking > 1 ? "s" : ""}
                                 </p>
                               </div>
                               <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
@@ -1043,6 +1103,7 @@ export default function NewBookingPage() {
           )}
         </div>
       )}
+      {continueBlockedReason && <p className="text-right text-xs text-[var(--color-error)]">{continueBlockedReason}</p>}
       <div className="flex items-center justify-between gap-3">
         <Button variant="outline" onClick={() => (step > 0 ? setStep((s) => s - 1) : navigate(-1))}>
           Back
@@ -1095,8 +1156,8 @@ export default function NewBookingPage() {
     <div className="space-y-5">
 
       <WizardShell
-        eyebrow={activeSubscription ? "Book with your plan" : "Book a service"}
-        title="Book your wash"
+        eyebrow={activeSubscription ? "Book With Your Plan" : "Book A Service"}
+        title="Book Your Wash"
         steps={STEPS}
         current={step}
         onStepClick={(i) => setStep(i)}
@@ -1209,6 +1270,14 @@ export default function NewBookingPage() {
                         <span className="font-mono-num shrink-0 text-gray-600">₹{car.subtotal}</span>
                         <button
                           type="button"
+                          onClick={() => editCar(car.vehicleId)}
+                          aria-label={`Edit ${car.label} on this visit`}
+                          className="shrink-0 text-xs font-bold text-gray-500 underline underline-offset-2 hover:text-black"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => removeCar(car.vehicleId)}
                           aria-label={`Remove ${car.label} from this visit`}
                           className="shrink-0 text-xs font-bold text-gray-400 underline underline-offset-2 hover:text-black"
@@ -1259,8 +1328,8 @@ export default function NewBookingPage() {
                 {(showNewVehicleForm || !vehicles?.length) && (
                   <div className="mb-4 space-y-3 rounded-lg border border-dashed border-gray-200 p-3">
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <Input label="Car Number" placeholder="MP09XX1234" value={carNumber} onChange={(e) => setCarNumber(e.target.value)} required />
-                      <Input label="Car Model (Optional)" placeholder="e.g. Hyundai i20" value={carModel} onChange={(e) => setCarModel(e.target.value)} />
+                      <Input label={vehicleNumberLabel} placeholder="MP09XX1234" value={carNumber} onChange={(e) => setCarNumber(e.target.value)} required />
+                      <Input label={vehicleModelLabel} placeholder={vehicleModelPlaceholder} value={carModel} onChange={(e) => setCarModel(sanitizeVehicleName(e.target.value))} />
                     </div>
                     <div>
                       <p className="mb-1.5 text-xs font-medium text-[var(--color-text-primary)]">Vehicle type</p>
@@ -1346,11 +1415,11 @@ export default function NewBookingPage() {
                     {selectedBase && bookingIsBike && (
                       <div className="mt-3 flex items-center justify-between rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3">
                         <div>
-                          <p className="text-xs font-medium text-[var(--color-text-primary)]">How many bikes?</p>
+                          <p className="text-xs font-medium text-[var(--color-text-primary)]">How Many Bikes?</p>
                           <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                             {kit.addBike
-                              ? `First bike ₹${priceFor(selectedBase, vehicleType).price}, ₹${priceFor(kit.addBike, vehicleType).price} each additional`
-                              : `₹${priceFor(selectedBase, vehicleType).price} per bike`}
+                              ? `First Bike ₹${priceFor(selectedBase, vehicleType).price}, ₹${priceFor(kit.addBike, vehicleType).price} Each Additional`
+                              : `₹${priceFor(selectedBase, vehicleType).price} Per Bike`}
                           </p>
                         </div>
                         <QtyStepper
@@ -1424,7 +1493,7 @@ export default function NewBookingPage() {
                       {(a.label ? `${a.label} — ` : "") + a.line1}
                     </option>
                   ))}
-                  <option value="__new">+ New address</option>
+                  <option value="__new">+ New Address</option>
                 </Select>
               )}
 
@@ -1535,7 +1604,13 @@ export default function NewBookingPage() {
                 <p className="mb-2 text-xs text-[var(--color-text-secondary)]">Someone else who'll be at the address, e.g. a driver or family member.</p>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Input placeholder="Their name" value={altContactName} onChange={(e) => setAltContactName(e.target.value)} />
-                  <Input placeholder="Their phone number" value={altContactPhone} onChange={(e) => setAltContactPhone(e.target.value)} />
+                  <Input
+                    placeholder="Their phone number"
+                    value={altContactPhone}
+                    onChange={(e) => setAltContactPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                    inputMode="numeric"
+                    maxLength={10}
+                  />
                 </div>
               </div>
             </div>

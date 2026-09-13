@@ -119,7 +119,7 @@ export default function MyBookingsPage() {
         <EmptyState
           title="No bookings found"
           description="Try a different filter or book your first service."
-          action={<Button onClick={() => navigate("/app/book")}>Book now</Button>}
+          action={<Button onClick={() => navigate("/app/book")}>Book Now</Button>}
         />
       ) : (
         <div className="space-y-3">

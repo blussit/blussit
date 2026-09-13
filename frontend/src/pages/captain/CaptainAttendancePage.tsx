@@ -19,6 +19,7 @@ import {
   StatusBadge,
 } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { translateCaptainError } from "../../lib/captainErrorTranslations";
 import { formatDateTime } from "../../lib/date";
 import type { AttendanceRecord, LeaveRequest } from "../../api/staffOps";
 
@@ -55,7 +56,7 @@ function withLocation(run: (loc: GeoPayload) => void) {
 }
 
 export default function CaptainAttendancePage() {
-  const { t } = useCaptainTranslation();
+  const { t, language } = useCaptainTranslation();
   const queryClient = useQueryClient();
   const { data: attendance } = useQuery({
     queryKey: ["attendance"],
@@ -88,7 +89,7 @@ export default function CaptainAttendancePage() {
       setError("");
       invalidate();
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setError(translateCaptainError(getErrorMessage(err), language)),
     onSettled: () => setLocating(null),
   });
   const checkOutMutation = useMutation({
@@ -97,7 +98,7 @@ export default function CaptainAttendancePage() {
       setError("");
       invalidate();
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setError(translateCaptainError(getErrorMessage(err), language)),
     onSettled: () => setLocating(null),
   });
 
@@ -109,7 +110,7 @@ export default function CaptainAttendancePage() {
       setLeaveOpen(false);
       setReason("");
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setError(translateCaptainError(getErrorMessage(err), language)),
   });
 
   return (

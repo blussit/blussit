@@ -1,10 +1,12 @@
 import { Outlet } from "react-router-dom";
 import { CalendarPlus, Car, Gift, Home, LayoutDashboard, LifeBuoy, ListChecks, MapPin, Plus, User } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
+import { useQuery } from "@tanstack/react-query";
+import { subscriptionApi } from "../../api/engagement";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/app", icon: LayoutDashboard, end: true },
-  { label: "Book a service", to: "/app/book", icon: CalendarPlus },
+  { label: "Book A Service", to: "/app/book", icon: CalendarPlus },
   { label: "My bookings", to: "/app/bookings", icon: ListChecks },
   { label: "Subscriptions", to: "/app/subscriptions", icon: Gift },
   { label: "Vehicles", to: "/app/vehicles", icon: Car },
@@ -25,15 +27,21 @@ const bottomNav: NavItem[] = [
   { label: "Profile", to: "/app/profile", icon: User },
 ];
 
-// Tapping the gold + asks HOW to book — with a plan or pay-per-wash.
+// Tapping the gold + only asks HOW to book when a usable pass exists.
 const centerMenu = [
-  { label: "Book with my plan", description: "Use your subscription washes — fastest way", icon: Gift, to: "/app/book?mode=plan" },
-  { label: "Normal booking", description: "Pick a service and pay per wash", icon: CalendarPlus, to: "/app/book" },
+  { label: "Book With My Plan", description: "Use Your Subscription Washes. Fastest Way.", icon: Gift, to: "/app/book?mode=plan" },
+  { label: "Normal Booking", description: "Pick A Service And Pay Per Wash", icon: CalendarPlus, to: "/app/book" },
 ];
 
 export default function CustomerLayout() {
+  const { data: subscriptions } = useQuery({
+    queryKey: ["my-subscriptions"],
+    queryFn: subscriptionApi.mySubscriptions,
+  });
+  const hasUsablePlan = (subscriptions || []).some((s) => s.status === "active" && (s.remaining_service_count ?? 0) > 0);
+
   return (
-    <DashboardShell navItems={navItems} portalLabel="Customer" brand bottomNav={bottomNav} centerMenu={centerMenu}>
+    <DashboardShell navItems={navItems} portalLabel="Customer" brand bottomNav={bottomNav} centerMenu={hasUsablePlan ? centerMenu : undefined}>
       <Outlet />
     </DashboardShell>
   );

@@ -508,6 +508,7 @@ class BookingService:
         source: str = "app",
         _allow_pinless: bool = False,
         _group: dict | None = None,
+        notify_background: bool = True,
     ) -> dict:
         """`_group` is set ONLY by create_booking_group, and marks this
         booking as one car of a multi-car visit:
@@ -821,7 +822,7 @@ class BookingService:
         # A car on a visit is announced by create_booking_group, once, for
         # the whole visit — never one message per car.
         if not awaiting_payment and _group is None:
-            await self._announce_confirmed_booking(created, service_center.get("manager_id"), date_str)
+            await self._announce_confirmed_booking(created, service_center.get("manager_id"), date_str, background=notify_background)
         await self._broadcast_booking_changed(created)
         await self._broadcast_slots_changed(str(service_center["_id"]), date_str)
         return serialize_doc(created)
@@ -839,11 +840,26 @@ class BookingService:
         except Exception:  # noqa: BLE001
             logger.exception("Could not roll back half-created booking %s", created.get("booking_number"))
 
-    async def _announce_confirmed_booking(self, booking: dict, manager_id: str | None, date_str: str) -> None:
+    async def _announce_confirmed_booking(self, booking: dict, manager_id: str | None, date_str: str, background: bool = True) -> None:
         """The two messages a REAL booking sends: the customer's confirmation
         and the manager's "needs a captain". Shared by immediate confirmation
         (cash/plan) and by confirm_awaiting_payment_booking, so a booking
-        confirmed by a payment reads exactly like any other."""
+        confirmed by a payment reads exactly like any other.
+
+        `background` defaults True: create_booking is on the customer's
+        critical path to their Thank You page, and a slow (or momentarily
+        down) WhatsApp API must never make them sit on a spinner waiting
+        for a message that has nothing to do with whether their booking
+        itself succeeded. The in-app notification row (and the manager's
+        queue entry) is still written before this returns — only the
+        outbound WhatsApp call happens after.
+
+        The ONE caller that passes background=False is the WhatsApp bot
+        (see create_booking's notify_background) — it immediately sends
+        its OWN follow-up messages in the same conversation right after
+        this returns ("Booking confirmed!", "How would you like to pay?"),
+        so this announcement's WhatsApp send has to actually finish first
+        or the customer can see them arrive out of order."""
         booking_id = str(booking["_id"])
         cars = await self._visit_cars(booking)
         if len(cars) > 1:
@@ -867,6 +883,7 @@ class BookingService:
             booking_id,
             wa_event="booking_confirmed",
             wa_params=[wa_name, wa_services, date_str, booking.get("scheduled_slot", ""), reference],
+            background=background,
         )
         if manager_id:
             await self.notifications.notify(
@@ -875,9 +892,10 @@ class BookingService:
                 f"{wa_services} on {date_str} at {booking.get('scheduled_slot', '')} needs a captain. ({reference})",
                 NotificationType.BOOKING,
                 booking_id,
+                background=background,
             )
 
-    async def confirm_awaiting_payment_booking(self, booking_id: str, note: str, extra_update: dict | None = None) -> dict | None:
+    async def confirm_awaiting_payment_booking(self, booking_id: str, note: str, extra_update: dict | None = None, notify_background: bool = True) -> dict | None:
         """Promote an unpaid booking into the real queue. Exactly two callers:
         a signature-verified online payment (PaymentService._settle_booking_payment)
         and the customer choosing cash instead (switch_to_cash).
@@ -910,12 +928,12 @@ class BookingService:
 
         date_str = to_ist(updated["scheduled_date"]).strftime("%Y-%m-%d")
         await self._record_history(booking_id, BookingStatus.PENDING, updated["customer_id"], note)
-        await self._announce_confirmed_booking(updated, manager_id, date_str)
+        await self._announce_confirmed_booking(updated, manager_id, date_str, background=notify_background)
         await self._broadcast_booking_changed(updated)
         await self._broadcast_slots_changed(updated["service_center_id"], date_str)
         return serialize_doc(updated)
 
-    async def switch_to_cash(self, booking_id: str, customer_id: str) -> dict:
+    async def switch_to_cash(self, booking_id: str, customer_id: str, notify_background: bool = True) -> dict:
         """"I couldn't finish the online payment — just let me pay the
         captain." Turns an unpaid online booking into a normal cash booking
         and confirms it, so an abandoned payment costs the customer their
@@ -931,6 +949,7 @@ class BookingService:
             booking_id,
             "Switched to cash on service — confirmed without online payment",
             {"payment_method": PaymentMethod.CASH.value},
+            notify_background=notify_background,
         )
         if result is None:
             # Lost the race to a payment that verified a moment ago — which
@@ -1942,6 +1961,14 @@ class BookingService:
             if not any(b.get("captain_id") == actor_id for b in bookings):
                 raise NotFoundException("Booking not found")
         enriched = await self._enrich_bookings(bookings)
+        # Same as get_booking_with_history — without this, the "Status
+        # timeline" card on a multi-vehicle visit had nothing to show for
+        # ANY car (each one's status_history was simply never attached),
+        # even though the single-booking read right next to it always has
+        # it.
+        for doc in enriched:
+            history = await self.history_repo.list_for_booking(doc["id"])
+            doc["status_history"] = serialize_list(history)
         # Same redaction every other booking read applies: a customer never
         # sees the captain's pay or the internal issue flags, a captain never
         # sees the platform's margin.
@@ -2720,22 +2747,58 @@ class BookingService:
             # (status/photo), which is safe to write redundantly.
             claimed = await self.repo.update_if(booking_id, {"wallet_settled": {"$ne": True}}, {"wallet_settled": True})
             if claimed:
-                if booking["payment_method"] == PaymentMethod.CASH.value:
-                    await self.wallet_service.debit(
-                        captain_id,
-                        booking["platform_earning"],
-                        booking_id,
-                        f"Platform share for cash booking {booking['booking_number']}",
-                        allow_negative=True,
-                    )
-                else:
-                    await self.wallet_service.credit(
-                        captain_id,
-                        booking["captain_earning"],
-                        booking_id,
-                        f"Payout for booking {booking['booking_number']}",
-                    )
-                update_data["payment_status"] = PaymentStatus.PAID.value
+                try:
+                    if booking["payment_method"] == PaymentMethod.CASH.value:
+                        await self.wallet_service.debit(
+                            captain_id,
+                            booking["platform_earning"],
+                            booking_id,
+                            f"Platform share for cash booking {booking['booking_number']}",
+                            allow_negative=True,
+                        )
+                        # Cash really was just handed to the captain — this is
+                        # the one moment that's genuinely true.
+                        update_data["payment_status"] = PaymentStatus.PAID.value
+                    else:
+                        await self.wallet_service.credit(
+                            captain_id,
+                            booking["captain_earning"],
+                            booking_id,
+                            f"Payout for booking {booking['booking_number']}",
+                        )
+                        # Crediting the captain here is a deliberate, unrelated
+                        # policy — they did the job and shouldn't wait on the
+                        # customer to be paid for it. But a properly-gated
+                        # app-sourced online/subscription booking is ALREADY
+                        # payment_status=paid by now (verified at booking
+                        # confirmation, see PaymentService.verify_payment); a
+                        # manager- or WhatsApp-created "online" booking skips
+                        # that gate entirely (see create_booking's source ==
+                        # "app" check) and can reach completion never actually
+                        # paid. Only echo payment_status=paid here when it's
+                        # already true — never invent one — so an unpaid
+                        # booking keeps showing "Collect Payment" to the
+                        # captain (see CaptainJobsPage's `owed` check) instead
+                        # of silently looking settled with no money collected.
+                        if booking.get("payment_status") == PaymentStatus.PAID.value:
+                            update_data["payment_status"] = PaymentStatus.PAID.value
+                except Exception:
+                    # The claim above already committed wallet_settled=True —
+                    # if the actual debit/credit then throws (a DB hiccup, a
+                    # dropped connection), that flag would otherwise be stuck
+                    # true FOREVER with no money ever having moved: the guard
+                    # at the top of this block (`not booking.get("wallet_settled")`)
+                    # would skip every future retry, permanently losing the
+                    # platform's share (cash) or stranding the captain's
+                    # payout (online/subscription) with no alert and no way
+                    # to tell it apart from a real settlement later. Undo the
+                    # claim so the NEXT after-photo retry (or a manual nudge)
+                    # can actually settle it, then let the real error surface
+                    # instead of silently completing the booking as if the
+                    # money had moved.
+                    await self.repo.update_by_id(booking_id, {"wallet_settled": False})
+                    logger.exception("Wallet settlement failed for booking %s — reverted wallet_settled for retry", booking.get("booking_number"))
+                    raise
 
         updated = await self.repo.update_by_id(booking_id, update_data)
         await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="after_photo", booking_id=booking_id)
@@ -2860,8 +2923,8 @@ class BookingService:
             wa_name, _ = await self._wa_ctx(booking)
             await self.notifications.notify(
                 booking["customer_id"],
-                f"{cancelled_label} cancelled",
-                f"Your {cancelled_label} booking ({booking['booking_number']}) has been cancelled.",
+                "Booking cancelled",
+                f"{cancelled_label} — {booking['booking_number']} has been cancelled.",
                 NotificationType.BOOKING,
                 booking_id,
                 wa_event="booking_cancelled",
@@ -2870,7 +2933,7 @@ class BookingService:
             if booking.get("captain_id"):
                 await self.notifications.notify(
                     booking["captain_id"],
-                    f"{cancelled_label} cancelled",
+                    "Booking cancelled",
                     f"{booking['booking_number']} was cancelled.",
                     NotificationType.BOOKING,
                     booking_id,

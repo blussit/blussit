@@ -43,8 +43,8 @@ const COLUMNS = [
       // Three links all pointing at /plans, two of them naming products we
       // don't sell (yearly plans are retired; "corporate" was never a
       // thing). Two honest links instead.
-      { label: "Monthly passes", href: "/plans" },
-      { label: "Custom plan", href: "/plans" },
+      { label: "Monthly Passes", href: "/plans" },
+      { label: "Custom Plan", href: "/plans" },
     ],
   },
   {
@@ -59,7 +59,7 @@ const COLUMNS = [
     links: [
       { label: "Service Policy", href: "/service-policy" },
       { label: "Cancellation Policy", href: "/cancellation-policy" },
-      { label: "Terms & Conditions", href: "/terms" },
+      { label: "Terms And Conditions", href: "/terms" },
       { label: "Privacy Policy", href: "/privacy-policy" },
     ],
   },
@@ -92,12 +92,12 @@ export function PublicFooter() {
             </a>
 
             <p className="mt-4 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#777777]">
-              Premium Doorstep Vehicle Care
+              Premium Car Wash At Doorstep
             </p>
 
-            <p className="mt-2.5 max-w-[300px] text-[12px] leading-[1.7] text-[#707070]">
-              Your car. Our care. Anywhere. Experience the ultimate
-              convenience in vehicle maintenance.
+            <p className="mt-2.5 max-w-[340px] text-[12px] leading-[1.7] text-[#707070]">
+              <span className="block whitespace-nowrap">Your car. Our care. Anywhere.</span>
+              <span className="block">Premium car wash at your doorstep.</span>
             </p>
 
             {/* Social icons — only channels that actually exist. */}
@@ -135,8 +135,6 @@ export function PublicFooter() {
                   mb-3 sm:mb-5
                   text-[11px]
                   font-bold
-                  uppercase
-                  tracking-[0.13em]
                   text-[#171717]
                 "
               >
@@ -211,7 +209,7 @@ export function PublicFooter() {
 
               <span className="flex items-center gap-2 text-[11px] font-medium text-[#333333]">
                 <MapPin className="h-[14px] w-[14px] text-[#666666]" />
-                Indore, MP
+                88 Shivampuri Colony, Bhawarkuwa, Indore 452001
               </span>
 
             </div>
@@ -220,18 +218,18 @@ export function PublicFooter() {
                 it never competes with the contact details above it.
                 rel="noopener noreferrer" because it opens in a new tab. */}
             <p className="text-[10px] font-medium text-[#999999]">
-              © {new Date().getFullYear()} BLUSSIT. All rights reserved.
-            </p>
-            <p className="text-[10px] font-medium text-[#999999]">
-              Developed by{" "}
-              <a
-                href="https://kalakartechcrew.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline underline-offset-2 transition-colors hover:text-[#333333]"
-              >
-                Kalakartechcrew
-              </a>
+              © {new Date().getFullYear()} BLUSSIT. All rights reserved.{" "}
+              <span className="whitespace-nowrap">
+                Developed by{" "}
+                <a
+                  href="https://kalakartechcrew.online"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-2 transition-colors hover:text-[#333333]"
+                >
+                  Kalakartechcrew
+                </a>
+              </span>
             </p>
 
           </div>

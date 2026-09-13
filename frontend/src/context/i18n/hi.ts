@@ -2,20 +2,20 @@ export const hi = {
   // Navigation
   "captain.nav.captain": "कप्तान",
   "captain.nav.jobs": "काम",
-  "captain.nav.attendance": "उपस्थिति",
+  "captain.nav.attendance": "अटेंडेंस",
   "captain.nav.profile": "प्रोफाइल",
   "captain.nav.earnings": "कमाई",
   "captain.nav.logout": "लॉग आउट",
 
   // Header / Common
   "captain.common.loading": "लोड हो रहा है...",
-  "captain.common.error": "एक त्रुटि हुई",
-  "captain.common.save": "सहेजें",
+  "captain.common.error": "कुछ गड़बड़ हो गई",
+  "captain.common.save": "Save करें",
   "captain.common.cancel": "रद्द करें",
   "captain.common.submit": "भेजें",
   "captain.common.confirm": "पक्का करें",
   "captain.common.close": "बंद करें",
-  "captain.common.status": "स्थिति",
+  "captain.common.status": "स्टेटस",
   "captain.common.back": "वापस",
 
   // Jobs Page
@@ -38,7 +38,7 @@ export const hi = {
   // Actions
   "captain.actions.startJob": "काम शुरू करें",
   "captain.actions.headOut": "निकलें",
-  "captain.actions.reachVerify": "पहुंचें और सत्यापित करें",
+  "captain.actions.reachVerify": "पहुंचकर वेरिफाई करें",
   "captain.actions.beforePhoto": "पहले की फोटो लें",
   "captain.actions.afterPhoto": "बाद की फोटो लें",
   "captain.actions.completeJob": "काम पूरा करें",
@@ -47,9 +47,9 @@ export const hi = {
 
   // Job Cards
   "captain.job.customer": "ग्राहक",
-  "captain.job.vehicle": "वाहन",
+  "captain.job.vehicle": "गाड़ी",
   "captain.job.scheduled": "निर्धारित",
-  "captain.job.location": "स्थान",
+  "captain.job.location": "लोकेशन",
   "captain.job.nextAction": "अगला कदम",
 
   // Modals / Collect Payment
@@ -68,19 +68,19 @@ export const hi = {
   "captain.payment.preparing_qr": "QR तैयार किया जा रहा है...",
 
   // Attendance
-  "captain.attendance.title": "उपस्थिति",
-  "captain.attendance.description": "अपनी दैनिक उपस्थिति और लॉग देखें।",
+  "captain.attendance.title": "अटेंडेंस",
+  "captain.attendance.description": "अपनी रोज़ की अटेंडेंस और लॉग यहाँ देखो।",
   "captain.attendance.your_day": "आपका दिन",
-  "captain.attendance.day_desc": "जब आप शुरू करें तो चेक इन करें, जब आप काम पूरा करें तो चेक आउट करें — आपका स्थान दोनों के साथ सहेजा जाता है।",
+  "captain.attendance.day_desc": "काम शुरू करते समय चेक इन करो, ख़त्म होने पर चेक आउट — दोनों बार आपकी लोकेशन भी सेव हो जाती है।",
   "captain.attendance.not_checked_in": "आपने आज चेक इन नहीं किया है।",
   "captain.attendance.check_in": "चेक इन करें",
-  "captain.attendance.loc_recorded": "आपका वर्तमान स्थान दर्ज किया गया है",
+  "captain.attendance.loc_recorded": "आपकी अभी की लोकेशन सेव हो गई है",
   "captain.attendance.checked_in_at": "{time} पर चेक इन किया",
   "captain.attendance.checked_out_at": "{time} पर चेक आउट किया · {hours} काम किया",
   "captain.attendance.on_duty": "ड्यूटी पर",
   "captain.attendance.check_out": "चेक आउट करें",
   "captain.attendance.history": "इतिहास",
-  "captain.attendance.no_history": "अभी तक कोई उपस्थिति दर्ज नहीं",
+  "captain.attendance.no_history": "अभी तक कोई अटेंडेंस नहीं है",
   "captain.attendance.date": "तारीख",
   "captain.attendance.hours": "घंटे",
   "captain.attendance.leave_requests": "छुट्टी की माँग",
@@ -93,24 +93,24 @@ export const hi = {
   
   // Profile
   "captain.profile.title": "प्रोफाइल",
-  "captain.profile.description": "अपनी कप्तान प्रोफाइल प्रबंधित करें।",
+  "captain.profile.description": "अपनी कप्तान प्रोफाइल यहाँ देखो और बदलो।",
   
   // Modals specific
-  "captain.modal.headOut.title": "स्थान की ओर निकलें?",
+  "captain.modal.headOut.title": "कस्टमर के यहाँ निकलें?",
   "captain.modal.headOut.desc": "पुष्टि करें कि आप रास्ते में हैं।",
-  "captain.modal.verify.title": "वाहन सत्यापित करें",
-  "captain.modal.verify.desc": "पंजीकरण के अंतिम 4 अंक दर्ज करें।",
+  "captain.modal.verify.title": "गाड़ी वेरिफाई करें",
+  "captain.modal.verify.desc": "गाड़ी नंबर के आख़िरी 4 नंबर डालो।",
   "captain.modal.verify.placeholder": "उदा. 1234",
   "captain.modal.photo.before": "पहले की फोटो लें",
   "captain.modal.photo.after": "बाद की फोटो लें",
-  "captain.modal.reportRisk.title": "जोखिम की रिपोर्ट करें",
+  "captain.modal.reportRisk.title": "प्रॉब्लम की रिपोर्ट करें",
   "captain.modal.cancel.title": "काम रद्द करें",
 
 
   // Job card / jobs page (captain card rework)
   "captain.job.now": "अभी",
   "captain.job.navigate": "रास्ता देखें",
-  "captain.job.navigateLockedTip": "पहले “निकल गया” दबाएँ — उसी से समय दर्ज होता है।",
+  "captain.job.navigateLockedTip": "पहले “निकल गया” दबाओ — उसी से समय सेव होता है।",
   "captain.job.showMap": "नक्शा दिखाएँ",
   "captain.job.hideMap": "नक्शा छिपाएँ",
   "captain.job.minRide": "मिनट का रास्ता",
@@ -161,7 +161,7 @@ export const hi = {
   "captain.profile.sameAsLocal": "अभी के पते जैसा ही",
   "captain.profile.submitForVerification": "जाँच के लिए भेजें",
   "captain.profile.resubmit": "दोबारा भेजें",
-  "captain.profile.security": "सुरक्षा",
+  "captain.profile.security": "सिक्योरिटी",
   "captain.profile.changePassword": "पासवर्ड बदलें",
   "captain.profile.currentPassword": "अभी का पासवर्ड",
   "captain.profile.newPassword": "नया पासवर्ड",
@@ -183,14 +183,14 @@ export const hi = {
   "captain.earnings.bankDetails": "बैंक की जानकारी",
   "captain.earnings.addBankDetails": "बैंक की जानकारी जोड़ें",
   "captain.earnings.updateBankDetails": "बैंक की जानकारी बदलें",
-  "captain.earnings.accountHolder": "खाताधारक का नाम",
+  "captain.earnings.accountHolder": "अकाउंट होल्डर का नाम",
   "captain.earnings.accountNumber": "खाता नंबर",
   "captain.earnings.ifsc": "IFSC कोड",
   "captain.earnings.amount": "रकम (₹)",
 
   // Captain action modals
   "captain.modal.headingTitle": "ग्राहक के पास निकलें",
-  "captain.modal.headingNote": "समय से 30 मिनट पहले निकल सकते हैं। आपकी जगह दर्ज होगी।",
+  "captain.modal.headingNote": "समय से 30 मिनट पहले निकल सकते हो। आपकी लोकेशन सेव हो जाएगी।",
   "captain.modal.verifyTitle": "पहुँच गया — गाड़ी जाँचें",
   "captain.modal.plateLabel": "गाड़ी का नंबर",
   "captain.modal.beforeTitle": "काम से पहले की फ़ोटो",
@@ -215,6 +215,10 @@ export const hi = {
   "captain.visit.now": "अभी",
   "captain.visit.next": "अगली",
   "captain.visit.done": "हो गई",
+  "captain.visit.pick": "पहले यह करें",
   "captain.visit.total": "पूरे चक्कर का कुल",
   "captain.payment.vehicles": "{n} गाड़ियाँ",
+  "captain.error.geoUnsupported": "इस डिवाइस पर लोकेशन काम नहीं कर रही।",
+  "captain.error.geoFailed": "आपकी लोकेशन नहीं मिली। लोकेशन ऑन करके फिर से कोशिश करो।",
+  "captain.modal.explainWhy": "वजह बताओ।",
 }

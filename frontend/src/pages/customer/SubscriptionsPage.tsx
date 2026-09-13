@@ -14,7 +14,7 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 import { format } from "../../lib/date";
-import { passFromPrice } from "../../lib/passPricing";
+import { passHeadlinePrice } from "../../lib/passPricing";
 import type { SubscriptionPlan, UserSubscription } from "../../types";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
 
@@ -208,12 +208,12 @@ export default function SubscriptionsPage() {
     <div className="space-y-8">
       <div>
         <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Passes</p>
-        <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">Monthly passes</h1>
+        <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">Monthly Passes</h1>
         <p className="mt-1 text-sm text-gray-600">One car, one service, one monthly price — book a wash whenever you need it.</p>
       </div>
 
       <div>
-        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">My passes</h2>
+        <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">My Passes</h2>
         {subsLoading ? (
           <PageLoader />
         ) : !mySubs?.length ? (
@@ -230,7 +230,7 @@ export default function SubscriptionsPage() {
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {(plans || []).map((plan) => {
-              const from = passFromPrice(plan, services, vehicleTypes);
+              const from = passHeadlinePrice(plan, services, vehicleTypes);
               const menuNames = (plan.included_service_ids || []).map(serviceName).filter(Boolean);
               return (
                 <Card key={plan.id} className="flex flex-col border-[#E5E7EB] p-5">
@@ -249,7 +249,7 @@ export default function SubscriptionsPage() {
                     <p className="mt-2 text-xs text-gray-600">Choose from: {menuNames.join(", ")}</p>
                   )}
                   <Button className="mt-4 w-full" onClick={() => { setBuyingPlan(plan); setPurchaseError(""); }}>
-                    Choose this pass
+                    Choose This Pass
                   </Button>
                 </Card>
               );
@@ -259,13 +259,13 @@ export default function SubscriptionsPage() {
                 different rhythm — goes to a human instead of nowhere. */}
             <Card className="flex flex-col justify-between border-dashed border-gray-300 p-5">
               <div>
-                <h3 className="font-display font-bold text-[var(--color-text-primary)]">Something else?</h3>
+                <h3 className="font-display font-bold text-[var(--color-text-primary)]">Something Else?</h3>
                 <p className="mt-1 text-sm text-gray-600">
-                  More cars, more washes, or a fixed time every week — tell us what you need and we'll price it for you.
+                  More Cars, More Washes, Or A Fixed Time Every Week. Tell Us What You Need And We'll Price It For You.
                 </p>
               </div>
               <Button variant="outline" className="mt-4 w-full" onClick={() => setEnquiryOpen(true)}>
-                Request a custom plan
+                Request A Custom Plan
               </Button>
             </Card>
           </div>

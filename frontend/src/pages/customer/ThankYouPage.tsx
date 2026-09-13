@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, useReducedMotion, type Variants } from "framer-motion";
 import { CheckCircle2, Gift, Home, LayoutDashboard, LogIn, ReceiptText } from "lucide-react";
 import { purchaseConfirmationApi } from "../../api/purchaseConfirmation";
@@ -69,10 +69,21 @@ const contentVariants: Variants = {
  */
 export default function ThankYouPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, isLoading: authLoading } = useAuth();
   const [params] = useSearchParams();
   const token = params.get("token");
   const shouldReduceMotion = useReducedMotion();
+  const instant = location.state as
+    | {
+        type?: "booking" | "subscription";
+        booking_number?: string;
+        scheduled_date?: string;
+        scheduled_slot?: string;
+        service_label?: string;
+        plan_name?: string;
+      }
+    | null;
 
   const { data: confirmation, isLoading: confirmationLoading, isError } = useQuery({
     queryKey: ["purchase-confirmation", token],
@@ -89,18 +100,21 @@ export default function ThankYouPage() {
     }
   }, [invalid, confirmationLoading, navigate]);
 
-  if (!token || confirmationLoading) return <PageLoader />;
-  if (invalid || !confirmation) return null; // redirecting via the effect above
+  if (!token) return <PageLoader />;
+  if (confirmationLoading && !instant) return <PageLoader />;
+  if (invalid || (!confirmation && !instant)) return null; // redirecting via the effect above
 
-  const isSubscription = confirmation.type === "subscription";
-  const heading = isSubscription ? "Thank you for subscribing!" : "Thank you for your booking!";
+  const confirmed = confirmation || { type: instant?.type || "booking", payload: instant || {}, reference_id: "" };
+  const isSubscription = confirmed.type === "subscription";
+  const serviceLabel = confirmed.payload.service_label;
+  const heading = isSubscription ? "Thank You For Subscribing!" : "Thank You For Your Booking!";
   const message = isSubscription
-    ? confirmation.payload.plan_name
-      ? `Your "${confirmation.payload.plan_name}" subscription is active. You can start booking services with it right away.`
-      : "Your subscription is active. You can start booking services with it right away."
-    : confirmation.payload.booking_number
-      ? `Your booking ${confirmation.payload.booking_number} for ${format(confirmation.payload.scheduled_date!)} · ${confirmation.payload.scheduled_slot} is confirmed.`
-      : "Your booking is confirmed. We'll notify you as soon as a captain is assigned.";
+    ? confirmed.payload.plan_name
+      ? `Your ${confirmed.payload.plan_name} Subscription Is Active. You Can Start Booking Services With It Right Away.`
+      : "Your Subscription Is Active. You Can Start Booking Services With It Right Away."
+    : confirmed.payload.booking_number
+      ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot}.`
+      : "Your Booking Is Confirmed. We'll Notify You As Soon As A Captain Is Assigned.";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg-primary)] p-4">
@@ -143,6 +157,20 @@ export default function ThankYouPage() {
             >
               {heading}
             </motion.h1>
+            {/* Service name reads as the headline fact of the booking; the
+                booking number is a receipt detail, not a headline — shown
+                small underneath instead of buried mid-sentence. */}
+            {!isSubscription && serviceLabel && (
+              <motion.p
+                custom={0.26}
+                variants={contentVariants}
+                initial={shouldReduceMotion ? false : "hidden"}
+                animate="show"
+                className="mt-1.5 text-base font-semibold text-[var(--color-text-primary)]"
+              >
+                {serviceLabel}
+              </motion.p>
+            )}
             <motion.p
               custom={0.3}
               variants={contentVariants}
@@ -152,6 +180,17 @@ export default function ThankYouPage() {
             >
               {message}
             </motion.p>
+            {!isSubscription && confirmed.payload.booking_number && (
+              <motion.p
+                custom={0.34}
+                variants={contentVariants}
+                initial={shouldReduceMotion ? false : "hidden"}
+                animate="show"
+                className="mt-1 font-mono-num text-xs text-[var(--color-text-secondary)]"
+              >
+                Booking ID: {confirmed.payload.booking_number}
+              </motion.p>
+            )}
 
             <motion.div
               custom={0.4}
@@ -172,15 +211,15 @@ export default function ThankYouPage() {
               ) : user ? (
                 <>
                   <Button className="w-full" onClick={() => navigate(ROLE_HOME[user.role] || "/")}>
-                    <LayoutDashboard className="h-4 w-4" /> Return to dashboard
+                    <LayoutDashboard className="h-4 w-4" /> Return To Dashboard
                   </Button>
                   {isSubscription ? (
                     <Button variant="outline" className="w-full" onClick={() => navigate("/app/subscriptions")}>
-                      <Gift className="h-4 w-4" /> View my subscriptions
+                      <Gift className="h-4 w-4" /> View My Subscriptions
                     </Button>
                   ) : (
-                    <Button variant="outline" className="w-full" onClick={() => navigate(`/app/bookings/${confirmation.reference_id}`)}>
-                      <ReceiptText className="h-4 w-4" /> View booking details
+                    <Button variant="outline" className="w-full" disabled={!confirmed.reference_id} onClick={() => navigate(`/app/bookings/${confirmed.reference_id}`)}>
+                      <ReceiptText className="h-4 w-4" /> View Booking Details
                     </Button>
                   )}
                 </>
@@ -189,10 +228,10 @@ export default function ThankYouPage() {
                   {/* Guest-checkout accounts get a random password — the way
                       in is the OTP reset flow, not a password they never had. */}
                   <Button className="w-full" onClick={() => navigate("/forgot-password")}>
-                    <LogIn className="h-4 w-4" /> Set your password (OTP)
+                    <LogIn className="h-4 w-4" /> Set Your Password (OTP)
                   </Button>
                   <Button variant="outline" className="w-full" onClick={() => navigate("/")}>
-                    <Home className="h-4 w-4" /> Return to website
+                    <Home className="h-4 w-4" /> Return To Website
                   </Button>
                 </>
               )}

@@ -1,4 +1,4 @@
-
+import { useEffect, useState } from "react";
 
 // Matches the public contact number displayed in the site footer. A Vite env
 // value can replace it for a different production WhatsApp business account.
@@ -11,12 +11,29 @@ export function openBlussitWhatsApp() {
 }
 
 export function WhatsAppFloatingButton() {
+  // This button is `position: fixed` in the same bottom-right corner the
+  // site footer's phone/email/social tiles scroll up into — on a phone,
+  // its hit area sat right on top of the footer's "tel:" tile, silently
+  // swallowing taps meant for the phone number. Fading it out for as long
+  // as the footer is on screen removes the overlap entirely, and it
+  // reappears the moment the user scrolls back up.
+  const [overFooter, setOverFooter] = useState(false);
+
+  useEffect(() => {
+    const footer = document.querySelector("footer");
+    if (!footer) return;
+    const observer = new IntersectionObserver(([entry]) => setOverFooter(entry.isIntersecting), { rootMargin: "0px 0px -80px 0px" });
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <button
       type="button"
       aria-label="Chat with Blussit on WhatsApp"
       onClick={() => openBlussitWhatsApp()}
-      className="group z-[99999] flex h-[54px] sm:h-[58px] items-center gap-2 outline-none flex-row"
+      aria-hidden={overFooter}
+      className={`group z-[99999] flex h-[54px] sm:h-[58px] items-center gap-2 outline-none flex-row transition-opacity duration-200 ${overFooter ? "pointer-events-none opacity-0" : "opacity-100"}`}
       style={{
         position: "fixed",
         right: "24px",

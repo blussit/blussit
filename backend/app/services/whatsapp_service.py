@@ -47,12 +47,28 @@ class WhatsAppProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str]) -> bool:
+    async def send_template(
+        self, phone: str, template_name: str, language_code: str, body_params: list[str], button_param: str | None = None, otp_button: bool = False
+    ) -> bool:
         """Sends a pre-approved WhatsApp template message — the only
         message type that can reach a recipient with NO open session
         (works for a genuinely first contact, e.g. a new customer's very
         first OTP). body_params fill the template's {{1}}, {{2}}, ...
-        placeholders in order, all as plain text components."""
+        placeholders in order, all as plain text components.
+
+        button_param: only for a template whose URL button itself has a
+        variable suffix (see create_template's has_url_param) — e.g.
+        "https://blussit.com/app/bookings/{{1}}" — filled in as that
+        button's own parameter. Passing this for a template with a STATIC
+        button (no variable) makes Meta reject the whole send, so callers
+        must only pass it when the template is known to expect one.
+
+        otp_button: only for an AUTHENTICATION-category template created
+        with a COPY_CODE button (see WhatsAppCrmService.create_otp_template)
+        — the button component needs a different shape than a URL button
+        (sub_type "copy_code", a "coupon_code" parameter instead of
+        "text"), filled with the same code as body_params[0]. Mutually
+        exclusive with button_param."""
         raise NotImplementedError
 
     @abstractmethod
@@ -116,8 +132,21 @@ class LogWhatsAppProvider(WhatsAppProvider):
         })
         return True
 
-    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str], extra: dict | None = None) -> bool:
+    async def send_template(
+        self,
+        phone: str,
+        template_name: str,
+        language_code: str,
+        body_params: list[str],
+        button_param: str | None = None,
+        otp_button: bool = False,
+        extra: dict | None = None,
+    ) -> bool:
         message = f"[template:{template_name}/{language_code}] " + ", ".join(body_params)
+        if button_param:
+            message += f" [button_param={button_param}]"
+        if otp_button:
+            message += " [otp_copy_code_button]"
         logger.info("WHATSAPP [log provider, template] -> %s: %s", phone, message)
         await self.db.whatsapp_outbox.insert_one({
             "phone": phone,
@@ -205,11 +234,33 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         }
         return await self._post(phone, message, body, extra=extra)
 
-    async def send_template(self, phone: str, template_name: str, language_code: str, body_params: list[str], extra: dict | None = None) -> bool:
+    async def send_template(
+        self,
+        phone: str,
+        template_name: str,
+        language_code: str,
+        body_params: list[str],
+        button_param: str | None = None,
+        otp_button: bool = False,
+        extra: dict | None = None,
+    ) -> bool:
         # Meta rejects template parameters containing newlines, tabs, or
         # 4+ consecutive spaces (error 132000) — flatten every param so a
         # multi-line notification text can never silently kill the send.
         params = [_flatten_param(p) for p in body_params]
+        components = [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}] if params else []
+        if button_param:
+            # Fills the {{1}} in a URL button whose template was created
+            # with one (see WhatsAppCrmService.create_template's
+            # has_url_param) — index "0" is the button's position, always
+            # the first (and only) button on every BLUSSIT template.
+            components.append({"type": "button", "sub_type": "url", "index": "0", "parameters": [{"type": "text", "text": _flatten_param(button_param)}]})
+        elif otp_button and params:
+            # The OTP template's "Copy Code" button — a fundamentally
+            # different component shape than a URL button (Meta's own
+            # design for AUTHENTICATION templates), filled with the same
+            # code as the body.
+            components.append({"type": "button", "sub_type": "copy_code", "index": "0", "parameters": [{"type": "coupon_code", "coupon_code": params[0]}]})
         body = {
             "messaging_product": "whatsapp",
             "to": _to_e164_digits(phone),
@@ -217,10 +268,11 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             "template": {
                 "name": template_name,
                 "language": {"code": language_code},
-                "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}] if params else [],
+                "components": components,
             },
         }
-        return await self._post(phone, f"[template:{template_name}] {', '.join(params)}", body, template_name=template_name, extra=extra)
+        log_text = f"[template:{template_name}] {', '.join(params)}" + (f" [button={button_param}]" if button_param else "")
+        return await self._post(phone, log_text, body, template_name=template_name, extra=extra)
 
     async def send_interactive_list(self, phone: str, body: str, button: str, rows: list[dict]) -> bool:
         rows = _normalize_rows(rows)
@@ -424,6 +476,7 @@ class WhatsAppService:
     successful booking)."""
 
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.provider = get_whatsapp_provider(db)
 
     async def send_otp(self, phone: str, code: str, purpose: str = "verification") -> bool:
@@ -434,8 +487,19 @@ class WhatsAppService:
         # session (e.g. re-verifying, or testing against your own number
         # that's messaged the business account), and is the safe default
         # until a real "authentication"-category template is approved.
+        #
+        # A BRAND-NEW customer has never messaged us, so THIS free-text
+        # fallback silently fails for exactly the people who need their
+        # first OTP most — until WHATSAPP_OTP_TEMPLATE_NAME points at an
+        # approved template (see create_otp_template), only re-verifies
+        # and testers who already have an open session actually receive
+        # this path's message; a first-time signup does not.
         if settings.WHATSAPP_OTP_TEMPLATE_NAME:
-            return await self.provider.send_template(phone, settings.WHATSAPP_OTP_TEMPLATE_NAME, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code], extra={"kind": "otp"})
+            tpl = await self.db.whatsapp_templates.find_one({"name": settings.WHATSAPP_OTP_TEMPLATE_NAME})
+            otp_button = bool(tpl and tpl.get("category") == "AUTHENTICATION")
+            return await self.provider.send_template(
+                phone, settings.WHATSAPP_OTP_TEMPLATE_NAME, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code], otp_button=otp_button, extra={"kind": "otp"}
+            )
         label = {"verification": "verify your phone", "password_reset": "reset your password"}.get(purpose, "verify your phone")
         return await self.provider.send(phone, f"Your Blussit code to {label} is {code}. It expires in 10 minutes. Do not share this code with anyone.", extra={"kind": "otp"})
 
@@ -492,8 +556,8 @@ class WhatsAppService:
     async def send_agent_media(self, phone: str, media_type: str, media_id: str, caption: str, filename: str, agent_id: str) -> bool:
         return await self.provider.send_media(phone, media_type, media_id, caption, filename, extra={"kind": "agent", "agent_id": agent_id})
 
-    async def send_event_template(self, phone: str, template_name: str, params: list[str]) -> bool:
-        return await self.provider.send_template(phone, template_name, settings.WHATSAPP_TEMPLATE_LANGUAGE, params, extra={"kind": "event"})
+    async def send_event_template(self, phone: str, template_name: str, params: list[str], button_param: str | None = None) -> bool:
+        return await self.provider.send_template(phone, template_name, settings.WHATSAPP_TEMPLATE_LANGUAGE, params, button_param=button_param, extra={"kind": "event"})
 
     async def upload_media(self, content: bytes, mime_type: str, filename: str) -> str | None:
         return await self.provider.upload_media(content, mime_type, filename)

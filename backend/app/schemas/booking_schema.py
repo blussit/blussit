@@ -1,10 +1,24 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import BookingPriority, PaymentMethod
 from app.schemas.profile_schema import AddressCreateRequest, VehicleCreateRequest
+from app.utils.phone import validate_indian_mobile
+
+
+def _validate_alt_contact_phone(v: Optional[str]) -> Optional[str]:
+    """Same canonical 10-digit Indian-mobile rule as every other phone
+    field — the secondary/alternate contact typed at booking time is
+    someone else's number, not the account holder's, but it still has to
+    be a real dialable mobile, not free text."""
+    if not v:
+        return v
+    phone = validate_indian_mobile(v)
+    if not phone:
+        raise ValueError("Enter a valid 10-digit mobile number")
+    return phone
 
 
 class BookingCreateRequest(BaseModel):
@@ -28,6 +42,8 @@ class BookingCreateRequest(BaseModel):
     # used when acquiring a hold, so create_booking can convert it.
     hold_key: Optional[str] = Field(default=None, max_length=80)
 
+    _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+
 
 class ManagerBookingCreateRequest(BaseModel):
     """A manager/admin creating a booking on behalf of a customer (new or
@@ -50,6 +66,8 @@ class ManagerBookingCreateRequest(BaseModel):
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
+
+    _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
 
     @model_validator(mode="after")
     def _exactly_one_vehicle_and_address(self) -> "ManagerBookingCreateRequest":
@@ -101,6 +119,8 @@ class BookingGroupCreateRequest(BaseModel):
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = None
     alternate_contact_phone: Optional[str] = None
+
+    _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
 
 
 class BookingCancelRequest(BaseModel):

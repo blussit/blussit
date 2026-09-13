@@ -249,6 +249,25 @@ export interface ContactMessage {
   created_at: string;
 }
 
+/** "None of the standard passes fit us" — captured from CustomPlanEnquiryModal.
+ *  Upserted on phone (see PlanEnquiryService), so requests_count tracks how
+ *  many times the same person has asked. */
+export interface PlanEnquiry {
+  id: string;
+  name: string;
+  phone: string;
+  vehicle_count: number;
+  services_wanted: string;
+  washes_per_month?: number | null;
+  preferred_time?: string | null;
+  notes?: string | null;
+  customer_id?: string | null;
+  status: "new" | "contacted" | "closed";
+  requests_count?: number;
+  created_at: string;
+  last_requested_at?: string;
+}
+
 export type BookingStatus =
   /** Created and holding its slot, but NOT a real booking yet: the customer
    *  chose to pay online and hasn't finished. Nobody has been notified and

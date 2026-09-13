@@ -21,7 +21,7 @@ import { QtyStepper } from "../../components/shared/QtyStepper";
 import { PLATE_FORMAT_HINT, validateIndianPlate } from "../../lib/validators";
 import type { Address, ComboOffer, Service, User, Vehicle, VehicleType } from "../../types";
 
-const STEPS = ["Find customer", "Service", "Vehicle, address & time", "Confirm"];
+const STEPS = ["Find Customer", "Service", "Vehicle, Address And Time", "Confirm"];
 const PAYMENT_METHODS = [
   { value: "cash", label: "Cash" },
   { value: "online", label: "Online" },
@@ -539,11 +539,11 @@ export default function ManagerNewBookingPage() {
                     {selectedBase && bookingIsBike && (
                       <div className="mt-3 flex items-center justify-between rounded-xl border border-gray-100 bg-[var(--color-surface)] p-3">
                         <div>
-                          <p className="text-xs font-medium text-[var(--color-text-primary)]">How many bikes?</p>
+                          <p className="text-xs font-medium text-[var(--color-text-primary)]">How Many Bikes?</p>
                           <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                             {kit.addBike
-                              ? `First bike ₹${priceFor(selectedBase, vehicleType)}, ₹${priceFor(kit.addBike, vehicleType)} each additional`
-                              : `₹${priceFor(selectedBase, vehicleType)} per bike`}
+                              ? `First Bike ₹${priceFor(selectedBase, vehicleType)}, ₹${priceFor(kit.addBike, vehicleType)} Each Additional`
+                              : `₹${priceFor(selectedBase, vehicleType)} Per Bike`}
                           </p>
                         </div>
                         <QtyStepper value={bikesInBooking} min={1} max={10} onChange={(n) => setExtraBikes(Math.max(0, n - bikeCount))} />
@@ -553,7 +553,7 @@ export default function ManagerNewBookingPage() {
                     {/* Add-ons — only the ones valid for what's selected */}
                     {selectedBase && (kit.simple.length > 0 || kit.addBike || kit.bikePolish) && (
                       <div className="mt-4">
-                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Add-ons</p>
+                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Add-Ons</p>
                         <div className="space-y-2.5">
                           {kit.simple.map((s) => {
                             const on = serviceIds.includes(s.id);
@@ -574,8 +574,8 @@ export default function ManagerNewBookingPage() {
                           {!bookingIsBike && kit.addBike && (
                             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm">
                               <div>
-                                <p className="font-medium text-[var(--color-text-primary)]">+ Add bikes to this visit</p>
-                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType)} per bike, washed at the same doorstep</p>
+                                <p className="font-medium text-[var(--color-text-primary)]">+ Add Bikes To This Visit</p>
+                                <p className="text-xs text-[var(--color-text-secondary)]">₹{priceFor(kit.addBike, vehicleType)} Per Bike, Washed At The Same Doorstep</p>
                               </div>
                               <QtyStepper value={extraBikes} min={0} max={10} onChange={setExtraBikes} />
                             </div>
@@ -586,7 +586,7 @@ export default function ManagerNewBookingPage() {
                               <div>
                                 <p className="font-medium text-[var(--color-text-primary)]">+ {kit.bikePolish.name}</p>
                                 <p className="text-xs text-[var(--color-text-secondary)]">
-                                  ₹{priceFor(kit.bikePolish, vehicleType)} per bike · up to {bikesInBooking} bike{bikesInBooking > 1 ? "s" : ""}
+                                  ₹{priceFor(kit.bikePolish, vehicleType)} Per Bike · Up To {bikesInBooking} Bike{bikesInBooking > 1 ? "s" : ""}
                                 </p>
                               </div>
                               <QtyStepper value={polishCount} min={0} max={bikesInBooking} onChange={setPolish} />
@@ -685,12 +685,12 @@ export default function ManagerNewBookingPage() {
                           : "border-gray-300 text-[var(--color-text-secondary)] hover:border-gray-400"
                       }`}
                     >
-                      + New address
+                      + New Address
                     </button>
                   </div>
                 )}
                 {!selectedAddressId && customerAddresses.length > 0 && !newAddressOpen && (
-                  <p className="text-xs text-[var(--color-text-secondary)]">Pick a saved address, or "+ New address" to add one — it's saved to the customer's account for next time.</p>
+                  <p className="text-xs text-[var(--color-text-secondary)]">Pick A Saved Address, Or "+ New Address" To Add One. It's Saved To The Customer's Account For Next Time.</p>
                 )}
                 {!selectedAddressId && (customerAddresses.length === 0 || newAddressOpen) && (
                   <div className="space-y-3">

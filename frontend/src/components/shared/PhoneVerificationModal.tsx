@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { MessageCircle, ShieldCheck } from "lucide-react";
 import { authApi, googleAuthApi, otpWidgetApi } from "../../api/auth";
@@ -21,7 +21,17 @@ import { validateIndianMobile } from "../../lib/validators";
  *    server-side with identifier binding.
  *  - Classic backend-generated OTP over WhatsApp (fallback).
  */
-export function PhoneVerificationModal({ open, onClose, onVerified }: { open: boolean; onClose: () => void; onVerified: () => void }) {
+export function PhoneVerificationModal({
+  open,
+  onClose,
+  onVerified,
+  autoSend = false,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onVerified: () => void;
+  autoSend?: boolean;
+}) {
   const { user, refreshUser } = useAuth();
   const [step, setStep] = useState<"send" | "verify">("send");
   const [otp, setOtp] = useState("");
@@ -110,11 +120,24 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  const autoSent = useRef(false);
+  const sendOtp = sendMutation.mutate;
+  useEffect(() => {
+    if (!open) {
+      autoSent.current = false;
+      return;
+    }
+    if (!autoSend || autoSent.current || step !== "send" || widgetReady === undefined || sendMutation.isPending) return;
+    autoSent.current = true;
+    sendOtp();
+  }, [autoSend, open, sendMutation.isPending, sendOtp, step, widgetReady]);
+
   const close = () => {
     setStep("send");
     setOtp("");
     setError("");
     setUsedWidget(false);
+    autoSent.current = false;
     onClose();
   };
 
@@ -124,7 +147,7 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
   const channelLabel = step === "verify" ? (usedWidget ? "SMS / WhatsApp" : "WhatsApp") : widgetReady ? "SMS / WhatsApp" : "WhatsApp";
 
   return (
-    <Modal open={open} onClose={close} title="Verify your phone number">
+    <Modal open={open} onClose={close} title="Verify Your Phone Number">
       <div className="space-y-4">
         <div className="flex items-start gap-3 rounded-xl bg-[var(--color-primary-light)] p-3.5">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-primary)]" />
@@ -139,18 +162,21 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
 
         {step === "send" ? (
           <>
+            {autoSend && sendMutation.isPending && (
+              <p className="text-sm text-[var(--color-text-secondary)]">Sending Your Verification Code...</p>
+            )}
             {needsPhone && (
               <Input
-                label="Mobile number"
+                label="Mobile Number"
                 value={newPhone}
                 onChange={(e) => setNewPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                placeholder="10-digit mobile"
+                placeholder="10-Digit Mobile"
                 autoFocus
               />
             )}
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
             <Button className="w-full" disabled={needsPhone && !validateIndianMobile(newPhone)} isLoading={sendMutation.isPending} onClick={() => sendMutation.mutate()}>
-              <MessageCircle className="h-4 w-4" /> Send code via {channelLabel}
+              <MessageCircle className="h-4 w-4" /> Send Code Via {channelLabel}
             </Button>
           </>
         ) : (
@@ -166,12 +192,12 @@ export function PhoneVerificationModal({ open, onClose, onVerified }: { open: bo
             />
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
             <Button className="w-full" disabled={otp.trim().length < 6} isLoading={verifyMutation.isPending} onClick={() => verifyMutation.mutate()}>
-              Verify &amp; continue
+              Verify And Continue
             </Button>
             <p className="text-center text-xs text-[var(--color-text-secondary)]">
               Didn't get it?{" "}
               <button type="button" className="font-semibold text-black hover:underline" onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending}>
-                Resend code
+                Resend Code
               </button>
             </p>
           </>

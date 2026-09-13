@@ -44,20 +44,24 @@ DEFAULT_TAGS = [
 
 # Booking events -> the dedicated template that should carry them once
 # approved (see bootstrap_blussit_templates). Fallback is always the
-# generic update template via send_generic.
+# generic update template via send_generic. The 9 booking-referencing
+# events point at the "_v2" templates (BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS)
+# whose button actually deep-links to the booking, not the old static
+# ones — event_template_if_ready only returns a template once ITS name is
+# Meta-approved, so these fall back to the generic template until then.
 EVENT_TEMPLATES = {
     "welcome": "blussit_account_created",
-    "booking_confirmed": "blussit_booking_confirmed",
-    "captain_assigned": "blussit_captain_assigned",
-    "captain_on_the_way": "blussit_captain_on_the_way",
+    "booking_confirmed": "blussit_booking_confirmed_v2",
+    "captain_assigned": "blussit_captain_assigned_v2",
+    "captain_on_the_way": "blussit_captain_on_the_way_v2",
     "service_completed": "blussit_service_completed",
     "review_request": "blussit_review_request",
-    "booking_reminder": "blussit_booking_reminder",
-    "reschedule_confirmation": "blussit_reschedule_confirmation",
-    "payment_confirmation": "blussit_payment_confirmation",
-    "booking_cancelled": "blussit_booking_cancelled",
-    "payment_pending": "blussit_payment_pending",
-    "captain_released": "blussit_captain_released",
+    "booking_reminder": "blussit_booking_reminder_v2",
+    "reschedule_confirmation": "blussit_reschedule_confirmation_v2",
+    "payment_confirmation": "blussit_payment_confirmation_v2",
+    "booking_cancelled": "blussit_booking_cancelled_v2",
+    "payment_pending": "blussit_payment_pending_v2",
+    "captain_released": "blussit_captain_released_v2",
     "subscription_activated": "blussit_subscription_activated",
     "subscription_renewed": "blussit_subscription_renewed",
     "subscription_expiring": "blussit_subscription_expiring",
@@ -565,6 +569,16 @@ class WhatsAppCrmService:
             return {"synced": 0, "note": "Provider does not support template listing (log provider or missing WABA id)."}
         for t in remote:
             body = next((c.get("text", "") for c in t.get("components", []) if c.get("type") == "BODY"), "")
+            buttons_component = next((c for c in t.get("components", []) if c.get("type") == "BUTTONS"), None)
+            # Authoritative, straight from Meta — whatever the template
+            # ACTUALLY has approved, not just what we asked for at
+            # creation time (in case it was edited directly on Meta's
+            # side). Only a URL button with a "{{" in it takes a
+            # per-send parameter; a static one must never be sent one.
+            has_url_param = bool(
+                buttons_component
+                and any(b.get("type") == "URL" and "{{" in (b.get("url") or "") for b in buttons_component.get("buttons", []))
+            )
             await self.db.whatsapp_templates.update_one(
                 {"name": t["name"]},
                 {"$set": {
@@ -572,6 +586,7 @@ class WhatsAppCrmService:
                     "language": t.get("language"), "body": body,
                     "rejected_reason": None if t.get("rejected_reason") in (None, "NONE") else t.get("rejected_reason"),
                     "param_count": body.count("{{"),
+                    "has_url_param": has_url_param,
                     "synced_at": datetime.now(timezone.utc),
                 }, "$setOnInsert": {"disabled": False, "created_at": datetime.now(timezone.utc)}},
                 upsert=True,
@@ -598,8 +613,15 @@ class WhatsAppCrmService:
         n = body.count("{{")
         if n:
             components[0]["example"] = {"body_text": [[f"Sample {i + 1}" for i in range(n)]]}
+        # A URL button with its own {{1}} (e.g. ".../app/bookings/{{1}}")
+        # needs its own example too, or Meta rejects the submission — the
+        # static ones (no "{{") don't take one at all.
+        has_url_param = bool(button_url and "{{" in button_url)
         if button_text and button_url:
-            components.append({"type": "BUTTONS", "buttons": [{"type": "URL", "text": button_text[:25], "url": button_url}]})
+            button: dict = {"type": "URL", "text": button_text[:25], "url": button_url}
+            if has_url_param:
+                button["example"] = [button_url.replace("{{1}}", "000000000000000000000000")]
+            components.append({"type": "BUTTONS", "buttons": [button]})
         result = await self.wa.create_template({"name": name, "language": language or "en_US", "category": category, "components": components})
         if result.get("error"):
             raise BadRequestException(f"Meta rejected the template: {result['error']}")
@@ -607,11 +629,55 @@ class WhatsAppCrmService:
             {"name": name},
             {"$set": {"name": name, "status": result.get("status", "PENDING"), "category": result.get("category", category),
                       "language": language or "en_US", "body": body, "param_count": n, "disabled": False,
-                      "synced_at": datetime.now(timezone.utc)},
+                      "has_url_param": has_url_param, "synced_at": datetime.now(timezone.utc)},
              "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
         return {"name": name, "status": result.get("status", "PENDING"), "category": result.get("category", category)}
+
+    async def create_otp_template(self, name: str, language: str = "en_US", code_expiration_minutes: int = 10) -> dict:
+        """The real fix for "OTP never arrives for a first-time customer":
+        send_otp's fallback (see WhatsAppService.send_otp) is a plain
+        free-text message, which WhatsApp only ever delivers to someone
+        who has an OPEN 24h SESSION with the business number — i.e. it
+        works for a re-verification or for testing against your own
+        number (which has messaged the bot before), but silently drops
+        for a genuinely brand-new signup, who has never messaged us. An
+        AUTHENTICATION-category template is the one message type Meta
+        lets through to a cold contact for a one-time code, and it
+        DEMANDS this exact shape — no custom body text at all: Meta
+        generates "{{1}} is your verification code." itself, adds the
+        security-recommendation and expiry lines, and the OTP arrives
+        with a native "Copy Code" button the customer taps to copy it
+        straight to their clipboard (no "type out 6 digits" needed) —
+        this is also the closest thing to autofill a WEBSITE (not a
+        native app, which is what Meta's other ONE_TAP button variant
+        needs) can offer. Once Meta approves this, point
+        WHATSAPP_OTP_TEMPLATE_NAME at `name` and restart — see
+        WhatsAppService.send_otp, which already checks whether the
+        configured template is this AUTHENTICATION kind."""
+        payload = {
+            "name": name,
+            "language": language,
+            "category": "AUTHENTICATION",
+            "components": [
+                {"type": "BODY", "add_security_recommendation": True},
+                {"type": "FOOTER", "code_expiration_minutes": code_expiration_minutes},
+                {"type": "BUTTONS", "buttons": [{"type": "OTP", "otp_type": "COPY_CODE", "text": "Copy Code"}]},
+            ],
+        }
+        result = await self.wa.create_template(payload)
+        if result.get("error"):
+            raise BadRequestException(f"Meta rejected the OTP template: {result['error']}")
+        await self.db.whatsapp_templates.update_one(
+            {"name": name},
+            {"$set": {"name": name, "status": result.get("status", "PENDING"), "category": "AUTHENTICATION",
+                      "language": language, "body": "(Meta-generated OTP text — no custom body for this category)",
+                      "param_count": 1, "disabled": False, "synced_at": datetime.now(timezone.utc)},
+             "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        return {"name": name, "status": result.get("status", "PENDING"), "category": "AUTHENTICATION"}
 
     async def set_template_disabled(self, name: str, disabled: bool) -> dict:
         r = await self.db.whatsapp_templates.update_one({"name": name}, {"$set": {"disabled": disabled}})
@@ -719,6 +785,52 @@ BLUSSIT_TEMPLATE_DEFS = [
     ("blussit_subscription_expired", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) has ended.\n\nRenew any time to keep your car shining.", "Renew Pass"),
 ]
 
+# "View Booking" / "Track Booking" on the templates above go to a STATIC
+# "https://blussit.com/" — every one of these buttons opened the plain
+# homepage, never the actual booking (see bootstrap_blussit_templates).
+# A URL button's target can't be edited on an already-APPROVED template —
+# Meta requires a new template for a structural change like this — so
+# these are new, versioned templates with a real per-booking link
+# ("https://blussit.com/app/bookings/{{1}}", filled with the booking id
+# at send time — see NotificationService._send_whatsapp). Same body copy
+# as the originals; EVENT_TEMPLATES below points these 9 events at the
+# new name so send_event_template only ever uses one or the other, not
+# both. Each needs Meta's approval before event_template_if_ready will
+# actually pick it (see bootstrap_blussit_templates); the originals stay
+# on the WABA, approved but unused, until then.
+BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS = [
+    ("blussit_booking_confirmed_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking is confirmed.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\nBooking ID: {{5}}\n\nWe'll see you at your doorstep!", "View Booking"),
+    ("blussit_captain_assigned_v2", "UTILITY", "Hi {{1}},\n\nYour BLUSSIT captain {{2}} has been assigned to your booking.\n\nService: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
+    ("blussit_captain_on_the_way_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT captain is on the way.\n\nYour service will begin shortly.", "Track Booking"),
+    ("blussit_booking_reminder_v2", "UTILITY", "Hi {{1}} 👋\n\nJust a reminder about your BLUSSIT booking.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
+    ("blussit_reschedule_confirmation_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking has been rescheduled.\n\nNew date: {{2}}\nNew time: {{3}}\nBooking ID: {{4}}\n\nSee you at the new time!", "View Booking"),
+    ("blussit_payment_confirmation_v2", "UTILITY", "Hi {{1}} 👋\n\nYour payment of ₹{{2}} for booking {{3}} has been received.\n\nThank you for choosing BLUSSIT!", "View Booking"),
+    ("blussit_booking_cancelled_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} has been cancelled.\n\nNeed it back? You can book again any time.", "View Booking"),
+    ("blussit_payment_pending_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} is waiting for payment.\n\nFinish paying in the next {{3}} minutes to keep your slot, or choose cash on service.", "Complete Payment"),
+    ("blussit_captain_released_v2", "UTILITY", "Hi {{1}} 👋\n\nYour captain for booking {{2}} is no longer available. We're assigning a replacement and will confirm shortly.", "View Booking"),
+]
+
+# The GENERIC fallback template — every notify() call that doesn't (yet)
+# have its own dedicated approved template above goes out through this
+# one, so it has to work for any title/message pair (booking updates,
+# complaint replies, payment/subscription pings, anything). The version
+# actually live on the WABA today (see WHATSAPP_UPDATE_TEMPLATE_NAME in
+# .env, "blussit_service_update") wraps every message in a long fixed
+# preamble/postamble — "You have an update on your Blussit Car Wash
+# service. {{1}}: {{2}}. If anything looks wrong, just reply here and our
+# team will help you right away." — which is what actually made every
+# single notification read as one long paragraph, whatever the title/
+# message text itself said. This trims it to just the two lines that
+# carry real information. Same "can't edit an approved template in
+# place" constraint as the booking-link ones above: submit this, wait for
+# Meta's approval, then point WHATSAPP_UPDATE_TEMPLATE_NAME at
+# "blussit_service_update_v2" and restart — nothing switches over on its
+# own, so the current (longer) template keeps working exactly as today
+# until that's done.
+BLUSSIT_GENERIC_UPDATE_TEMPLATE_DEFS = [
+    ("blussit_service_update_v2", "UTILITY", "*{{1}}*\n{{2}}\n\nReply here if you need help.", None),
+]
+
 # Marketing templates are SUBMITTED for approval up front too (an approved
 # template that's never sent costs nothing; one that's missing when the
 # founder wants a campaign costs a week). Sending stays gated: approved +
@@ -736,6 +848,17 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
     crm = WhatsAppCrmService(db)
     await crm.sync_templates()
     results = []
+    otp_name = "blussit_otp"
+    existing_otp = await db.whatsapp_templates.find_one({"name": otp_name})
+    if existing_otp and existing_otp.get("status") in ("APPROVED", "PENDING"):
+        results.append({"name": otp_name, "status": existing_otp["status"], "note": "already exists"})
+    else:
+        try:
+            r = await crm.create_otp_template(otp_name)
+            r["note"] = "AUTHENTICATION template with a Copy Code button — point WHATSAPP_OTP_TEMPLATE_NAME at this once approved"
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": otp_name, "status": "ERROR", "note": exc.message})
     for name, category, body, button in BLUSSIT_TEMPLATE_DEFS:
         existing = await db.whatsapp_templates.find_one({"name": name})
         if existing and existing.get("status") in ("APPROVED", "PENDING"):
@@ -743,6 +866,28 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
             continue
         try:
             r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/")
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": name, "status": "ERROR", "note": exc.message})
+    for name, category, body, button in BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS:
+        existing = await db.whatsapp_templates.find_one({"name": name})
+        if existing and existing.get("status") in ("APPROVED", "PENDING"):
+            results.append({"name": name, "status": existing["status"], "note": "already exists"})
+            continue
+        try:
+            r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/app/bookings/{{1}}")
+            r["note"] = "deep-links to the specific booking once approved — see EVENT_TEMPLATES"
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": name, "status": "ERROR", "note": exc.message})
+    for name, category, body, button in BLUSSIT_GENERIC_UPDATE_TEMPLATE_DEFS:
+        existing = await db.whatsapp_templates.find_one({"name": name})
+        if existing and existing.get("status") in ("APPROVED", "PENDING"):
+            results.append({"name": name, "status": existing["status"], "note": "already exists"})
+            continue
+        try:
+            r = await crm.create_template(name, category, "en_US", body, button, None)
+            r["note"] = "shorter replacement for the generic fallback — point WHATSAPP_UPDATE_TEMPLATE_NAME at this once approved"
             results.append(r)
         except BadRequestException as exc:
             results.append({"name": name, "status": "ERROR", "note": exc.message})

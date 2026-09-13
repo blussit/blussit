@@ -72,6 +72,7 @@ export function NowJobCard({
   onAction,
   onCancel,
   onReportRisk,
+  onSelectCar,
 }: {
   job: Booking;
   /** Every car on this trip when there's more than one; null for a single. */
@@ -84,6 +85,10 @@ export function NowJobCard({
   onAction: (kind: JobAction["kind"]) => void;
   onCancel: () => void;
   onReportRisk: () => void;
+  /** Visit only: picks which not-yet-done car the next action (verify /
+   *  before / after photo) applies to — e.g. the customer wants a
+   *  particular car done first. Ignored for a single-vehicle job. */
+  onSelectCar?: (carId: string) => void;
 }) {
   const { t } = useCaptainTranslation();
   const [showMap, setShowMap] = useState(false);
@@ -294,8 +299,21 @@ export function NowJobCard({
                 const Icon = iconFor(c);
                 const done = c.status === "completed";
                 const current = c.id === job.id && !FINISHED.has(c.status);
+                // Any not-yet-finished car is pickable — he isn't locked
+                // into array order; tapping ahead makes THAT one "now".
+                const selectable = !!onSelectCar && !FINISHED.has(c.status) && !current;
+                const Row: "button" | "li" = selectable ? "button" : "li";
                 return (
-                  <li key={c.id} className={cn("flex items-center gap-2.5 px-3 py-2", current && "bg-[#FFFCF0]")}>
+                  <Row
+                    key={c.id}
+                    type={selectable ? "button" : undefined}
+                    onClick={selectable ? () => onSelectCar!(c.id) : undefined}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 px-3 py-2 text-left",
+                      current && "bg-[#FFFCF0]",
+                      selectable && "cursor-pointer hover:bg-[#FAFAFA]"
+                    )}
+                  >
                     <span className="font-mono-num w-5 shrink-0 text-xs font-bold text-gray-400">{i + 1}</span>
                     <Icon className={cn("h-4 w-4 shrink-0", current ? "text-black" : "text-gray-400")} />
                     <span className="min-w-0 flex-1">
@@ -313,9 +331,9 @@ export function NowJobCard({
                         done ? "bg-green-100 text-green-700" : current ? "bg-black text-white" : "bg-gray-100 text-gray-500"
                       )}
                     >
-                      {done ? t("captain.visit.done") : current ? t("captain.visit.now") : t("captain.visit.next")}
+                      {done ? t("captain.visit.done") : current ? t("captain.visit.now") : selectable ? t("captain.visit.pick") : t("captain.visit.next")}
                     </span>
-                  </li>
+                  </Row>
                 );
               })}
             </ul>

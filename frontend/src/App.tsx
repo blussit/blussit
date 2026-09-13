@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { PageLoader } from "./components/ui";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { getErrorMessage } from "./lib/api-client";
 import { toastBus } from "./context/ToastContext";
@@ -11,6 +12,7 @@ import { ConfirmProvider } from "./context/ConfirmContext";
 import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { ProtectedRoute, GuestOnlyRoute } from "./routes/ProtectedRoute";
 import { StaffBookingRedirect } from "./routes/StaffBookingRedirect";
+import { ScrollRestoration } from "./components/shared/ScrollRestoration";
 
 import LandingPage from "./pages/public/LandingPage";
 import ServicesPage from "./pages/public/ServicesPage";
@@ -64,6 +66,7 @@ const AdminVehicleTypesPage = lazy(() => import("./pages/admin/AdminVehicleTypes
 const AdminComboOffersPage = lazy(() => import("./pages/admin/AdminComboOffersPage"));
 const AdminHomepageSettingsPage = lazy(() => import("./pages/admin/AdminHomepageSettingsPage"));
 const AdminContactMessagesPage = lazy(() => import("./pages/admin/AdminContactMessagesPage"));
+const AdminPlanEnquiriesPage = lazy(() => import("./pages/admin/AdminPlanEnquiriesPage"));
 const AdminWhatsAppPage = lazy(() => import("./pages/admin/AdminWhatsAppPage"));
 const AdminCoverageLeadsPage = lazy(() => import("./pages/admin/AdminCoverageLeadsPage"));
 const AdminPricingPage = lazy(() => import("./pages/admin/AdminPricingPage"));
@@ -90,6 +93,15 @@ const queryClient = new QueryClient({
   }),
 });
 
+// A render crash anywhere in the route tree used to take the whole app to
+// a blank white page — nothing caught it. This resets automatically on
+// every navigation (see ErrorBoundary's resetKey), so leaving the page
+// that crashed clears it without needing a hard reload.
+function RoutedErrorBoundary({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  return <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>;
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -97,8 +109,10 @@ export default function App() {
         <AuthProvider>
         <ToastProvider>
         <ConfirmProvider>
+          <ScrollRestoration />
           <ToastContainer />
           <ConfirmDialog />
+          <RoutedErrorBoundary>
           <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
@@ -190,6 +204,7 @@ export default function App() {
                 <Route path="homepage" element={<AdminHomepageSettingsPage />} />
                 <Route path="whatsapp" element={<AdminWhatsAppPage />} />
                 <Route path="contact-messages" element={<AdminContactMessagesPage />} />
+                <Route path="plan-enquiries" element={<AdminPlanEnquiriesPage />} />
                 <Route path="coverage-requests" element={<AdminCoverageLeadsPage />} />
                 <Route path="pricing" element={<AdminPricingPage />} />
                 <Route path="subscription-plans" element={<AdminSubscriptionPlansPage />} />
@@ -205,6 +220,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>
+          </RoutedErrorBoundary>
         </ConfirmProvider>
         </ToastProvider>
         </AuthProvider>

@@ -218,7 +218,8 @@ VITE_API_BASE_URL=https://api.blussit.com/api/v1
 VITE_WHATSAPP_NUMBER=<public_whatsapp_number>
 ```
 
-Do not point the frontend at the temporary Cloud Run URL in source code.
+Use `https://api.blussit.com/api/v1` for production. Do not point the
+frontend at the temporary Cloud Run URL in source code or Vercel env vars.
 
 ## Webhooks
 

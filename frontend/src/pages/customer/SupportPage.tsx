@@ -205,10 +205,27 @@ export default function SupportPage() {
               </option>
             ))}
           </Select>
-          <Input label="What went wrong?" value={subject} onChange={(e) => setSubject(e.target.value)} required />
-          <Input label="Tell us a bit more" value={description} onChange={(e) => setDescription(e.target.value)} required />
+          <Input
+            label="What went wrong?"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            hint={subject.trim().length > 0 && subject.trim().length < 3 ? "At least 3 characters." : undefined}
+            required
+          />
+          <Input
+            label="Tell us a bit more"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            hint={description.trim().length > 0 && description.trim().length < 5 ? "At least 5 characters." : undefined}
+            required
+          />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-          <Button type="submit" className="w-full" disabled={!bookingId} isLoading={createMutation.isPending}>
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={!bookingId || subject.trim().length < 3 || description.trim().length < 5}
+            isLoading={createMutation.isPending}
+          >
             Submit request
           </Button>
         </form>

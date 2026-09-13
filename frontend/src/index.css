@@ -83,7 +83,7 @@
   .font-mono-num {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    font-style: italic;
+    font-style: normal;
     font-weight: 400;
   }
   .font-mono-num.font-medium {

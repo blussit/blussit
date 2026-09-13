@@ -10,6 +10,7 @@ export interface PurchaseConfirmation {
     booking_number?: string;
     scheduled_date?: string;
     scheduled_slot?: string;
+    service_label?: string;
     plan_name?: string;
   };
   expires_at: string;

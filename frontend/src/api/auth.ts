@@ -23,6 +23,9 @@ export const authApi = {
 
   // The OTP itself is never in this response — it's sent over WhatsApp
   // only (see backend AuthController.forgot_password).
+  requestOtp: (identifier: string) =>
+    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/otp/request", { identifier }).then((r) => r.data.data),
+
   forgotPassword: (identifier: string) =>
     apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/forgot-password", { identifier }).then((r) => r.data.data),
 
