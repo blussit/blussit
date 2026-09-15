@@ -49,6 +49,10 @@ RULES: list[tuple[str, int, int, str | None]] = [
     # either costs us something, while a real customer books once. Generous
     # enough that a retry storm on a flaky connection still gets through.
     ("/api/v1/payments/create-order", 20, 60, "POST"),
+    # The no-login quick booking: creates a customer profile AND reserves
+    # capacity from a bare phone number, so it gets the tightest bucket of
+    # the booking family. Above the generic /bookings rule on purpose.
+    ("/api/v1/bookings/quick", 8, 60, "POST"),
     ("/api/v1/bookings", 20, 60, "POST"),
     ("/api/v1/reviews", 15, 60, "POST"),
     # Public forms: junk-data buckets, same shape as coverage leads.

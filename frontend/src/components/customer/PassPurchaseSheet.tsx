@@ -1,26 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Check } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
-import { vehicleApi } from "../../api/profile";
-import { Button, Input, Modal, Select, Spinner } from "../ui";
+import { Button, Modal, Spinner } from "../ui";
 import { baseGroups } from "../../lib/serviceMix";
 import { getErrorMessage } from "../../lib/api-client";
-import type { SubscriptionPlan, Vehicle } from "../../types";
+import type { SubscriptionPlan } from "../../types";
 import { VehicleIcon } from "../shared/VehicleIcon";
 
 /**
- * Buying a monthly pass asks exactly TWO questions (founder model):
+ * Buying a monthly pass asks exactly TWO questions (2026-09 model):
  *
- *   1. WHICH CAR — an existing vehicle, or a new one added right here with
- *      the same fields the garage page uses.
- *   2. WHICH SERVICE — one wash from the plan's own menu (Jet Wash,
- *      Waterless, Star Wash; Deep Cleaning is deliberately not sold as a
- *      pass).
+ *   1. WHICH VEHICLE TYPE — hatchback, SUV, bike... No registration, no
+ *      brand/model: a pass is for a type, and the server applies it to
+ *      any booking of that type + service automatically.
+ *   2. WHICH SERVICE — one wash from the plan's own menu.
  *
- * Everything else follows: the car decides the vehicle type, the type and
- * the service decide the price, and the price is quoted by the SAME backend
+ * The type and the service decide the price, quoted by the SAME backend
  * function that will charge for it — this sheet never does its own money
  * arithmetic, so what's shown is always what's charged.
  */
@@ -35,12 +32,10 @@ export function PassPurchaseSheet({
   plan: SubscriptionPlan | null;
   open: boolean;
   onClose: () => void;
-  onConfirm: (args: { vehicleId: string; serviceId: string; autoPay: boolean }) => void;
+  onConfirm: (args: { vehicleType: string; serviceId: string; autoPay: boolean }) => void;
   isPaying: boolean;
   error?: string;
 }) {
-  const queryClient = useQueryClient();
-  const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: open });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
   const { data: servicesData } = useQuery({
     queryKey: ["services-for-passes"],
@@ -48,35 +43,29 @@ export function PassPurchaseSheet({
     enabled: open,
   });
 
-  const [vehicleId, setVehicleId] = useState<string | null>(null);
+  const [vehicleType, setVehicleType] = useState<string | null>(null);
   const [serviceId, setServiceId] = useState<string | null>(null);
   const [autoPay, setAutoPay] = useState(true);
-  const [addingCar, setAddingCar] = useState(false);
-  const [newPlate, setNewPlate] = useState("");
-  const [newBrand, setNewBrand] = useState("");
-  const [newTypeId, setNewTypeId] = useState("");
-  const [formError, setFormError] = useState("");
 
-  const chosenVehicle = (vehicles || []).find((v) => v.id === vehicleId) || null;
+  // The types this plan is sold for (all of them when the plan doesn't
+  // restrict), in the admin's display order.
+  const types = useMemo(() => {
+    const all = (vehicleTypes || []).filter((t) => t.is_active !== false).sort((a, b) => a.display_order - b.display_order);
+    const allowed = plan?.vehicle_types || [];
+    return allowed.length ? all.filter((t) => allowed.includes(t.id)) : all;
+  }, [vehicleTypes, plan]);
 
   // The services this pass may cover: the plan's own menu, narrowed to what
-  // the CHOSEN CAR can actually have done to it. Offering "Bike Wash" for a
-  // Thar is the kind of thing a customer notices immediately and trusts you
-  // less for — and the backend refuses it anyway.
-  //
-  // baseGroups also collapses variant families, so "Bike Wash" and "Bike
-  // Wash (2 bikes)" are ONE choice rather than two chips competing for the
-  // same tap. (Quantity on a pass is a booking-time decision, not a
-  // purchase-time one.)
+  // is actually offered for the chosen type. baseGroups collapses variant
+  // families ("Bike Wash", "Bike Wash (2 bikes)") into one choice.
   const menu = useMemo(() => {
     const all = servicesData?.data || [];
     const allowed = plan?.included_service_ids || [];
     const onMenu = allowed.length ? all.filter((s) => allowed.includes(s.id)) : all;
-    if (!chosenVehicle) return [];
-    return baseGroups(onMenu, chosenVehicle.vehicle_type).map((g) => g.primary);
-  }, [servicesData, plan, chosenVehicle]);
+    if (!vehicleType) return [];
+    return baseGroups(onMenu, vehicleType).map((g) => g.primary);
+  }, [servicesData, plan, vehicleType]);
 
-  // Switching car can invalidate the chosen service (car service -> bike).
   useEffect(() => {
     if (serviceId && !menu.some((s) => s.id === serviceId)) setServiceId(null);
   }, [menu, serviceId]);
@@ -85,125 +74,52 @@ export function PassPurchaseSheet({
   useEffect(() => {
     if (!open) return;
     setServiceId(null);
+    setVehicleType(null); // re-seeded below from THIS plan's types
     setAutoPay(true);
-    setFormError("");
-    setAddingCar(false);
-    setNewPlate("");
-    setNewBrand("");
   }, [open, plan?.id]);
-
-  // Default to the car they use most.
   useEffect(() => {
-    if (!open || vehicleId || !vehicles?.length) return;
-    setVehicleId((vehicles.find((v) => v.is_default) || vehicles[0]).id);
-  }, [open, vehicles, vehicleId]);
+    if (!open || vehicleType || !types.length) return;
+    setVehicleType(types[0].id);
+  }, [open, types, vehicleType]);
 
-  useEffect(() => {
-    if (!newTypeId && vehicleTypes?.length) setNewTypeId(vehicleTypes[0].id);
-  }, [vehicleTypes, newTypeId]);
-
-  // The live price. Re-quoted from the server whenever the car or the
-  // service changes — never computed here.
+  // The live price — re-quoted from the server whenever the type or the
+  // service changes, never computed here.
   const { data: quote, isFetching: quoting, error: quoteError } = useQuery({
-    queryKey: ["pass-quote", plan?.id, vehicleId, serviceId],
-    queryFn: () => subscriptionApi.quotePass({ plan_id: plan!.id, vehicle_id: vehicleId!, service_id: serviceId! }),
-    enabled: !!plan && !!vehicleId && !!serviceId,
+    queryKey: ["pass-quote", plan?.id, vehicleType, serviceId],
+    queryFn: () => subscriptionApi.quotePass({ plan_id: plan!.id, vehicle_type: vehicleType!, service_id: serviceId! }),
+    enabled: !!plan && !!vehicleType && !!serviceId,
     retry: false,
   });
 
-  const addCarMutation = useMutation({
-    mutationFn: () =>
-      vehicleApi.create({
-        vehicle_type: newTypeId,
-        brand: newBrand.trim().split(" ")[0] || "Vehicle",
-        model: newBrand.trim().split(" ").slice(1).join(" ") || newBrand.trim() || "—",
-        registration_number: newPlate.trim().toUpperCase(),
-        is_default: !vehicles?.length,
-      }),
-    onSuccess: (created: Vehicle) => {
-      queryClient.invalidateQueries({ queryKey: ["vehicles"] });
-      setVehicleId(created.id);
-      setAddingCar(false);
-      setNewPlate("");
-      setNewBrand("");
-      setFormError("");
-    },
-    onError: (err) => setFormError(getErrorMessage(err)),
-  });
-
+  const chosenType = types.find((t) => t.id === vehicleType) || null;
   const blocked = quote?.vehicle_has_pass;
-  const canPay = !!vehicleId && !!serviceId && !!quote && !blocked && !quoting;
+  const canPay = !!vehicleType && !!serviceId && !!quote && !blocked && !quoting;
 
   return (
     <Modal open={open} onClose={onClose} title={plan ? `Monthly pass — ${plan.name}` : "Monthly pass"}>
       <div className="space-y-6">
-        {/* ---- 1. Which car ---- */}
+        {/* ---- 1. Which vehicle type ---- */}
         <div>
-          <p className="text-sm font-semibold text-black">1. Which car is this pass for?</p>
-          <p className="mt-0.5 text-xs text-gray-500">A pass belongs to one car — one car, one pass.</p>
-
-          {!addingCar ? (
-            <div className="mt-2.5 space-y-2">
-              {(vehicles || []).map((v) => (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => setVehicleId(v.id)}
-                  aria-pressed={vehicleId === v.id}
-                  className={`flex w-full items-center gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors ${
-                    vehicleId === v.id ? "border-black bg-[#FAFAFA]" : "border-[#E5E7EB] hover:border-gray-400"
-                  }`}
-                >
-                  <VehicleIcon vehicleTypeId={v.vehicle_type} className="h-4 w-4 shrink-0 text-gray-500" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold text-black">
-                      {v.brand} {v.model}
-                    </span>
-                    <span className="font-mono-num block text-xs text-gray-500">{v.registration_number}</span>
-                  </span>
-                  {vehicleId === v.id && <Check className="h-4 w-4 shrink-0 text-black" />}
-                </button>
-              ))}
+          <p className="text-sm font-semibold text-black">1. Which vehicle is this pass for?</p>
+          <p className="mt-0.5 text-xs text-gray-500">Just the type — it applies to any {chosenType ? chosenType.name.toLowerCase() : "vehicle of that type"} you book.</p>
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            {types.map((t) => (
               <button
+                key={t.id}
                 type="button"
-                onClick={() => setAddingCar(true)}
-                className="w-full rounded-xl border border-dashed border-gray-300 px-3.5 py-2.5 text-sm font-medium text-gray-600 hover:border-gray-400"
+                onClick={() => setVehicleType(t.id)}
+                aria-pressed={vehicleType === t.id}
+                className={`flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors ${
+                  vehicleType === t.id ? "border-black bg-[#FAFAFA] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                }`}
               >
-                + Add a different car
+                <VehicleIcon vehicleTypeId={t.id} className="h-4 w-4 text-gray-500" />
+                {t.name}
+                {vehicleType === t.id && <Check className="h-4 w-4 text-black" />}
               </button>
-            </div>
-          ) : (
-            <div className="mt-2.5 space-y-3 rounded-xl border border-dashed border-gray-300 p-3.5">
-              <Input
-                label="Registration number"
-                placeholder="MP09AB1234"
-                value={newPlate}
-                onChange={(e) => setNewPlate(e.target.value.toUpperCase())}
-                required
-              />
-              <Input label="Brand & model" placeholder="Maruti Swift" value={newBrand} onChange={(e) => setNewBrand(e.target.value)} />
-              <Select label="Vehicle type" value={newTypeId} onChange={(e) => setNewTypeId(e.target.value)}>
-                {(vehicleTypes || []).map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </Select>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  disabled={newPlate.trim().length < 4 || !newTypeId}
-                  isLoading={addCarMutation.isPending}
-                  onClick={() => addCarMutation.mutate()}
-                >
-                  Save car
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => { setAddingCar(false); setFormError(""); }}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          )}
+            ))}
+            {!types.length && <p className="text-xs text-gray-500">Loading vehicle types…</p>}
+          </div>
         </div>
 
         {/* ---- 2. Which service ---- */}
@@ -226,9 +142,7 @@ export function PassPurchaseSheet({
             ))}
             {!menu.length && (
               <p className="text-xs text-gray-500">
-                {chosenVehicle
-                  ? `No Service On This Pass Is Offered For A ${chosenVehicle.brand} ${chosenVehicle.model}. Try Another Car, Or Request A Custom Plan.`
-                  : "Pick A Car First."}
+                {chosenType ? `No service on this pass is offered for a ${chosenType.name}. Try another type, or request a custom plan.` : "Pick a vehicle type first."}
               </p>
             )}
           </div>
@@ -236,8 +150,8 @@ export function PassPurchaseSheet({
 
         {/* ---- the price, straight from the server ---- */}
         <div className="rounded-xl border border-[#E5E7EB] bg-[#FAFAFA] p-4">
-          {!vehicleId || !serviceId ? (
-            <p className="text-sm text-gray-500">Pick a car and a service to see the price.</p>
+          {!vehicleType || !serviceId ? (
+            <p className="text-sm text-gray-500">Pick a vehicle type and a service to see the price.</p>
           ) : quoting ? (
             <p className="flex items-center gap-2 text-sm text-gray-500">
               <Spinner className="h-4 w-4" /> Working out your price…
@@ -249,7 +163,7 @@ export function PassPurchaseSheet({
               <div className="flex items-baseline justify-between gap-3">
                 <span className="text-sm text-gray-600">
                   {quote.visits} × {quote.service_name}
-                  {chosenVehicle ? ` · ${chosenVehicle.registration_number}` : ""}
+                  {chosenType ? ` · ${chosenType.name}` : ""}
                 </span>
                 <span className="font-mono-num text-xl font-bold text-black">₹{quote.price}</span>
               </div>
@@ -258,9 +172,7 @@ export function PassPurchaseSheet({
                 {quote.discount_percent > 0 ? ` · ${quote.discount_percent}% off vs booking them one by one` : ""} · per month
               </p>
               {blocked && (
-                <p className="mt-2 text-sm text-[var(--color-error)]">
-                  {chosenVehicle?.registration_number || "This car"} already has an active pass. Pick another car.
-                </p>
+                <p className="mt-2 text-sm text-[var(--color-error)]">You already have an active pass for this vehicle type and service. Use it up first, or pick another.</p>
               )}
             </>
           ) : null}
@@ -290,14 +202,9 @@ export function PassPurchaseSheet({
           </div>
         </div>
 
-        {(formError || error) && <p className="text-sm text-[var(--color-error)]">{formError || error}</p>}
+        {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
-        <Button
-          className="w-full"
-          disabled={!canPay}
-          isLoading={isPaying}
-          onClick={() => onConfirm({ vehicleId: vehicleId!, serviceId: serviceId!, autoPay })}
-        >
+        <Button className="w-full" disabled={!canPay} isLoading={isPaying} onClick={() => onConfirm({ vehicleType: vehicleType!, serviceId: serviceId!, autoPay })}>
           {quote ? `Pay ₹${quote.price} & activate` : "Pay & activate"}
         </Button>
         <p className="text-center text-[11px] text-gray-500">

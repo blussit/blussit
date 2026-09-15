@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, useReducedMotion, type Variants } from "framer-motion";
-import { CheckCircle2, Gift, Home, LayoutDashboard, LogIn, ReceiptText } from "lucide-react";
+import { CheckCircle2, CreditCard, Gift, Home, LayoutDashboard, LogIn, ReceiptText } from "lucide-react";
 import { purchaseConfirmationApi } from "../../api/purchaseConfirmation";
 import { Button, Card, CardBody, PageLoader, Spinner } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
@@ -82,6 +82,10 @@ export default function ThankYouPage() {
         scheduled_slot?: string;
         service_label?: string;
         plan_name?: string;
+        service_code?: string | null;
+        payment_link?: string | null;
+        awaiting_payment?: boolean;
+        total_amount?: number;
       }
     | null;
 
@@ -107,14 +111,22 @@ export default function ThankYouPage() {
   const confirmed = confirmation || { type: instant?.type || "booking", payload: instant || {}, reference_id: "" };
   const isSubscription = confirmed.type === "subscription";
   const serviceLabel = confirmed.payload.service_label;
-  const heading = isSubscription ? "Thank You For Subscribing!" : "Thank You For Your Booking!";
+  const serviceCode = confirmed.payload.service_code || instant?.service_code || null;
+  const paymentLink = confirmed.payload.payment_link || instant?.payment_link || null;
+  // Awaiting payment is a fact about the booking, link or no link — a
+  // failed link creation must never read as "confirmed".
+  const awaitingPayment = !!(confirmed.payload.awaiting_payment ?? instant?.awaiting_payment);
+  const totalAmount = confirmed.payload.total_amount ?? instant?.total_amount;
+  const heading = isSubscription ? "Thank You For Subscribing!" : awaitingPayment ? "One Last Step — Pay To Confirm" : "Thank You For Your Booking!";
   const message = isSubscription
     ? confirmed.payload.plan_name
       ? `Your ${confirmed.payload.plan_name} Subscription Is Active. You Can Start Booking Services With It Right Away.`
       : "Your Subscription Is Active. You Can Start Booking Services With It Right Away."
-    : confirmed.payload.booking_number
-      ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot}.`
-      : "Your Booking Is Confirmed. We'll Notify You As Soon As A Captain Is Assigned.";
+    : awaitingPayment
+      ? `Your slot on ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot} is held for 30 minutes. Pay online to confirm it — or we'll release it.`
+      : confirmed.payload.booking_number
+        ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot}.`
+        : "Your Booking Is Confirmed. We'll Notify You As Soon As A Captain Is Assigned.";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg-primary)] p-4">
@@ -191,6 +203,41 @@ export default function ThankYouPage() {
                 Booking ID: {confirmed.payload.booking_number}
               </motion.p>
             )}
+            {/* The one number the customer needs on the day: the captain
+                asks for it on arrival instead of a registration plate. Also
+                sent on WhatsApp with the confirmation. */}
+            {!isSubscription && serviceCode && (
+              <motion.div
+                custom={0.36}
+                variants={contentVariants}
+                initial={shouldReduceMotion ? false : "hidden"}
+                animate="show"
+                className="mt-4 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-4 py-3"
+              >
+                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#B08A00]">Your Service Code</p>
+                <p className="font-mono-num mt-1 text-3xl font-bold tracking-[0.3em] text-black">{serviceCode}</p>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Share this with the captain when they arrive. It's also in your WhatsApp confirmation.</p>
+              </motion.div>
+            )}
+            {awaitingPayment && (
+              <motion.div custom={0.38} variants={contentVariants} initial={shouldReduceMotion ? false : "hidden"} animate="show" className="mt-4">
+                {paymentLink ? (
+                  <>
+                    <a
+                      href={paymentLink}
+                      className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#E8A900] text-sm font-bold text-white shadow-[0_8px_20px_rgba(232,169,0,0.24)] hover:bg-[#D99A00]"
+                    >
+                      <CreditCard className="h-4 w-4" /> Pay {totalAmount ? `₹${totalAmount}` : "Now"} Online
+                    </a>
+                    <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Prefer cash? Open the booking after logging in and choose "pay the captain instead".</p>
+                  </>
+                ) : (
+                  <p className="rounded-xl border border-[#E8A900] bg-[#FFFCF0] px-4 py-3 text-xs text-[var(--color-text-primary)]">
+                    We couldn't set up the online payment link right now. Log in with your number, open this booking under My bookings, and either retry paying online or choose "pay the captain instead" — your slot is held for 30 minutes.
+                  </p>
+                )}
+              </motion.div>
+            )}
 
             <motion.div
               custom={0.4}
@@ -225,10 +272,10 @@ export default function ThankYouPage() {
                 </>
               ) : (
                 <>
-                  {/* Guest-checkout accounts get a random password — the way
-                      in is the OTP reset flow, not a password they never had. */}
-                  <Button className="w-full" onClick={() => navigate("/forgot-password")}>
-                    <LogIn className="h-4 w-4" /> Set Your Password (OTP)
+                  {/* Quick-booking accounts have no password — logging in is
+                      a phone OTP, only if they ever want to see history. */}
+                  <Button className="w-full" onClick={() => navigate("/login")}>
+                    <LogIn className="h-4 w-4" /> Log In With OTP To Track It
                   </Button>
                   <Button variant="outline" className="w-full" onClick={() => navigate("/")}>
                     <Home className="h-4 w-4" /> Return To Website

@@ -246,11 +246,13 @@ class PaymentService:
                 service_id=payload.service_id, vehicle_type=payload.vehicle_type,
             ),
         )
-        if payload.vehicle_id:
-            # A PASS is priced from the car's type and the chosen service —
+        if payload.service_id and (payload.vehicle_id or payload.vehicle_type):
+            # A PASS is priced from the vehicle type and the chosen service —
             # by the same function that will quote it in the purchase sheet,
             # so the customer is never charged a number they weren't shown.
-            quote = await subscriptions.quote_pass(customer_id, payload.plan_id, payload.vehicle_id, payload.service_id)
+            quote = await subscriptions.quote_pass(
+                customer_id, payload.plan_id, payload.vehicle_id, payload.service_id, vehicle_type=payload.vehicle_type
+            )
             price = quote["price"]
             description = f"{plan['name']} — {quote['service_name']}"
         else:
@@ -553,9 +555,14 @@ class PaymentService:
             customer = await self.db.users.find_one({"_id": ObjectId(customer_id)}) if ObjectId.is_valid(customer_id) else None
             first = ((customer or {}).get("full_name") or "there").split(" ")[0]
             vehicle = await self.db.vehicles.find_one({"_id": ObjectId(sub["vehicle_id"])}) if sub.get("vehicle_id") and ObjectId.is_valid(str(sub["vehicle_id"])) else None
+            vt_doc = (
+                await self.db.vehicle_types.find_one({"_id": ObjectId(str(sub["vehicle_type"]))})
+                if not vehicle and sub.get("vehicle_type") and ObjectId.is_valid(str(sub["vehicle_type"]))
+                else None
+            )
             vehicle_label = (
                 f"{vehicle.get('brand', '')} {vehicle.get('model', '')} · {vehicle.get('registration_number', '')}".strip(" ·")
-                if vehicle else "your vehicle"
+                if vehicle else ((vt_doc or {}).get("name") or "your vehicle")
             )
             end = sub.get("end_date")
             valid_till = to_ist(end).strftime("%d %b %Y") if end else "—"

@@ -9,7 +9,6 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  Car,
   Check,
   ChevronRight,
   FileText,
@@ -21,7 +20,7 @@ import {
   Pencil,
   type LucideIcon,
 } from "lucide-react";
-import { userApi, vehicleApi, addressApi } from "../../api/profile";
+import { userApi, addressApi } from "../../api/profile";
 import { authApi } from "../../api/auth";
 import { subscriptionApi } from "../../api/engagement";
 import { Button, Input } from "../../components/ui";
@@ -80,7 +79,6 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 export default function CustomerProfilePage() {
   const { user, logout, refreshUser } = useAuth();
   const confirm = useConfirm();
-  const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: addresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const { data: subs } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const activeSub = (subs || []).find((s) => s.effective_status === "active");
@@ -169,7 +167,6 @@ export default function CustomerProfilePage() {
       </div>
 
       <Group title="Account">
-        <Row icon={Car} label="My vehicles" meta={vehicles?.length ? String(vehicles.length) : undefined} to="/app/vehicles" />
         <Row icon={MapPin} label="Saved addresses" meta={addresses?.length ? String(addresses.length) : undefined} to="/app/addresses" />
         <Row
           icon={Gift}

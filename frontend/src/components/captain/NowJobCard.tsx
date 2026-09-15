@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { MiniPinMap } from "../shared/MiniPinMap";
 import { Badge, Button, Card, StatusBadge } from "../ui";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
-import { ISSUE_LABELS } from "../../lib/constants";
+import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 import { vehicleTypeApi } from "../../api/catalog";
 import type { BookingSlab } from "../../lib/bookingGroups";
@@ -291,8 +291,12 @@ export function NowJobCard({
 
           {/* Every car on the trip, in working order, each with where it
               stands — so "Car 2 · Before photo" on the button below has an
-              obvious referent. Registration is deliberately NOT shown: the
-              verify step exists so the captain types the plate he sees. */}
+              obvious referent. One service code covers the whole visit:
+              once it's entered, the captain taps whichever car the
+              customer wants done first and works through the rest. */}
+          {isVisit && job.vehicle_verified && job.status === "captain_on_the_way" && (
+            <p className="text-xs font-medium text-[#B08A00]">{t("captain.job.pickCarHint")}</p>
+          )}
           {isVisit ? (
             <ul className="divide-y divide-[#F3E5B5] rounded-xl border border-[#F3E5B5]">
               {cars.map((c, i) => {
@@ -318,8 +322,8 @@ export function NowJobCard({
                     <Icon className={cn("h-4 w-4 shrink-0", current ? "text-black" : "text-gray-400")} />
                     <span className="min-w-0 flex-1">
                       <span className={cn("block truncate text-sm", current ? "font-semibold text-black" : "text-[var(--color-text-primary)]")}>
-                        {c.vehicle_snapshot ? `${c.vehicle_snapshot.brand} ${c.vehicle_snapshot.model}` : t("captain.job.vehicleUnavailable")}
-                        {typeOf(c) ? <span className="text-xs text-gray-400"> ({typeOf(c)!.name})</span> : null}
+                        {vehicleLabel(c)}
+                        {typeOf(c) && !vehicleLabel(c).includes(typeOf(c)!.name) ? <span className="text-xs text-gray-400"> ({typeOf(c)!.name})</span> : null}
                       </span>
                       <span className="block truncate text-xs text-[var(--color-text-secondary)]">
                         {c.combo_name || c.service_names?.join(", ") || "—"} · <span className="font-mono-num">₹{c.total_amount}</span>
@@ -344,7 +348,7 @@ export function NowJobCard({
                 return <Icon className="h-4 w-4 shrink-0 text-black" />;
               })()}
               {job.vehicle_snapshot
-                ? `${job.vehicle_snapshot.brand} ${job.vehicle_snapshot.model}${typeOf(job) ? ` (${typeOf(job)!.name})` : ""}`
+                ? `${vehicleLabel(job)}${typeOf(job) && !vehicleLabel(job).includes(typeOf(job)!.name) ? ` (${typeOf(job)!.name})` : ""}`
                 : t("captain.job.vehicleUnavailable")}
             </div>
           )}

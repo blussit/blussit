@@ -2,33 +2,55 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vehicle-icon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The tab icon is the "B" mark cropped straight from blussit-logo.png
+         (the official wordmark) — previously a generic car glyph unrelated
+         to the brand. .ico first for broad browser support, PNG mark as a
+         fallback, plus an iOS home-screen icon. -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" href="/blussit-mark.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- maximum-scale=1 keeps the zoom level fixed — without it, mobile
+         Safari/Chrome auto-zoom the whole page in whenever a form field is
+         focused (below their ~16px auto-zoom threshold) or the layout
+         reflows, which felt like the page "jumping" during booking. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
     <meta name="theme-color" content="#0A0A0A" />
 
-    <title>Blussit | Premium Doorstep Vehicle Care in Indore</title>
-    <meta
-      name="description"
-      content="Blussit brings professional car and bike cleaning to your doorstep in Indore. Book a wash by the slot, or take a monthly pass for one car."
-    />
-    <!-- Canonical is the bare domain, never www — the host is configured to
-         redirect www and http to https://blussit.com. -->
-    <link rel="canonical" href="https://blussit.com/" />
+    <!-- A bare pre-hydration fallback so the tab doesn't sit blank for the
+         instant before React mounts — harmless to duplicate, since browsers
+         just use whichever <title> comes last in the document. NO static
+         description/canonical though: every route (including "/") sets its
+         own through <PageSeo> (see src/components/shared/PageSeo.tsx),
+         sourced from the single src/seo/pages.json list, and a static
+         canonical here alongside a conflicting one from Helmet after
+         hydration is exactly the "multiple canonical tags" situation
+         Google says can make it ignore all of them — that one has to come
+         from the same place for every route, with nothing to conflict. -->
+    <title>Blussit</title>
 
+    <!-- OG/Twitter stay static: link-preview scrapers (WhatsApp, iMessage,
+         Facebook, ...) generally don't run JavaScript, so anything
+         Helmet-only would never reach them. PageSeo adds matching
+         og:title/description/url per route on top of these, for the
+         crawlers that DO run JS — pure upside, no conflict risk like
+         canonical has. -->
     <meta property="og:site_name" content="Blussit" />
-    <meta property="og:title" content="Blussit — Premium Doorstep Vehicle Care" />
+    <meta property="og:title" content="Blussit — Premium Doorstep Car & Bike Wash in Indore" />
     <meta
       property="og:description"
-      content="Professional car and bike cleaning at your doorstep in Indore. Book a slot, or take a monthly pass."
+      content="Book a premium car or bike wash at your doorstep in Indore. Verified captains, transparent pricing — no queues, no driving anywhere."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://blussit.com/" />
     <meta property="og:image" content="https://blussit.com/banner.webp" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Blussit — premium car wash at your doorstep" />
     <meta property="og:locale" content="en_IN" />
 
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Blussit — Premium Doorstep Vehicle Care" />
-    <meta name="twitter:description" content="Professional car and bike cleaning at your doorstep in Indore." />
+    <meta name="twitter:title" content="Blussit — Premium Doorstep Car & Bike Wash in Indore" />
+    <meta name="twitter:description" content="Book a premium car or bike wash at your doorstep in Indore." />
     <meta name="twitter:image" content="https://blussit.com/banner.webp" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -36,19 +58,47 @@
     <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;800&display=swap" rel="stylesheet" />
 
     <!-- Structured data. Deliberately factual only: no ratings, awards or
-         certifications we can't substantiate. areaServed reflects where we
-         actually operate today. -->
+         certifications we can't substantiate here (the AggregateRating on
+         real customer reviews is emitted separately, from live data, on
+         the homepage's Reviews section — see ReviewsShowcase.tsx). Address/
+         phone/hours match the live service center record; update both
+         together if that ever changes. "AutoWash" is schema.org's specific
+         type for car-wash businesses and is what makes this eligible for
+         local/"near me" results, on top of plain Organization/WebSite. -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@graph": [
           {
-            "@type": "Organization",
+            "@type": ["Organization", "LocalBusiness", "AutoWash"],
             "@id": "https://blussit.com/#organization",
             "name": "Blussit",
             "url": "https://blussit.com/",
             "logo": "https://blussit.com/blussit-logo.png",
-            "areaServed": { "@type": "City", "name": "Indore" }
+            "image": "https://blussit.com/banner.webp",
+            "telephone": "+91-8962288774",
+            "email": "contact.blussit@gmail.com",
+            "priceRange": "₹₹",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "AB Road",
+              "addressLocality": "Indore",
+              "addressRegion": "Madhya Pradesh",
+              "postalCode": "452001",
+              "addressCountry": "IN"
+            },
+            "geo": {
+              "@type": "GeoCoordinates",
+              "latitude": 22.68205299918325,
+              "longitude": 75.86653931944844
+            },
+            "areaServed": { "@type": "City", "name": "Indore" },
+            "openingHoursSpecification": {
+              "@type": "OpeningHoursSpecification",
+              "dayOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+              "opens": "07:00",
+              "closes": "19:00"
+            }
           },
           {
             "@type": "WebSite",

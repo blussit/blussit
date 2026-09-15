@@ -23,7 +23,6 @@ import PrivacyPolicyPage from "./pages/public/PrivacyPolicyPage";
 import TermsPage from "./pages/public/TermsPage";
 import BookPage from "./pages/public/BookPage";
 import LoginPage from "./pages/auth/LoginPage";
-import RegisterPage from "./pages/auth/RegisterPage";
 import ForgotPasswordPage from "./pages/auth/ForgotPasswordPage";
 
 const CustomerLayout = lazy(() => import("./pages/customer/CustomerLayout"));
@@ -33,7 +32,6 @@ const MyBookingsPage = lazy(() => import("./pages/customer/MyBookingsPage"));
 const BookingDetailPage = lazy(() => import("./pages/customer/BookingDetailPage"));
 const ThankYouPage = lazy(() => import("./pages/customer/ThankYouPage"));
 const SubscriptionsPage = lazy(() => import("./pages/customer/SubscriptionsPage"));
-const VehiclesPage = lazy(() => import("./pages/customer/VehiclesPage"));
 const AddressesPage = lazy(() => import("./pages/customer/AddressesPage"));
 const SupportPage = lazy(() => import("./pages/customer/SupportPage"));
 
@@ -126,7 +124,6 @@ export default function App() {
 
             <Route element={<GuestOnlyRoute />}>
               <Route path="/login" element={<LoginPage />} />
-              <Route path="/register" element={<RegisterPage />} />
               <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             </Route>
 
@@ -148,7 +145,6 @@ export default function App() {
                 <Route path="bookings" element={<MyBookingsPage />} />
                 <Route path="bookings/:id" element={<BookingDetailPage />} />
                 <Route path="subscriptions" element={<SubscriptionsPage />} />
-                <Route path="vehicles" element={<VehiclesPage />} />
                 <Route path="addresses" element={<AddressesPage />} />
                 <Route path="support" element={<SupportPage />} />
                 <Route path="profile" element={<CustomerProfilePage />} />

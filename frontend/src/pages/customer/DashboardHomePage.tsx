@@ -15,7 +15,6 @@ import { format } from "../../lib/date";
 import { toSlabs } from "../../lib/bookingGroups";
 
 const QUICK_LINKS = [
-  { label: "My vehicles", sub: "Add or manage your cars & bikes", to: "/app/vehicles", icon: Car },
   { label: "My addresses", sub: "Pin the doorsteps we come to", to: "/app/addresses", icon: MapPin },
   { label: "Support", sub: "Raise an issue about a booking", to: "/app/support", icon: LifeBuoy },
 ];

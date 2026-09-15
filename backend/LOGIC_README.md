@@ -211,3 +211,35 @@ matching rebuild — new CleanRide-style theme, a direct booking modal flow,
 dashboard-first routing after login, camera-capture components with
 geolocation, wallet screens, and admin area/pricing management screens —
 which is a substantial follow-up piece of work in its own right.
+
+## Quick-booking model (2026-09)
+
+A booking no longer needs an account, an OTP or a vehicle record:
+
+- `POST /bookings/quick` (public, rate-limited) takes name + phone + address
+  (saved id or new pin/line1/pincode) + `lines` of `{vehicle_type, quantity,
+  service_ids, service_quantities}` + date/slot + payment method. The
+  customer profile is found-or-created by phone
+  (`AuthService.ensure_customer_by_phone`) and the visit is created through
+  `BookingService.create_quick_booking` — one car via `create_booking`, more
+  via `create_booking_group`. `POST /bookings/manager-quick` is the same
+  shape for staff. The WhatsApp bot's confirm step uses the same method.
+- Bookings carry `vehicle_type` / `vehicle_label` directly; `vehicle_id` is
+  optional (legacy). "2 SUVs" = two bookings on one visit; bikes keep the
+  per-bike pricing on one booking. The active-slot unique index is on
+  `visit_line_key` (vehicle_id or `<type>#<line index>`).
+- Every visit gets a 4-digit `service_code` (sent with the WhatsApp
+  confirmation, in the booking-reference template slot). Captains verify
+  arrival with it (`VerifyVehicleRequest.service_code`); plate matching
+  remains only for legacy vehicle_id bookings.
+- OTP is for LOGIN only (customers have no password). The
+  `PhoneNotVerifiedException` gate no longer applies to bookings or
+  subscriptions.
+- Passes are keyed by vehicle TYPE + service (`SubscribeRequest.vehicle_type`
+  + `service_id`, quoted by `quote_pass(..., vehicle_type=)`). A signed-in
+  customer's matching pass is applied automatically by
+  `create_quick_booking`.
+- Online payment on a quick booking: the visit is parked awaiting payment
+  and a Razorpay payment link is returned (`payment_link`) and reminded on
+  WhatsApp; paying it confirms the visit through the existing link
+  callback / sweep.

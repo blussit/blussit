@@ -12,6 +12,12 @@ export interface PurchaseConfirmation {
     scheduled_slot?: string;
     service_label?: string;
     plan_name?: string;
+    /** Quick-booking model: the 4-digit code the captain asks for. */
+    service_code?: string | null;
+    /** Set when the visit was booked "pay online" and is waiting for it. */
+    payment_link?: string | null;
+    awaiting_payment?: boolean;
+    total_amount?: number;
   };
   expires_at: string;
 }

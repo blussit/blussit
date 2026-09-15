@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Droplets, ParkingCircle, ShieldCheck, Sparkles, Wrench } from "lucide-react";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
+import { PageSeo } from "../../components/shared/PageSeo";
 import { catalogApi } from "../../api/catalog";
 import { parseIncludes, titleCase } from "../../components/public/landing/shared";
 
@@ -42,6 +43,7 @@ export default function ServicePolicyPage() {
 
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
+      <PageSeo path="/service-policy" />
       <PublicNavbar />
 
       <main className="container-page py-12 sm:py-16">

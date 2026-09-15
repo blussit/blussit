@@ -110,14 +110,19 @@ async def create_indexes() -> None:
     # The partial filter GREW (awaiting_payment joined the active set) and
     # Mongo won't re-spec a partialFilterExpression in place — drop the
     # original auto-named index once, then build the named replacement.
-    try:
-        await db.bookings.drop_index("customer_id_1_vehicle_id_1_scheduled_date_1_scheduled_slot_1")
-    except Exception:
-        pass
+    for stale in ("customer_id_1_vehicle_id_1_scheduled_date_1_scheduled_slot_1", "uniq_active_customer_slot"):
+        try:
+            await db.bookings.drop_index(stale)
+        except Exception:
+            pass
+    # Keyed on visit_line_key (see BookingModel) rather than vehicle_id:
+    # bookings no longer need a vehicle record, and two SUVs on one visit
+    # must not collide with each other while a double-submitted single
+    # booking still must.
     await db.bookings.create_index(
-        [("customer_id", 1), ("vehicle_id", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
+        [("customer_id", 1), ("visit_line_key", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
         unique=True,
-        name="uniq_active_customer_slot",
+        name="uniq_active_customer_slot_v2",
         partialFilterExpression={"status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
     )
 

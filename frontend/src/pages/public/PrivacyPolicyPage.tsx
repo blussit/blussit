@@ -1,5 +1,6 @@
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
+import { PageSeo } from "../../components/shared/PageSeo";
 
 /**
  * The published privacy policy — also a hard requirement for taking the
@@ -63,6 +64,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
 export default function PrivacyPolicyPage() {
   return (
     <div className="min-h-screen bg-white text-black">
+      <PageSeo path="/privacy-policy" />
       <PublicNavbar />
       <main className="container-page max-w-[820px] py-12 sm:py-16">
         <p className="text-[11px] font-bold tracking-[0.18em] text-[#B08A00]">Policy</p>

@@ -276,7 +276,7 @@ export function DashboardShell({
                 className="h-auto w-[158px] object-contain object-left"
               />
               <span className="mt-0.5 whitespace-nowrap text-[6.5px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
-                Premium Car Wash At Doorstep.
+                Premium Car Wash At Your Doorstep.
               </span>
             </Link>
           ) : (
@@ -369,7 +369,7 @@ export function DashboardShell({
                 className="h-auto w-[104px] object-contain"
               />
               <span className="mt-0.5 whitespace-nowrap text-[5px] font-bold uppercase tracking-[0.08em] text-[#E8A900]">
-                Premium Car Wash At Doorstep.
+                Premium Car Wash At Your Doorstep.
               </span>
             </Link>
           ) : (

@@ -5,6 +5,7 @@ with a safe log-only fallback when no WhatsApp credentials are configured
 (see get_whatsapp_provider) so this all still works end-to-end in dev/test.
 """
 import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 
@@ -57,16 +58,42 @@ class AuthService:
         self.whatsapp = WhatsAppService(db)
         self.sms = SmsService(db)
 
+    async def _whatsapp_can_reach(self, phone: str) -> bool:
+        """Can a WhatsApp OTP actually LAND for this number right now? With an
+        approved OTP template configured, always. Without one, only a
+        free-text message can be sent, and Meta silently drops free text
+        outside an open 24h customer-service window — the send API still
+        says 200, so the only way to know is to check for a recent inbound
+        message from that number ourselves. Saying "no" here is what lets
+        the caller fall back to SMS immediately instead of after a code
+        that never arrives."""
+        from app.core.config import settings
+
+        if settings.WHATSAPP_OTP_TEMPLATE_NAME:
+            return True
+        if settings.WHATSAPP_PROVIDER == "log":
+            return True  # tests / local: the log provider "delivers" everything
+        since = datetime.now(timezone.utc) - timedelta(hours=23, minutes=30)
+        convo = await self.db.whatsapp_conversations.find_one(
+            {"$or": [{"phone": phone}, {"wa_id": f"91{phone}"}, {"wa_id": phone}], "last_inbound_at": {"$gte": since}}
+        )
+        return convo is not None
+
     async def _deliver_otp(self, phone: str, otp: str, purpose: str) -> bool:
-        """OTP delivery with channel fallback: try settings.OTP_CHANNEL
-        first, then the other channel if the first fails or isn't
-        configured. SMS disabled (the default) degrades to exactly the
-        old WhatsApp-only behavior."""
+        """OTP delivery: WhatsApp first, SMS as the fallback (settings.
+        OTP_CHANNEL="sms" flips the order). WhatsApp is skipped outright
+        when it can't reach the number (see _whatsapp_can_reach), so the
+        fallback happens NOW rather than after a code that never lands.
+        Returns False when nothing could be sent — the caller surfaces
+        that as an error and the login page then tries the MSG91 widget
+        (SMS) on its own."""
         from app.core.config import settings
 
         order = ["sms", "whatsapp"] if settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
         for channel in order:
             if channel == "whatsapp":
+                if not await self._whatsapp_can_reach(phone):
+                    continue
                 if await self.whatsapp.send_otp(phone, otp, purpose):
                     return True
             elif channel == "sms" and self.sms.enabled:
@@ -169,6 +196,54 @@ class AuthService:
             # Same check-then-act race as register_customer — see there.
             raise ConflictException("An account with this email or phone number already exists")
         return UserPublic.from_doc(created).model_dump()
+
+    async def ensure_customer_by_phone(self, phone: str, full_name: str) -> dict:
+        """Quick-booking model (2026-09): a booking needs no account up front.
+        The customer profile is found by phone, or created silently from
+        the name + phone typed into the booking — no password (customers
+        log in by OTP only), no must_change_password gate, no OTP before
+        booking. Returns the raw user doc."""
+        from app.utils.phone import validate_indian_mobile
+
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit mobile number")
+        name = " ".join((full_name or "").split())[:100]
+        user = await self.users.find_by_phone(normalized)
+        if user:
+            if user.get("is_deleted"):
+                raise BadRequestException("This number can't be used to book — please contact support.")
+            if user.get("role") != UserRole.CUSTOMER.value:
+                raise BadRequestException("This number belongs to a staff account — use a customer number to book.")
+            if user.get("status") == UserStatus.SUSPENDED.value:
+                raise UnauthorizedException("This account has been suspended. Contact support.")
+            # Fill in a name the profile never had (WhatsApp/quick accounts
+            # start with just a phone); never overwrite one the customer set.
+            if name and not (user.get("full_name") or "").strip():
+                await self.users.update_by_id(str(user["_id"]), {"full_name": name})
+                user["full_name"] = name
+            return user
+
+        user_doc = self._strip_absent_contact_fields({
+            "full_name": name or "Customer",
+            "phone": normalized,
+            # Never a usable password: customers sign in with a phone OTP.
+            "password_hash": hash_password(secrets.token_urlsafe(24)),
+            "role": UserRole.CUSTOMER.value,
+            "status": UserStatus.ACTIVE.value,
+            "referral_code": self._generate_referral_code(name or "USER"),
+            "phone_verified": False,
+            "account_source": "quick_booking",
+        })
+        try:
+            return await self.users.create(user_doc)
+        except DuplicateKeyError:
+            # Two near-simultaneous bookings from the same new number — the
+            # loser of the race just picks up the account the winner made.
+            existing = await self.users.find_by_phone(normalized)
+            if existing:
+                return existing
+            raise ConflictException("An account with this phone number already exists")
 
     LOGIN_MAX_FAILURES = 5
     LOGIN_LOCK_MINUTES = 5

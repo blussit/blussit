@@ -16,8 +16,60 @@ export interface BookingGroupResult {
   confirmation_token?: string;
 }
 
+/** One vehicle TYPE on a quick booking — "2 SUVs, Foam Wash". */
+export interface QuickBookingLine {
+  vehicle_type: string;
+  quantity: number;
+  service_ids: string[];
+  service_quantities?: Record<string, number>;
+}
+
+export interface QuickBookingPayload {
+  customer_name: string;
+  customer_phone: string;
+  /** Exactly one of these. */
+  address_id?: string;
+  address?: {
+    line1: string;
+    landmark?: string;
+    city?: string;
+    state?: string;
+    /** Optional when latitude/longitude are given (pin with no postal code). */
+    pincode?: string;
+    latitude?: number | null;
+    longitude?: number | null;
+  };
+  lines: QuickBookingLine[];
+  scheduled_date: string;
+  scheduled_slot: string;
+  payment_method?: "cash" | "online";
+  customer_notes?: string;
+  alternate_contact_name?: string;
+  alternate_contact_phone?: string;
+  hold_key?: string;
+}
+
+/** What POST /bookings/quick returns — one shape for one car or many. */
+export interface QuickBookingResult {
+  booking_group_id: string | null;
+  bookings: Booking[];
+  vehicle_count: number;
+  total_amount: number;
+  /** The 4-digit code the captain asks for on arrival. */
+  service_code: string | null;
+  booking_numbers: string[];
+  scheduled_date: string;
+  scheduled_slot: string;
+  /** "Pay online" bookings wait for this link to be paid before they're real. */
+  awaiting_payment: boolean;
+  payment_link: string | null;
+  customer_id: string;
+  confirmation_token?: string;
+}
+
 export interface CreateBookingPayload {
-  vehicle_id: string;
+  vehicle_id?: string;
+  vehicle_type?: string;
   address_id: string;
   service_ids?: string[];
   /** Per-unit add-on counts (service_id -> qty) — e.g. Extra Bike Wash ×3. */
@@ -93,6 +145,13 @@ export interface EligibleCaptain {
 
 export const bookingApi = {
   create: (payload: CreateBookingPayload) => apiClient.post<ApiSuccess<Booking>>("/bookings", payload).then((r) => r.data.data),
+
+  /** The quick-booking model: no login, no OTP — name + phone + what/where/when.
+   *  A signed-in customer books under their own account. */
+  quick: (payload: QuickBookingPayload) => apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/quick", payload).then((r) => r.data.data),
+  /** Same shape, booked by a manager/admin on a customer's behalf. */
+  managerQuick: (payload: QuickBookingPayload) =>
+    apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-quick", payload).then((r) => r.data.data),
 
   myBookings: (params?: { status?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Booking>>("/bookings/my", { params }).then((r) => r.data),
@@ -173,8 +232,10 @@ export const bookingApi = {
 
   // "I've reached" + plate check in one press — carries the device GPS so
   // the backend can geofence-check the arrival like it does the photos.
-  verifyVehicle: (id: string, registration_number: string, location?: { latitude: number; longitude: number; accuracy_m?: number }) =>
-    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/verify-vehicle`, { registration_number, ...location }).then((r) => r.data.data),
+  // Quick-booking model: the customer's 4-digit service code is the
+  // arrival check (a plate is accepted only for older saved-vehicle bookings).
+  verifyVehicle: (id: string, check: { service_code?: string; registration_number?: string }, location?: { latitude: number; longitude: number; accuracy_m?: number }) =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/verify-vehicle`, { ...check, ...location }).then((r) => r.data.data),
 
   resolveIssue: (id: string, note?: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/resolve-issue`, { note }).then((r) => r.data.data),

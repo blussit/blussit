@@ -54,7 +54,7 @@ export interface PlanEnquiryPayload {
 }
 
 export const subscriptionApi = {
-  quotePass: (payload: { plan_id: string; vehicle_id: string; service_id: string }) =>
+  quotePass: (payload: { plan_id: string; vehicle_id?: string; vehicle_type?: string; service_id: string }) =>
     apiClient.post<ApiSuccess<PassQuote>>("/subscriptions/quote", payload).then((r) => r.data.data),
   submitEnquiry: (payload: PlanEnquiryPayload) =>
     apiClient.post<ApiSuccess<null>>("/subscriptions/enquiries", payload).then((r) => r.data),

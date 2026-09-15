@@ -22,7 +22,10 @@ def _validate_alt_contact_phone(v: Optional[str]) -> Optional[str]:
 
 
 class BookingCreateRequest(BaseModel):
-    vehicle_id: str
+    # Exactly one of these: a saved vehicle record (older flows) or just the
+    # VEHICLE TYPE (quick booking — no plate, no brand/model).
+    vehicle_id: Optional[str] = None
+    vehicle_type: Optional[str] = None
     address_id: str
     service_ids: list[str] = Field(default_factory=list)
     # Per-unit add-on counts (service_id -> qty), e.g. Extra Bike Wash ×3 or
@@ -44,6 +47,97 @@ class BookingCreateRequest(BaseModel):
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
 
+    @model_validator(mode="after")
+    def _vehicle_or_type(self) -> "BookingCreateRequest":
+        if bool(self.vehicle_id) == bool(self.vehicle_type):
+            raise ValueError("Provide exactly one of vehicle_id or vehicle_type")
+        return self
+
+
+class QuickAddress(BaseModel):
+    """Where the captain comes to — a pinned point (the LocationPicker)
+    plus the pincode that routes it to a service center. line1 is the
+    resolved label of that pin, or the typed address in the no-maps
+    fallback."""
+    line1: str = Field(min_length=3, max_length=300)
+    landmark: Optional[str] = Field(default=None, max_length=200)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    # Optional ONLY with a pin: a reverse-geocode can come back without a
+    # postal code, and the pin alone is enough to route the booking.
+    pincode: Optional[str] = Field(default=None, max_length=10)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _pin_or_pincode(self) -> "QuickAddress":
+        pin = (self.pincode or "").strip()
+        if pin and len(pin) < 4:
+            raise ValueError("Enter a valid pincode")
+        if not pin and (self.latitude is None or self.longitude is None):
+            raise ValueError("Enter the pincode or pin the location on the map")
+        self.pincode = pin or None
+        return self
+
+
+class QuickBookingLine(BaseModel):
+    """One vehicle TYPE on the visit: "2 SUVs, Foam Wash". quantity > 1
+    becomes that many bookings, each with the same service(s)."""
+    vehicle_type: str
+    quantity: int = Field(default=1, ge=1, le=10)
+    service_ids: list[str] = Field(min_length=1)
+    service_quantities: dict[str, int] = Field(default_factory=dict)
+
+
+class QuickBookingRequest(BaseModel):
+    """The whole booking in one request, no account needed up front
+    (2026-09 quick-booking model): who (name + phone), what (vehicle types
+    + services), where (address) and when (date + slot). The customer
+    profile is found or created from the phone silently; nothing here
+    requires a login or an OTP. The same shape serves the website, the
+    WhatsApp bot and a manager booking on a customer's behalf."""
+    customer_name: str = Field(min_length=2, max_length=100)
+    customer_phone: str = Field(min_length=10, max_length=20)
+    # A saved address (logged-in customer / manager picking one) OR a new
+    # one — exactly one.
+    address_id: Optional[str] = None
+    address: Optional[QuickAddress] = None
+    lines: list[QuickBookingLine] = Field(min_length=1)
+    scheduled_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    scheduled_slot: str = Field(max_length=20)
+    payment_method: PaymentMethod = PaymentMethod.CASH
+    customer_notes: Optional[str] = Field(default=None, max_length=500)
+    alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
+    alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
+    hold_key: Optional[str] = Field(default=None, max_length=80)
+
+    _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+
+    @field_validator("customer_phone")
+    @classmethod
+    def _phone(cls, v: str) -> str:
+        phone = validate_indian_mobile(v)
+        if not phone:
+            raise ValueError("Enter a valid 10-digit mobile number")
+        return phone
+
+    @field_validator("customer_name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) < 2:
+            raise ValueError("Enter your name")
+        return v
+
+    @model_validator(mode="after")
+    def _one_address(self) -> "QuickBookingRequest":
+        if bool(self.address_id) == bool(self.address):
+            raise ValueError("Provide exactly one of address_id or address")
+        total = sum(line.quantity for line in self.lines)
+        if total > 10:
+            raise ValueError("You can book up to 10 vehicles on one visit")
+        return self
+
 
 class ManagerBookingCreateRequest(BaseModel):
     """A manager/admin creating a booking on behalf of a customer (new or
@@ -53,6 +147,8 @@ class ManagerBookingCreateRequest(BaseModel):
     customer_id: str
     vehicle_id: Optional[str] = None
     new_vehicle: Optional[VehicleCreateRequest] = None
+    # Quick-booking model: just the vehicle TYPE, no record at all.
+    vehicle_type: Optional[str] = None
     address_id: Optional[str] = None
     new_address: Optional[AddressCreateRequest] = None
     service_ids: list[str] = Field(default_factory=list)
@@ -71,8 +167,8 @@ class ManagerBookingCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_vehicle_and_address(self) -> "ManagerBookingCreateRequest":
-        if bool(self.vehicle_id) == bool(self.new_vehicle):
-            raise ValueError("Provide exactly one of vehicle_id or new_vehicle")
+        if sum(bool(x) for x in (self.vehicle_id, self.new_vehicle, self.vehicle_type)) != 1:
+            raise ValueError("Provide exactly one of vehicle_id, new_vehicle or vehicle_type")
         if bool(self.address_id) == bool(self.new_address):
             raise ValueError("Provide exactly one of address_id or new_address")
         return self
@@ -95,13 +191,25 @@ class GroupVehicleRequest(BaseModel):
     service. Everything shared by the visit (where, when, how it's paid for)
     lives on BookingGroupCreateRequest."""
 
-    vehicle_id: str
+    vehicle_id: Optional[str] = None
+    # Quick-booking model: a vehicle TYPE instead of a record; quantity > 1
+    # expands to that many cars with the same service(s).
+    vehicle_type: Optional[str] = None
+    quantity: int = Field(default=1, ge=1, le=10)
     service_ids: list[str] = []
     service_quantities: dict[str, int] = Field(default_factory=dict)
     combo_id: Optional[str] = None
     # This car's own pass, if it has one. A pass belongs to one car, so a
     # customer with two passes gets two cars covered and pays for the rest.
     subscription_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _vehicle_or_type(self) -> "GroupVehicleRequest":
+        if bool(self.vehicle_id) == bool(self.vehicle_type):
+            raise ValueError("Provide exactly one of vehicle_id or vehicle_type")
+        if self.vehicle_id and self.quantity != 1:
+            raise ValueError("quantity applies to vehicle_type lines only")
+        return self
 
 
 class BookingGroupCreateRequest(BaseModel):
@@ -182,10 +290,20 @@ class VerifyVehicleRequest(BaseModel):
     This is also the "I've reached" moment, so it carries the device's GPS
     (geofence-checked against the customer's address like the photos).
     Coordinates are optional only for old app versions still in the field."""
-    registration_number: str = Field(min_length=3, max_length=20)
+    # Quick-booking model: the 4-digit service code the customer received
+    # on confirmation. registration_number remains only for bookings made
+    # under the older saved-vehicle flow.
+    service_code: Optional[str] = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
+    registration_number: Optional[str] = Field(default=None, min_length=3, max_length=20)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     accuracy_m: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _code_or_plate(self) -> "VerifyVehicleRequest":
+        if not self.service_code and not self.registration_number:
+            raise ValueError("Enter the customer's 4-digit service code")
+        return self
 
 
 class ResolveIssueRequest(BaseModel):

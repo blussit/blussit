@@ -313,7 +313,7 @@ export interface Booking {
   confirmation_token?: string;
   // Booking channel: "app" | "whatsapp" | "staff" — display metadata only.
   source?: string;
-  vehicle_id: string;
+  vehicle_id?: string | null;
   address_id: string;
   service_center_id: string;
   captain_id?: string | null;
@@ -383,12 +383,22 @@ export interface Booking {
   // Denormalized onto the response for display — see BookingService._enrich_bookings.
   customer_name?: string | null;
   customer_phone?: string | null;
+  /** Always present on an enriched booking. Quick-booking model: a booking
+   *  is for a vehicle TYPE, so brand/model/registration are null and
+   *  `label` ("SUV") is what to show; older saved-vehicle bookings carry
+   *  all four plus a "Brand Model" label. */
   vehicle_snapshot?: {
-    vehicle_type: VehicleType;
-    brand: string;
-    model: string;
-    registration_number: string;
+    vehicle_type: VehicleType | null;
+    brand: string | null;
+    model: string | null;
+    registration_number: string | null;
+    label?: string | null;
   } | null;
+  /** Denormalized on every new booking (quick-booking model). */
+  vehicle_type?: string | null;
+  vehicle_label?: string | null;
+  /** 4-digit code the captain asks for on arrival — one per visit. */
+  service_code?: string | null;
   travel_distance_km?: number | null;
   travel_eta_minutes?: number | null;
   address_snapshot?: {

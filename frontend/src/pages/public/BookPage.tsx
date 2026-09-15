@@ -1,24 +1,17 @@
-import { type CSSProperties, useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { type CSSProperties } from "react";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
-import { PublicBookingWizard, type WizardPreselect } from "../../components/public/PublicBookingWizard";
+import { PageSeo } from "../../components/shared/PageSeo";
+import { QuickBookFlow } from "../../components/booking/QuickBookFlow";
+import { useAuth } from "../../context/AuthContext";
 
+/**
+ * /book — the public booking page. No login wall: the two-step quick flow
+ * books straight from a name and phone number. A signed-in customer who
+ * lands here gets the same flow with their details prefilled.
+ */
 export default function BookPage() {
-  const [searchParams] = useSearchParams();
-  const [preselect, setPreselect] = useState<WizardPreselect | null>(null);
-
-  useEffect(() => {
-    const serviceId = searchParams.get("serviceId");
-    if (serviceId) {
-      setPreselect({ serviceId });
-    }
-  }, [searchParams]);
-
-  // Keep /book mounted even after guest registration logs the customer in.
-  // Redirecting at that moment unmounted the OTP modal and could also change
-  // hook order, leaving the page blank right after "Verify And Book".
-
+  const { user } = useAuth();
   const themeScope = {
     "--color-primary": "#000000",
     "--color-primary-dark": "#000000",
@@ -28,12 +21,11 @@ export default function BookPage() {
 
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
+      <PageSeo path="/book" />
       <PublicNavbar />
-      {/* The wizard shell carries its own title/step rail — the page just
-          gives it a white ground and breathing room, same as after login. */}
       <div className="bg-white pb-12 pt-8 sm:pt-12">
         <div className="container-page">
-          <PublicBookingWizard preselect={preselect} />
+          <QuickBookFlow mode={user?.role === "customer" ? "customer" : "public"} />
         </div>
       </div>
       <PublicFooter />

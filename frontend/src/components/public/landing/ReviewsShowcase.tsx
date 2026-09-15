@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
+import { Helmet } from "react-helmet-async";
 import { Star } from "lucide-react";
 import { contentApi } from "../../../api/catalog";
 import { SectionHeader, SectionShell } from "./shared";
 import { AutoRail } from "./AutoRail";
+import seoConfig from "../../../seo/pages.json";
 
 interface ReviewItem {
   id: string;
@@ -18,10 +20,35 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
   // Honesty over decoration: this section used to show three HARDCODED
   // fake reviews forever (no admin surface exists yet to add real ones).
   // Until real testimonials are seeded, the section simply doesn't render.
+  // That same rule applies to the AggregateRating schema below — it's
+  // built from this exact list, so it only ever appears alongside reviews
+  // that are actually visible here, never as a number invented for SEO.
   if (!reviews.length) return null;
+
+  const average = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "LocalBusiness",
+    name: "Blussit",
+    url: seoConfig.siteUrl + "/",
+    aggregateRating: {
+      "@type": "AggregateRating",
+      ratingValue: average.toFixed(1),
+      reviewCount: reviews.length,
+    },
+    review: reviews.map((r) => ({
+      "@type": "Review",
+      author: { "@type": "Person", name: r.customer_name },
+      reviewRating: { "@type": "Rating", ratingValue: r.rating, bestRating: 5 },
+      reviewBody: r.comment,
+    })),
+  };
 
   return (
     <SectionShell id={id} className="border-t border-cream-line-soft bg-white">
+      <Helmet>
+        <script type="application/ld+json">{JSON.stringify(jsonLd)}</script>
+      </Helmet>
       <SectionHeader title="What customers say" subtitle="Real doorstep washes, in their own words." />
 
       {/* Auto-advancing swipe row on phones, grid from tablet up */}

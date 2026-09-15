@@ -57,7 +57,7 @@ export default function AdminLayout() {
     item.to === "/admin/whatsapp" ? { ...item, badge: waBadge?.unread_conversations || 0 } : item,
   );
   return (
-    <DashboardShell navItems={items} portalLabel="Super Admin">
+    <DashboardShell navItems={items} portalLabel="Super Admin" brand>
       <Outlet />
     </DashboardShell>
   );

@@ -4,7 +4,7 @@ from bson import ObjectId
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, PhoneNotVerifiedException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.models.enums import BillingCycle, SubscriptionStatus
 from app.repositories.catalog_repository import ServiceRepository
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
@@ -200,17 +200,12 @@ class UserSubscriptionService:
         return _with_effective_statuses(subs)
 
     async def subscribe(self, customer_id: str, payload: SubscribeRequest, razorpay_subscription_id: str | None = None) -> dict:
-        # Same phone-verification gate as a customer's first self-service
-        # booking (BookingService.create_booking) — a subscription is a
-        # real purchase too. assign() (manager/admin granting a plan) is
-        # a completely separate method and is never gated by this.
+        # A purchase needs a signed-in customer (the route enforces that);
+        # customers sign in by phone OTP, so there is no separate
+        # verification gate here any more (2026-09 quick model).
         customer = await self.user_repo.find_by_id(customer_id)
         if not customer:
             raise NotFoundException("Customer not found")
-        from app.services.auth_service import AuthService
-
-        if not AuthService.phone_verification_fresh(customer):
-            raise PhoneNotVerifiedException("Please verify your phone number with an OTP before purchasing a subscription.")
         return await self._create_subscription(
             customer_id, payload.plan_id, payload.auto_renew, payload.vehicle_type, razorpay_subscription_id,
             vehicle_id=payload.vehicle_id, service_id=payload.service_id,
@@ -224,10 +219,6 @@ class UserSubscriptionService:
         customer = await self.user_repo.find_by_id(customer_id)
         if not customer:
             raise NotFoundException("Customer not found")
-        from app.services.auth_service import AuthService
-
-        if not AuthService.phone_verification_fresh(customer):
-            raise PhoneNotVerifiedException("Please verify your phone number with an OTP before purchasing a subscription.")
         plan = await self.plan_repo.find_by_id(payload.plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
@@ -235,6 +226,9 @@ class UserSubscriptionService:
             # Pass purchase: the car and the service are the whole spec, and
             # both are re-validated here BEFORE any money moves.
             await self._resolve_pass_target(customer_id, plan, payload.vehicle_id, payload.service_id)
+        elif payload.vehicle_type and payload.service_id:
+            # 2026-09 pass model: a vehicle TYPE + one service.
+            await self._resolve_pass_service(plan, payload.vehicle_type, payload.service_id)
         elif payload.vehicle_type:
             vt_doc = await self.vehicle_type_repo.find_by_id(payload.vehicle_type)
             if not vt_doc or not vt_doc.get("is_active", True):
@@ -242,7 +236,7 @@ class UserSubscriptionService:
             plan_types = plan.get("vehicle_types") or []
             if plan_types and payload.vehicle_type not in plan_types:
                 raise BadRequestException("This plan isn't sold for that vehicle type.")
-        await self._guard_duplicate_pass(customer_id, payload.plan_id, plan, payload.vehicle_id)
+        await self._guard_duplicate_pass(customer_id, payload.plan_id, plan, payload.vehicle_id, payload.vehicle_type, payload.service_id)
 
     async def assign(self, payload: AssignSubscriptionRequest) -> dict:
         """Manager/admin granting a subscription to a customer directly —
@@ -280,17 +274,20 @@ class UserSubscriptionService:
             # The CAR's own type prices the pass — never a type the client
             # sent alongside it.
             vehicle_type = vehicle.get("vehicle_type")
+        elif vehicle_type and service_id:
+            # 2026-09 pass model: a vehicle TYPE + one service, no car record.
+            service = await self._resolve_pass_service(plan, vehicle_type, service_id)
 
         # Re-checked HERE, not only in validate_purchase, because this is the
         # last gate before a pass is actually created, whichever path got
         # here (a verified payment, a staff grant, a second tab racing the
         # first).
-        await self._guard_duplicate_pass(customer_id, plan_id, plan, vehicle_id)
+        await self._guard_duplicate_pass(customer_id, plan_id, plan, vehicle_id, vehicle_type, service_id if service else None)
 
         # LEGACY tier path: which vehicle type this card is being paid for
         # when no specific car was named. Validated against the real
         # vehicle-type catalog and the plan's own covered-type list.
-        if vehicle_type and not vehicle_id:
+        if vehicle_type and not vehicle_id and not service:
             vt_doc = await self.vehicle_type_repo.find_by_id(vehicle_type)
             if not vt_doc or not vt_doc.get("is_active", True):
                 raise BadRequestException("Pick a valid vehicle type for this plan.")
@@ -348,7 +345,7 @@ class UserSubscriptionService:
             return None
         return await self.plan_repo.find_by_id(sub["plan_id"])
 
-    async def plan_consumption(self, subscription_id: str, vehicle_id: str, services: list[dict], customer_id: str) -> dict:
+    async def plan_consumption(self, subscription_id: str, vehicle_id: str | None, services: list[dict], customer_id: str, vehicle_type: str | None = None) -> dict:
         """Validates the subscription can actually cover this booking's
         services and computes exactly what WOULD be deducted, without
         writing anything yet. Falls back to the flat counter for older
@@ -375,16 +372,29 @@ class UserSubscriptionService:
             raise NotFoundException("Subscription not found")
         plan = await self.plan_repo.find_by_id(sub["plan_id"])
 
-        # ---- PASS PATH: one named car, one named service ----------------
+        # ---- PASS PATH: one vehicle TYPE (2026-09 model) or one named car
+        # (older passes), one named service -------------------------------
         named_vehicle = sub.get("vehicle_id")
         covered_service_id = sub.get("service_id")
-        if named_vehicle and covered_service_id:
-            if vehicle_id != named_vehicle:
+        pass_type = sub.get("vehicle_type")
+        if covered_service_id and (named_vehicle or pass_type):
+            if named_vehicle and vehicle_id and vehicle_id != named_vehicle:
                 owner_vehicle = await self.vehicle_repo.find_by_id(named_vehicle)
                 plate = (owner_vehicle or {}).get("registration_number") or "another car"
                 raise BadRequestException(
                     f"This pass belongs to {plate}. Book that car with it, or book this one as a normal service."
                 )
+            if not named_vehicle or not vehicle_id:
+                # Type-scoped pass: the booking's vehicle type must be the
+                # pass's type or a type the plan prices cheaper.
+                booking_type = vehicle_type
+                if not booking_type and vehicle_id:
+                    v = await self.vehicle_repo.find_by_id(vehicle_id)
+                    booking_type = (v or {}).get("vehicle_type")
+                if pass_type and booking_type != pass_type and not (plan and tier_allows(plan, pass_type, booking_type)):
+                    raise BadRequestException(
+                        "This pass was bought for a different vehicle type. Book that type with it, or book this one as a normal service."
+                    )
             def _sid(service: dict) -> str:
                 return str(service.get("_id") or service.get("id") or "")
 
@@ -413,13 +423,16 @@ class UserSubscriptionService:
         allowed_types = (plan or {}).get("vehicle_types") or []
         purchased_type = sub.get("vehicle_type")
         if allowed_types or purchased_type:
-            vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
-            if not vehicle or (allowed_types and vehicle["vehicle_type"] not in allowed_types):
+            booking_type = vehicle_type
+            if not booking_type and vehicle_id:
+                vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
+                booking_type = (vehicle or {}).get("vehicle_type")
+            if not booking_type or (allowed_types and booking_type not in allowed_types):
                 raise BadRequestException("This subscription doesn't cover this vehicle's type and can't be used for this booking.")
             # Tier cap: a plan bought at hatchback price can't wash an SUV.
             # The other direction (bigger tier used on a smaller vehicle) is
             # allowed and still burns one full visit — the buyer's call.
-            if plan and not tier_allows(plan, purchased_type, vehicle["vehicle_type"]):
+            if plan and not tier_allows(plan, purchased_type, booking_type):
                 raise BadRequestException(
                     "Your plan was purchased for a smaller vehicle type — it works for that type and below. "
                     "Book this vehicle normally, or upgrade your plan."
@@ -550,33 +563,84 @@ class UserSubscriptionService:
             )
         return vehicle, service
 
-    async def quote_pass(self, customer_id: str, plan_id: str, vehicle_id: str, service_id: str) -> dict:
+    async def _resolve_pass_service(self, plan: dict, vehicle_type: str, service_id: str | None) -> dict:
+        """2026-09 pass model — the two things a pass is: a vehicle TYPE
+        and ONE service. Validates both against the catalog and the plan's
+        own menu; returns the service doc."""
+        vt_doc = await self.vehicle_type_repo.find_by_id(vehicle_type)
+        if not vt_doc or not vt_doc.get("is_active", True):
+            raise BadRequestException("Pick a valid vehicle type for this pass.")
+        plan_types = plan.get("vehicle_types") or []
+        if plan_types and vehicle_type not in plan_types:
+            raise BadRequestException("This pass isn't sold for that vehicle type.")
+        menu = plan.get("included_service_ids") or []
+        if not service_id:
+            raise BadRequestException("Choose which service this pass should cover.")
+        if menu and service_id not in menu:
+            raise BadRequestException("That service isn't available on this pass.")
+        service = await self.service_repo.find_by_id(service_id)
+        if not service or not service.get("is_active", True) or service.get("is_addon"):
+            raise BadRequestException("That service isn't available on this pass.")
+        service_types = service.get("vehicle_types") or []
+        if service_types and vehicle_type not in service_types:
+            raise BadRequestException(f"{service.get('name')} isn't offered for {vt_doc.get('name') or 'this vehicle type'}.")
+        return service
+
+    async def _active_pass_for_type(self, customer_id: str, vehicle_type: str, service_id: str) -> dict | None:
+        """The live pass this customer already holds for this vehicle type
+        + service, if any."""
+        subs = await self.repo.collection.find(
+            {
+                "customer_id": customer_id,
+                "vehicle_type": vehicle_type,
+                "service_id": service_id,
+                "status": SubscriptionStatus.ACTIVE.value,
+                "is_deleted": {"$ne": True},
+            }
+        ).to_list(length=50)
+        now = now_ist()
+        for candidate in subs:
+            end = candidate.get("end_date")
+            if end is None or end.replace(tzinfo=timezone.utc) > now:
+                return candidate
+        return None
+
+    async def quote_pass(self, customer_id: str, plan_id: str, vehicle_id: str | None, service_id: str, vehicle_type: str | None = None) -> dict:
         """What this pass would cost — priced by the SAME code that charges
         for it, so the number in the purchase sheet is the number on the
-        card. Read-only; buys nothing."""
+        card. Read-only; buys nothing. Quoted for a saved car (older flow)
+        or straight for a vehicle TYPE (2026-09 model)."""
         plan = await self.plan_repo.find_by_id(plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
-        vehicle, service = await self._resolve_pass_target(customer_id, plan, vehicle_id, service_id)
-        existing = await self._active_pass_for_vehicle(customer_id, vehicle_id)
+        if vehicle_id:
+            vehicle, service = await self._resolve_pass_target(customer_id, plan, vehicle_id, service_id)
+            vt = vehicle.get("vehicle_type")
+            existing = await self._active_pass_for_vehicle(customer_id, vehicle_id)
+        else:
+            if not vehicle_type:
+                raise BadRequestException("Pick a vehicle type for this pass.")
+            service = await self._resolve_pass_service(plan, vehicle_type, service_id)
+            vt = vehicle_type
+            existing = await self._active_pass_for_type(customer_id, vehicle_type, service_id)
         return {
             "plan_id": plan_id,
             "plan_name": plan.get("name"),
             "vehicle_id": vehicle_id,
-            "vehicle_type": vehicle.get("vehicle_type"),
+            "vehicle_type": vt,
             "service_id": service_id,
             "service_name": service.get("name"),
             "visits": int(plan.get("total_service_count") or 1),
-            "price_per_wash": service_price_for_type(service, vehicle.get("vehicle_type")),
-            "price": resolve_pass_price(plan, service, vehicle.get("vehicle_type")),
+            "price_per_wash": service_price_for_type(service, vt),
+            "price": resolve_pass_price(plan, service, vt),
             # An admin-set price has no "% off" story to tell — the UI shows
             # the figure plainly instead of inventing a saving.
             "discount_percent": (
                 0.0
-                if pass_price_override(plan, service, vehicle.get("vehicle_type")) is not None
+                if pass_price_override(plan, service, vt) is not None
                 else float(plan.get("plan_discount_percent") or 0.0)
             ),
-            # So the sheet can say "this car already has a pass" instead of
+            # So the sheet can say "you already have this pass" instead of
             # only finding out when the payment is refused.
             "vehicle_has_pass": existing is not None,
         }
@@ -621,12 +685,28 @@ class UserSubscriptionService:
                 return candidate
         return None
 
-    async def _guard_duplicate_pass(self, customer_id: str, plan_id: str, plan: dict, vehicle_id: str | None) -> None:
+    async def _guard_duplicate_pass(
+        self, customer_id: str, plan_id: str, plan: dict, vehicle_id: str | None,
+        vehicle_type: str | None = None, service_id: str | None = None,
+    ) -> None:
         """Founder rule: ONE CAR CARRIES ONE PASS. Buy as many passes as you
         have cars — never two on the same car, whatever plan they're on,
         because a second pass on one car is money the customer can't spend
-        any faster. For pre-pass subscriptions (no car named) the older
-        one-copy-per-plan rule still applies."""
+        any faster. 2026-09 model: the same rule per vehicle TYPE + service
+        (a second SUV foam-wash pass can't be spent any faster either). For
+        pre-pass subscriptions (no car named) the older one-copy-per-plan
+        rule still applies."""
+        if not vehicle_id and vehicle_type and service_id:
+            existing = await self._active_pass_for_type(customer_id, vehicle_type, service_id)
+            if not existing:
+                return
+            end = existing.get("end_date")
+            until = f" until {from_stored(end).strftime('%d %b %Y')}" if end else ""
+            left = existing.get("remaining_service_count") or 0
+            raise BadRequestException(
+                f"You already have an active pass for this vehicle type and service ({left} wash{'' if left == 1 else 'es'} left{until}). "
+                "Use it up or let it expire first."
+            )
         if vehicle_id:
             existing = await self._active_pass_for_vehicle(customer_id, vehicle_id)
             if not existing:

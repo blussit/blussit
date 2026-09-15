@@ -50,53 +50,76 @@ def _register_wa_cleanup(cleanup, wa_id, phone):
     cleanup.append(("users", {"phone": phone}))
 
 
-async def _to_reg_step(bot, db, wa_id, hatchback):
+async def _to_count_step(bot, db, wa_id, hatchback):
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
     await bot.handle_webhook(wa_payload(wa_id, text="WA Tester"))  # brand-new number: name first
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
     await bot.handle_webhook(wa_payload(wa_id, reply=f"vt:{hatchback}"))
-    await bot.handle_webhook(wa_payload(wa_id, text="Maruti Swift"))
 
 
 @pytest.mark.asyncio
-async def test_invalid_registration_is_reasked_with_format_help(rig, db, cleanup):
+async def test_invalid_count_is_reasked_then_typed_number_accepted(rig, db, cleanup):
+    """"How many?" takes a tap (1/2/3) OR a typed number; anything else is
+    re-asked once with the hint, and a typed "2" then moves on to the
+    service list (with what's included sent as text first)."""
     wa_id, phone = "918887772001", "8887772001"
     _register_wa_cleanup(cleanup, wa_id, phone)
     bot = WhatsAppBotService(db)
-    await _to_reg_step(bot, db, wa_id, rig["hatchback"])
+    await _to_count_step(bot, db, wa_id, rig["hatchback"])
 
-    await bot.handle_webhook(wa_payload(wa_id, text="not a plate"))
+    await bot.handle_webhook(wa_payload(wa_id, text="lots"))
     out = await last_out(db, phone)
-    assert "doesn't look like a valid registration" in out["message"]
-    # Still on the same step: a VALID plate now goes through.
-    await bot.handle_webhook(wa_payload(wa_id, text="dl 1c xy 9876"))
-    user = await db.users.find_one({"phone": phone})
-    cleanup.append(("vehicles", {"owner_id": str(user["_id"])}))
-    vehicle = await db.vehicles.find_one({"owner_id": str(user["_id"])})
-    assert vehicle and vehicle["registration_number"] == "DL1CXY9876"
+    assert "Tap 1, 2 or 3" in out["message"]
+    await bot.handle_webhook(wa_payload(wa_id, text="2"))
+    recent = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(length=2)
+    assert recent[0]["interactive_kind"] == "list"
+    assert any(r["id"].startswith("svc:") for r in recent[0]["options"])
+    assert "includes" in (recent[1].get("message") or "").lower()
+    convo = await db.whatsapp_conversations.find_one({"wa_id": wa_id})
+    assert convo["data"]["cur"]["count"] == 2
 
 
 @pytest.mark.asyncio
-async def test_already_added_car_is_reused_not_duplicated(rig, db, cleanup):
+async def test_book_again_replays_the_last_visit(rig, db, cleanup):
+    """A returning customer gets a "Book again" button; tapping it replays
+    the last visit's vehicles, services and address and jumps straight to
+    picking a time — no questions in between."""
+    from datetime import datetime
+
+    from app.schemas.booking_schema import QuickAddress, QuickBookingLine, QuickBookingRequest
+    from app.services.auth_service import AuthService
+    from app.services.booking_service import BookingService
+
     wa_id, phone = "918887772002", "8887772002"
     _register_wa_cleanup(cleanup, wa_id, phone)
-    bot = WhatsAppBotService(db)
-    await _to_reg_step(bot, db, wa_id, rig["hatchback"])
-    await bot.handle_webhook(wa_payload(wa_id, text="MP09ZZ7777"))
-    user = await db.users.find_one({"phone": phone})
-    cleanup.append(("vehicles", {"owner_id": str(user["_id"])}))
-    assert await db.vehicles.count_documents({"owner_id": str(user["_id"])}) == 1
+    cleanup.append(("bookings", {"customer_phone": phone}))
+    cleanup.append(("addresses", {"line1": "9 Again Street"}))
+    customer = await AuthService(db).ensure_customer_by_phone(phone, "Again Tester")
+    when = (now_ist().date() + timedelta(days=1)).isoformat()
+    await BookingService(db).create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Again Tester", customer_phone=phone,
+            address=QuickAddress(line1="9 Again Street", pincode="452099"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["foam"]])],
+            scheduled_date=when, scheduled_slot="15:00-18:00",
+        ),
+        customer=customer, source="app", allow_pinless=True,
+    )
+    assert datetime.strptime(when, "%Y-%m-%d")
 
-    # Try to add the SAME car again (with different separators).
-    await bot.handle_webhook(wa_payload(wa_id, text="menu"))
-    await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
-    await bot.handle_webhook(wa_payload(wa_id, reply="veh:new"))
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"vt:{rig['hatchback']}"))
-    await bot.handle_webhook(wa_payload(wa_id, text="Maruti Swift"))
-    await bot.handle_webhook(wa_payload(wa_id, text="mp 09 zz 7777"))
-    assert await db.vehicles.count_documents({"owner_id": str(user["_id"])}) == 1  # no duplicate
-    out = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(length=3)
-    assert any("already saved on your account" in (o.get("message") or "") for o in out)
+    bot = WhatsAppBotService(db)
+    await bot.handle_webhook(wa_payload(wa_id, text="hi"))
+    out = await last_out(db, phone)
+    assert "menu:again" in {b["id"] for b in out["options"]}
+    await bot.handle_webhook(wa_payload(wa_id, reply="menu:again"))
+    recent = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(length=2)
+    assert recent[0]["interactive_kind"] == "list"
+    assert all(r["id"].startswith("when:") for r in recent[0]["options"])
+    assert "Same as last time" in (recent[1].get("message") or "")
+    convo = await db.whatsapp_conversations.find_one({"wa_id": wa_id})
+    assert convo["state"] == "q_when"
+    assert convo["data"]["lines"][0]["vehicle_type"] == rig["hatchback"]
+    assert convo["data"]["address_id"]
 
 
 @pytest.mark.asyncio
@@ -145,24 +168,22 @@ async def test_my_bookings_readable_list_and_reschedule_flow(rig, db, cleanup):
     _register_wa_cleanup(cleanup, wa_id, phone)
     bot = WhatsAppBotService(db)
 
-    # Book something first, through the bot itself.
-    await _to_reg_step(bot, db, wa_id, rig["hatchback"])
-    await bot.handle_webhook(wa_payload(wa_id, text="MP09YY5555"))
+    # Book something first, through the bot itself (quick flow).
+    await _to_count_step(bot, db, wa_id, rig["hatchback"])
+    await bot.handle_webhook(wa_payload(wa_id, reply="cnt:1"))
     user = await db.users.find_one({"phone": phone})
-    cleanup.append(("vehicles", {"owner_id": str(user["_id"])}))
     cleanup.append(("addresses", {"owner_id": str(user["_id"])}))
     cleanup.append(("bookings", {"customer_id": str(user["_id"])}))
     cleanup.append(("notifications", {"user_id": str(user["_id"])}))
     cleanup.append(("purchase_confirmations", {"customer_id": str(user["_id"])}))
     await bot.handle_webhook(wa_payload(wa_id, reply=f"svc:{rig['foam']}"))
+    await bot.handle_webhook(wa_payload(wa_id, reply="more:no"))
     await bot.handle_webhook(wa_payload(wa_id, location=(22.701, 75.801)))
-    await bot.handle_webhook(wa_payload(wa_id, text="12, Test Colony"))
-    await bot.handle_webhook(wa_payload(wa_id, text="452099"))
-    date_str = (now_ist().date() + timedelta(days=2)).isoformat()
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"date:{date_str}"))
+    await bot.handle_webhook(wa_payload(wa_id, text="12, Test Colony 452099"))
     out = await last_out(db, phone)
-    slot_id = out["options"][0]["id"]
-    await bot.handle_webhook(wa_payload(wa_id, reply=slot_id))
+    when_id = out["options"][0]["id"]
+    assert when_id.startswith("when:")
+    await bot.handle_webhook(wa_payload(wa_id, reply=when_id))
     await bot.handle_webhook(wa_payload(wa_id, reply="confirm:yes"))
     booking = await db.bookings.find_one({"customer_id": str(user["_id"])})
     assert booking is not None

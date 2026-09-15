@@ -1,0 +1,63 @@
+{
+  "siteUrl": "https://blussit.com",
+  "defaultTitle": "Blussit — Premium Doorstep Car & Bike Wash in Indore",
+  "defaultDescription": "Book a premium car or bike wash at your doorstep in Indore. Verified captains, waterless & foam wash options, transparent pricing — no queues, no driving anywhere.",
+  "pages": [
+    {
+      "path": "/",
+      "title": "Blussit — Premium Doorstep Car & Bike Wash in Indore",
+      "description": "Book a premium car or bike wash at your doorstep in Indore. Verified captains, waterless & foam wash options, transparent pricing — no queues, no driving anywhere.",
+      "changefreq": "daily",
+      "priority": "1.0"
+    },
+    {
+      "path": "/services",
+      "title": "Car Wash & Bike Wash Services in Indore | Blussit",
+      "description": "All doorstep car wash, bike wash and detailing services in Indore, with transparent pricing for every vehicle type. Book online in minutes — we come to you.",
+      "changefreq": "weekly",
+      "priority": "0.9"
+    },
+    {
+      "path": "/plans",
+      "title": "Car Wash Subscription Plans in Indore | Blussit",
+      "description": "Monthly, quarterly and yearly doorstep car wash plans in Indore. Fixed washes, fixed price, zero hassle — save more with a Blussit subscription.",
+      "changefreq": "weekly",
+      "priority": "0.9"
+    },
+    {
+      "path": "/book",
+      "title": "Book a Doorstep Car Wash Online | Blussit",
+      "description": "Book a professional car or bike wash at your doorstep in Indore in under two minutes. Pick a slot, choose your service, and relax while we do the rest.",
+      "changefreq": "weekly",
+      "priority": "0.9"
+    },
+    {
+      "path": "/service-policy",
+      "title": "Service Policy | Blussit",
+      "description": "How Blussit's doorstep car and bike wash service works, what's included, and what to expect at every visit.",
+      "changefreq": "monthly",
+      "priority": "0.3"
+    },
+    {
+      "path": "/cancellation-policy",
+      "title": "Cancellation Policy | Blussit",
+      "description": "Blussit's booking cancellation and rescheduling policy for doorstep car and bike wash services.",
+      "changefreq": "monthly",
+      "priority": "0.3"
+    },
+    {
+      "path": "/privacy-policy",
+      "title": "Privacy Policy | Blussit",
+      "description": "How Blussit collects, uses and protects your personal information.",
+      "changefreq": "yearly",
+      "priority": "0.2"
+    },
+    {
+      "path": "/terms",
+      "title": "Terms & Conditions | Blussit",
+      "description": "Terms and conditions for using Blussit's doorstep vehicle care platform and booking services.",
+      "changefreq": "yearly",
+      "priority": "0.2"
+    }
+  ]
+}

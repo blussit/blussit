@@ -278,8 +278,11 @@ class KpiService:
         vt_names = {str(x["_id"]): x.get("name", "?") for x in await self.db.vehicle_types.find({}).to_list(length=None)}
         vt_mix: dict[str, dict] = {}
         for b in cur:
-            v = vehicles.get(b.get("vehicle_id", ""))
-            vt = vt_names.get(str(v.get("vehicle_type", "")), "Unknown") if v else "Unknown"
+            # Quick-booking model: the type is on the booking itself; the
+            # vehicle join only covers older saved-vehicle bookings.
+            v = vehicles.get(b.get("vehicle_id") or "")
+            vt_id = b.get("vehicle_type") or (v.get("vehicle_type") if v else None)
+            vt = vt_names.get(str(vt_id or ""), b.get("vehicle_label") or "Unknown")
             row = vt_mix.setdefault(vt, {"name": vt, "bookings": 0, "revenue": 0.0})
             if self._created_in(b, s, e):
                 row["bookings"] += 1

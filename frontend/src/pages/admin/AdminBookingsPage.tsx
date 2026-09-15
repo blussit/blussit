@@ -163,7 +163,7 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
                 </ul>
               ) : (
                 <span>
-                  {slab.primary.vehicle_snapshot ? `${slab.primary.vehicle_snapshot.brand} ${slab.primary.vehicle_snapshot.model}` : "—"}
+                  {vehicleLabel(slab.primary)}
                   <span className="block text-xs text-[var(--color-text-secondary)]">{slab.serviceLabel}</span>
                 </span>
               ),

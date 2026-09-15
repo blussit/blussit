@@ -172,7 +172,7 @@ class ReviewService:
             else:
                 doc["combo_name"] = None
                 doc["service_names"] = None
-            doc["vehicle_type_id"] = vehicle.get("vehicle_type") if vehicle else None
+            doc["vehicle_type_id"] = (booking.get("vehicle_type") if booking else None) or (vehicle.get("vehicle_type") if vehicle else None)
             doc["captain_name"] = captain.get("full_name") if captain else None
             doc["service_center_name"] = center.get("name") if center else None
             results.append(doc)

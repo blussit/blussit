@@ -15,12 +15,14 @@ from app.schemas.booking_schema import (
     ManagerBookingCreateRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
+    QuickBookingRequest,
     ReassignCaptainRequest,
     ReportRiskRequest,
     ResolveIssueRequest,
     VerifyVehicleRequest,
 )
 from app.services.audit_service import AuditService
+from app.services.auth_service import AuthService
 from app.services.booking_service import BookingService
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 from app.services.staff_directory_service import StaffDirectoryService
@@ -28,9 +30,74 @@ from app.services.staff_directory_service import StaffDirectoryService
 
 class BookingController:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.service = BookingService(db)
         self.audit = AuditService(db)
         self.confirmations = PurchaseConfirmationService(db)
+
+    async def _quick_result_with_ticket(self, result: dict, customer_id: str) -> dict:
+        # The public /thank-you page reads this ticket, never a raw booking
+        # id — same as the older self-service create paths.
+        bookings = result.get("bookings") or []
+        service_names = [
+            b.get("combo_name") or ", ".join(b.get("service_names") or [])
+            for b in bookings
+            if b.get("combo_name") or b.get("service_names")
+        ]
+        if bookings:
+            result["confirmation_token"] = await self.confirmations.issue(
+                "booking",
+                bookings[0]["id"],
+                customer_id,
+                {
+                    "booking_number": " + ".join(result.get("booking_numbers") or []),
+                    "scheduled_date": result.get("scheduled_date"),
+                    "scheduled_slot": result.get("scheduled_slot"),
+                    "service_label": " + ".join(service_names) or None,
+                    "service_code": result.get("service_code"),
+                    "payment_link": result.get("payment_link"),
+                    "awaiting_payment": result.get("awaiting_payment"),
+                    "total_amount": result.get("total_amount"),
+                },
+            )
+        return result
+
+    async def quick_create(self, current_user: CurrentUser | None, payload: QuickBookingRequest):
+        """The no-login booking. A signed-in CUSTOMER books under their own
+        account (the typed name/phone are ignored in favour of the
+        profile); anyone else is found-or-created by phone."""
+        auth = AuthService(self.db)
+        if current_user is not None and current_user.role == "customer":
+            customer = await auth.users.find_by_id(current_user.id)
+            if not customer:
+                customer = await auth.ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
+            elif not customer.get("phone"):
+                # A Google sign-in account has no phone yet — the number
+                # typed into the booking becomes the account's, unless it
+                # already belongs to someone else (then they must log in
+                # with that number instead of quietly taking it over).
+                from app.core.exceptions import BadRequestException
+
+                other = await auth.users.find_by_phone(payload.customer_phone)
+                if other and str(other["_id"]) != str(customer["_id"]):
+                    raise BadRequestException("This mobile number already has an account — log out and log in with that number to book.")
+                await auth.users.update_by_id(str(customer["_id"]), {"phone": payload.customer_phone})
+                customer["phone"] = payload.customer_phone
+        else:
+            customer = await auth.ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
+        result = await self.service.create_quick_booking(payload, customer=customer, source="app")
+        result = await self._quick_result_with_ticket(result, str(customer["_id"]))
+        return success(result, "Booking confirmed" if not result.get("awaiting_payment") else "Finish paying to confirm your booking")
+
+    async def manager_quick_create(self, current_user: CurrentUser, payload: QuickBookingRequest):
+        """Same quick shape, on a customer's behalf — the phone-in booking."""
+        customer = await AuthService(self.db).ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
+        result = await self.service.create_quick_booking(payload, customer=customer, source="staff", allow_pinless=True)
+        for b in result.get("bookings") or []:
+            await self.audit.log_action(
+                current_user.id, current_user.role, "MANAGER_CREATE_BOOKING", "bookings", b["id"], {"customer_id": str(customer["_id"])}
+            )
+        return success(result, "Booking created")
 
     async def create(self, current_user: CurrentUser, payload: BookingCreateRequest):
         result = await self.service.create_booking(current_user.id, payload)

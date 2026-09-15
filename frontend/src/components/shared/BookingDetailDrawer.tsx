@@ -56,7 +56,7 @@ export function BookingDetailDrawer({
   const paymentPending = cars.some((c) => c.payment_status !== "paid");
   /** "Car 2 · MP09RB0002" — how a per-car section is labelled on a visit. */
   const carTag = (c: Booking) =>
-    `Car ${cars.indexOf(c) + 1} · ${c.vehicle_snapshot?.registration_number || c.vehicle_registration_number || c.booking_number}`;
+    `Car ${cars.indexOf(c) + 1} · ${vehicleLabel(c) || c.booking_number}`;
 
   const travelActive = car != null && ["assigned", "captain_on_the_way"].includes(car.status);
   const { data: travel } = useQuery({
@@ -140,9 +140,12 @@ export function BookingDetailDrawer({
             ) : (
               <Row
                 label="Vehicle"
-                value={booking.vehicle_snapshot ? `${booking.vehicle_snapshot.brand} ${booking.vehicle_snapshot.model} · ${booking.vehicle_snapshot.registration_number}` : booking.vehicle_registration_number}
+                value={vehicleLabel(booking)}
               />
             )}
+            {/* The 4-digit arrival code (quick-booking model) — so staff can
+                read it out to a customer who lost their confirmation. */}
+            {booking.service_code && <Row label="Service code" value={<span className="font-mono-num tracking-[0.2em]">{booking.service_code}</span>} />}
           </Section>
 
           <Section title="Service & location" icon={Wrench}>

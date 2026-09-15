@@ -3,12 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { CalendarClock, Gift, RefreshCw } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
-import { vehicleApi } from "../../api/profile";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { Button, Card, EmptyState, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { PassPurchaseSheet } from "../../components/customer/PassPurchaseSheet";
 import { CustomPlanEnquiryModal } from "../../components/shared/CustomPlanEnquiryModal";
-import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -29,21 +27,18 @@ export default function SubscriptionsPage() {
   const { user } = useAuth();
   const confirm = useConfirm();
   const queryClient = useQueryClient();
-  const [verifyOpen, setVerifyOpen] = useState(false);
 
   const { data: plans, isLoading: plansLoading } = useQuery({ queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) });
   const { data: mySubs, isLoading: subsLoading } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
-  const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-subscriptions"], queryFn: () => catalogApi.services({ page_size: 100 }) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const services = servicesData?.data || [];
   const serviceName = (id?: string | null) => services.find((s) => s.id === id)?.name || "";
-  const plateOf = (id?: string | null) => (vehicles || []).find((v) => v.id === id)?.registration_number || "";
-  const vehicleTypeOf = (id?: string | null) => (vehicles || []).find((v) => v.id === id)?.vehicle_type;
+  // A pass is for a vehicle TYPE (2026-09 model) — show its name.
+  const typeNameOf = (id?: string | null) => (vehicleTypes || []).find((t) => t.id === id)?.name || "";
 
   const [buyingPlan, setBuyingPlan] = useState<SubscriptionPlan | null>(null);
   const [purchaseError, setPurchaseError] = useState("");
-  const [pendingPurchase, setPendingPurchase] = useState<{ vehicleId: string; serviceId: string; autoPay: boolean } | null>(null);
   const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
   const [upgradeError, setUpgradeError] = useState("");
   const [enquiryOpen, setEnquiryOpen] = useState(false);
@@ -52,13 +47,13 @@ export default function SubscriptionsPage() {
 
 
   const purchaseMutation = useMutation({
-    mutationFn: (args: { vehicleId: string; serviceId: string; autoPay: boolean }) => {
+    mutationFn: (args: { vehicleType: string; serviceId: string; autoPay: boolean }) => {
       setPurchaseError("");
       return payWithRazorpay(
         {
           purpose: "subscription",
           plan_id: buyingPlan!.id,
-          vehicle_id: args.vehicleId,
+          vehicle_type: args.vehicleType,
           service_id: args.serviceId,
           auto_pay: args.autoPay,
         },
@@ -98,14 +93,9 @@ export default function SubscriptionsPage() {
     onError: (err) => setUpgradeError(getErrorMessage(err)),
   });
 
-  const startPurchase = (args: { vehicleId: string; serviceId: string; autoPay: boolean }) => {
-    if (!user?.phone_verified) {
-      setPendingPurchase(args);
-      setVerifyOpen(true);
-      return;
-    }
-    purchaseMutation.mutate(args);
-  };
+  // Buying needs a signed-in customer (this page is behind login, which is
+  // an OTP) — there's no separate phone-verification gate any more.
+  const startPurchase = (args: { vehicleType: string; serviceId: string; autoPay: boolean }) => purchaseMutation.mutate(args);
 
   const upgradeTargets = upgradingSub
     ? (plans || []).filter((p) => (plans?.find((cp) => cp.id === upgradingSub.planId)?.upgrade_to_plan_ids || []).includes(p.id))
@@ -116,17 +106,17 @@ export default function SubscriptionsPage() {
     const isActive = sub.effective_status === "active";
     const canUpgrade = isActive && !!plan?.upgrade_to_plan_ids?.length;
     const pct = sub.total_service_count ? Math.round(((sub.remaining_service_count ?? 0) / sub.total_service_count) * 100) : 0;
-    const plate = plateOf(sub.vehicle_id);
+    const typeName = typeNameOf(sub.vehicle_type);
     const covered = serviceName(sub.service_id);
     return (
       <Card key={sub.id} className="border-[#E5E7EB] p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 className="font-display font-bold text-[var(--color-text-primary)]">{covered || plan?.name || "Monthly pass"}</h3>
-            {plate && (
+            {typeName && (
               <p className="mt-0.5 flex items-center gap-1.5 text-xs text-gray-500">
-                <VehicleIcon vehicleTypeId={vehicleTypeOf(sub.vehicle_id)} className="h-3 w-3" />
-                <span className="font-mono-num">{plate}</span>
+                <VehicleIcon vehicleTypeId={sub.vehicle_type} className="h-3 w-3" />
+                <span>{typeName}</span>
               </p>
             )}
           </div>
@@ -279,16 +269,6 @@ export default function SubscriptionsPage() {
         onConfirm={startPurchase}
         isPaying={purchaseMutation.isPending}
         error={purchaseError}
-      />
-
-      <PhoneVerificationModal
-        open={verifyOpen}
-        onClose={() => setVerifyOpen(false)}
-        onVerified={() => {
-          setVerifyOpen(false);
-          if (pendingPurchase) purchaseMutation.mutate(pendingPurchase);
-          setPendingPurchase(null);
-        }}
       />
 
       <CustomPlanEnquiryModal open={enquiryOpen} onClose={() => setEnquiryOpen(false)} defaultName={user?.full_name} defaultPhone={user?.phone} />

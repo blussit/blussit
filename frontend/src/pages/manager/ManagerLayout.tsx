@@ -17,7 +17,7 @@ const navItems: NavItem[] = [
 
 export default function ManagerLayout() {
   return (
-    <DashboardShell navItems={navItems} portalLabel="Manager">
+    <DashboardShell navItems={navItems} portalLabel="Manager" brand>
       <Outlet />
     </DashboardShell>
   );

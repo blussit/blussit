@@ -49,8 +49,10 @@ async def rig(db, cleanup):
     cleanup.append(("purchase_confirmations", {"customer_id": customer_id}))
     return {
         "db": db, "center_id": center_id, "customer_id": customer_id, "vehicle_id": vehicle_id,
-        "address_id": address_id, "car_vehicle": {"vehicle_type": hatchback},
-        "bike_vehicle": {"vehicle_type": str(bike_type["_id"])},
+        # _validate_service_mix takes the vehicle TYPE id (quick-booking
+        # model — bookings no longer carry a vehicle record).
+        "address_id": address_id, "car_vehicle": hatchback,
+        "bike_vehicle": str(bike_type["_id"]),
     }
 
 
@@ -165,7 +167,7 @@ async def test_quantities_multiply_price_end_to_end(rig, db):
         scheduled_slot="09:00-12:00",
     )
     booking = await bs.create_booking(rig["customer_id"], payload)
-    hatch = rig["car_vehicle"]["vehicle_type"]
+    hatch = rig["car_vehicle"]
     expected = (
         bs._resolve_price(star, hatch, True)
         + 3 * bs._resolve_price(extra_bike, hatch, True)

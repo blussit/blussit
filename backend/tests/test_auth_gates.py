@@ -91,12 +91,20 @@ async def test_booking_gate_rejects_stale_verification(db, cleanup):
         {"_id": ObjectId(customer_id)},
         {"$set": {"phone_verified_at": datetime.now(timezone.utc) - timedelta(days=91)}},
     )
-    with pytest.raises(PhoneNotVerifiedException):
+    # Quick-booking model: OTP is for LOGIN only — a stale (or missing)
+    # phone verification no longer blocks a booking. The only thing wrong
+    # with this request is that it names no service, and that is the
+    # error that must surface — not PhoneNotVerifiedException.
+    from app.core.exceptions import BadRequestException
+
+    with pytest.raises(BadRequestException) as exc:
         await BookingService(db).create_booking(
             customer_id,
             BookingCreateRequest(vehicle_id=vehicle_id, address_id=address_id, service_ids=[],
                                  scheduled_date=datetime.now(), scheduled_slot="09:00-12:00"),
         )
+    assert not isinstance(exc.value, PhoneNotVerifiedException)
+    assert "service" in exc.value.message.lower()
 
 
 @pytest.mark.asyncio

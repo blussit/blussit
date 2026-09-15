@@ -33,7 +33,6 @@ const COLUMNS = [
       { label: "All Services", href: "/services" },
       { label: "Exterior Clean", href: "/services" },
       { label: "Interior Clean", href: "/services" },
-      { label: "Premium Care", href: "/services" },
       { label: "Other Services", href: "/services" },
     ],
   },

@@ -34,6 +34,21 @@ export default function ManagerInventoryPage() {
     setForm(emptyForm);
     setError("");
   };
+  const validateForm = () => {
+    if (!form.item_name.trim()) {
+      setError("Enter the item name.");
+      return false;
+    }
+    if (!Number.isFinite(form.quantity_available) || form.quantity_available < 0) {
+      setError("Quantity on hand cannot be negative.");
+      return false;
+    }
+    if (!Number.isFinite(form.reorder_level) || form.reorder_level < 0) {
+      setError("Reorder level cannot be negative.");
+      return false;
+    }
+    return true;
+  };
 
   const createMutation = useMutation({
     mutationFn: () => inventoryApi.create({ ...form, service_center_id: centerId }),
@@ -132,7 +147,9 @@ export default function ManagerInventoryPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
-            editing ? updateMutation.mutate() : createMutation.mutate();
+            if (!validateForm()) return;
+            if (editing) updateMutation.mutate();
+            else createMutation.mutate();
           }}
         >
           <Input label="Item name" value={form.item_name} onChange={(e) => setForm({ ...form, item_name: e.target.value })} required />
@@ -148,6 +165,7 @@ export default function ManagerInventoryPage() {
             <Input
               label={editing ? "Quantity on hand" : "Starting quantity"}
               type="number"
+              min={0}
               value={form.quantity_available}
               onChange={(e) => setForm({ ...form, quantity_available: Number(e.target.value) })}
               required
@@ -156,6 +174,7 @@ export default function ManagerInventoryPage() {
             <Input
               label="Reorder level"
               type="number"
+              min={0}
               value={form.reorder_level}
               onChange={(e) => setForm({ ...form, reorder_level: Number(e.target.value) })}
             />

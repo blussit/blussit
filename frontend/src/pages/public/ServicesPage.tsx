@@ -1,6 +1,7 @@
 import { type CSSProperties } from "react";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
+import { PageSeo } from "../../components/shared/PageSeo";
 import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 
 export default function ServicesPage() {
@@ -13,6 +14,7 @@ export default function ServicesPage() {
 
   return (
     <div className="min-h-screen bg-white" style={themeScope}>
+      <PageSeo path="/services" />
       <PublicNavbar />
       <ServicesShowcase
         id="all-services"

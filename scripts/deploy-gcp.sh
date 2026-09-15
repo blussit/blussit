@@ -92,6 +92,19 @@ elif [[ "$SMS_PROVIDER" == "msg91" ]]; then
   require_value MSG91_OTP_TEMPLATE_ID
 fi
 
+# OTP delivery (quick-booking model: OTP is for login only): WhatsApp
+# first, SMS as the fallback. The backend skips WhatsApp when it can't
+# reach a number (no approved OTP template and no open 24h chat), and
+# the login page then sends by SMS through the MSG91 widget — so at
+# least one SMS path must exist, or a first-time login has no way in.
+[[ "$OTP_CHANNEL" == "whatsapp" ]] || fail "OTP_CHANNEL must be whatsapp (WhatsApp first, SMS fallback)"
+if [[ -z "${WHATSAPP_OTP_TEMPLATE_NAME:-}" ]]; then
+  printf 'WARNING: WHATSAPP_OTP_TEMPLATE_NAME is empty — WhatsApp OTPs reach only numbers with an open 24h chat; everyone else falls back to SMS. Set it once Meta approves the blussit_otp template.\n' >&2
+fi
+if [[ -z "${SMS_PROVIDER:-}" && ( -z "${MSG91_AUTH_KEY:-}" || -z "${MSG91_WIDGET_ID:-}" || -z "${MSG91_TOKEN_AUTH:-}" ) ]]; then
+  fail "No SMS fallback configured: set SMS_PROVIDER (fast2sms/msg91) or the MSG91 widget trio (MSG91_AUTH_KEY, MSG91_WIDGET_ID, MSG91_TOKEN_AUTH)"
+fi
+
 # The MSG91 widget is enabled only when all three values are present.
 MSG91_WIDGET_ENABLED=false
 if [[ -n "${MSG91_AUTH_KEY:-}" || -n "${MSG91_WIDGET_ID:-}" || -n "${MSG91_TOKEN_AUTH:-}" ]]; then

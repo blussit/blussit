@@ -30,7 +30,26 @@ class EquipmentUsedItem(BaseModel):
 class BookingModel(BusinessRecordBase):
     booking_number: str
     customer_id: str
-    vehicle_id: str
+    # Quick-booking model (2026-09): a booking is for a VEHICLE TYPE ("SUV",
+    # "Bike"), not a registered vehicle record — the customer never types a
+    # plate or brand/model. vehicle_id is kept only for bookings created
+    # through the older saved-vehicle paths and is None on every new one.
+    vehicle_id: Optional[str] = None
+    # VehicleType id + its display name, snapshotted at creation. This is
+    # what prices the booking, what the captain sees ("SUV · Foam Wash") and
+    # what a pass is matched against.
+    vehicle_type: Optional[str] = None
+    vehicle_label: Optional[str] = None
+    # The unique-index key that stops the same customer double-submitting
+    # the same car into the same slot: the vehicle_id when there is one,
+    # otherwise "<vehicle_type>#<line index within the visit>" — so two
+    # SUVs on one visit are two distinct keys while a double-tapped
+    # single-car booking is still one.
+    visit_line_key: Optional[str] = None
+    # 4-digit code shared with the customer on confirmation; the captain
+    # enters it on arrival instead of typing the registration plate. One
+    # code per visit (every car on a multi-car visit carries the same one).
+    service_code: Optional[str] = None
     address_id: str
     service_center_id: str
     captain_id: Optional[str] = None

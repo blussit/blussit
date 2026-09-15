@@ -1,10 +1,12 @@
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
+import { PageSeo } from "../../components/shared/PageSeo";
 import { AlertTriangle, CheckCircle2, Clock, ParkingCircle } from "lucide-react";
 
 export default function CancellationPolicyPage() {
   return (
     <div className="min-h-screen bg-white text-black">
+      <PageSeo path="/cancellation-policy" />
       <PublicNavbar />
       <main className="container-page max-w-[820px] py-12 sm:py-16">
         <p className="text-[11px] font-bold tracking-[0.18em] text-[#B08A00]">Policy</p>

@@ -47,7 +47,9 @@ export const isOpenIssue = (b: Booking) => !!b.issue_flag && !b.issue_resolved &
  * every booking row shows the vehicle the same way. */
 export const vehicleLabel = (b: Booking): string => {
   const v = b.vehicle_snapshot;
-  const name = v ? [v.brand, v.model].filter(Boolean).join(" ") : "";
+  // Quick-booking model: the type name ("SUV") IS the vehicle — no plate,
+  // no brand/model. Older saved-vehicle bookings still show all of it.
+  const name = v ? [v.brand, v.model].filter(Boolean).join(" ") || v.label || "" : b.vehicle_label || "";
   const plate = v?.registration_number || b.vehicle_registration_number || "";
-  return [name, plate].filter(Boolean).join(" · ");
+  return [name, plate].filter(Boolean).join(" · ") || "Vehicle";
 };

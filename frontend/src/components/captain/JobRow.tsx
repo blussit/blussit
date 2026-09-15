@@ -3,7 +3,7 @@ import { AlertTriangle, CheckCircle2, Flag, XCircle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Button, StatusBadge } from "../ui";
 import { minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
-import { ISSUE_LABELS } from "../../lib/constants";
+import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 import { vehicleTypeApi } from "../../api/catalog";
 import type { BookingSlab } from "../../lib/bookingGroups";
@@ -99,7 +99,7 @@ export function JobRow({
           {!isVisit && job.vehicle_snapshot && (
             <span className="text-[var(--color-text-secondary)]">
               {" "}
-              · {job.vehicle_snapshot.brand} {job.vehicle_snapshot.model} ({vehicleTypeName(job.vehicle_snapshot.vehicle_type)})
+              · {vehicleLabel(job)}{job.vehicle_snapshot.brand ? ` (${vehicleTypeName(job.vehicle_snapshot.vehicle_type || "")})` : ""}
             </span>
           )}
         </p>
@@ -109,7 +109,7 @@ export function JobRow({
             {cars.map((c, i) => (
               <li key={c.id} className={cn(c.status === "completed" && "line-through decoration-gray-300")}>
                 <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
-                {c.vehicle_snapshot ? `${c.vehicle_snapshot.brand} ${c.vehicle_snapshot.model}` : t("captain.job.vehicleUnavailable")} —{" "}
+                {vehicleLabel(c)} —{" "}
                 {c.combo_name || c.service_names?.join(", ") || "—"}
               </li>
             ))}

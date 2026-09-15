@@ -12,6 +12,7 @@ import { useLiveChannel } from "../../lib/socket";
 import { formatDateTime } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
+import { vehicleLabel } from "../../lib/constants";
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -67,7 +68,7 @@ export default function BookingDetailPage() {
   const trailCars = visit || (booking ? [booking] : []);
   const multiCar = trailCars.length > 1;
   const carLabel = (car: (typeof trailCars)[number]) =>
-    car.vehicle_snapshot ? `${car.vehicle_snapshot.brand} ${car.vehicle_snapshot.model} · ${car.vehicle_snapshot.registration_number}` : "Vehicle";
+    vehicleLabel(car);
 
   useLiveChannel(id ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
@@ -248,6 +249,19 @@ export default function BookingDetailPage() {
         <StatusBadge status={booking.status} />
       </div>
 
+      {/* The one number the customer needs on the day — the captain asks
+          for it on arrival (quick-booking model). Hidden once the visit is
+          over. */}
+      {booking.service_code && !["completed", "cancelled"].includes(booking.status) && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-4 py-3">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#B08A00]">Service code</p>
+            <p className="text-xs text-[var(--color-text-secondary)]">Share this with the captain when they arrive.</p>
+          </div>
+          <p className="font-mono-num text-2xl font-bold tracking-[0.3em] text-black">{booking.service_code}</p>
+        </div>
+      )}
+
       {/* The whole point of the awaiting-payment state: say plainly that
           this isn't booked yet, and give the two ways out — finish paying,
           or have the captain collect cash instead. */}
@@ -350,7 +364,7 @@ export default function BookingDetailPage() {
                 <div key={car.id}>
                   <p className="flex items-center gap-2 text-xs font-semibold text-black">
                     {car.vehicle_snapshot
-                      ? `${car.vehicle_snapshot.brand} ${car.vehicle_snapshot.model} · ${car.vehicle_snapshot.registration_number}`
+                      ? vehicleLabel(car)
                       : "Vehicle"}
                     {car.id === booking.id && (
                       <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">

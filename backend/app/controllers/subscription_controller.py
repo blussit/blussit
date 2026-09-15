@@ -54,7 +54,7 @@ class UserSubscriptionController:
 
     async def quote_pass(self, current_user: CurrentUser, payload: PassQuoteRequest):
         return success(
-            await self.service.quote_pass(current_user.id, payload.plan_id, payload.vehicle_id, payload.service_id)
+            await self.service.quote_pass(current_user.id, payload.plan_id, payload.vehicle_id, payload.service_id, vehicle_type=payload.vehicle_type)
         )
 
     async def submit_enquiry(self, current_user: CurrentUser | None, payload: PlanEnquiryRequest):

@@ -131,57 +131,58 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     cleanup.append(("purchase_confirmations", {"customer_id": str(user["_id"])}))
     assert user["full_name"] == "Ravi Kumar"
     assert user["phone_verified"] is True  # WhatsApp IS the phone proof
-    assert user["must_change_password"] is True  # claims web access via forgot-password
+    assert not user.get("must_change_password")  # customers log in by OTP — no password gate
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "buttons"
-    assert {b["id"] for b in out["options"]} == {"menu:book", "menu:bookings"}
+    assert {b["id"] for b in out["options"]} == {"menu:book", "menu:bookings"}  # no history → no "Book again"
 
-    # 2. Book → no saved vehicles → vehicle-type list.
+    # 2. Book → vehicle-type list (no plates, no saved-vehicle picker).
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "list"
     assert any(r["id"] == f"vt:{rig['hatchback']}" for r in out["options"])
 
-    # 3. Type → brand/model → registration.
+    # 3. Type → how many (buttons) → service list, with what's included
+    # sent as text right before it.
     await bot.handle_webhook(wa_payload(wa_id, reply=f"vt:{rig['hatchback']}"))
-    await bot.handle_webhook(wa_payload(wa_id, text="Maruti Swift"))
-    await bot.handle_webhook(wa_payload(wa_id, text="MP09WA0001"))
-    vehicle = await db.vehicles.find_one({"owner_id": str(user["_id"])})
-    assert vehicle and vehicle["registration_number"] == "MP09WA0001"
-
-    # 4. Service list (with per-vehicle-type pricing in the description).
     out = await last_out(db, phone)
-    assert out["interactive_kind"] == "list"
-    assert any(r["id"] == f"svc:{rig['foam']}" for r in out["options"])
+    assert out["interactive_kind"] == "buttons"
+    assert {b["id"] for b in out["options"]} == {"cnt:1", "cnt:2", "cnt:3"}
+    await bot.handle_webhook(wa_payload(wa_id, reply="cnt:1"))
+    recent = await db.whatsapp_outbox.find({"phone": phone}, sort=[("_id", -1)]).to_list(length=2)
+    assert recent[0]["interactive_kind"] == "list"
+    assert any(r["id"] == f"svc:{rig['foam']}" for r in recent[0]["options"])
+    assert "includes" in recent[1]["message"].lower()
 
-    # 5. Pick service → live-location request (WhatsApp's native prompt).
+    # 4. Pick service → "add another?" → that's all → live-location
+    # request (WhatsApp's native prompt; no saved address yet).
     await bot.handle_webhook(wa_payload(wa_id, reply=f"svc:{rig['foam']}"))
+    out = await last_out(db, phone)
+    assert out["interactive_kind"] == "buttons"
+    assert {b["id"] for b in out["options"]} == {"more:no", "more:yes"}
+    await bot.handle_webhook(wa_payload(wa_id, reply="more:no"))
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "location_request"
 
-    # 6. Share pin → line1 → pincode; address is created and dispatch
-    # resolves to the nearest covering center.
+    # 5. Share pin → ONE line of address text (pincode inside it); the
+    # address is created and dispatch resolves to the covering center.
     await bot.handle_webhook(wa_payload(wa_id, location=(22.701, 75.801)))
-    await bot.handle_webhook(wa_payload(wa_id, text="12, Test Colony, Main Road"))
-    await bot.handle_webhook(wa_payload(wa_id, text="452099"))
+    await bot.handle_webhook(wa_payload(wa_id, text="12, Test Colony, Main Road 452099"))
     address = await db.addresses.find_one({"owner_id": str(user["_id"])})
     assert address and address["latitude"] == 22.701 and address["pincode"] == "452099"
+    assert "452099" not in address["line1"]
 
-    # 7. Date buttons → slot list must be exactly the same availability the
-    # website would show for that center/date.
-    out = await last_out(db, phone)
-    assert out["interactive_kind"] == "buttons"
-    date_str = (now_ist().date() + timedelta(days=2)).isoformat()
-    assert any(b["id"] == f"date:{date_str}" for b in out["options"])
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"date:{date_str}"))
+    # 6. Day AND time in one list — exactly the availability the website
+    # would show for that center/date (tomorrow always fits in the 10 rows).
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "list"
-    offered = {r["id"] for r in out["options"]}
+    date_str = (now_ist().date() + timedelta(days=1)).isoformat()
+    offered = {r["id"] for r in out["options"] if r["id"].startswith(f"when:{date_str}|")}
     web_slots = await BookingService(db).available_slots(rig["center_id"], date_str)
-    assert offered == {f"slot:{s['key']}" for s in web_slots if s["status"] != "full"}
+    assert offered == {f"when:{date_str}|{s['key']}" for s in web_slots if s["status"] != "full"}
 
-    # 8. Pick a slot → confirm summary → confirm.
-    await bot.handle_webhook(wa_payload(wa_id, reply="slot:09:00-12:00"))
+    # 7. Pick a time → confirm summary → confirm.
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"when:{date_str}|09:00-12:00"))
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "buttons"
     assert {b["id"] for b in out["options"]} == {"confirm:yes", "confirm:no"}
@@ -192,6 +193,10 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     assert booking["source"] == "whatsapp"
     assert booking["service_center_id"] == rig["center_id"]
     assert booking["scheduled_slot"] == "09:00-12:00"
+    # Quick-booking model: a vehicle TYPE, no vehicle record, and the
+    # 4-digit code the captain asks for.
+    assert booking["vehicle_id"] is None and booking["vehicle_type"] == rig["hatchback"]
+    assert booking["service_code"] and len(booking["service_code"]) == 4
 
     # Centralization: the SAME capacity counter web bookings use went down.
     slot_doc = await db.slot_capacity.find_one({"service_center_id": rig["center_id"], "date": date_str, "slot_key": "09:00-12:00"})
@@ -201,12 +206,12 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     notif = await db.notifications.find_one({"user_id": rig["manager_id"], "reference_id": str(booking["_id"])})
     assert notif is not None
 
-    # The customer got a confirmation with the real booking number,
-    # followed by the cash-or-online payment choice (the new final
-    # exchange since Razorpay payment links landed).
+    # The customer got a confirmation with the real booking number AND the
+    # service code, followed by the cash-or-online payment choice.
     recent = await db.whatsapp_outbox.find({"phone": phone}, sort=[("_id", -1)]).to_list(length=2)
     assert "How would you like to pay?" in recent[0]["message"]
     assert booking["booking_number"] in recent[1]["message"]
+    assert booking["service_code"] in recent[1]["message"]
 
 
 @pytest.mark.asyncio
@@ -267,27 +272,25 @@ async def test_admin_slot_closure_is_reflected_in_chat_offers(rig, db, cleanup):
     wa_id, phone = f"91{customer['phone']}", customer["phone"]
     _register_wa_cleanup(cleanup, wa_id, phone)
 
-    date_str = (now_ist().date() + timedelta(days=2)).isoformat()
+    date_str = (now_ist().date() + timedelta(days=1)).isoformat()
     await BookingService(db).set_slot_capacity(rig["center_id"], date_str, "12:00-15:00", capacity=None, is_closed=True)
 
     bot = WhatsAppBotService(db)
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
-    out = await last_out(db, phone)
-    vehicle = await db.vehicles.find_one({"owner_id": customer_id})
-    assert any(r["id"] == f"veh:{vehicle['_id']}" for r in out["options"])  # saved vehicle offered directly
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"veh:{vehicle['_id']}"))
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"vt:{rig['hatchback']}"))
+    await bot.handle_webhook(wa_payload(wa_id, reply="cnt:1"))
     await bot.handle_webhook(wa_payload(wa_id, reply=f"svc:{rig['foam']}"))
+    await bot.handle_webhook(wa_payload(wa_id, reply="more:no"))
     out = await last_out(db, phone)
     address = await db.addresses.find_one({"owner_id": customer_id})
     assert any(r["id"] == f"addr:{address['_id']}" for r in out["options"])  # saved address offered directly
     await bot.handle_webhook(wa_payload(wa_id, reply=f"addr:{address['_id']}"))
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"date:{date_str}"))
 
     out = await last_out(db, phone)
     offered = {r["id"] for r in out["options"]}
-    assert "slot:12:00-15:00" not in offered  # the admin-closed slot
-    assert "slot:09:00-12:00" in offered  # the rest still bookable
+    assert f"when:{date_str}|12:00-15:00" not in offered  # the admin-closed slot
+    assert f"when:{date_str}|09:00-12:00" in offered  # the rest still bookable
 
 
 @pytest.mark.asyncio

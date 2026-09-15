@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from bson import ObjectId
 
-from app.core.exceptions import BadRequestException, PhoneNotVerifiedException
+from app.core.exceptions import BadRequestException
 from app.schemas.booking_schema import BookingCreateRequest, ManagerBookingCreateRequest
 from app.schemas.subscription_schema import AssignSubscriptionRequest, SubscribeRequest
 from app.services.auth_service import AuthService
@@ -42,17 +42,21 @@ def _tomorrow():
 
 
 @pytest.mark.asyncio
-async def test_unverified_customer_is_blocked_from_self_service_booking(rig, cleanup):
+async def test_unverified_customer_can_still_book(rig, cleanup):
+    """Quick-booking model (2026-09): OTP is for logging in, never for
+    booking — an unverified phone books exactly like a verified one."""
     customer_id, vehicle_id, address_id = await make_customer_with_vehicle(rig["db"], rig["hatchback"], phone_verified=False)
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     cleanup.append(("vehicles", {"owner_id": customer_id}))
     cleanup.append(("addresses", {"owner_id": customer_id}))
+    cleanup.append(("bookings", {"customer_id": customer_id}))
 
     bs = BookingService(rig["db"])
-    with pytest.raises(PhoneNotVerifiedException):
-        await bs.create_booking(
-            customer_id, BookingCreateRequest(vehicle_id=vehicle_id, address_id=address_id, service_ids=[rig["foam"]], scheduled_date=_tomorrow(), scheduled_slot="09:00-12:00")
-        )
+    booking = await bs.create_booking(
+        customer_id, BookingCreateRequest(vehicle_id=vehicle_id, address_id=address_id, service_ids=[rig["foam"]], scheduled_date=_tomorrow(), scheduled_slot="09:00-12:00")
+    )
+    assert booking["status"] == "pending"
+    assert booking["service_code"] and len(booking["service_code"]) == 4
 
 
 @pytest.mark.asyncio
@@ -92,17 +96,21 @@ async def test_manager_booking_on_behalf_bypasses_the_gate(rig, cleanup):
 
 
 @pytest.mark.asyncio
-async def test_unverified_customer_is_blocked_from_subscribing(rig, db, cleanup):
+async def test_unverified_customer_can_subscribe(rig, db, cleanup):
+    """Quick-booking model: a purchase needs a signed-in customer (the
+    route enforces that; customers sign in by OTP) — there is no separate
+    phone-verification gate on subscribing any more."""
     customer_id = await make_customer_with_vehicle(db, rig["hatchback"], phone_verified=False)
     customer_id = customer_id[0]
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    cleanup.append(("user_subscriptions", {"customer_id": customer_id}))
 
     plan_id = await make_subscription_plan(db, vehicle_types=[rig["hatchback"]])
     cleanup.append(("subscription_plans", {"_id": ObjectId(plan_id)}))
 
     svc = UserSubscriptionService(db)
-    with pytest.raises(PhoneNotVerifiedException):
-        await svc.subscribe(customer_id, SubscribeRequest(plan_id=plan_id))
+    sub = await svc.subscribe(customer_id, SubscribeRequest(plan_id=plan_id))
+    assert sub["status"] == "active"
 
 
 @pytest.mark.asyncio

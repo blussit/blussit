@@ -179,13 +179,13 @@ export default function CaptainJobsPage() {
   const verifyMutation = useMutation({
     mutationFn: ({
       id,
-      registration_number,
+      check,
       location,
     }: {
       id: string;
-      registration_number: string;
+      check: { service_code?: string; registration_number?: string };
       location?: { latitude: number; longitude: number; accuracy_m?: number };
-    }) => bookingApi.verifyVehicle(id, registration_number, location),
+    }) => bookingApi.verifyVehicle(id, check, location),
     onSuccess: () => {
       invalidate();
       closeModal();
@@ -195,9 +195,13 @@ export default function CaptainJobsPage() {
 
   // "I've reached" carries GPS like every other step — blocking fix first,
   // same pattern as confirmHeading below.
+  // Quick-booking model: the customer's 4-digit service code is the
+  // arrival check; only older saved-vehicle bookings still ask for a plate.
+  const verifyByCode = !!activeJob?.service_code;
   const confirmVerify = () => {
     if (!activeJob) return;
     const reg = regInput.trim();
+    const check = verifyByCode ? { service_code: reg } : { registration_number: reg };
     if (!navigator.geolocation) {
       setActionError(t("captain.error.geoUnsupported"));
       return;
@@ -208,7 +212,7 @@ export default function CaptainJobsPage() {
         setLocating(false);
         verifyMutation.mutate({
           id: activeJob.id,
-          registration_number: reg,
+          check,
           location: {
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
@@ -593,16 +597,27 @@ export default function CaptainJobsPage() {
       >
         <div className="mb-3 flex items-start gap-2 rounded-lg bg-[var(--color-secondary-light)] px-3 py-2.5 text-xs text-[var(--color-text-secondary)]">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-secondary)]" />
-          Type the plate you actually see on the car. If it doesn't match, do
-          not proceed — release the job instead.
+          {verifyByCode ? t("captain.modal.codeHint") : t("captain.modal.plateHint")}
         </div>
-        <Input
-          label={t("captain.modal.plateLabel")}
-          placeholder="MP09XX1234"
-          value={regInput}
-          onChange={(e) => setRegInput(e.target.value.toUpperCase())}
-          autoFocus
-        />
+        {verifyByCode ? (
+          <Input
+            label={t("captain.modal.codeLabel")}
+            placeholder="4-digit code"
+            inputMode="numeric"
+            maxLength={4}
+            value={regInput}
+            onChange={(e) => setRegInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            autoFocus
+          />
+        ) : (
+          <Input
+            label={t("captain.modal.plateLabel")}
+            placeholder="MP09XX1234"
+            value={regInput}
+            onChange={(e) => setRegInput(e.target.value.toUpperCase())}
+            autoFocus
+          />
+        )}
         {actionError && (
           <p className="mt-2 text-sm text-[var(--color-error)]">
             {actionError}
@@ -610,11 +625,11 @@ export default function CaptainJobsPage() {
         )}
         <Button
           className="mt-4 w-full"
-          disabled={regInput.trim().length < 3}
+          disabled={verifyByCode ? regInput.trim().length !== 4 : regInput.trim().length < 3}
           isLoading={locating || verifyMutation.isPending}
           onClick={confirmVerify}
         >
-          <BadgeCheck className="h-4 w-4" /> I've reached — confirm vehicle
+          <BadgeCheck className="h-4 w-4" /> {t("captain.modal.verifyCta")}
         </Button>
         <p className="mt-2 text-center text-[11px] text-[var(--color-text-secondary)]">
           Your location is captured with this step.

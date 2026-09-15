@@ -13,6 +13,7 @@ from app.core.dependencies import (
     PaginationParams,
     get_current_user,
     get_db,
+    get_optional_user,
     require_admin,
     require_captain,
     require_customer,
@@ -29,6 +30,7 @@ from app.schemas.booking_schema import (
     ManagerBookingCreateRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
+    QuickBookingRequest,
     ReassignCaptainRequest,
     ReportRiskRequest,
     ResolveIssueRequest,
@@ -41,6 +43,24 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
 @router.post("", dependencies=[Depends(require_customer)])
 async def create_booking(payload: BookingCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).create(current_user, payload)
+
+
+@router.post("/quick")
+async def quick_create_booking(
+    payload: QuickBookingRequest,
+    current_user: CurrentUser | None = Depends(get_optional_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Public by design (quick-booking model): name + phone + what/where/
+    when, no account or OTP first. Rate-limited (see core/rate_limit.py)."""
+    return await BookingController(db).quick_create(current_user, payload)
+
+
+@router.post("/manager-quick", dependencies=[Depends(require_manager_or_admin)])
+async def manager_quick_create_booking(
+    payload: QuickBookingRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    return await BookingController(db).manager_quick_create(current_user, payload)
 
 
 @router.post("/manager-create", dependencies=[Depends(require_manager_or_admin)])

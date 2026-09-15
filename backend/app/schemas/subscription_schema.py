@@ -86,7 +86,9 @@ class PassQuoteRequest(BaseModel):
     from the same function that charges them."""
 
     plan_id: str
-    vehicle_id: str
+    # A saved car (older flow) OR a vehicle type (2026-09 model) — one of them.
+    vehicle_id: Optional[str] = None
+    vehicle_type: Optional[str] = None
     service_id: str
 
 

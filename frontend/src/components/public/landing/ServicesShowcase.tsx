@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigationType } from "react-router-dom";
 import { ArrowRight, Check, Clock, Droplet, Wind, Sparkles, Armchair, Waves, Link2, Leaf } from "lucide-react";
+import { useAuth } from "../../../context/AuthContext";
 import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
 import type { Service, VehicleTypeOption } from "../../../types";
 import {
@@ -130,11 +131,15 @@ function ServiceCard({
   const vehicle = vehicleLabel(s.vehicle_types, vehicleTypes);
   const hasVariants = group.variants.length > 1;
   const showFrom = pv.varies || hasVariants;
+  const { user } = useAuth();
+  // A logged-in customer already has an account — send them to the
+  // after-login booking page instead of the guest-only wizard.
+  const bookHref = user?.role === "customer" ? `/app/book?service=${s.id}` : `/book?serviceId=${s.id}`;
 
   return (
     <Link
       id={`service-card-${s.id}`}
-      to={`/book?serviceId=${s.id}`}
+      to={bookHref}
       aria-label={`Book ${titleCase(s.name)}`}
       onClick={() => {
         try {
@@ -270,11 +275,13 @@ function SkeletonGrid() {
 }
 
 function EmptyNotice() {
+  const { user } = useAuth();
+  const bookHref = user?.role === "customer" ? "/app/book" : "/book";
   return (
     <div className="mt-8 rounded-2xl border border-dashed border-cream-line bg-white p-8 text-center">
       <p className="text-[15px] font-semibold text-black">Our service list is being updated.</p>
       <p className="mt-1 text-[14px] text-neutral-600">You can still book — tell us what your vehicle needs.</p>
-      <Link to="/book" className="mt-5 inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[14px] bg-gold font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-gold-dark">
+      <Link to={bookHref} className="mt-5 inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[14px] bg-gold font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-gold-dark">
         Book Now
         <ArrowRight className="h-4 w-4" />
       </Link>

@@ -6,7 +6,14 @@
  *    A non-dismissible modal forces a real password before anything else;
  *    closing the tab just brings it back next visit.
  * 2. 90-day phone re-verification (customers) — phone_verification_stale
- *    from the backend re-runs the OTP gate on login.
+ *    from the backend re-runs the OTP gate on login. Unlike #1 this is
+ *    DISMISSIBLE: it used to be forced with no close button at all, which
+ *    could trap a customer mid-booking (e.g. on the review step) with no
+ *    way back to what they were doing. The backend remains the real
+ *    enforcement point — it still refuses to create a booking/subscription
+ *    on a stale-verified phone (PhoneNotVerifiedException) — so dismissing
+ *    this reminder only postpones it; the customer's own booking flow
+ *    reopens the same OTP modal right when it's actually needed.
  *
  * Password comes first: it's the stronger claim on the account.
  */
@@ -27,6 +34,7 @@ export function MandatoryGates() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
+  const [phoneGateDismissed, setPhoneGateDismissed] = useState(false);
 
   const save = useMutation({
     mutationFn: () => guestAuthApi.setPassword(password),
@@ -80,10 +88,13 @@ export function MandatoryGates() {
     );
   }
 
-  if (user.role === "customer" && user.phone_verification_stale && user.phone) {
-    // Non-dismissible: onClose is a no-op; verification itself closes it
-    // by refreshing the user (stale flag flips off).
-    return <PhoneVerificationModal open onClose={() => undefined} onVerified={() => undefined} />;
+  if (user.role === "customer" && user.phone_verification_stale && user.phone && !phoneGateDismissed) {
+    // Dismissible — the ✕/backdrop just closes it for the rest of this
+    // page visit (state resets on a fresh mount, e.g. next login), so a
+    // customer who doesn't want to verify right now isn't stuck. Actually
+    // verifying still closes it too, by refreshing the user (stale flag
+    // flips off) before this even re-renders.
+    return <PhoneVerificationModal open onClose={() => setPhoneGateDismissed(true)} onVerified={() => undefined} />;
   }
 
   return null;

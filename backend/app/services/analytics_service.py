@@ -350,6 +350,7 @@ class AnalyticsService:
             {
                 "$project": {
                     "vehicle_id": 1,
+                    "vehicle_type": 1,
                     "status": 1,
                     "actual_duration_minutes": 1,
                     "delay_minutes": 1,
@@ -364,7 +365,11 @@ class AnalyticsService:
         vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))}
         types = {str(t["_id"]): t.get("name", "Unknown") for t in await self.vehicle_type_repo.find_all_no_paginate()}
 
-        grouped = self._group_rows_by(rows, lambda row: (vehicles.get(row.get("vehicle_id")) or {}).get("vehicle_type"))
+        # Quick-booking model: the type is on the booking itself; the vehicle
+        # join only covers older saved-vehicle bookings.
+        grouped = self._group_rows_by(
+            rows, lambda row: row.get("vehicle_type") or (vehicles.get(row.get("vehicle_id")) or {}).get("vehicle_type")
+        )
         ratings_by_type = await self._ratings_grouped_by_vehicle_type(service_center_id)
 
         results = []
@@ -454,7 +459,7 @@ class AnalyticsService:
                 continue
             if service_center_id and booking.get("service_center_id") != service_center_id:
                 continue
-            vt = (vehicles.get(booking.get("vehicle_id")) or {}).get("vehicle_type")
+            vt = booking.get("vehicle_type") or (vehicles.get(booking.get("vehicle_id")) or {}).get("vehicle_type")
             rating = r.get("captain_rating") if r.get("captain_rating") is not None else r.get("rating")
             if vt and rating is not None:
                 grouped.setdefault(vt, []).append(rating)

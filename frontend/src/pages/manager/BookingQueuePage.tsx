@@ -163,7 +163,7 @@ export default function BookingQueuePage() {
     refetchInterval: 60000,
     refetchIntervalInBackground: true,
   });
-  const items = data?.data || [];
+  const items = useMemo(() => data?.data || [], [data]);
 
   useLiveChannel(centerId ? `center-bookings:${centerId}` : null, () => {
     queryClient.invalidateQueries({ queryKey: centerBookingsQueryKey });

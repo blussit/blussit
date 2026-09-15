@@ -1,5 +1,6 @@
 import logging
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
@@ -7,7 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.core.authz import ensure_own_center
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, PhoneNotVerifiedException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.ws_manager import manager as ws_manager
 from app.models.enums import BookingStatus, NotificationType, PaymentMethod, PaymentStatus
 from app.repositories.address_repository import AddressRepository
@@ -19,6 +20,7 @@ from app.repositories.service_center_repository import ServiceCenterRepository
 from app.repositories.slot_capacity_repository import DailyCapacityRepository, SlotCapacityRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
+from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.utils.slots import generate_slots
 from app.utils.text import normalize_plate
 from app.schemas.booking_schema import (
@@ -28,13 +30,16 @@ from app.schemas.booking_schema import (
     BookingCreateRequest,
     BookingRescheduleRequest,
     CaptainCancelRequest,
+    GroupVehicleRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
     PhotoCaptureRequest,
+    QuickBookingRequest,
     ReassignCaptainRequest,
     ReportRiskRequest,
     VerifyVehicleRequest,
 )
+from app.schemas.profile_schema import AddressCreateRequest
 from app.services.booking_policy_service import BookingPolicyService
 from app.services.capacity_policy_service import CapacityPolicyService
 from app.services.coupon_service import CouponService
@@ -395,10 +400,19 @@ class BookingService:
         self.policy_service = BookingPolicyService(db)
         self.capacity_policy_service = CapacityPolicyService(db)
         self.location_repo = CaptainLocationRepository(db)
+        self.vehicle_type_repo = VehicleTypeRepository(db)
 
     _BIKE_WORD = re.compile(r"bike|scooter|two.?wheeler", re.IGNORECASE)
 
-    async def _validate_service_mix(self, services: list[dict], vehicle: dict, raw_quantities: dict) -> dict[str, int]:
+    @staticmethod
+    def new_service_code() -> str:
+        """The 4-digit code the customer shares with the captain on arrival
+        (quick-booking model) — one per visit. Purely a "you're at the right
+        door" check against THIS booking, so collisions across bookings
+        don't matter."""
+        return f"{secrets.randbelow(9000) + 1000:04d}"
+
+    async def _validate_service_mix(self, services: list[dict], vehicle_type_id: str, raw_quantities: dict) -> dict[str, int]:
         """The catalogue's add-on/base/variant rules, enforced server-side so
         no client (app, guest wizard, staff panel, WhatsApp bot) can compose
         an impossible booking:
@@ -419,7 +433,7 @@ class BookingService:
         """
         type_docs = await self.db.vehicle_types.find({}).to_list(length=None)
         is_bike_type = {str(t["_id"]): bool(self._BIKE_WORD.search(t.get("name", ""))) for t in type_docs}
-        booking_is_bike = is_bike_type.get(vehicle["vehicle_type"], False)
+        booking_is_bike = is_bike_type.get(vehicle_type_id, False)
 
         def classes_of(svc: dict) -> set[str]:
             ids = svc.get("vehicle_types") or []
@@ -512,15 +526,31 @@ class BookingService:
     ) -> dict:
         """`_group` is set ONLY by create_booking_group, and marks this
         booking as one car of a multi-car visit:
-          {"id": <group id>, "offset_minutes": int, "charge_travel": bool}
+          {"id": <group id>, "offset_minutes": int, "charge_travel": bool,
+           "line_index": int, "service_code": str}
         It changes exactly three things — the slot seat is NOT reserved here
         (the visit reserved one seat for all its cars), the captain's travel
         pay is on the first car only (one trip), and the car carries its
         start offset. Everything else about a car in a group is an ordinary
-        booking: its own plate check, photos, pass redemption and review."""
-        vehicle = await self.vehicle_repo.find_by_id(payload.vehicle_id)
-        if not vehicle or vehicle["owner_id"] != customer_id:
-            raise NotFoundException("Vehicle not found")
+        booking: its own arrival check, photos, pass redemption and review.
+
+        Quick-booking model (2026-09): the payload names a vehicle TYPE, not
+        a vehicle record — no plate, no brand/model, and NO phone-OTP gate
+        (OTP is for logging in, never for booking). vehicle_id is still
+        honoured for the older saved-vehicle paths."""
+        vehicle: dict | None = None
+        if payload.vehicle_id:
+            vehicle = await self.vehicle_repo.find_by_id(payload.vehicle_id)
+            if not vehicle or vehicle["owner_id"] != customer_id:
+                raise NotFoundException("Vehicle not found")
+            vehicle_type = vehicle["vehicle_type"]
+            vt_doc = await self.vehicle_type_repo.find_by_id(vehicle_type)
+        else:
+            vehicle_type = payload.vehicle_type or ""
+            vt_doc = await self.vehicle_type_repo.find_by_id(vehicle_type) if vehicle_type else None
+            if not vt_doc or not vt_doc.get("is_active", True):
+                raise BadRequestException("Pick a valid vehicle type.")
+        vehicle_label = (vt_doc or {}).get("name") or "Vehicle"
 
         address = await self.address_repo.find_by_id(payload.address_id)
         if not address or address["owner_id"] != customer_id:
@@ -529,17 +559,6 @@ class BookingService:
         customer = await self.user_repo.find_by_id(customer_id)
         if not customer:
             raise NotFoundException("Customer not found")
-        # Phone verification gate: a customer must complete an OTP
-        # (POST /auth/verify-phone/request + /confirm) before their FIRST
-        # self-service booking; verification now EXPIRES after 90 days
-        # so every booking after that skips this. _skip_verification_gate
-        # is set only by create_booking_for_customer (a manager/admin
-        # booking on the customer's behalf) — staff-initiated bookings are
-        # never gated on the customer's own verification status.
-        from app.services.auth_service import AuthService
-
-        if not _skip_verification_gate and not AuthService.phone_verification_fresh(customer):
-            raise PhoneNotVerifiedException()
 
         # Resolve what's actually being purchased: either a combo bundle (its own
         # price, expands to the services inside it) or an explicit list of services.
@@ -566,7 +585,7 @@ class BookingService:
         if combo:
             quantities = {str(s["_id"]): 1 for s in services}
         else:
-            quantities = await self._validate_service_mix(services, vehicle, payload.service_quantities or {})
+            quantities = await self._validate_service_mix(services, vehicle_type, payload.service_quantities or {})
 
         duration_minutes = sum(s.get("duration_minutes", 30) * quantities[str(s["_id"])] for s in services) or 30
 
@@ -599,13 +618,12 @@ class BookingService:
         # just this customer's account — the same car plate or phone number
         # having any prior non-cancelled booking (under any account) disqualifies
         # it. This is what stops "new phone number, same car" discount abuse.
-        registration_number = normalize_plate(vehicle["registration_number"])
+        registration_number = normalize_plate(vehicle["registration_number"]) if vehicle and vehicle.get("registration_number") else None
         phone = customer.get("phone")
-        vehicle_seen_before = await self.repo.exists_for_registration(registration_number, FRAUD_CHECK_EXCLUDED_STATUSES)
+        vehicle_seen_before = bool(registration_number) and await self.repo.exists_for_registration(registration_number, FRAUD_CHECK_EXCLUDED_STATUSES)
         phone_seen_before = bool(phone) and await self.repo.exists_for_phone(phone, FRAUD_CHECK_EXCLUDED_STATUSES)
         first_time_eligible = not vehicle_seen_before and not phone_seen_before
 
-        vehicle_type = vehicle["vehicle_type"]
         if combo:
             subtotal = self._resolve_price(combo, vehicle_type, first_time_eligible)
         else:
@@ -626,7 +644,7 @@ class BookingService:
             # customer when a manager books on someone's behalf) — the
             # subscription must belong to exactly that person.
             subscription_consumption = await self.subscription_service.plan_consumption(
-                payload.subscription_id, payload.vehicle_id, services, customer_id
+                payload.subscription_id, payload.vehicle_id, services, customer_id, vehicle_type=vehicle_type
             )
             payment_method = PaymentMethod.SUBSCRIPTION
             discount_amount = await self._subscription_discount(payload.subscription_id, services, vehicle_type, first_time_eligible)
@@ -693,6 +711,11 @@ class BookingService:
             "booking_number": await self.repo.generate_unique_booking_number(),
             "customer_id": customer_id,
             "vehicle_id": payload.vehicle_id,
+            "vehicle_type": vehicle_type,
+            "vehicle_label": vehicle_label,
+            "visit_line_key": payload.vehicle_id or f"{vehicle_type}#{int((_group or {}).get('line_index') or 0)}",
+            # One code per visit — every car on it carries the same one.
+            "service_code": (_group or {}).get("service_code") or self.new_service_code(),
             "address_id": payload.address_id,
             "service_center_id": str(service_center["_id"]),
             "service_ids": service_ids,
@@ -875,14 +898,20 @@ class BookingService:
         wa_name, _ = await self._wa_ctx(booking)
         wa_services = await self._visit_label(cars)
         reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
+        code = booking.get("service_code")
+        # The service code rides in the booking-reference slot of the
+        # approved template ("BK0012 · Code 4821") — no new template needed,
+        # and it's the one number the customer must have on the day.
+        wa_reference = f"{reference} · Code {code}" if code else reference
+        code_line = f" Your service code is {code} — share it with the captain when they arrive." if code else ""
         await self.notifications.notify(
             booking["customer_id"],
             f"{wa_services} booked",
-            f"{wa_services} on {date_str} at {booking.get('scheduled_slot', '')} is confirmed. ({reference})",
+            f"{wa_services} on {date_str} at {booking.get('scheduled_slot', '')} is confirmed. ({reference}){code_line}",
             NotificationType.BOOKING,
             booking_id,
             wa_event="booking_confirmed",
-            wa_params=[wa_name, wa_services, date_str, booking.get("scheduled_slot", ""), reference],
+            wa_params=[wa_name, wa_services, date_str, booking.get("scheduled_slot", ""), wa_reference],
             background=background,
         )
         if manager_id:
@@ -1036,7 +1065,7 @@ class BookingService:
             }
         ).to_list(length=100)
 
-    async def create_booking_group(self, customer_id: str, payload: BookingGroupCreateRequest, source: str = "app") -> dict:
+    async def create_booking_group(self, customer_id: str, payload: BookingGroupCreateRequest, source: str = "app", allow_pinless: bool = False, notify_background: bool = True) -> dict:
         """Several of one customer's cars washed on ONE visit.
 
         Each car becomes a REAL booking — its own plate verification, its own
@@ -1058,22 +1087,29 @@ class BookingService:
         applies to one car, not to all five at once."""
         policy = await self.policy_service.get_policy()
         limit = int(policy.get("max_vehicles_per_booking", 5))
-        if len(payload.vehicles) > limit:
+        # A type line with quantity N is N cars ("2 SUVs, Foam Wash" = two
+        # bookings with the same service) — expand before counting.
+        cars: list[GroupVehicleRequest] = []
+        for line in payload.vehicles:
+            cars.extend([line] * (line.quantity if line.vehicle_type else 1))
+        if len(cars) > limit:
             raise BadRequestException(f"You can book up to {limit} vehicles on one visit.")
 
-        vehicle_ids = [v.vehicle_id for v in payload.vehicles]
+        vehicle_ids = [v.vehicle_id for v in cars if v.vehicle_id]
         if len(set(vehicle_ids)) != len(vehicle_ids):
             raise BadRequestException("Each vehicle can only be added once to a visit.")
 
         group_id = str(ObjectId())
+        service_code = self.new_service_code()
         service_center = None
         date_str = payload.scheduled_date
         created: list[dict] = []
         offset = 0
         try:
-            for index, car in enumerate(payload.vehicles):
+            for index, car in enumerate(cars):
                 single = BookingCreateRequest(
                     vehicle_id=car.vehicle_id,
+                    vehicle_type=car.vehicle_type,
                     address_id=payload.address_id,
                     service_ids=car.service_ids or None,
                     service_quantities=car.service_quantities or {},
@@ -1097,11 +1133,14 @@ class BookingService:
                     customer_id,
                     single,
                     source=source,
+                    _allow_pinless=allow_pinless,
                     _group={
                         "id": group_id,
                         "offset_minutes": offset,
                         "charge_travel": index == 0,
                         "reserve_seat": index == 0,
+                        "line_index": index,
+                        "service_code": service_code,
                     },
                 )
                 if index == 0:
@@ -1130,13 +1169,14 @@ class BookingService:
         first = await self.repo.find_by_id(created[0]["id"])
         if first and first.get("status") != BookingStatus.AWAITING_PAYMENT.value:
             center_doc = await self.center_repo.find_by_id(first["service_center_id"])
-            await self._announce_confirmed_booking(first, (center_doc or {}).get("manager_id"), date_str)
+            await self._announce_confirmed_booking(first, (center_doc or {}).get("manager_id"), date_str, background=notify_background)
 
         total = round(sum(float(b.get("total_amount") or 0) for b in created), 2)
         return {
             "booking_group_id": group_id,
             "bookings": created,
             "vehicle_count": len(created),
+            "service_code": service_code,
             "total_amount": total,
             # How long the whole visit runs — what the customer is told, and
             # what stops five cars being sold as a 45-minute job.
@@ -1146,6 +1186,215 @@ class BookingService:
             "scheduled_slot": payload.scheduled_slot,
             "confirmation_token": created[0].get("confirmation_token"),
         }
+
+    async def create_quick_booking(self, payload: QuickBookingRequest, *, customer: dict, source: str = "app", allow_pinless: bool = False, notify_background: bool = True) -> dict:
+        """The 2026-09 quick-booking model, end to end: a customer profile
+        (found or created by the caller from the phone — see
+        AuthService.ensure_customer_by_phone), an address (saved or created
+        here), and one visit of one or more vehicle TYPES. No vehicle
+        records, no OTP, no login.
+
+          - lines expand to cars ("2 SUVs" = two bookings, same service);
+            ONE car goes through create_booking, more through
+            create_booking_group — both existing, tested paths.
+          - a logged-in customer's matching pass is applied automatically
+            (same vehicle type + main service) — nothing to pick.
+          - online payment: the visit is created awaiting payment and a
+            Razorpay payment link is returned (and the customer is
+            reminded on WhatsApp) — paying it confirms the visit, exactly
+            like the WhatsApp bot's own pay link.
+
+        Returns the same shape for one car or many: bookings, totals, the
+        4-digit service_code, and payment_link when there's one to pay."""
+        customer_id = str(customer["_id"])
+
+        # -- where --------------------------------------------------------
+        if payload.address_id:
+            address = await self.address_repo.find_by_id(payload.address_id)
+            if not address or address.get("owner_id") != customer_id:
+                raise NotFoundException("Address not found")
+            address_id = payload.address_id
+        else:
+            addr = payload.address
+            existing = await self.address_repo.list_by_owner(customer_id)
+            match = next(
+                (a for a in existing if (a.get("line1") or "").strip().lower() == addr.line1.strip().lower() and (not addr.pincode or a.get("pincode") == addr.pincode)),
+                None,
+            )
+            if match:
+                address_id = str(match["_id"])
+                # A pin the saved copy never had is worth keeping.
+                if addr.latitude is not None and match.get("latitude") is None:
+                    await self.address_repo.update_by_id(address_id, {"latitude": addr.latitude, "longitude": addr.longitude})
+            else:
+                pincode = (addr.pincode or "").strip()
+                if not pincode:
+                    # A dropped pin whose reverse-geocode had no postal code:
+                    # the pin alone decides coverage, and the covering
+                    # center's own pincode stands in on the address record.
+                    center, _ = await self._resolve_service_center(
+                        {"latitude": addr.latitude, "longitude": addr.longitude, "pincode": ""}, allow_pinless=allow_pinless
+                    )
+                    pincode = str((center.get("location") or {}).get("pincode") or center.get("pincode") or "000000")
+                created_addr = await AddressService(self.db).create(
+                    customer_id,
+                    AddressCreateRequest(
+                        label="Home",
+                        line1=addr.line1.strip(),
+                        landmark=addr.landmark,
+                        city=addr.city or "—",
+                        state=addr.state or "—",
+                        pincode=pincode,
+                        latitude=addr.latitude,
+                        longitude=addr.longitude,
+                        is_default=not existing,
+                    ),
+                )
+                address_id = created_addr["id"]
+
+        # -- what: type lines -> cars, with the customer's passes applied ---
+        passes = await self._usable_passes(customer_id)
+        cars: list[GroupVehicleRequest] = []
+        for line in payload.lines:
+            main_ids = [sid for sid in line.service_ids]
+            for _ in range(line.quantity):
+                sub_id = None
+                for sub in passes:
+                    if sub.get("_used"):
+                        continue
+                    if sub.get("service_id") in main_ids and sub.get("vehicle_type") == line.vehicle_type:
+                        sub["_used"] = True
+                        sub_id = str(sub["_id"])
+                        break
+                cars.append(
+                    GroupVehicleRequest(
+                        vehicle_type=line.vehicle_type,
+                        quantity=1,
+                        service_ids=list(line.service_ids),
+                        service_quantities=dict(line.service_quantities or {}),
+                        subscription_id=sub_id,
+                    )
+                )
+
+        scheduled_date = datetime.strptime(payload.scheduled_date, "%Y-%m-%d")
+        group_id: str | None = None
+        if len(cars) == 1:
+            car = cars[0]
+            booking = await self.create_booking(
+                customer_id,
+                BookingCreateRequest(
+                    vehicle_type=car.vehicle_type,
+                    address_id=address_id,
+                    service_ids=car.service_ids,
+                    service_quantities=car.service_quantities,
+                    scheduled_date=scheduled_date,
+                    scheduled_slot=payload.scheduled_slot,
+                    payment_method=payload.payment_method,
+                    subscription_id=car.subscription_id,
+                    customer_notes=payload.customer_notes,
+                    alternate_contact_name=payload.alternate_contact_name,
+                    alternate_contact_phone=payload.alternate_contact_phone,
+                    hold_key=payload.hold_key,
+                ),
+                source=source,
+                _allow_pinless=allow_pinless,
+                notify_background=notify_background,
+            )
+            raw_cars = [await self.repo.find_by_id(booking["id"])]
+            service_code = booking.get("service_code")
+        else:
+            visit = await self.create_booking_group(
+                customer_id,
+                BookingGroupCreateRequest(
+                    vehicles=cars,
+                    address_id=address_id,
+                    scheduled_date=payload.scheduled_date,
+                    scheduled_slot=payload.scheduled_slot,
+                    hold_key=payload.hold_key,
+                    payment_method=payload.payment_method,
+                    customer_notes=payload.customer_notes,
+                    alternate_contact_name=payload.alternate_contact_name,
+                    alternate_contact_phone=payload.alternate_contact_phone,
+                ),
+                source=source,
+                allow_pinless=allow_pinless,
+                notify_background=notify_background,
+            )
+            group_id = visit["booking_group_id"]
+            raw_cars = [await self.repo.find_by_id(b["id"]) for b in visit["bookings"]]
+            service_code = visit.get("service_code")
+
+        raw_cars = [c for c in raw_cars if c]
+        bookings = await self._enrich_bookings(raw_cars)
+        total = round(sum(float(b.get("total_amount") or 0) for b in bookings), 2)
+        awaiting = any(b.get("status") == BookingStatus.AWAITING_PAYMENT.value for b in bookings)
+
+        payment_link: str | None = None
+        if awaiting and total >= 1:
+            from app.services.payment_service import PaymentService
+
+            # The link's booking must be one that actually owes money — a
+            # pass-covered car on the same visit is already PAID (₹0), and
+            # binding the link to it would fail settlement on amount.
+            unpaid = [c for c in raw_cars if c.get("payment_status") != PaymentStatus.PAID.value]
+            first = unpaid[0] if unpaid else raw_cars[0]
+            try:
+                link = await PaymentService(self.db).create_payment_link(
+                    first, contact_phone=customer.get("phone"), name=customer.get("full_name"), cars=unpaid
+                )
+                payment_link = link["short_url"]
+            except Exception:  # noqa: BLE001
+                # The booking exists and is parked awaiting payment; the
+                # Thank You page and My bookings still offer paying/cash.
+                logger.exception("Could not create a payment link for quick booking %s", first.get("booking_number"))
+            if payment_link:
+                policy = await self.policy_service.get_policy()
+                window = int(policy.get("payment_window_minutes", 30))
+                reference = " + ".join(str(c.get("booking_number") or "") for c in raw_cars)
+                await self.notifications.notify(
+                    customer_id,
+                    "Finish paying to confirm your booking",
+                    f"Your booking {reference} is waiting for payment. Pay within {window} minutes to keep your slot: {payment_link}",
+                    NotificationType.BOOKING,
+                    str(first["_id"]),
+                    wa_event="payment_pending",
+                    wa_params=[(customer.get("full_name") or "there").split(" ")[0], reference, str(window)],
+                    background=True,
+                )
+
+        return {
+            "booking_group_id": group_id,
+            "bookings": bookings,
+            "vehicle_count": len(bookings),
+            "total_amount": total,
+            "service_code": service_code,
+            "booking_numbers": [b.get("booking_number") for b in bookings],
+            "scheduled_date": payload.scheduled_date,
+            "scheduled_slot": payload.scheduled_slot,
+            "awaiting_payment": awaiting,
+            "payment_link": payment_link,
+            "customer_id": customer_id,
+        }
+
+    async def _usable_passes(self, customer_id: str) -> list[dict]:
+        """This customer's live passes (type + service scoped) with washes
+        left — what create_quick_booking applies automatically."""
+        try:
+            subs = await self.subscription_service.repo.collection.find(
+                {"customer_id": customer_id, "status": "active", "is_deleted": {"$ne": True}, "service_id": {"$ne": None}}
+            ).to_list(length=50)
+        except Exception:  # noqa: BLE001
+            return []
+        now = datetime.now(timezone.utc)
+        usable = []
+        for sub in subs:
+            end = sub.get("end_date")
+            if end is not None and end.replace(tzinfo=timezone.utc) <= now:
+                continue
+            if int(sub.get("remaining_service_count") or 0) < 1:
+                continue
+            usable.append(sub)
+        return usable
 
     async def create_booking_for_customer(self, actor_id: str, payload: ManagerBookingCreateRequest) -> dict:
         """A manager/admin creating a booking on behalf of a customer (new or
@@ -1168,6 +1417,7 @@ class BookingService:
 
         booking_request = BookingCreateRequest(
             vehicle_id=vehicle_id,
+            vehicle_type=payload.vehicle_type if not vehicle_id else None,
             address_id=address_id,
             service_ids=payload.service_ids,
             service_quantities=payload.service_quantities or {},
@@ -1252,7 +1502,7 @@ class BookingService:
         # along at full price, as everywhere else.
         sub = await self.subscription_service.get_subscription(subscription_id)
         covered_service_id = (sub or {}).get("service_id")
-        if covered_service_id and (sub or {}).get("vehicle_id"):
+        if covered_service_id and ((sub or {}).get("vehicle_id") or (sub or {}).get("vehicle_type")):
             return round(
                 sum(
                     self._resolve_price(s, vehicle_type, first_time_eligible)
@@ -1813,7 +2063,7 @@ class BookingService:
         if not bookings:
             return []
         customer_ids = {b.get("customer_id") for b in bookings}
-        vehicle_ids = {b.get("vehicle_id") for b in bookings}
+        vehicle_ids = {b.get("vehicle_id") for b in bookings if b.get("vehicle_id")}
         address_ids = {b.get("address_id") for b in bookings}
         captain_ids = {b.get("captain_id") for b in bookings if b.get("captain_id")}
         service_ids: set[str] = set()
@@ -1826,7 +2076,7 @@ class BookingService:
 
         customers = {str(u["_id"]): u for u in await self.user_repo.find_by_ids(list(customer_ids))}
         captains = {str(u["_id"]): u for u in await self.user_repo.find_by_ids(list(captain_ids))} if captain_ids else {}
-        vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))}
+        vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))} if vehicle_ids else {}
         addresses = {str(a["_id"]): a for a in await self.address_repo.find_by_ids(list(address_ids))}
         services = {str(s["_id"]): s for s in await self.service_repo.find_by_ids(list(service_ids))} if service_ids else {}
         combos = {str(c["_id"]): c for c in await self.combo_repo.find_by_ids(list(combo_ids))} if combo_ids else {}
@@ -1859,15 +2109,25 @@ class BookingService:
                 if captain
                 else None
             )
+            # A saved vehicle record when the booking has one; otherwise the
+            # type the booking itself carries (quick-booking model) — the
+            # label ("SUV") is what every screen should show.
             doc["vehicle_snapshot"] = (
                 {
                     "vehicle_type": vehicle.get("vehicle_type"),
                     "brand": vehicle.get("brand"),
                     "model": vehicle.get("model"),
                     "registration_number": vehicle.get("registration_number"),
+                    "label": f"{vehicle.get('brand') or ''} {vehicle.get('model') or ''}".strip() or booking.get("vehicle_label") or "Vehicle",
                 }
                 if vehicle
-                else None
+                else {
+                    "vehicle_type": booking.get("vehicle_type"),
+                    "brand": None,
+                    "model": None,
+                    "registration_number": None,
+                    "label": booking.get("vehicle_label") or "Vehicle",
+                }
             )
             doc["address_snapshot"] = (
                 {
@@ -1974,7 +2234,7 @@ class BookingService:
         # sees the platform's margin.
         return [_redact_financials(doc, actor_role) for doc in enriched]
 
-    async def switch_group_to_cash(self, booking_group_id: str, customer_id: str) -> dict:
+    async def switch_group_to_cash(self, booking_group_id: str, customer_id: str, notify_background: bool = True) -> dict:
         """"Let me pay the captain instead" for a whole visit — one decision
         covers every car on it, because the customer made one booking."""
         bookings = await self.repo.collection.find(
@@ -1986,7 +2246,7 @@ class BookingService:
         for booking in bookings:
             if booking.get("status") != BookingStatus.AWAITING_PAYMENT.value:
                 continue
-            await self.switch_to_cash(str(booking["_id"]), customer_id)
+            await self.switch_to_cash(str(booking["_id"]), customer_id, notify_background=notify_background)
             switched += 1
         if not switched:
             raise BadRequestException("This visit is already confirmed.")
@@ -2619,13 +2879,26 @@ class BookingService:
         if booking["status"] != BookingStatus.CAPTAIN_ON_THE_WAY.value:
             raise BadRequestException("Vehicle verification happens after you've started heading to the customer")
 
-        entered = normalize_plate(payload.registration_number)
-        expected = booking.get("vehicle_registration_number") or ""
-        if entered != expected:
-            raise BadRequestException(
-                "That registration number doesn't match this booking. Double-check the plate before proceeding — "
-                "if this really is the wrong vehicle, release the job instead of continuing."
-            )
+        # Quick-booking model: the customer's 4-digit service code is the
+        # arrival check. Plate matching remains only for bookings made
+        # under the older saved-vehicle flow (they have no code).
+        expected_code = booking.get("service_code")
+        expected_plate = booking.get("vehicle_registration_number") or ""
+        if payload.service_code:
+            if not expected_code or payload.service_code != expected_code:
+                raise BadRequestException(
+                    "That code doesn't match this booking. Ask the customer to check the code in their confirmation message — "
+                    "if this really isn't their booking, release the job instead of continuing."
+                )
+        elif payload.registration_number and expected_plate:
+            # Older saved-vehicle bookings can still be verified by plate.
+            if normalize_plate(payload.registration_number) != expected_plate:
+                raise BadRequestException(
+                    "That registration number doesn't match this booking. Double-check the plate before proceeding — "
+                    "if this really is the wrong vehicle, release the job instead of continuing."
+                )
+        else:
+            raise BadRequestException("Ask the customer for their 4-digit service code and enter it to start.")
 
         now = now_ist()
         update_data: dict = {"vehicle_verified": True, "vehicle_verified_at": now}
@@ -2644,7 +2917,24 @@ class BookingService:
         updated = await self.repo.update_by_id(booking_id, update_data)
         if payload.latitude is not None and payload.longitude is not None:
             await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="arrival", booking_id=booking_id)
-        await self._record_history(booking_id, BookingStatus.CAPTAIN_ON_THE_WAY, captain_id, "Vehicle registration verified on arrival")
+        await self._record_history(
+            booking_id, BookingStatus.CAPTAIN_ON_THE_WAY, captain_id,
+            "Service code verified on arrival" if payload.service_code else "Vehicle registration verified on arrival",
+        )
+        # ONE code per visit: entering it once verifies every car on the
+        # visit, so the captain can then start whichever car the customer
+        # points him to first (before/after photos stay per car). Only
+        # cars that are actually here with him (same captain, on the way).
+        if payload.service_code:
+            for sib in await self._visit_siblings(booking):
+                if sib.get("captain_id") != captain_id or sib.get("status") != BookingStatus.CAPTAIN_ON_THE_WAY.value:
+                    continue
+                if sib.get("vehicle_verified") or sib.get("service_code") != expected_code:
+                    continue
+                await self.repo.update_by_id(str(sib["_id"]), update_data)
+                await self._record_history(
+                    str(sib["_id"]), BookingStatus.CAPTAIN_ON_THE_WAY, captain_id, "Service code verified on arrival (visit)"
+                )
         if flagged:
             await self._notify_location_flag(booking, "arrival", distance_m)
         return serialize_doc(updated)

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Menu, X, ArrowRight } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "../../context/AuthContext";
@@ -49,12 +49,13 @@ export function PublicNavbar() {
 
   const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
-  // On the login page the auth button flips to "Sign up" (and vice versa
-  // stays "Login" on the register page) — no point offering the page
-  // the visitor is already on.
-  const onLoginPage = useLocation().pathname === "/login";
-  const authLabel = onLoginPage ? "Sign up" : "Login";
-  const authTarget = onLoginPage ? "/register" : "/login";
+  // Quick-booking model: there is no sign-up — an account is created the
+  // first time someone books, and login (OTP) is only to look things up.
+  const authLabel = "Login";
+  const authTarget = "/login";
+  // A logged-in customer already has an account — send "Book Now" to the
+  // after-login booking page instead of the guest-only wizard.
+  const bookHref = user?.role === "customer" ? "/app/book" : "/book";
 
   // Mobile menu: tapping anywhere outside the header (or pressing Escape)
   // closes it, so it never sits open over the page.
@@ -190,7 +191,7 @@ export function PublicNavbar() {
               </button>
 
               <a
-                href="/book"
+                href={bookHref}
                 className="
                   group inline-flex cursor-pointer items-center gap-2
                   rounded-[10px]
@@ -360,7 +361,7 @@ export function PublicNavbar() {
               </button>
 
               <a
-                href="/book"
+                href={bookHref}
                 onClick={() => setOpen(false)}
                 className="
                   flex
