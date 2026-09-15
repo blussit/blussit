@@ -330,6 +330,14 @@ class WhatsAppBotService:
             await self._on_pay_choice(phone, customer_id, str(value))
             return
 
+        # WhatsApp keeps old list messages tappable. If the customer taps a
+        # different service after we've already moved to time/address/confirm,
+        # accept the latest tap as the real choice and continue from the
+        # current point in the booking flow.
+        if kind == "reply" and str(value).startswith("svc:") and state != "q_service":
+            if await self._on_late_service_choice(wa_id, phone, customer_id, data, state, str(value)):
+                return
+
         # No active flow (or an explicit greeting) → main menu.
         if state is None or (kind == "text" and text_lower in _GREETING_WORDS):
             if convo.get("_timed_out"):
@@ -745,8 +753,58 @@ class WhatsAppBotService:
             return
         line = await self._build_line(cur, service)
         data["lines"] = [line]
-        data.pop("cur", None)
+        data["cur"] = {
+            "vehicle_type": line["vehicle_type"],
+            "type_name": line["type_name"],
+            "count": line.get("count") or 1,
+        }
         await self._start_when_step(wa_id, phone, data)
+
+    def _current_vehicle_context(self, data: dict) -> dict:
+        cur = data.get("cur") or {}
+        if cur.get("vehicle_type"):
+            return cur
+        line = (data.get("lines") or [{}])[0] or {}
+        if not line.get("vehicle_type"):
+            return {}
+        return {
+            "vehicle_type": line.get("vehicle_type"),
+            "type_name": line.get("type_name") or "Vehicle",
+            "count": line.get("count") or 1,
+        }
+
+    async def _on_late_service_choice(self, wa_id, phone, customer_id, data, state: str | None, value: str) -> bool:
+        cur = self._current_vehicle_context(data)
+        if not cur.get("vehicle_type"):
+            return False
+        service = await self.services.find_by_id(value.split(":", 1)[1])
+        if not service or not service.get("is_active"):
+            await self.wa.send_text(phone, "That service isn't available any more — pick another from the list.")
+            await self._start_service_step(wa_id, phone, data)
+            return True
+
+        line = await self._build_line(cur, service)
+        data["lines"] = [line]
+        data["cur"] = {
+            "vehicle_type": line["vehicle_type"],
+            "type_name": line["type_name"],
+            "count": line.get("count") or 1,
+        }
+        data.pop("strikes", None)
+
+        if state == "q_when":
+            await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
+            await self._start_when_step(wa_id, phone, data)
+            return True
+        if state in {"q_address", "await_location", "await_addr_pincode"}:
+            await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
+            await self._set_state(wa_id, state, data)
+            return True
+        if state == "confirm":
+            await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
+            await self._hold_and_confirm(wa_id, phone, customer_id, data)
+            return True
+        return False
 
     # -- address / live location --------------------------------------
 
