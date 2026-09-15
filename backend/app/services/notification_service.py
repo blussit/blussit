@@ -120,7 +120,9 @@ class NotificationService:
                         # always the booking id for every event that has
                         # one of these (see BLUSSIT_TEMPLATE_DEFS), which
                         # is exactly what "/app/bookings/{{1}}" expects.
-                        button_param = reference_id if tpl.get("has_url_param") and reference_id else None
+                        button_param = None
+                        if tpl.get("has_url_param") and reference_id:
+                            button_param = f"{reference_id}?review=1" if wa_event == "service_completed" else reference_id
                         sent = await self.whatsapp.send_event_template(phone, tpl["name"], wa_params, button_param=button_param)
                 except Exception:  # noqa: BLE001 — automation must never block the fallback
                     logger.exception("WhatsApp event-template send failed (event=%s, user=%s) — falling back to generic", wa_event, user_id)

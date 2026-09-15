@@ -106,6 +106,7 @@ class QuickBookingRequest(BaseModel):
     scheduled_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     scheduled_slot: str = Field(max_length=20)
     payment_method: PaymentMethod = PaymentMethod.CASH
+    coupon_code: Optional[str] = Field(default=None, max_length=20)
     customer_notes: Optional[str] = Field(default=None, max_length=500)
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)

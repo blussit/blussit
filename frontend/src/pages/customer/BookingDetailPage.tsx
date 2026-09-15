@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Pencil, Phone, RotateCcw, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { complaintApi, reviewApi } from "../../api/engagement";
@@ -16,6 +16,7 @@ import { vehicleLabel } from "../../lib/constants";
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -86,12 +87,18 @@ export default function BookingDetailPage() {
   // so an already-rated booking never flashes the modal.
   const autoOpenedRef = useRef(false);
   useEffect(() => {
+    const requestedReview = searchParams.get("review") === "1";
     if (autoOpenedRef.current || !isCustomer) return;
+    if (requestedReview && booking && myReviews !== undefined) {
+      autoOpenedRef.current = true;
+      openReview();
+      return;
+    }
     if (booking?.status !== "completed" || myReviews === undefined || myReview) return;
     autoOpenedRef.current = true;
     openReview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [booking?.status, myReviews]);
+  }, [booking?.status, myReviews, searchParams]);
 
   const openReview = () => {
     setError("");

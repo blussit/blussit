@@ -310,7 +310,7 @@ async def _reminder_loop() -> None:
                     try:
                         cars = await booking_service._visit_cars(booking)
                         reference = booking_service._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
-                        wa_name, _ = await booking_service._wa_ctx(booking)
+                        wa_services, wa_reference, _wa_date, _wa_slot, _wa_vehicle, _wa_code = await booking_service._wa_details(booking, cars)
                         minutes_left = str(int(policy_now.get("payment_reminder_minutes_before", 10)))
                         await notifications.notify(
                             booking["customer_id"],
@@ -319,7 +319,7 @@ async def _reminder_loop() -> None:
                             NotificationType.BOOKING,
                             str(booking["_id"]),
                             wa_event="payment_pending",
-                            wa_params=[wa_name, reference, minutes_left],
+                            wa_params=[wa_services, wa_reference, minutes_left],
                         )
                         # A tappable "Pay now" / "Cash instead" on top of the
                         # approved-template text above — only actually lands

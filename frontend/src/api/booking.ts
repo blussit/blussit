@@ -43,6 +43,7 @@ export interface QuickBookingPayload {
   scheduled_date: string;
   scheduled_slot: string;
   payment_method?: "cash" | "online";
+  coupon_code?: string;
   customer_notes?: string;
   alternate_contact_name?: string;
   alternate_contact_phone?: string;

@@ -895,14 +895,9 @@ class BookingService:
                 confirmed = sorted(confirmed + [booking], key=lambda c: int(c.get("group_offset_minutes") or 0))
             if not self._leads_visit(booking, confirmed):
                 return
-        wa_name, _ = await self._wa_ctx(booking)
-        wa_services = await self._visit_label(cars)
+        wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
         reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
         code = booking.get("service_code")
-        # The service code rides in the booking-reference slot of the
-        # approved template ("BK0012 · Code 4821") — no new template needed,
-        # and it's the one number the customer must have on the day.
-        wa_reference = f"{reference} · Code {code}" if code else reference
         code_line = f" Your service code is {code} — share it with the captain when they arrive." if code else ""
         await self.notifications.notify(
             booking["customer_id"],
@@ -911,7 +906,7 @@ class BookingService:
             NotificationType.BOOKING,
             booking_id,
             wa_event="booking_confirmed",
-            wa_params=[wa_name, wa_services, date_str, booking.get("scheduled_slot", ""), wa_reference],
+            wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
             background=background,
         )
         if manager_id:
@@ -1290,6 +1285,7 @@ class BookingService:
                     scheduled_date=scheduled_date,
                     scheduled_slot=payload.scheduled_slot,
                     payment_method=payload.payment_method,
+                    coupon_code=payload.coupon_code,
                     subscription_id=car.subscription_id,
                     customer_notes=payload.customer_notes,
                     alternate_contact_name=payload.alternate_contact_name,
@@ -1312,6 +1308,7 @@ class BookingService:
                     scheduled_slot=payload.scheduled_slot,
                     hold_key=payload.hold_key,
                     payment_method=payload.payment_method,
+                    coupon_code=payload.coupon_code,
                     customer_notes=payload.customer_notes,
                     alternate_contact_name=payload.alternate_contact_name,
                     alternate_contact_phone=payload.alternate_contact_phone,
@@ -1351,6 +1348,7 @@ class BookingService:
                 policy = await self.policy_service.get_policy()
                 window = int(policy.get("payment_window_minutes", 30))
                 reference = " + ".join(str(c.get("booking_number") or "") for c in raw_cars)
+                wa_services, wa_reference, _wa_date, _wa_slot, _wa_vehicle, _wa_code = await self._wa_details(first, raw_cars)
                 await self.notifications.notify(
                     customer_id,
                     "Finish paying to confirm your booking",
@@ -1358,7 +1356,7 @@ class BookingService:
                     NotificationType.BOOKING,
                     str(first["_id"]),
                     wa_event="payment_pending",
-                    wa_params=[(customer.get("full_name") or "there").split(" ")[0], reference, str(window)],
+                    wa_params=[wa_services, wa_reference, str(window)],
                     background=True,
                 )
 
@@ -2274,11 +2272,11 @@ class BookingService:
             # about it once, below.
             await self.cancel_booking(str(booking["_id"]), payload, actor_id, actor_role, actor_center_id, _quiet=True)
         lead = live[0]
-        wa_name, _ = await self._wa_ctx(lead)
+        wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, _wa_code = await self._wa_details(lead, live)
         await self.notifications.notify(
             lead["customer_id"], f"{label} cancelled",
             f"Your visit ({numbers}) has been cancelled.", NotificationType.BOOKING, str(lead["_id"]),
-            wa_event="booking_cancelled", wa_params=[wa_name, numbers],
+            wa_event="booking_cancelled", wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
         )
         for captain_id in {b.get("captain_id") for b in live if b.get("captain_id")}:
             await self.notifications.notify(
@@ -2470,12 +2468,12 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
             )
-            wa_name, _ = await self._wa_ctx(booking)
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
             await self.notifications.notify(
                 booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
                 NotificationType.BOOKING, booking_id,
                 wa_event="captain_assigned",
-                wa_params=[wa_name, captain.get("full_name", "Your captain"), label, booking.get("scheduled_slot", "")],
+                wa_params=[captain.get("full_name", "Your captain"), wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
             )
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
@@ -2656,7 +2654,7 @@ class BookingService:
         # The customer had already been told a captain was assigned/on the
         # way — leaving them with no signal that changed until (or unless) a
         # new captain gets assigned is a silent, confusing gap.
-        wa_name, _ = await self._wa_ctx(booking)
+        wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, _wa_code = await self._wa_details(booking, to_release)
         await self.notifications.notify(
             booking["customer_id"],
             "Finding you a new captain",
@@ -2664,7 +2662,7 @@ class BookingService:
             NotificationType.BOOKING,
             booking_id,
             wa_event="captain_released",
-            wa_params=[wa_name, reference],
+            wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
         )
         await self._broadcast_booking_changed(updated)
         await ws_manager.broadcast(f"user:{captain_id}", {"type": "changed", "channel": f"user:{captain_id}", "booking_id": booking_id})
@@ -2846,10 +2844,11 @@ class BookingService:
                     f"Captain is heading to the customer — same visit ({stage.replace('_', ' ')})",
                 )
                 await self._broadcast_booking_changed(sib_updated)
-        wa_name, _ = await self._wa_ctx(booking)
+        wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, visit)
         await self.notifications.notify(
             booking["customer_id"], "Captain on the way", "Your captain has left for your location.",
-            NotificationType.BOOKING, booking_id, wa_event="captain_on_the_way", wa_params=[wa_name],
+            NotificationType.BOOKING, booking_id, wa_event="captain_on_the_way",
+            wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
         )
 
         if penalty_pct > 0:
@@ -2971,7 +2970,14 @@ class BookingService:
         # "Started" is said once per visit — when the first car starts, not
         # again for each of the others.
         if not any(c.get("service_started_at") for c in await self._visit_siblings(booking)):
-            await self.notifications.notify(booking["customer_id"], "Service started", "Your captain has started the service.", NotificationType.BOOKING, booking_id)
+            cars = await self._visit_cars(booking)
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
+            await self.notifications.notify(
+                booking["customer_id"], "Service started", "Your captain has started the service.",
+                NotificationType.BOOKING, booking_id,
+                wa_event="service_started",
+                wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
+            )
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
@@ -3103,7 +3109,7 @@ class BookingService:
             cars = await self._visit_cars(booking)
             reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
             done = f"All {len(cars)} vehicles are done ({reference})." if len(cars) > 1 else f"Booking {reference} is complete."
-            wa_name, _ = await self._wa_ctx(booking)
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
             await self.notifications.notify(
                 booking["customer_id"],
                 "Service completed",
@@ -3111,7 +3117,7 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
                 wa_event="service_completed",
-                wa_params=[wa_name],
+                wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
             )
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
@@ -3210,7 +3216,7 @@ class BookingService:
         await self._record_history(booking_id, BookingStatus.CANCELLED, actor_id, payload.reason)
         if not _quiet:
             cancelled_label = await self._service_label(booking)
-            wa_name, _ = await self._wa_ctx(booking)
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, _wa_code = await self._wa_details(booking)
             await self.notifications.notify(
                 booking["customer_id"],
                 "Booking cancelled",
@@ -3218,7 +3224,7 @@ class BookingService:
                 NotificationType.BOOKING,
                 booking_id,
                 wa_event="booking_cancelled",
-                wa_params=[wa_name, booking["booking_number"]],
+                wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
             )
             if booking.get("captain_id"):
                 await self.notifications.notify(
@@ -3395,7 +3401,7 @@ class BookingService:
             cars = await self._visit_cars(booking)
             reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
             if actor_role != "customer":
-                wa_name, _ = await self._wa_ctx(booking)
+                wa_services, wa_reference, _wa_date, _wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
                 await self.notifications.notify(
                     booking["customer_id"],
                     "Booking rescheduled",
@@ -3403,7 +3409,7 @@ class BookingService:
                     NotificationType.BOOKING,
                     booking_id,
                     wa_event="reschedule_confirmation",
-                    wa_params=[wa_name, new_date_str, payload.scheduled_slot, reference],
+                    wa_params=[wa_services, wa_reference, new_date_str, payload.scheduled_slot, wa_vehicle, wa_code],
                 )
             if had_captain and booking.get("captain_id"):
                 await self.notifications.notify(
@@ -3980,6 +3986,51 @@ class BookingService:
             return name, ", ".join(n for n in names if n) or "Vehicle care"
         except Exception:  # noqa: BLE001
             return "there", "Vehicle care"
+
+    async def _vehicle_label_for_wa(self, booking: dict) -> str:
+        """Short car label for customer WhatsApp notifications."""
+        try:
+            if booking.get("vehicle_label"):
+                return str(booking["vehicle_label"])
+            if booking.get("vehicle_registration_number"):
+                return str(booking["vehicle_registration_number"])
+            vehicle_id = booking.get("vehicle_id")
+            if vehicle_id:
+                vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
+                if vehicle:
+                    bits = [vehicle.get("brand"), vehicle.get("model"), vehicle.get("registration_number")]
+                    label = " ".join(str(b) for b in bits if b)
+                    if label:
+                        return label
+            vehicle_type = booking.get("vehicle_type")
+            if vehicle_type:
+                vt = await self.vehicle_type_repo.find_by_id(vehicle_type)
+                if vt and vt.get("name"):
+                    return str(vt["name"])
+                return str(vehicle_type)
+        except Exception:  # noqa: BLE001
+            pass
+        return "Vehicle"
+
+    async def _wa_details(self, booking: dict, cars: list[dict] | None = None) -> tuple[str, str, str, str, str, str]:
+        """Shared compact fields for service WhatsApp templates.
+
+        Returns: service label, booking reference, date, slot, car label,
+        service code. It is intentionally best-effort because notifications
+        must never block the booking state change they describe.
+        """
+        try:
+            cars = cars if cars is not None else await self._visit_cars(booking)
+            service = await self._visit_label(cars)
+            reference = self._visit_numbers(cars) if len(cars) > 1 else str(booking.get("booking_number") or "")
+            date_value = booking.get("scheduled_date")
+            date = to_ist(date_value).strftime("%d %b %Y") if date_value else ""
+            slot = str(booking.get("scheduled_slot") or "")
+            vehicle = f"{len(cars)} vehicles" if len(cars) > 1 else await self._vehicle_label_for_wa(booking)
+            code = str(booking.get("service_code") or "-")
+            return service, reference, date, slot, vehicle, code
+        except Exception:  # noqa: BLE001
+            return "Vehicle care", str(booking.get("booking_number") or ""), "", str(booking.get("scheduled_slot") or ""), "Vehicle", str(booking.get("service_code") or "-")
 
     # -- Visits: several cars, ONE trip ----------------------------------
     #

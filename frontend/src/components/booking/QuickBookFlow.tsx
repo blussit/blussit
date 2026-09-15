@@ -117,6 +117,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [date, setDate] = useState(todayIST());
   const [slot, setSlot] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "online">("cash");
+  const [couponCode, setCouponCode] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [altName, setAltName] = useState("");
@@ -158,6 +159,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         if (saved.date) setDate(saved.date);
         setSlot(saved.slot || "");
         setPaymentMethod(saved.paymentMethod === "online" ? "online" : "cash");
+        setCouponCode(saved.couponCode || "");
         setNotes(saved.notes || "");
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
@@ -182,12 +184,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, notes, altName, altPhone })
+        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, notes, altName, altPhone]);
+  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -568,6 +570,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     if (coverage !== "covered") next.location = next.location || "We need a serviceable address to continue.";
     if (!date) next.date = "Choose a date.";
     if (!slot) next.slot = "Choose a time slot.";
+    if (couponCode.trim().length > 20) next.couponCode = "Coupon code can be up to 20 characters.";
     if (altPhone.trim() && !validateIndianMobile(altPhone)) next.altPhone = "Enter a valid 10-digit mobile number.";
     setFieldErrors(next);
     return Object.keys(next).length === 0;
@@ -585,6 +588,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         scheduled_date: date,
         scheduled_slot: slot,
         payment_method: total > 0 ? paymentMethod : "cash",
+        coupon_code: isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
         customer_notes: notes.trim() || undefined,
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
@@ -1005,6 +1009,20 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {isManager && total > 0 && (
+            <div className="max-w-sm">
+              <Input
+                label="Coupon code"
+                value={couponCode}
+                maxLength={20}
+                onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
+                error={fieldErrors.couponCode}
+                placeholder="Optional"
+                hint="Applied by the server when the booking is created."
+              />
             </div>
           )}
 

@@ -44,24 +44,25 @@ DEFAULT_TAGS = [
 
 # Booking events -> the dedicated template that should carry them once
 # approved (see bootstrap_blussit_templates). Fallback is always the
-# generic update template via send_generic. The 9 booking-referencing
-# events point at the "_v2" templates (BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS)
+# generic update template via send_generic. The booking-referencing
+# events point at the short "_v4" templates (BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS)
 # whose button actually deep-links to the booking, not the old static
 # ones — event_template_if_ready only returns a template once ITS name is
 # Meta-approved, so these fall back to the generic template until then.
 EVENT_TEMPLATES = {
     "welcome": "blussit_account_created",
-    "booking_confirmed": "blussit_booking_confirmed_v2",
-    "captain_assigned": "blussit_captain_assigned_v2",
-    "captain_on_the_way": "blussit_captain_on_the_way_v2",
-    "service_completed": "blussit_service_completed",
+    "booking_confirmed": "blussit_booking_confirmed_v4",
+    "captain_assigned": "blussit_captain_assigned_v4",
+    "captain_on_the_way": "blussit_captain_on_the_way_v4",
+    "service_started": "blussit_service_started_v4",
+    "service_completed": "blussit_service_completed_v4",
     "review_request": "blussit_review_request",
-    "booking_reminder": "blussit_booking_reminder_v2",
-    "reschedule_confirmation": "blussit_reschedule_confirmation_v2",
-    "payment_confirmation": "blussit_payment_confirmation_v2",
-    "booking_cancelled": "blussit_booking_cancelled_v2",
-    "payment_pending": "blussit_payment_pending_v2",
-    "captain_released": "blussit_captain_released_v2",
+    "booking_reminder": "blussit_booking_reminder_v4",
+    "reschedule_confirmation": "blussit_reschedule_confirmation_v4",
+    "payment_confirmation": "blussit_payment_confirmation_v4",
+    "booking_cancelled": "blussit_booking_cancelled_v4",
+    "payment_pending": "blussit_payment_pending_v4",
+    "captain_released": "blussit_captain_released_v4",
     "subscription_activated": "blussit_subscription_activated",
     "subscription_renewed": "blussit_subscription_renewed",
     "subscription_expiring": "blussit_subscription_expiring",
@@ -765,20 +766,20 @@ BLUSSIT_TEMPLATE_DEFS = [
     # blussit_welcome went live that way and stays on the WABA unused.
     # The utility-safe framing is an account-created confirmation.
     ("blussit_account_created", "UTILITY", "Hi {{1}}, your Blussit account has been created. Reply here anytime for help with your bookings.", None),
-    ("blussit_booking_confirmed", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking is confirmed.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\nBooking ID: {{5}}\n\nWe'll see you at your doorstep!", "View Booking"),
-    ("blussit_captain_assigned", "UTILITY", "Hi {{1}},\n\nYour BLUSSIT captain {{2}} has been assigned to your booking.\n\nService: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
-    ("blussit_captain_on_the_way", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT captain is on the way.\n\nYour service will begin shortly.", "Track Booking"),
-    ("blussit_service_completed", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT service has been completed.\n\nThank you for choosing BLUSSIT!", "Rate Service"),
+    ("blussit_booking_confirmed", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_assigned", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}}\n⏰ {{3}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_on_the_way", "UTILITY", "🚗 Captain heading out\n🚗 {{1}}\nCall us for any query.", "Track Booking"),
+    ("blussit_service_completed", "UTILITY", "✅ Service done\n⭐ Rate your wash\nCall us for any query.", "Rate Service"),
     ("blussit_review_request", "UTILITY", "Hi {{1}} 👋\n\nHow was your BLUSSIT experience?\n\nYour feedback helps us improve.", "Leave a Review"),
-    ("blussit_booking_reminder", "UTILITY", "Hi {{1}} 👋\n\nJust a reminder about your BLUSSIT booking.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
-    ("blussit_reschedule_confirmation", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking has been rescheduled.\n\nNew date: {{2}}\nNew time: {{3}}\nBooking ID: {{4}}\n\nSee you at the new time!", "View Booking"),
-    ("blussit_payment_confirmation", "UTILITY", "Hi {{1}} 👋\n\nYour payment of ₹{{2}} for booking {{3}} has been received.\n\nThank you for choosing BLUSSIT!", "View Booking"),
+    ("blussit_booking_reminder", "UTILITY", "⏰ Booking reminder\n🚗 {{1}}\n📅 {{2}} · {{3}}\nCall us for any query.", "View Booking"),
+    ("blussit_reschedule_confirmation", "UTILITY", "🔁 Booking rescheduled\n📅 {{1}} · {{2}}\n🚗 {{3}}\nCall us for any query.", "View Booking"),
+    ("blussit_payment_confirmation", "UTILITY", "✅ Payment received\n💰 ₹{{1}}\n🚗 {{2}}\nCall us for any query.", "View Booking"),
     # Every remaining moment a customer hears from us, so nothing has to
     # wait for a template review later. Each pairs with an EVENT_TEMPLATES
     # entry above and a notify(..., wa_event=...) call site.
-    ("blussit_booking_cancelled", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} has been cancelled.\n\nNeed it back? You can book again any time.", "Book Again"),
-    ("blussit_payment_pending", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} is waiting for payment.\n\nFinish paying in the next {{3}} minutes to keep your slot, or choose cash on service.", "Complete Payment"),
-    ("blussit_captain_released", "UTILITY", "Hi {{1}} 👋\n\nYour captain for booking {{2}} is no longer available. We're assigning a replacement and will confirm shortly.", "View Booking"),
+    ("blussit_booking_cancelled", "UTILITY", "❌ Booking cancelled\n🚗 {{1}}\nCall us for any query.", "Book Again"),
+    ("blussit_payment_pending", "UTILITY", "💳 Payment pending\n🚗 {{1}}\n⏳ Pay within {{2}} minutes\nCall us for any query.", "Complete Payment"),
+    ("blussit_captain_released", "UTILITY", "🧑‍🔧 Assigning new captain\n🚗 {{1}}\nCall us for any query.", "View Booking"),
     ("blussit_subscription_activated", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}", "View Plan"),
     ("blussit_subscription_renewed", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass has renewed.\n\nPlan: {{2}}\nValid till: {{3}}\n\nAuto-pay went through — nothing to do.", "View Plan"),
     ("blussit_subscription_expiring", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) ends on {{3}} with {{4}} washes left.\n\nBook them before it ends, or renew to keep going.", "Book Now"),
@@ -799,15 +800,17 @@ BLUSSIT_TEMPLATE_DEFS = [
 # actually pick it (see bootstrap_blussit_templates); the originals stay
 # on the WABA, approved but unused, until then.
 BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS = [
-    ("blussit_booking_confirmed_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking is confirmed.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\nBooking ID: {{5}}\n\nWe'll see you at your doorstep!", "View Booking"),
-    ("blussit_captain_assigned_v2", "UTILITY", "Hi {{1}},\n\nYour BLUSSIT captain {{2}} has been assigned to your booking.\n\nService: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
-    ("blussit_captain_on_the_way_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT captain is on the way.\n\nYour service will begin shortly.", "Track Booking"),
-    ("blussit_booking_reminder_v2", "UTILITY", "Hi {{1}} 👋\n\nJust a reminder about your BLUSSIT booking.\n\nService: {{2}}\nDate: {{3}}\nTime: {{4}}\n\nSee you soon!", "View Booking"),
-    ("blussit_reschedule_confirmation_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking has been rescheduled.\n\nNew date: {{2}}\nNew time: {{3}}\nBooking ID: {{4}}\n\nSee you at the new time!", "View Booking"),
-    ("blussit_payment_confirmation_v2", "UTILITY", "Hi {{1}} 👋\n\nYour payment of ₹{{2}} for booking {{3}} has been received.\n\nThank you for choosing BLUSSIT!", "View Booking"),
-    ("blussit_booking_cancelled_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} has been cancelled.\n\nNeed it back? You can book again any time.", "View Booking"),
-    ("blussit_payment_pending_v2", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT booking {{2}} is waiting for payment.\n\nFinish paying in the next {{3}} minutes to keep your slot, or choose cash on service.", "Complete Payment"),
-    ("blussit_captain_released_v2", "UTILITY", "Hi {{1}} 👋\n\nYour captain for booking {{2}} is no longer available. We're assigning a replacement and will confirm shortly.", "View Booking"),
+    ("blussit_booking_confirmed_v4", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_assigned_v4", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}} ({{3}})\n📅 {{4}} · {{5}}\n🚙 {{6}}\n🔐 Code: {{7}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_on_the_way_v4", "UTILITY", "🚗 Captain heading out\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Track Booking"),
+    ("blussit_service_started_v4", "UTILITY", "🧽 Service started\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Track Booking"),
+    ("blussit_service_completed_v4", "UTILITY", "✅ Service done\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Rate Now"),
+    ("blussit_booking_reminder_v4", "UTILITY", "⏰ Booking reminder\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
+    ("blussit_reschedule_confirmation_v4", "UTILITY", "🔁 Booking rescheduled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
+    ("blussit_payment_confirmation_v4", "UTILITY", "✅ Payment received\n🚗 {{1}} ({{2}})\n💰 ₹{{3}}\nCall us for any query.", "View Booking"),
+    ("blussit_booking_cancelled_v4", "UTILITY", "❌ Booking cancelled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
+    ("blussit_payment_pending_v4", "UTILITY", "💳 Payment pending\n🚗 {{1}} ({{2}})\n⏳ Pay within {{3}} minutes\nCall us for any query.", "Complete Payment"),
+    ("blussit_captain_released_v4", "UTILITY", "🧑‍🔧 Assigning new captain\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
 ]
 
 # The GENERIC fallback template — every notify() call that doesn't (yet)
@@ -824,11 +827,11 @@ BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS = [
 # carry real information. Same "can't edit an approved template in
 # place" constraint as the booking-link ones above: submit this, wait for
 # Meta's approval, then point WHATSAPP_UPDATE_TEMPLATE_NAME at
-# "blussit_service_update_v2" and restart — nothing switches over on its
+# "blussit_service_update_v3" and restart — nothing switches over on its
 # own, so the current (longer) template keeps working exactly as today
 # until that's done.
 BLUSSIT_GENERIC_UPDATE_TEMPLATE_DEFS = [
-    ("blussit_service_update_v2", "UTILITY", "*{{1}}*\n{{2}}\n\nReply here if you need help.", None),
+    ("blussit_service_update_v3", "UTILITY", "*{{1}}*\n{{2}}\nCall us for any query.", None),
 ]
 
 # Marketing templates are SUBMITTED for approval up front too (an approved
