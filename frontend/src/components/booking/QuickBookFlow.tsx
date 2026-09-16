@@ -59,6 +59,8 @@ const EMPTY_DRAFT: Draft = { typeId: "", count: 1, base: null, addons: [] };
 type Coverage = "idle" | "checking" | "covered" | "uncovered";
 
 const STEPS = ["What Are We Washing?", "Where And When?"];
+const LAUNCH_FREE_BIKE_OFFER = "free-bike-wash";
+const LAUNCH_FREE_BIKE_COUPON = "FREEBIKE";
 
 function priceFor(s: Service, vt: string): number {
   return s.vehicle_type_prices?.[vt] ?? s.price;
@@ -74,6 +76,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const { push: pushToast } = useToast();
   const isCustomer = mode === "customer";
   const isManager = mode === "manager";
+  const launchOfferActive = searchParams.get("offer") === LAUNCH_FREE_BIKE_OFFER;
   // Guests are (almost always) first-time customers — quote the first-wash
   // price where one exists. The backend re-checks eligibility by phone.
   const showFirstWash = mode === "public" && !user;
@@ -130,12 +133,16 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // Back button, a tap on the logo, a refresh — the customer comes back to
   // exactly where they were. sessionStorage on purpose: this tab only,
   // gone when it closes, never days-old state resurfacing.
-  const storageKey = `blussit:quickbook:${mode}`;
+  const storageKey = `blussit:quickbook:${mode}${launchOfferActive ? ":launch-free-bike" : ""}`;
   const repeatId = searchParams.get("repeat");
   const [restored, setRestored] = useState(false);
   const restoreAddressRef = useRef<null | { pinned: LocationValue | null; savedAddressId: string | null; pincode: string; typed: boolean; slot: string }>(null);
   const skipAutoDateRef = useRef(false);
   useEffect(() => {
+    if (launchOfferActive) {
+      setRestored(true);
+      return;
+    }
     if (repeatId) {
       setRestored(true);
       return;
@@ -273,6 +280,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     addons: Service[];
     subtotal: number;
     regularSubtotal: number;
+    offerDiscount: number;
+    freeBikeAddon: Service | null;
     payload: QuickBookingLine | null;
     services: Service[];
   }
@@ -283,6 +292,21 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     const first = firstWashPriceFor(s, vt);
     return first != null && first < regular ? first : regular;
   };
+  function isLaunchOfferBase(s: Service | null | undefined) {
+    const name = `${s?.name || ""} ${s?.slug || ""}`.toLowerCase();
+    return /star/.test(name) || (/deep/.test(name) && /clean/.test(name));
+  }
+  function launchOfferBaseKey(typeId: string) {
+    const groups = baseGroups(services, typeId);
+    return (
+      groups.find((g) => /star/.test(`${g.label} ${g.primary.slug}`.toLowerCase())) ||
+      groups.find((g) => {
+        const name = `${g.label} ${g.primary.slug}`.toLowerCase();
+        return /deep/.test(name) && /clean/.test(name);
+      }) ||
+      groups[0]
+    )?.key ?? null;
+  }
 
   const lineFor = (d: Draft): Line | null => {
     const t = types.find((x) => x.id === d.typeId);
@@ -312,10 +336,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           }
         }
         const addons = c.addons.map((id) => services.find((s) => s.id === id)).filter(Boolean) as Service[];
+        const requestedFreeBike = !!(kit.addBike && addons.some((a) => a.id === kit.addBike?.id));
+        const freeBikeAddon = (launchOfferActive || requestedFreeBike) && !isBike && base && isLaunchOfferBase(base) && kit.addBike ? kit.addBike : null;
+        if (freeBikeAddon && !addons.some((a) => a.id === freeBikeAddon.id)) addons.push(freeBikeAddon);
         const perUnit = (s: Service) => unit(s, t.id);
         const perUnitRegular = (s: Service) => priceFor(s, t.id);
         let subtotal = 0;
         let regularSubtotal = 0;
+        let offerDiscount = 0;
         const serviceIds: string[] = [];
         const quantities: Record<string, number> = {};
         if (base) {
@@ -335,6 +363,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             if (qty > 1) quantities[a.id] = qty;
             subtotal += perUnit(a) * qty;
             regularSubtotal += perUnitRegular(a) * qty;
+            if (freeBikeAddon && a.id === freeBikeAddon.id) offerDiscount += perUnit(a) * qty;
           }
         }
         // Cars: every car of this type is its own booking with the same service.
@@ -351,6 +380,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           addons,
           subtotal: subtotal * quantity,
           regularSubtotal: regularSubtotal * quantity,
+          offerDiscount: offerDiscount * quantity,
+          freeBikeAddon,
           payload: base ? { vehicle_type: t.id, quantity, service_ids: serviceIds, service_quantities: quantities } : null,
           services: lineServices,
         };
@@ -362,20 +393,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // The editor's own line (may be incomplete — used for the chips/prices).
   const editing = draft.typeId ? lineFor({ ...draft, base: draft.base }) : null;
   const editingGroups = draft.typeId ? baseGroups(services, draft.typeId) : [];
+  const launchOfferGroups = launchOfferActive ? editingGroups.filter((g) => isLaunchOfferBase(g.primary)) : [];
   const editingKit = draft.typeId ? addonKit(services, draft.typeId, bikeIds) : null;
   const editingIsBike = bikeIds.has(draft.typeId);
 
   const total = lines.reduce((n, l) => n + l.subtotal, 0);
   const regularTotal = lines.reduce((n, l) => n + l.regularSubtotal, 0);
+  const offerDiscount = lines.reduce((n, l) => n + l.offerDiscount, 0);
+  const displayTotal = Math.max(0, total - offerDiscount);
   const allServices = lines.flatMap((l) => l.services);
   const step1Ready = lines.length > 0 && lines.every((l) => !!l.base) && (!draft.typeId || draftReady);
 
   const otherVehicles = added.reduce((n, d) => n + d.count, 0);
+  const selectableTypes = launchOfferActive ? types.filter((t) => !bikeIds.has(t.id)) : types;
   const pickType = (typeId: string) => {
     // Default the service to the first one offered for this type so the
     // dropdown pick is already a bookable line.
-    const first = baseGroups(services, typeId)[0];
-    setDraft({ typeId, count: 1, base: first ? first.key : null, addons: [] });
+    const first = launchOfferActive ? launchOfferBaseKey(typeId) : baseGroups(services, typeId)[0]?.key ?? null;
+    setDraft({ typeId, count: 1, base: first, addons: [] });
   };
   const setCount = (next: number) => {
     const clamped = Math.max(1, Math.min(10, next));
@@ -587,8 +622,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         lines: lines.map((l) => l.payload!).filter(Boolean),
         scheduled_date: date,
         scheduled_slot: slot,
-        payment_method: total > 0 ? paymentMethod : "cash",
-        coupon_code: isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
+        payment_method: displayTotal > 0 ? paymentMethod : "cash",
+        coupon_code: launchOfferActive || offerDiscount > 0 ? LAUNCH_FREE_BIKE_COUPON : isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
         customer_notes: notes.trim() || undefined,
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
@@ -627,7 +662,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           booking_number: result.booking_numbers.join(" + "),
           scheduled_date: date,
           scheduled_slot: slot,
-          service_label: lines.map((l) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name} · ${titleCase(l.base?.name)}`).join(" + "),
+          service_label: lines.map((l) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name} · ${titleCase(l.base?.name)}${l.freeBikeAddon ? " + Free Bike Wash" : ""}`).join(" + "),
           service_code: result.service_code,
           payment_link: result.payment_link,
           awaiting_payment: result.awaiting_payment,
@@ -651,7 +686,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         <span className="min-w-0 flex-1 truncate text-xs text-gray-500">{summary || "Pick your vehicles"}</span>
         <span className="text-right">
           {showFirstWash && regularTotal > total && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{regularTotal}</span>}
-          <span className="font-mono-num text-lg font-bold text-black">₹{total}</span>
+          {offerDiscount > 0 && <span className="mr-1.5 text-xs font-bold text-[#E11D48]">FREE bike -₹{offerDiscount}</span>}
+          <span className="font-mono-num text-lg font-bold text-black">₹{displayTotal}</span>
         </span>
       </div>
       {error && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error}</p>}
@@ -666,7 +702,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         ) : (
           <Button className="min-w-[150px]" disabled={!step2Ready} isLoading={submitting} onClick={submit}>
             <CheckCircle2 className="h-4 w-4" />
-            {total > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
+            {displayTotal > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
           </Button>
         )}
       </div>
@@ -688,7 +724,30 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       {/* ---------------- STEP 1 ---------------- */}
       {step === 0 && (
         <div className="space-y-6">
-          <WizardStepHeader title="What Are We Washing?" description={`Pick the vehicle and the service. Up to ${maxVehicles} vehicles on one visit — one address, one slot.`} />
+          <WizardStepHeader
+            title="What Are We Washing?"
+            description={
+              launchOfferActive
+                ? "Your launch offer is ready: choose your car type, pick Star Wash or Deep Cleaning, and one Bike Wash is added free."
+                : `Pick the vehicle and the service. Up to ${maxVehicles} vehicles on one visit — one address, one slot.`
+            }
+          />
+
+          {launchOfferActive && (
+            <div className="overflow-hidden rounded-2xl border border-[#F3E5B5] bg-[#111] text-white shadow-[0_16px_38px_rgba(0,0,0,0.18)]">
+              <div className="grid gap-0 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div className="p-4 sm:p-5">
+                  <p className="text-xs font-bold uppercase tracking-wide text-[#FACC15]">Launch offer claimed</p>
+                  <h3 className="mt-1 text-xl font-black">Star Wash Or Deep Cleaning + Bike Wash</h3>
+                  <p className="mt-1 text-sm text-white/70">Select your car type and service. We add one Bike Wash free to this booking.</p>
+                </div>
+                <div className="flex items-center gap-2 border-t border-white/10 bg-white/[0.06] p-4 sm:border-l sm:border-t-0">
+                  <span className="rounded-full bg-[#E11D48] px-3 py-1 text-xs font-black uppercase tracking-wide text-white">Bike FREE</span>
+                  <span className="text-xs font-semibold text-white/70">Till 24 Sep</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Vehicles already on the visit */}
           {added.length > 0 && (
@@ -728,13 +787,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <Select label="Vehicle type" value={draft.typeId} onChange={(e) => pickType(e.target.value)}>
                 <option value="">Select vehicle type…</option>
-                {types.map((t) => (
+                {selectableTypes.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name}
                   </option>
                 ))}
               </Select>
-              {draft.typeId && (
+              {draft.typeId && !launchOfferActive && (
                 <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 sm:h-[46px]">
                   <span className="text-sm text-gray-600">How many?</span>
                   <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
@@ -749,6 +808,50 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 ) : editingGroups.length === 0 ? (
                   <p className="text-sm text-gray-500">No services are offered for this vehicle type yet.</p>
                 ) : (
+                  launchOfferActive ? (
+                    <div className="space-y-3">
+                      <div>
+                        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">Choose Offer Service</p>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {(launchOfferGroups.length ? launchOfferGroups : editingGroups).map((g) => {
+                            const selected = draft.base === g.key;
+                            const shown = unit(g.primary, draft.typeId);
+                            return (
+                              <button
+                                key={g.key}
+                                type="button"
+                                onClick={() => pickBase(g.key)}
+                                aria-pressed={selected}
+                                className={`rounded-xl border-2 px-3.5 py-3 text-left transition-colors ${
+                                  selected ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white hover:border-gray-400"
+                                }`}
+                              >
+                                <span className="flex items-center justify-between gap-3">
+                                  <span className="text-sm font-semibold text-black">{titleCase(g.label)}</span>
+                                  <span className="font-mono-num shrink-0 text-sm font-bold text-black">₹{shown}</span>
+                                </span>
+                                <span className="mt-1 block text-xs text-gray-600">Includes one Bike Wash free with this launch offer.</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-3">
+                        <div>
+                          <p className="text-sm font-semibold text-black">Bike Wash</p>
+                          <p className="mt-0.5 text-xs text-gray-600">Added automatically with your selected offer service.</p>
+                        </div>
+                        <span className="rounded-full bg-[#E11D48] px-2.5 py-1 text-[11px] font-black uppercase tracking-wide text-white">Free</span>
+                      </div>
+
+                      {editing.offerDiscount > 0 && (
+                        <p className="text-sm text-gray-700">
+                          Offer discount: <span className="font-mono-num font-semibold text-[#E11D48]">-₹{editing.offerDiscount}</span>
+                        </p>
+                      )}
+                    </div>
+                  ) : (
                   <>
                     <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                       Service {draft.count > 1 ? `(same for all ${draft.count})` : ""}
@@ -820,18 +923,43 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                       </div>
                     )}
 
+                    {editing.base && !editingIsBike && editingKit?.addBike && isLaunchOfferBase(editing.base) && (
+                      <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-black">Add Free Bike Wash</p>
+                            <p className="mt-0.5 text-xs text-gray-600">Optional launch offer with {titleCase(editing.base.name)}.</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleAddon(editingKit.addBike!.id)}
+                            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full border px-3.5 py-2 text-xs font-black uppercase tracking-wide transition-colors ${
+                              draft.addons.includes(editingKit.addBike.id)
+                                ? "border-[#E11D48] bg-[#E11D48] text-white"
+                                : "border-[#E11D48]/30 bg-white text-[#E11D48] hover:border-[#E11D48]"
+                            }`}
+                          >
+                            {draft.addons.includes(editingKit.addBike.id) ? "Free Bike Added" : "Add Free Bike"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {editing.base && (
                       <p className="text-sm text-gray-700">
-                        {lineLabel(editing)}: <span className="font-mono-num font-semibold text-black">₹{editing.subtotal}</span>
+                        {lineLabel(editing)}:{" "}
+                        {editing.offerDiscount > 0 && <span className="mr-1.5 text-xs font-bold text-[#E11D48]">FREE bike -₹{editing.offerDiscount}</span>}
+                        <span className="font-mono-num font-semibold text-black">₹{editing.subtotal - editing.offerDiscount}</span>
                       </p>
                     )}
                   </>
+                  )
                 )}
               </div>
             )}
 
             {/* A different type on the same visit */}
-            {totalVehicles < maxVehicles && (
+            {!launchOfferActive && totalVehicles < maxVehicles && (
               <div>
                 <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
                   <Plus className="h-4 w-4" /> Add another vehicle
@@ -985,7 +1113,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           )}
 
           {/* How to pay */}
-          {total > 0 && (
+          {displayTotal > 0 && (
             <div>
               <p className="mb-2 text-sm font-medium text-black">How would you like to pay?</p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1012,7 +1140,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             </div>
           )}
 
-          {isManager && total > 0 && (
+          {isManager && displayTotal > 0 && (
             <div className="max-w-sm">
               <Input
                 label="Coupon code"

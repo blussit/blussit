@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
@@ -18,16 +20,49 @@ class CouponService:
         items, total = await self.repo.find_many(filters, page=page, page_size=page_size)
         return serialize_list(items), total
 
+    async def ensure_default_launch_offer(self) -> None:
+        # Only create the launch row if it has never existed. If an admin has
+        # turned it off, edited it, or even soft-deleted it, leave that choice
+        # alone.
+        if await self.repo.collection.find_one({"code": "FREEBIKE"}):
+            return
+        ist = timezone(timedelta(hours=5, minutes=30))
+        await self.repo.create(
+            {
+                "code": "FREEBIKE",
+                "description": "Launch offer: free bike wash with Star Wash or Deep Cleaning.",
+                "coupon_type": "flat",
+                "value": 0.0,
+                "min_order_value": 0.0,
+                "max_discount_amount": None,
+                "usage_limit_per_user": 1,
+                "total_usage_limit": None,
+                "total_used": 0,
+                "valid_from": datetime(2026, 9, 1, 0, 0, 0, tzinfo=ist),
+                "valid_until": datetime(2026, 9, 24, 23, 59, 59, tzinfo=ist),
+                "is_active": True,
+                "offer_kind": "free_addon_with_service",
+                "eligible_service_keywords": ["star", "deep cleaning"],
+                "free_addon_keywords": ["extra bike wash"],
+            }
+        )
+
     async def create(self, payload: CouponCreateRequest) -> dict:
         if await self.repo.find_by_code(payload.code):
             raise ConflictException("A coupon with this code already exists")
         doc = payload.model_dump()
         doc["code"] = payload.code.upper()
+        doc["eligible_service_keywords"] = self._normalize_keywords(doc.get("eligible_service_keywords"))
+        doc["free_addon_keywords"] = self._normalize_keywords(doc.get("free_addon_keywords"))
         created = await self.repo.create(doc)
         return serialize_doc(created)
 
     async def update(self, coupon_id: str, payload: CouponUpdateRequest) -> dict:
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        if "eligible_service_keywords" in data:
+            data["eligible_service_keywords"] = self._normalize_keywords(data.get("eligible_service_keywords"))
+        if "free_addon_keywords" in data:
+            data["free_addon_keywords"] = self._normalize_keywords(data.get("free_addon_keywords"))
         updated = await self.repo.update_by_id(coupon_id, data)
         if not updated:
             raise NotFoundException("Coupon not found")
@@ -37,7 +72,11 @@ class CouponService:
         if not await self.repo.soft_delete(coupon_id):
             raise NotFoundException("Coupon not found")
 
-    async def validate_and_compute_discount(self, code: str, order_value: float, user_id: str) -> tuple[dict, float]:
+    @staticmethod
+    def _normalize_keywords(values: list[str] | None) -> list[str]:
+        return [v.strip().lower() for v in (values or []) if v and v.strip()]
+
+    async def _valid_coupon(self, code: str, order_value: float, user_id: str | None = None) -> dict:
         coupon = await self.repo.find_by_code(code)
         if not coupon or not coupon.get("is_active"):
             raise BadRequestException("Invalid coupon code")
@@ -57,10 +96,15 @@ class CouponService:
         if coupon.get("total_usage_limit") and coupon.get("total_used", 0) >= coupon["total_usage_limit"]:
             raise BadRequestException("This coupon has reached its usage limit")
 
-        user_usage_count = await self.usage_repo.count_for_user(str(coupon["_id"]), user_id)
-        if user_usage_count >= coupon.get("usage_limit_per_user", 1):
-            raise BadRequestException("You have already used this coupon the maximum number of times")
+        if user_id:
+            user_usage_count = await self.usage_repo.count_for_user(str(coupon["_id"]), user_id)
+            if user_usage_count >= coupon.get("usage_limit_per_user", 1):
+                raise BadRequestException("You have already used this coupon the maximum number of times")
 
+        return coupon
+
+    @staticmethod
+    def _standard_discount(coupon: dict, order_value: float) -> float:
         if coupon["coupon_type"] == CouponType.PERCENTAGE.value:
             discount = order_value * (coupon["value"] / 100)
             if coupon.get("max_discount_amount"):
@@ -69,7 +113,64 @@ class CouponService:
             discount = coupon["value"]
 
         discount = min(discount, order_value)
+        return round(discount, 2)
+
+    async def validate_and_compute_discount(self, code: str, order_value: float, user_id: str) -> tuple[dict, float]:
+        coupon = await self._valid_coupon(code, order_value, user_id)
+        if coupon.get("offer_kind", "standard") != "standard":
+            raise BadRequestException("This offer is applied automatically during booking.")
+        discount = self._standard_discount(coupon, order_value)
         return coupon, round(discount, 2)
+
+    async def validate_public_offer(self, code: str) -> dict:
+        coupon = await self._valid_coupon(code, 0, None)
+        return serialize_doc(coupon)
+
+    async def validate_and_compute_booking_discount(
+        self,
+        code: str,
+        order_value: float,
+        user_id: str,
+        *,
+        services: list[dict],
+        quantities: dict[str, int],
+        vehicle_type: str,
+        first_time_eligible: bool,
+        price_resolver,
+    ) -> tuple[dict, float]:
+        coupon = await self._valid_coupon(code, order_value, user_id)
+        offer_kind = coupon.get("offer_kind", "standard")
+        if offer_kind == "standard":
+            return coupon, self._standard_discount(coupon, order_value)
+        if offer_kind != "free_addon_with_service":
+            raise BadRequestException("Unsupported offer type")
+
+        eligible_keywords = self._normalize_keywords(coupon.get("eligible_service_keywords"))
+        free_keywords = self._normalize_keywords(coupon.get("free_addon_keywords"))
+        if not eligible_keywords or not free_keywords:
+            raise BadRequestException("This offer is not configured correctly.")
+
+        def service_name(svc: dict) -> str:
+            return f"{svc.get('name', '')} {svc.get('slug', '')}".lower()
+
+        has_eligible_main = any(
+            not svc.get("is_addon") and any(keyword in service_name(svc) for keyword in eligible_keywords)
+            for svc in services
+        )
+        if not has_eligible_main:
+            raise BadRequestException("This offer does not apply to the selected service.")
+
+        discount = 0.0
+        for svc in services:
+            if not svc.get("is_addon"):
+                continue
+            if not any(keyword in service_name(svc) for keyword in free_keywords):
+                continue
+            qty = quantities.get(str(svc["_id"]), 1)
+            discount += price_resolver(svc, vehicle_type, first_time_eligible) * qty
+        if discount <= 0:
+            raise BadRequestException("Add the free offer item to claim this offer.")
+        return coupon, round(min(discount, order_value), 2)
 
     async def record_usage(self, coupon_id: str, user_id: str, booking_id: str) -> None:
         """The counter bump is guarded by an atomic $expr condition on the

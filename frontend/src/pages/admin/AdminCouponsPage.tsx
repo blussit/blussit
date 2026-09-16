@@ -9,9 +9,13 @@ import type { Coupon } from "../../types";
 
 const emptyForm = {
   code: "",
+  description: "",
+  offer_kind: "standard" as "standard" | "free_addon_with_service",
   coupon_type: "flat" as "flat" | "percentage",
   value: 0,
   min_order_value: 0,
+  eligible_service_keywords: "",
+  free_addon_keywords: "",
   valid_from: "",
   valid_until: "",
 };
@@ -27,7 +31,14 @@ export default function AdminCouponsPage() {
   const createMutation = useMutation({
     mutationFn: () =>
       adminCouponApi.create({
-        ...form,
+        code: form.code,
+        description: form.description || undefined,
+        offer_kind: form.offer_kind,
+        coupon_type: form.coupon_type,
+        value: form.offer_kind === "free_addon_with_service" ? 0 : form.value,
+        min_order_value: form.min_order_value,
+        eligible_service_keywords: form.offer_kind === "free_addon_with_service" ? form.eligible_service_keywords.split(",").map((x) => x.trim()).filter(Boolean) : [],
+        free_addon_keywords: form.offer_kind === "free_addon_with_service" ? form.free_addon_keywords.split(",").map((x) => x.trim()).filter(Boolean) : [],
         // Sent as explicit IST-offset strings, not new Date(...).toISOString()
         // — that parses a plain "YYYY-MM-DD" input as UTC midnight, which is
         // 5.5h later than intended for "start of this IST business day".
@@ -59,7 +70,7 @@ export default function AdminCouponsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Coupons</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Create promotional discount codes.</p>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Create promotional discounts and offer codes.</p>
         </div>
         <Button onClick={() => setOpen(true)}>
           <Plus className="h-4 w-4" /> Add coupon
@@ -72,8 +83,9 @@ export default function AdminCouponsPage() {
         emptyTitle="No coupons yet"
         columns={[
           { header: "Code", accessor: (c) => <span className="font-mono-num font-semibold">{c.code}</span> },
+          { header: "Offer", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Free add-on" : "Standard") },
           { header: "Type", accessor: (c) => <span className="capitalize">{c.coupon_type}</span> },
-          { header: "Value", accessor: (c) => (c.coupon_type === "percentage" ? `${c.value}%` : `₹${c.value}`) },
+          { header: "Value", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Configured" : c.coupon_type === "percentage" ? `${c.value}%` : `₹${c.value}`) },
           { header: "Min order", accessor: (c) => `₹${c.min_order_value}` },
           { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
           {
@@ -109,19 +121,45 @@ export default function AdminCouponsPage() {
           }}
         >
           <Input label="Coupon code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} required />
-          <Select label="Type" value={form.coupon_type} onChange={(e) => setForm({ ...form, coupon_type: e.target.value as "flat" | "percentage" })}>
-            <option value="flat">Flat amount</option>
-            <option value="percentage">Percentage</option>
+          <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional admin note" />
+          <Select label="Offer type" value={form.offer_kind} onChange={(e) => setForm({ ...form, offer_kind: e.target.value as "standard" | "free_addon_with_service" })}>
+            <option value="standard">Standard discount</option>
+            <option value="free_addon_with_service">Free add-on with selected service</option>
           </Select>
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="Value" type="number" value={form.value} onChange={(e) => setForm({ ...form, value: Number(e.target.value) })} required />
-            <Input
-              label="Min order value"
-              type="number"
-              value={form.min_order_value}
-              onChange={(e) => setForm({ ...form, min_order_value: Number(e.target.value) })}
-            />
-          </div>
+          {form.offer_kind === "standard" ? (
+            <>
+              <Select label="Discount type" value={form.coupon_type} onChange={(e) => setForm({ ...form, coupon_type: e.target.value as "flat" | "percentage" })}>
+                <option value="flat">Flat amount</option>
+                <option value="percentage">Percentage</option>
+              </Select>
+              <div className="grid grid-cols-2 gap-3">
+                <Input label="Value" type="number" value={form.value} onChange={(e) => setForm({ ...form, value: Number(e.target.value) })} required />
+                <Input
+                  label="Min order value"
+                  type="number"
+                  value={form.min_order_value}
+                  onChange={(e) => setForm({ ...form, min_order_value: Number(e.target.value) })}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="space-y-3 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
+              <Input
+                label="Eligible service keywords"
+                value={form.eligible_service_keywords}
+                onChange={(e) => setForm({ ...form, eligible_service_keywords: e.target.value })}
+                placeholder="star, deep cleaning"
+                required
+              />
+              <Input
+                label="Free add-on keywords"
+                value={form.free_addon_keywords}
+                onChange={(e) => setForm({ ...form, free_addon_keywords: e.target.value })}
+                placeholder="extra bike wash"
+                required
+              />
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Input label="Valid from" type="date" value={form.valid_from} onChange={(e) => setForm({ ...form, valid_from: e.target.value })} required />
             <Input label="Valid until" type="date" value={form.valid_until} onChange={(e) => setForm({ ...form, valid_until: e.target.value })} required />

@@ -649,8 +649,15 @@ class BookingService:
             payment_method = PaymentMethod.SUBSCRIPTION
             discount_amount = await self._subscription_discount(payload.subscription_id, services, vehicle_type, first_time_eligible)
         elif payload.coupon_code:
-            coupon, discount_amount = await self.coupon_service.validate_and_compute_discount(
-                payload.coupon_code, subtotal, customer_id
+            coupon, discount_amount = await self.coupon_service.validate_and_compute_booking_discount(
+                payload.coupon_code,
+                subtotal,
+                customer_id,
+                services=services,
+                quantities=quantities,
+                vehicle_type=vehicle_type,
+                first_time_eligible=first_time_eligible,
+                price_resolver=self._resolve_price,
             )
 
         tax_amount = 0.0

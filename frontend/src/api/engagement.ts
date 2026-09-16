@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Complaint, Notification, Review, SubscriptionPlan, UserSubscription } from "../types";
+import type { Complaint, Coupon, Notification, Review, SubscriptionPlan, UserSubscription } from "../types";
 
 /** One subscription row on the manager's center overview. */
 export interface CenterSubscriptionRow {
@@ -82,6 +82,7 @@ export const subscriptionApi = {
 };
 
 export const couponApi = {
+  publicOffer: (code: string) => apiClient.get<ApiSuccess<Coupon>>(`/coupons/public/${code}`).then((r) => r.data.data),
   validate: (code: string, orderValue: number) =>
     apiClient
       .post<ApiSuccess<{ valid: boolean; discount_amount: number; coupon_code: string }>>("/coupons/validate", {

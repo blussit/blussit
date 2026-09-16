@@ -9,6 +9,7 @@ import { HowItWorksStrip } from "../../components/public/landing/HowItWorksStrip
 import { PlansShowcase } from "../../components/public/landing/PlansShowcase";
 import { ReviewsShowcase } from "../../components/public/landing/ReviewsShowcase";
 import { FaqSection } from "../../components/public/landing/FaqSection";
+import { LaunchOfferPopup, LaunchOfferStrip } from "../../components/public/LaunchOfferPopup";
 import { PageSeo } from "../../components/shared/PageSeo";
 import { useAuth } from "../../context/AuthContext";
 
@@ -39,6 +40,8 @@ export default function LandingPage() {
       <PageSeo path="/" />
       <LaunchCountdownBar />
       <PublicNavbar />
+      <LaunchOfferStrip onClaim={() => navigate(`${bookPath}?offer=free-bike-wash`)} />
+      <LaunchOfferPopup onClaim={() => navigate(`${bookPath}?offer=free-bike-wash`)} />
       <LandingHero
         onBook={(serviceId) => {
           if (bookPath === "/app/book") {

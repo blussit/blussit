@@ -478,6 +478,12 @@ async def on_startup() -> None:
             await assign_missing_employee_ids(get_database())
         except Exception:
             logger.exception("Employee-id backfill failed")
+        try:
+            from app.services.coupon_service import CouponService
+
+            await CouponService(get_database()).ensure_default_launch_offer()
+        except Exception:
+            logger.exception("Default launch offer initialization failed")
 
     asyncio.create_task(_deferred_init())
     _reminder_task = asyncio.create_task(_reminder_loop())

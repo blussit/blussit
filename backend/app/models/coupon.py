@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Optional
 
+from pydantic import Field
+
 from app.models.base import BusinessRecordBase
 from app.models.enums import CouponType
 
@@ -18,3 +20,6 @@ class CouponModel(BusinessRecordBase):
     valid_from: datetime
     valid_until: datetime
     is_active: bool = True
+    offer_kind: str = "standard"
+    eligible_service_keywords: list[str] = Field(default_factory=list)
+    free_addon_keywords: list[str] = Field(default_factory=list)

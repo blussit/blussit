@@ -6,6 +6,7 @@ content (FAQs, testimonials) so the app is demo-ready immediately.
 Run with:  python -m app.seed
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 
@@ -155,6 +156,37 @@ async def seed() -> None:
     ]
     retired = await db.services.update_many({"slug": {"$in": legacy_slugs}, "is_active": True}, {"$set": {"is_active": False}})
     print(f"Services seeded ({len(services)} in catalogue, {retired.modified_count} legacy retired).")
+
+    # --- Launch offer coupon ----------------------------------------------
+    # A real admin-managed offer row, not a hidden code path. Admins can
+    # turn it off from Coupons, extend dates, or create the same style of
+    # "free add-on with selected service" offer later.
+    ist = timezone(timedelta(hours=5, minutes=30))
+    await db.coupons.update_one(
+        {"code": "FREEBIKE"},
+        {
+            "$set": {
+                "code": "FREEBIKE",
+                "description": "Launch offer: free bike wash with Star Wash or Deep Cleaning.",
+                "coupon_type": "flat",
+                "value": 0.0,
+                "min_order_value": 0.0,
+                "max_discount_amount": None,
+                "usage_limit_per_user": 1,
+                "total_usage_limit": None,
+                "valid_from": datetime(2026, 9, 1, 0, 0, 0, tzinfo=ist),
+                "valid_until": datetime(2026, 9, 24, 23, 59, 59, tzinfo=ist),
+                "is_active": True,
+                "offer_kind": "free_addon_with_service",
+                "eligible_service_keywords": ["star", "deep cleaning"],
+                "free_addon_keywords": ["extra bike wash"],
+                "is_deleted": False,
+            },
+            "$setOnInsert": {"total_used": 0},
+        },
+        upsert=True,
+    )
+    print("Launch offer coupon ready: FREEBIKE")
 
     # --- Service Center -------------------------------------------------
     existing_center = await db.service_centers.find_one({"code": "IND-0001"})

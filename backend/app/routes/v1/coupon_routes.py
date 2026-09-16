@@ -13,6 +13,11 @@ async def list_coupons(active_only: bool = False, pagination: PaginationParams =
     return await CouponController(db).list(pagination, active_only)
 
 
+@router.get("/public/{code}")
+async def public_offer(code: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await CouponController(db).public_offer(code)
+
+
 @router.post("", dependencies=[Depends(require_admin)])
 async def create_coupon(payload: CouponCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await CouponController(db).create(current_user, payload)

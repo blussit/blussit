@@ -631,6 +631,9 @@ export interface Coupon {
   coupon_type: "flat" | "percentage";
   value: number;
   min_order_value: number;
+  offer_kind?: "standard" | "free_addon_with_service";
+  eligible_service_keywords?: string[];
+  free_addon_keywords?: string[];
   is_active: boolean;
   valid_from: string;
   valid_until: string;
