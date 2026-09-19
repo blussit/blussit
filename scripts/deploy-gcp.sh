@@ -87,14 +87,13 @@ fi
 
 if [[ "$SMS_PROVIDER" == "msg91" ]]; then
   require_value MSG91_AUTH_KEY
-  require_value MSG91_OTP_TEMPLATE_ID
 fi
 
-# OTP delivery (quick-booking model: OTP is for login only): WhatsApp
-# first, SMS as the fallback. The backend skips WhatsApp when it can't
-# reach a number (no approved OTP template and no open 24h chat), and
-# the login page then sends by SMS through the MSG91 widget — so at
-# least one SMS path must exist, or a first-time login has no way in.
+# OTP delivery (login + the confirm-booking OTP): WhatsApp first, SMS as
+# the fallback. The backend skips WhatsApp when it can't reach a number
+# (no approved OTP template and no open 24h chat) and sends by SMS
+# through MSG91 (SMS_PROVIDER=msg91) — so an SMS path must exist, or
+# first-time customers can't get a code.
 [[ "$OTP_CHANNEL" == "whatsapp" ]] || fail "OTP_CHANNEL must be whatsapp (WhatsApp first, SMS fallback)"
 if [[ -z "${WHATSAPP_OTP_TEMPLATE_NAME:-}" ]]; then
   printf 'WARNING: WHATSAPP_OTP_TEMPLATE_NAME is empty — WhatsApp OTPs reach only numbers with an open 24h chat; everyone else falls back to SMS. Set it once Meta approves the blussit_otp template.\n' >&2
@@ -193,7 +192,7 @@ if [[ "$MSG91_WIDGET_ENABLED" == true ]]; then
   NORMAL_NAMES+=(MSG91_WIDGET_ID)
   SECRET_NAMES+=(MSG91_AUTH_KEY MSG91_TOKEN_AUTH)
 fi
-if [[ "$SMS_PROVIDER" == "msg91" ]]; then
+if [[ "$SMS_PROVIDER" == "msg91" && -n "${MSG91_OTP_TEMPLATE_ID:-}" ]]; then
   NORMAL_NAMES+=(MSG91_OTP_TEMPLATE_ID)
 fi
 if [[ -n "${GOOGLE_MAPS_SERVER_KEY:-}" ]]; then

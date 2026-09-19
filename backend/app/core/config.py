@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     # permanent fallback after). Same provider-abstraction shape as
     # WHATSAPP_PROVIDER: "" disables SMS entirely (default — WhatsApp-only,
     # exactly today's behavior), "log" writes to the sms_outbox collection
-    # (dev/tests), "msg91" sends for real once its key + OTP template id are set.
+    # (dev/tests), "msg91" sends for real once its auth key is set (template id optional).
     SMS_PROVIDER: str = ""
     MSG91_AUTH_KEY: str = ""
     MSG91_OTP_TEMPLATE_ID: str = ""

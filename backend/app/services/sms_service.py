@@ -7,8 +7,9 @@ OTP_CHANNEL first, then the other channel automatically).
 Provider-abstracted exactly like whatsapp_service.py:
   - LogSmsProvider: records to the sms_outbox collection, never calls a
     real API (dev/tests).
-  - Msg91Provider: MSG91's OTP API (needs MSG91_AUTH_KEY and a
-    DLT-approved OTP template id). The only real SMS provider.
+  - Msg91Provider: MSG91's OTP API (needs MSG91_AUTH_KEY; the OTP
+    template id is optional — without it MSG91 uses the account's
+    default OTP template). The only real SMS provider.
 
 India-reality note kept in one place: proper custom-content SMS requires
 TRAI DLT entity+template registration; MSG91's OTP API carries the
@@ -64,13 +65,15 @@ class LogSmsProvider(SmsProvider):
 
 
 class Msg91Provider(SmsProvider):
-    def __init__(self, db: AsyncIOMotorDatabase, auth_key: str, otp_template_id: str):
+    def __init__(self, db: AsyncIOMotorDatabase, auth_key: str, otp_template_id: str = ""):
         self.db = db
         self.auth_key = auth_key
         self.otp_template_id = otp_template_id
 
     async def send_otp(self, phone: str, code: str) -> bool:
-        params = {"template_id": self.otp_template_id, "mobile": f"91{_digits10(phone)}", "otp": code}
+        params = {"mobile": f"91{_digits10(phone)}", "otp": code}
+        if self.otp_template_id:
+            params["template_id"] = self.otp_template_id
         outbox = {"phone": phone, "message": f"[msg91 otp] {code}", "kind": "otp", "provider": "msg91",
                   "created_at": datetime.now(timezone.utc)}
         try:
@@ -100,7 +103,7 @@ def get_sms_provider(db: AsyncIOMotorDatabase) -> SmsProvider | None:
     that as 'not configured' and stay WhatsApp-only."""
     if settings.SMS_PROVIDER == "log":
         return LogSmsProvider(db)
-    if settings.SMS_PROVIDER == "msg91" and settings.MSG91_AUTH_KEY and settings.MSG91_OTP_TEMPLATE_ID:
+    if settings.SMS_PROVIDER == "msg91" and settings.MSG91_AUTH_KEY:
         return Msg91Provider(db, settings.MSG91_AUTH_KEY, settings.MSG91_OTP_TEMPLATE_ID)
     return None
 
