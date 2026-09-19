@@ -11,6 +11,7 @@ import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { QtyStepper } from "../shared/QtyStepper";
+import { BookingOtpModal } from "./BookingOtpModal";
 import { CoverageLeadInline } from "../public/CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
@@ -23,14 +24,14 @@ import { parseIncludes, titleCase } from "../public/landing/shared";
 import type { Address, Service, VehicleTypeOption } from "../../types";
 
 /**
- * THE booking flow (2026-09 quick-booking model) — two steps, no account,
- * no OTP:
+ * THE booking flow (2026-09 quick-booking model) — two steps, no account;
+ * anonymous bookings end with a one-time-code popup (BookingOtpModal):
  *
  *   1. What are we washing?  pick a vehicle type, how many, one service
  *      (+ add-ons); "Add another vehicle" for a different type on the
  *      same visit ("Bike ×2 + SUV ×1").
  *   2. Where & when?         pin the address, pick a slot, name + phone,
- *      how to pay → Book.
+ *      how to pay → Book (→ verify the number with an OTP if not signed in).
  *
  * One component, three seats:
  *   - "public":   anyone on /book — a profile is created silently from the
@@ -128,6 +129,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [otpOpen, setOtpOpen] = useState(false);
+  const [verified, setVerified] = useState<{ phone: string; token: string } | null>(null);
+  const phoneRef = useRef<HTMLInputElement>(null);
 
   // ---- keep an unfinished booking for THIS browser tab ---------------------
   // Back button, a tap on the logo, a refresh — the customer comes back to
@@ -611,14 +615,25 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     return Object.keys(next).length === 0;
   };
 
-  const submit = async () => {
+  // Anonymous website bookings prove the phone with an OTP as the last step;
+  // signed-in customers already did (OTP login) and managers book on behalf.
+  const needsOtp = !isManager && (!user || user.role !== "customer");
+
+  const submit = async (freshToken?: string) => {
     if (!validateStep2()) return;
+    const canonicalPhone = validateIndianMobile(phone) || phone.trim();
+    const token = freshToken || (verified?.phone === canonicalPhone ? verified.token : undefined);
+    if (needsOtp && !token) {
+      setOtpOpen(true);
+      return;
+    }
     setError("");
     setSubmitting(true);
     try {
       const payload: QuickBookingPayload = {
         customer_name: name.trim(),
-        customer_phone: validateIndianMobile(phone) || phone.trim(),
+        customer_phone: canonicalPhone,
+        phone_verification_token: needsOtp ? token : undefined,
         lines: lines.map((l) => l.payload!).filter(Boolean),
         scheduled_date: date,
         scheduled_slot: slot,
@@ -670,7 +685,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         },
       });
     } catch (err) {
-      setError(getErrorMessage(err));
+      const message = getErrorMessage(err);
+      setError(message);
+      // The backend rejected the proof (expired/used) — ask for a fresh code.
+      if (message.startsWith("Please verify your mobile number")) {
+        setVerified(null);
+        setOtpOpen(true);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -700,7 +721,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             Continue
           </Button>
         ) : (
-          <Button className="min-w-[150px]" disabled={!step2Ready} isLoading={submitting} onClick={submit}>
+          <Button className="min-w-[150px]" disabled={!step2Ready} isLoading={submitting} onClick={() => void submit()}>
             <CheckCircle2 className="h-4 w-4" />
             {displayTotal > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
           </Button>
@@ -713,6 +734,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   );
 
   return (
+    <>
+    {needsOtp && (
+      <BookingOtpModal
+        open={otpOpen}
+        phone={validateIndianMobile(phone) || phone.trim()}
+        onClose={() => setOtpOpen(false)}
+        onEditNumber={() => {
+          setOtpOpen(false);
+          setTimeout(() => phoneRef.current?.focus(), 0);
+        }}
+        onVerified={(token) => {
+          const canonicalPhone = validateIndianMobile(phone) || phone.trim();
+          setVerified({ phone: canonicalPhone, token });
+          setOtpOpen(false);
+          void submit(token);
+        }}
+      />
+    )}
     <WizardShell
       eyebrow={isManager ? "Book for a customer" : "Book a wash"}
       title={isManager ? "New Booking" : "Book Your Doorstep Wash"}
@@ -991,6 +1030,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Input label={isManager ? "Customer name" : "Your name"} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
               <Input
+                ref={phoneRef}
                 label={isManager ? "Customer mobile" : "Mobile number"}
                 value={phone}
                 inputMode="numeric"
@@ -1181,5 +1221,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         </div>
       )}
     </WizardShell>
+    </>
   );
 }

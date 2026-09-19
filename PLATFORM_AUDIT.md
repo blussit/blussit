@@ -55,7 +55,7 @@ every one of those has a free or near-free configuration below.*
 |---|---|---|
 | Wallet / captain earnings / withdrawals / top-ups | **Already OFF** (`wallet_gating_enabled=false`); nav hidden | Leave off. Zero runtime cost. Revisit only with a payment gateway |
 | Inventory / equipment-per-job deduction | Backend works, frontend sends `[]` — a live no-op | Park. It's the future supplies-reconciliation feature we deferred — costs nothing meanwhile |
-| SMS channel (MSG91 / Fast2SMS) | Disabled (`SMS_PROVIDER=""`) — WhatsApp handles OTP | Leave off. DLT SMS ≈ ₹0.15–0.25 each vs WhatsApp auth ≈ ₹0.12. Only enable if WhatsApp delivery becomes a problem |
+| SMS channel (MSG91) | Disabled (`SMS_PROVIDER=""`) — WhatsApp handles OTP | Leave off. DLT SMS ≈ ₹0.15–0.25 each vs WhatsApp auth ≈ ₹0.12. Only enable if WhatsApp delivery becomes a problem |
 | Cloudinary storage | Configured but `STORAGE_PROVIDER=local` | Stay local until the disk matters (uploads are 14MB after months of dev). Cloudinary free tier covers you when you switch |
 | Coverage leads (out-of-area interest capture) | Light | Keep (it's ~free) but don't invest further |
 | Homepage config / testimonials / content CMS | Light | Keep as-is; don't extend |

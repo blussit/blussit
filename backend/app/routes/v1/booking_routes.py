@@ -19,11 +19,14 @@ from app.core.dependencies import (
     require_customer,
     require_manager_or_admin,
 )
+from app.services.auth_service import AuthService
 from app.schemas.booking_schema import (
     BookingGroupCreateRequest,
     BookingAssignCaptainRequest,
     BookingCancelRequest,
     BookingCreateRequest,
+    BookingPhoneOtpConfirm,
+    BookingPhoneOtpRequest,
     BookingRescheduleRequest,
     CaptainCancelRequest,
     HeadingRequest,
@@ -45,14 +48,27 @@ async def create_booking(payload: BookingCreateRequest, current_user: CurrentUse
     return await BookingController(db).create(current_user, payload)
 
 
+@router.post("/verify-phone/request")
+async def request_booking_phone_otp(payload: BookingPhoneOtpRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+    await AuthService(db).request_phone_otp(payload.phone)
+    return success(None, "Verification code sent")
+
+
+@router.post("/verify-phone/confirm")
+async def confirm_booking_phone_otp(payload: BookingPhoneOtpConfirm, db: AsyncIOMotorDatabase = Depends(get_db)):
+    token = await AuthService(db).confirm_phone_otp(payload.phone, payload.otp)
+    return success({"phone_verification_token": token}, "Phone verified")
+
+
 @router.post("/quick")
 async def quick_create_booking(
     payload: QuickBookingRequest,
     current_user: CurrentUser | None = Depends(get_optional_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    """Public by design (quick-booking model): name + phone + what/where/
-    when, no account or OTP first. Rate-limited (see core/rate_limit.py)."""
+    """Public: name + phone + what/where/when. Anonymous callers must carry
+    a phone_verification_token from /verify-phone/confirm; signed-in
+    customers are already OTP-verified. Rate-limited (core/rate_limit.py)."""
     return await BookingController(db).quick_create(current_user, payload)
 
 

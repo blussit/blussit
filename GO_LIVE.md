@@ -39,7 +39,7 @@ Vercel project → Environment Variables → `VITE_API_BASE_URL=https://api.blus
 - Final images for the landing page.
 
 ### 5. Optional but recommended
-- Fast2SMS API key → `SMS_PROVIDER=fast2sms`, `FAST2SMS_API_KEY=...` (OTP fallback channel).
+- MSG91 → `SMS_PROVIDER=msg91`, `MSG91_AUTH_KEY=...`, `MSG91_OTP_TEMPLATE_ID=...` (OTP fallback channel).
 - UptimeRobot (free) pinging `https://api.blussit.com/api/health` — alerts you if the API goes down.
 
 ### 6. Google (Maps + Sign-in) — before real customers

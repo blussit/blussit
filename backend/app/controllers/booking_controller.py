@@ -65,9 +65,11 @@ class BookingController:
     async def quick_create(self, current_user: CurrentUser | None, payload: QuickBookingRequest):
         """The no-login booking. A signed-in CUSTOMER books under their own
         account (the typed name/phone are ignored in favour of the
-        profile); anyone else is found-or-created by phone."""
+        profile); anyone else is found-or-created by phone, but only after
+        proving the phone with the confirm-booking OTP."""
         auth = AuthService(self.db)
-        if current_user is not None and current_user.role == "customer":
+        signed_in_customer = current_user is not None and current_user.role == "customer"
+        if signed_in_customer:
             customer = await auth.users.find_by_id(current_user.id)
             if not customer:
                 customer = await auth.ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
@@ -84,8 +86,11 @@ class BookingController:
                 await auth.users.update_by_id(str(customer["_id"]), {"phone": payload.customer_phone})
                 customer["phone"] = payload.customer_phone
         else:
+            await auth.check_phone_token(payload.phone_verification_token, payload.customer_phone)
             customer = await auth.ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
         result = await self.service.create_quick_booking(payload, customer=customer, source="app")
+        if not signed_in_customer:
+            await auth.burn_phone_token(payload.phone_verification_token)
         result = await self._quick_result_with_ticket(result, str(customer["_id"]))
         return success(result, "Booking confirmed" if not result.get("awaiting_payment") else "Finish paying to confirm your booking")
 

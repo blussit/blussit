@@ -85,9 +85,7 @@ if [[ "$WHATSAPP_PROVIDER" == "meta_cloud" ]]; then
   require_value WHATSAPP_APP_SECRET
 fi
 
-if [[ "$SMS_PROVIDER" == "fast2sms" ]]; then
-  require_value FAST2SMS_API_KEY
-elif [[ "$SMS_PROVIDER" == "msg91" ]]; then
+if [[ "$SMS_PROVIDER" == "msg91" ]]; then
   require_value MSG91_AUTH_KEY
   require_value MSG91_OTP_TEMPLATE_ID
 fi
@@ -102,7 +100,7 @@ if [[ -z "${WHATSAPP_OTP_TEMPLATE_NAME:-}" ]]; then
   printf 'WARNING: WHATSAPP_OTP_TEMPLATE_NAME is empty — WhatsApp OTPs reach only numbers with an open 24h chat; everyone else falls back to SMS. Set it once Meta approves the blussit_otp template.\n' >&2
 fi
 if [[ -z "${SMS_PROVIDER:-}" && ( -z "${MSG91_AUTH_KEY:-}" || -z "${MSG91_WIDGET_ID:-}" || -z "${MSG91_TOKEN_AUTH:-}" ) ]]; then
-  fail "No SMS fallback configured: set SMS_PROVIDER (fast2sms/msg91) or the MSG91 widget trio (MSG91_AUTH_KEY, MSG91_WIDGET_ID, MSG91_TOKEN_AUTH)"
+  fail "No SMS fallback configured: set SMS_PROVIDER=msg91 or the MSG91 widget trio (MSG91_AUTH_KEY, MSG91_WIDGET_ID, MSG91_TOKEN_AUTH)"
 fi
 
 # The MSG91 widget is enabled only when all three values are present.
@@ -188,9 +186,7 @@ SECRET_NAMES+=(MONGO_URI JWT_SECRET_KEY R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY)
 if [[ "$WHATSAPP_PROVIDER" == "meta_cloud" ]]; then
   SECRET_NAMES+=(WHATSAPP_ACCESS_TOKEN WHATSAPP_WEBHOOK_VERIFY_TOKEN WHATSAPP_APP_SECRET)
 fi
-if [[ "$SMS_PROVIDER" == "fast2sms" ]]; then
-  SECRET_NAMES+=(FAST2SMS_API_KEY)
-elif [[ "$SMS_PROVIDER" == "msg91" ]]; then
+if [[ "$SMS_PROVIDER" == "msg91" ]]; then
   SECRET_NAMES+=(MSG91_AUTH_KEY)
 fi
 if [[ "$MSG91_WIDGET_ENABLED" == true ]]; then

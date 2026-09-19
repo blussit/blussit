@@ -348,7 +348,9 @@ class AuthService:
         phone = user.get("phone")
         if not phone:
             raise BadRequestException("This account has no phone number on file to send a verification code to.")
+        await self._issue_otp(identifier, phone, purpose)
 
+    async def _issue_otp(self, identifier: str, phone: str, purpose: str) -> None:
         existing = await self.otp_store.find_one({"identifier": identifier})
         now = datetime.now(timezone.utc)
         if existing and existing.get("last_sent_at"):
@@ -378,6 +380,38 @@ class AuthService:
         sent = await self._deliver_otp(phone, otp, purpose)
         if not sent:
             raise BadRequestException("Couldn't send the verification code — please try again in a moment.")
+
+    async def request_phone_otp(self, phone: str) -> None:
+        """Confirm-booking OTP for a bare phone number — no account exists
+        yet (or needs to), so the code is keyed by the phone itself."""
+        await self._issue_otp(f"booking:{phone}", phone, "booking_confirmation")
+
+    async def confirm_phone_otp(self, phone: str, otp: str) -> str:
+        """Verifies the confirm-booking code and returns a short-lived,
+        single-use token bound to this phone. The booking endpoint demands
+        it, so skipping the popup and calling the API directly gets
+        nowhere."""
+        if not await self.verify_otp(f"booking:{phone}", otp):
+            raise BadRequestException("Invalid or expired code.")
+        token = secrets.token_urlsafe(24)
+        await self.db["booking_phone_tokens"].insert_one(
+            {"token": token, "phone": phone, "expires_at": datetime.now(timezone.utc) + timedelta(minutes=30)}
+        )
+        return token
+
+    async def check_phone_token(self, token: str | None, phone: str) -> None:
+        """Non-destructive: a booking that then fails (slot just taken)
+        shouldn't cost the customer a second OTP."""
+        doc = None
+        if token:
+            doc = await self.db["booking_phone_tokens"].find_one(
+                {"token": token, "phone": phone, "expires_at": {"$gt": datetime.now(timezone.utc)}}
+            )
+        if not doc:
+            raise BadRequestException("Please verify your mobile number with the code we send to confirm your booking.")
+
+    async def burn_phone_token(self, token: str) -> None:
+        await self.db["booking_phone_tokens"].delete_one({"token": token})
 
     async def verify_otp(self, identifier: str, otp: str) -> bool:
         record = await self.otp_store.find_one({"identifier": identifier})
@@ -494,10 +528,9 @@ class AuthService:
         temp_password = "".join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=10))
         await self.users.update_by_id(customer_id, {"password_hash": hash_password(temp_password), "must_change_password": True})
         await self.users.collection.update_one({"_id": ObjectId(customer_id)}, {"$inc": {"token_version": 1}})
-        # Same channel-order fallback as OTPs (note: Fast2SMS's DLT-exempt
-        # route can't carry free text, so its send_temp_password returns
-        # False and WhatsApp handles it — MSG91-with-template or WhatsApp
-        # are the real carriers for this one).
+        # Same channel-order fallback as OTPs (note: MSG91's OTP API can't
+        # carry free text, so send_temp_password returns False and
+        # WhatsApp handles it).
         from app.core.config import settings as _settings
         order = ["sms", "whatsapp"] if _settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
         sent = False

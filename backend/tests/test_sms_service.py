@@ -10,7 +10,7 @@ from bson import ObjectId
 
 from app.core.config import settings
 from app.services.auth_service import AuthService
-from app.services.sms_service import Fast2SmsProvider, LogSmsProvider, SmsService, get_sms_provider
+from app.services.sms_service import LogSmsProvider, Msg91Provider, SmsService, get_sms_provider
 
 from tests.factories import make_customer
 
@@ -64,8 +64,8 @@ async def test_sms_first_falls_back_to_whatsapp_when_sms_fails(db, customer, mon
 
 
 @pytest.mark.asyncio
-async def test_fast2sms_provider_refuses_free_text_without_dlt(db):
-    provider = Fast2SmsProvider(db, "fake-key")
+async def test_msg91_provider_refuses_free_text(db):
+    provider = Msg91Provider(db, "fake-key", "fake-template")
     assert await provider.send_text("9876500001", "Your temp password is Xy12") is False
 
 

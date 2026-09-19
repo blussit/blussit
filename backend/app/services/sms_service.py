@@ -7,19 +7,12 @@ OTP_CHANNEL first, then the other channel automatically).
 Provider-abstracted exactly like whatsapp_service.py:
   - LogSmsProvider: records to the sms_outbox collection, never calls a
     real API (dev/tests).
-  - Fast2SmsProvider: Fast2SMS's DLT-exempt OTP route — sends ONLY a
-    numeric code through their pre-approved "{code} is your verification
-    code" template, which is why it works with zero DLT registration.
-    Free-text (e.g. a temp password) is NOT possible on this route, so
-    send_text returns False there and the caller's WhatsApp fallback
-    handles it.
-  - Msg91Provider: MSG91's OTP API (template_id required — needs DLT,
-    the grown-up setup once Udyam/DLT registration is done).
+  - Msg91Provider: MSG91's OTP API (needs MSG91_AUTH_KEY and a
+    DLT-approved OTP template id). The only real SMS provider.
 
 India-reality note kept in one place: proper custom-content SMS requires
-TRAI DLT entity+template registration. The two providers above are wired
-specifically because they offer legitimate OTP-only delivery without the
-customer holding their own DLT registration.
+TRAI DLT entity+template registration; MSG91's OTP API carries the
+DLT-approved OTP template only, so free text still goes over WhatsApp.
 """
 import logging
 from abc import ABC, abstractmethod
@@ -70,39 +63,6 @@ class LogSmsProvider(SmsProvider):
         return await self._record(phone, message, "text")
 
 
-class Fast2SmsProvider(SmsProvider):
-    def __init__(self, db: AsyncIOMotorDatabase, api_key: str):
-        self.db = db
-        self.api_key = api_key
-
-    async def send_otp(self, phone: str, code: str) -> bool:
-        params = {"route": "otp", "variables_values": code, "numbers": _digits10(phone)}
-        outbox = {"phone": phone, "message": f"[otp route] {code}", "kind": "otp", "provider": "fast2sms",
-                  "created_at": datetime.now(timezone.utc)}
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get("https://www.fast2sms.com/dev/bulkV2", params=params, headers={"authorization": self.api_key})
-            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-            ok = r.status_code < 300 and bool(body.get("return"))
-            outbox.update({"status_code": r.status_code, "ok": ok, "response_body": r.text[:1000]})
-            await self.db.sms_outbox.insert_one(outbox)
-            if not ok:
-                logger.error("Fast2SMS OTP send failed (%s): %s", r.status_code, r.text[:300])
-            return ok
-        except httpx.HTTPError as exc:
-            logger.error("Fast2SMS send raised %s for %s", exc, phone)
-            outbox.update({"ok": False, "error": str(exc)})
-            await self.db.sms_outbox.insert_one(outbox)
-            return False
-
-    async def send_text(self, phone: str, message: str) -> bool:
-        # The DLT-exempt route carries ONLY the numeric OTP template —
-        # free text would need the customer's own DLT registration. Refuse
-        # so the caller's WhatsApp fallback takes over.
-        logger.info("Fast2SMS free-text not available without DLT — falling back (message for %s suppressed)", phone)
-        return False
-
-
 class Msg91Provider(SmsProvider):
     def __init__(self, db: AsyncIOMotorDatabase, auth_key: str, otp_template_id: str):
         self.db = db
@@ -140,8 +100,6 @@ def get_sms_provider(db: AsyncIOMotorDatabase) -> SmsProvider | None:
     that as 'not configured' and stay WhatsApp-only."""
     if settings.SMS_PROVIDER == "log":
         return LogSmsProvider(db)
-    if settings.SMS_PROVIDER == "fast2sms" and settings.FAST2SMS_API_KEY:
-        return Fast2SmsProvider(db, settings.FAST2SMS_API_KEY)
     if settings.SMS_PROVIDER == "msg91" and settings.MSG91_AUTH_KEY and settings.MSG91_OTP_TEMPLATE_ID:
         return Msg91Provider(db, settings.MSG91_AUTH_KEY, settings.MSG91_OTP_TEMPLATE_ID)
     return None

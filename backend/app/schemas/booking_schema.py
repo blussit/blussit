@@ -111,6 +111,10 @@ class QuickBookingRequest(BaseModel):
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
     hold_key: Optional[str] = Field(default=None, max_length=80)
+    # Single-use proof that customer_phone passed the confirm-booking OTP
+    # (POST /bookings/verify-phone/confirm). Required for anonymous website
+    # bookings only — signed-in customers and managers don't send one.
+    phone_verification_token: Optional[str] = Field(default=None, max_length=64)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
 
@@ -138,6 +142,24 @@ class QuickBookingRequest(BaseModel):
         if total > 10:
             raise ValueError("You can book up to 10 vehicles on one visit")
         return self
+
+
+def _canonical_phone(v: str) -> str:
+    phone = validate_indian_mobile(v)
+    if not phone:
+        raise ValueError("Enter a valid 10-digit mobile number")
+    return phone
+
+
+class BookingPhoneOtpRequest(BaseModel):
+    phone: str = Field(min_length=10, max_length=20)
+    _phone = field_validator("phone")(_canonical_phone)
+
+
+class BookingPhoneOtpConfirm(BaseModel):
+    phone: str = Field(min_length=10, max_length=20)
+    otp: str = Field(min_length=4, max_length=8)
+    _phone = field_validator("phone")(_canonical_phone)
 
 
 class ManagerBookingCreateRequest(BaseModel):
