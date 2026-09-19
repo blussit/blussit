@@ -479,6 +479,19 @@ class WhatsAppService:
         self.db = db
         self.provider = get_whatsapp_provider(db)
 
+    async def otp_template_name(self) -> str:
+        """The OTP template WhatsApp can use right now: the configured
+        WHATSAPP_OTP_TEMPLATE_NAME, or — when none is configured —
+        `blussit_otp` the moment Meta has approved it (Sync in the CRM
+        Templates tab). "" = no template yet, WhatsApp OTP is free-text
+        only and reaches just numbers with an open 24h chat."""
+        if settings.WHATSAPP_OTP_TEMPLATE_NAME:
+            return settings.WHATSAPP_OTP_TEMPLATE_NAME
+        tpl = await self.db.whatsapp_templates.find_one(
+            {"name": "blussit_otp", "status": "APPROVED", "category": "AUTHENTICATION", "disabled": {"$ne": True}}
+        )
+        return tpl["name"] if tpl else ""
+
     async def send_otp(self, phone: str, code: str, purpose: str = "verification") -> bool:
         # A template message (WHATSAPP_OTP_TEMPLATE_NAME) is the ONLY kind
         # that reaches a recipient with no open 24h session — i.e. the one
@@ -494,11 +507,12 @@ class WhatsAppService:
         # approved template (see create_otp_template), only re-verifies
         # and testers who already have an open session actually receive
         # this path's message; a first-time signup does not.
-        if settings.WHATSAPP_OTP_TEMPLATE_NAME:
-            tpl = await self.db.whatsapp_templates.find_one({"name": settings.WHATSAPP_OTP_TEMPLATE_NAME})
+        template = await self.otp_template_name()
+        if template:
+            tpl = await self.db.whatsapp_templates.find_one({"name": template})
             otp_button = bool(tpl and tpl.get("category") == "AUTHENTICATION")
             return await self.provider.send_template(
-                phone, settings.WHATSAPP_OTP_TEMPLATE_NAME, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code], otp_button=otp_button, extra={"kind": "otp"}
+                phone, template, settings.WHATSAPP_OTP_TEMPLATE_LANGUAGE, [code], otp_button=otp_button, extra={"kind": "otp"}
             )
         label = {"verification": "verify your phone", "password_reset": "reset your password"}.get(purpose, "verify your phone")
         return await self.provider.send(phone, f"Your Blussit code to {label} is {code}. It expires in 10 minutes. Do not share this code with anyone.", extra={"kind": "otp"})

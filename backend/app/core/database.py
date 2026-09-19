@@ -223,8 +223,6 @@ async def create_indexes() -> None:
     # self-delete at their own expiry instant (TTL 0 on expires_at).
     await db.otp_requests.create_index("identifier")
     await db.otp_requests.create_index("expires_at", expireAfterSeconds=0)
-    await db.booking_phone_tokens.create_index("token", unique=True)
-    await db.booking_phone_tokens.create_index("expires_at", expireAfterSeconds=0)
 
     await db.inventory.create_index("service_center_id")
 

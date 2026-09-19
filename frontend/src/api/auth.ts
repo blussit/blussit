@@ -51,7 +51,7 @@ export const authApi = {
 export const otpWidgetApi = {
   config: () =>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
     apiClient
-      .get<ApiSuccess<{ enabled: boolean; widget_id: string | null; token_auth: string | null }>>("/auth/otp-widget-config")
+      .get<ApiSuccess<{ enabled: boolean; widget_id: string | null; token_auth: string | null; whatsapp_primary?: boolean }>>("/auth/otp-widget-config")
       .then((r) => r.data.data),
   verifyPhone: (access_token: string) =>
     apiClient.post<ApiSuccess<{ phone_verified: boolean }>>("/auth/verify-phone/widget", { access_token }).then((r) => r.data.data),

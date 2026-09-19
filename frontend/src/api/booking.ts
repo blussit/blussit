@@ -48,9 +48,13 @@ export interface QuickBookingPayload {
   alternate_contact_name?: string;
   alternate_contact_phone?: string;
   hold_key?: string;
-  /** From confirmPhoneOtp — required for anonymous website bookings. */
-  phone_verification_token?: string;
+  /** Proof of the phone, same kinds login uses — required for anonymous
+   *  website bookings: our own OTP code, or the MSG91 widget access token. */
+  phone_otp?: string;
+  phone_access_token?: string;
 }
+
+export type PhoneProof = Pick<QuickBookingPayload, "phone_otp" | "phone_access_token">;
 
 /** What POST /bookings/quick returns — one shape for one car or many. */
 export interface QuickBookingResult {
@@ -149,15 +153,12 @@ export interface EligibleCaptain {
 export const bookingApi = {
   create: (payload: CreateBookingPayload) => apiClient.post<ApiSuccess<Booking>>("/bookings", payload).then((r) => r.data.data),
 
-  /** Confirm-booking OTP: sent over WhatsApp with an instant SMS fallback. */
+  /** Our own OTP for a phone with no account yet (WhatsApp / SMS from the
+   *  backend). The MSG91 widget path needs no backend call to send. */
   requestPhoneOtp: (phone: string) => apiClient.post("/bookings/verify-phone/request", { phone }).then((r) => r.data),
-  confirmPhoneOtp: (phone: string, otp: string) =>
-    apiClient
-      .post<ApiSuccess<{ phone_verification_token: string }>>("/bookings/verify-phone/confirm", { phone, otp })
-      .then((r) => r.data.data.phone_verification_token),
 
   /** The quick-booking model: name + phone + what/where/when. Anonymous
-   *  callers carry a phone_verification_token; a signed-in customer books
+   *  callers carry phone_otp / phone_access_token; a signed-in customer books
    *  under their own account. */
   quick: (payload: QuickBookingPayload) => apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/quick", payload).then((r) => r.data.data),
   /** Same shape, booked by a manager/admin on a customer's behalf. */

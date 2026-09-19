@@ -1,52 +1,76 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
-import { bookingApi } from "../../api/booking";
+import { bookingApi, type PhoneProof } from "../../api/booking";
 import { Button, Modal, OtpInput } from "../ui";
 import { getErrorMessage } from "../../lib/api-client";
+import { ensureOtpWidget, whatsappIsPrimary, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
 
 const RESEND_SECONDS = 30;
 
 /**
- * The last step of an anonymous website booking: a code goes to the typed
- * number the moment this opens (WhatsApp first, instant SMS fallback — the
- * backend decides), and the booking only goes through once it's entered.
+ * The last step of an anonymous website booking — the same OTP mechanics as
+ * login: MSG91 (SMS, via the widget) leads until an approved WhatsApp OTP
+ * template exists, after which WhatsApp leads and MSG91 is the fallback.
+ * The code is proven server-side when the booking is submitted.
  * "Edit number" backs out to the phone field.
  */
 export function BookingOtpModal({
   open,
   phone,
+  initialError = "",
   onClose,
   onEditNumber,
   onVerified,
 }: {
   open: boolean;
   phone: string;
+  /** Set when reopened because the last code was rejected — skips the auto-send. */
+  initialError?: string;
   onClose: () => void;
   onEditNumber: () => void;
-  onVerified: (token: string) => void;
+  onVerified: (proof: PhoneProof) => void;
 }) {
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  const [viaWidget, setViaWidget] = useState(false);
   const sentFor = useRef<string | null>(null);
 
   const send = async () => {
     setSending(true);
     setError("");
     setOtp("");
-    try {
-      await bookingApi.requestPhoneOtp(phone);
-      setCooldown(RESEND_SECONDS);
-    } catch (err) {
-      const message = getErrorMessage(err);
-      // A code went out moments ago (modal reopened) — just let them enter it.
-      if (message.startsWith("Please wait")) setCooldown(parseInt(message.replace(/\D/g, ""), 10) || RESEND_SECONDS);
-      else setError(message);
-    } finally {
-      setSending(false);
+    const order = (await whatsappIsPrimary()) ? (["backend", "widget"] as const) : (["widget", "backend"] as const);
+    let lastError = "";
+    for (const channel of order) {
+      try {
+        if (channel === "widget") {
+          if (!(await ensureOtpWidget())) continue;
+          await widgetSendOtp(phone);
+          setViaWidget(true);
+        } else {
+          await bookingApi.requestPhoneOtp(phone);
+          setViaWidget(false);
+        }
+        setCooldown(RESEND_SECONDS);
+        setSending(false);
+        return;
+      } catch (err) {
+        const message = getErrorMessage(err);
+        // A backend code went out moments ago (modal reopened) — just enter it.
+        if (channel === "backend" && message.startsWith("Please wait")) {
+          setViaWidget(false);
+          setCooldown(parseInt(message.replace(/\D/g, ""), 10) || RESEND_SECONDS);
+          setSending(false);
+          return;
+        }
+        lastError = message;
+      }
     }
+    setError(lastError || "Couldn't send the code right now — please try again in a moment.");
+    setSending(false);
   };
 
   useEffect(() => {
@@ -54,11 +78,16 @@ export function BookingOtpModal({
       sentFor.current = null;
       return;
     }
+    if (initialError) {
+      setError(initialError);
+      setOtp("");
+      return;
+    }
     if (sentFor.current === phone) return;
     sentFor.current = phone;
     void send();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, phone]);
+  }, [open, phone, initialError]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -71,9 +100,8 @@ export function BookingOtpModal({
     setVerifying(true);
     setError("");
     try {
-      const token = await bookingApi.confirmPhoneOtp(phone, code);
+      onVerified(viaWidget ? { phone_access_token: await widgetVerifyOtp(code.trim()) } : { phone_otp: code.trim() });
       setOtp("");
-      onVerified(token);
     } catch (err) {
       setError(getErrorMessage(err));
       setOtp("");
@@ -88,7 +116,7 @@ export function BookingOtpModal({
         <div className="flex items-start gap-3 rounded-xl bg-[var(--color-primary-light)] p-3.5">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-primary)]" />
           <p className="text-sm text-[var(--color-text-primary)]">
-            {sending ? "Sending a code to " : "Enter the 6-digit code we sent to "}
+            {sending ? "Sending a code to " : `Enter the 6-digit code we sent ${viaWidget ? "by SMS " : ""}to `}
             <span className="font-semibold">+91 {phone}</span>
           </p>
         </div>

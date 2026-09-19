@@ -21,6 +21,18 @@ declare global {
 }
 
 let loader: Promise<boolean> | null = null;
+let configPromise: ReturnType<typeof otpWidgetApi.config> | null = null;
+const getOtpConfig = () => (configPromise ??= otpWidgetApi.config());
+
+/** True once the backend has an approved WhatsApp OTP template — from then
+ * on WhatsApp leads; until then the MSG91 widget (SMS) is the primary. */
+export async function whatsappIsPrimary(): Promise<boolean> {
+  try {
+    return !!(await getOtpConfig()).whatsapp_primary;
+  } catch {
+    return false;
+  }
+}
 
 /** Loads the widget script once. Resolves false when the widget isn't
  * configured on the backend (caller should use the classic OTP flow). */
@@ -28,7 +40,7 @@ export function ensureOtpWidget(): Promise<boolean> {
   if (!loader) {
     loader = (async () => {
       try {
-        const cfg = await otpWidgetApi.config();
+        const cfg = await getOtpConfig();
         if (!cfg.enabled || !cfg.widget_id || !cfg.token_auth) return false;
         // Primary + fallback hosts, per MSG91's own embed snippet.
         const urls = ["https://verify.msg91.com/otp-provider.js", "https://verify.phone91.com/otp-provider.js"];

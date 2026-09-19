@@ -69,7 +69,7 @@ class AuthService:
         that never arrives."""
         from app.core.config import settings
 
-        if settings.WHATSAPP_OTP_TEMPLATE_NAME:
+        if await self.whatsapp.otp_template_name():
             return True
         if settings.WHATSAPP_PROVIDER == "log":
             return True  # tests / local: the log provider "delivers" everything
@@ -382,36 +382,28 @@ class AuthService:
             raise BadRequestException("Couldn't send the verification code — please try again in a moment.")
 
     async def request_phone_otp(self, phone: str) -> None:
-        """Confirm-booking OTP for a bare phone number — no account exists
-        yet (or needs to), so the code is keyed by the phone itself."""
-        await self._issue_otp(f"booking:{phone}", phone, "booking_confirmation")
+        """Backend OTP for a bare phone number — the same code, cooldown and
+        WhatsApp/SMS delivery as login, minus the account lookup (a first-time
+        booker has no account yet). Keyed by the phone, like login's."""
+        await self._issue_otp(phone, phone, "booking_confirmation")
 
-    async def confirm_phone_otp(self, phone: str, otp: str) -> str:
-        """Verifies the confirm-booking code and returns a short-lived,
-        single-use token bound to this phone. The booking endpoint demands
-        it, so skipping the popup and calling the API directly gets
-        nowhere."""
-        if not await self.verify_otp(f"booking:{phone}", otp):
-            raise BadRequestException("Invalid or expired code.")
-        token = secrets.token_urlsafe(24)
-        await self.db["booking_phone_tokens"].insert_one(
-            {"token": token, "phone": phone, "expires_at": datetime.now(timezone.utc) + timedelta(minutes=30)}
-        )
-        return token
+    async def verify_phone_proof(self, phone: str, otp: str | None, widget_access_token: str | None) -> bool:
+        """Proof of phone ownership, exactly as login checks it: the MSG91
+        widget's access token (verified server-side, bound to this phone)
+        or our own classic OTP."""
+        if widget_access_token:
+            from app.services.msg91_widget_service import Msg91WidgetService
 
-    async def check_phone_token(self, token: str | None, phone: str) -> None:
-        """Non-destructive: a booking that then fails (slot just taken)
-        shouldn't cost the customer a second OTP."""
-        doc = None
-        if token:
-            doc = await self.db["booking_phone_tokens"].find_one(
-                {"token": token, "phone": phone, "expires_at": {"$gt": datetime.now(timezone.utc)}}
-            )
-        if not doc:
+            return await Msg91WidgetService().verify_access_token(widget_access_token, phone)
+        if otp:
+            return await self.verify_otp(phone, otp)
+        return False
+
+    async def require_phone_proof(self, phone: str, otp: str | None, widget_access_token: str | None) -> None:
+        if not (otp or widget_access_token):
             raise BadRequestException("Please verify your mobile number with the code we send to confirm your booking.")
-
-    async def burn_phone_token(self, token: str) -> None:
-        await self.db["booking_phone_tokens"].delete_one({"token": token})
+        if not await self.verify_phone_proof(phone, otp, widget_access_token):
+            raise BadRequestException("Invalid or expired code.")
 
     async def verify_otp(self, identifier: str, otp: str) -> bool:
         record = await self.otp_store.find_one({"identifier": identifier})
@@ -593,14 +585,7 @@ class AuthService:
         if user.get("status") == UserStatus.SUSPENDED.value:
             raise UnauthorizedException("Your account has been suspended. Contact support.")
 
-        verified = False
-        if widget_access_token:
-            from app.services.msg91_widget_service import Msg91WidgetService
-
-            verified = await Msg91WidgetService().verify_access_token(widget_access_token, normalized)
-        elif otp:
-            verified = await self.verify_otp(normalized, otp)
-        if not verified:
+        if not await self.verify_phone_proof(normalized, otp, widget_access_token):
             raise BadRequestException("Invalid or expired code.")
 
         await self.users.update_by_id(

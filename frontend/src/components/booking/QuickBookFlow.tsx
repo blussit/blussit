@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { BadgeCheck, Banknote, Car, CheckCircle2, CreditCard, MapPin, Plus, Trash2 } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
-import { bookingApi, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { bookingApi, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
 import { addressApi } from "../../api/profile";
 import { Button, Input, Select, Spinner } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
@@ -130,7 +130,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [otpOpen, setOtpOpen] = useState(false);
+  // A MSG91 widget token stays reusable for a retry on the same number; a
+  // classic OTP code is spent by the booking call, so it isn't kept.
   const [verified, setVerified] = useState<{ phone: string; token: string } | null>(null);
+  const [otpError, setOtpError] = useState("");
   const phoneRef = useRef<HTMLInputElement>(null);
 
   // ---- keep an unfinished booking for THIS browser tab ---------------------
@@ -619,11 +622,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // signed-in customers already did (OTP login) and managers book on behalf.
   const needsOtp = !isManager && (!user || user.role !== "customer");
 
-  const submit = async (freshToken?: string) => {
+  const submit = async (freshProof?: PhoneProof) => {
     if (!validateStep2()) return;
     const canonicalPhone = validateIndianMobile(phone) || phone.trim();
-    const token = freshToken || (verified?.phone === canonicalPhone ? verified.token : undefined);
-    if (needsOtp && !token) {
+    const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? { phone_access_token: verified.token } : undefined);
+    if (needsOtp && !proof) {
+      setOtpError("");
       setOtpOpen(true);
       return;
     }
@@ -633,7 +637,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       const payload: QuickBookingPayload = {
         customer_name: name.trim(),
         customer_phone: canonicalPhone,
-        phone_verification_token: needsOtp ? token : undefined,
+        ...(needsOtp ? proof : {}),
         lines: lines.map((l) => l.payload!).filter(Boolean),
         scheduled_date: date,
         scheduled_slot: slot,
@@ -686,11 +690,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       });
     } catch (err) {
       const message = getErrorMessage(err);
-      setError(message);
-      // The backend rejected the proof (expired/used) — ask for a fresh code.
-      if (message.startsWith("Please verify your mobile number")) {
+      // The backend rejected the code (wrong/expired) — back to the popup.
+      if (needsOtp && /^(Invalid or expired code|Please verify your mobile number)/.test(message)) {
         setVerified(null);
+        setError("");
+        setOtpError(message);
         setOtpOpen(true);
+      } else {
+        setError(message);
       }
     } finally {
       setSubmitting(false);
@@ -739,16 +746,16 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       <BookingOtpModal
         open={otpOpen}
         phone={validateIndianMobile(phone) || phone.trim()}
+        initialError={otpError}
         onClose={() => setOtpOpen(false)}
         onEditNumber={() => {
           setOtpOpen(false);
           setTimeout(() => phoneRef.current?.focus(), 0);
         }}
-        onVerified={(token) => {
-          const canonicalPhone = validateIndianMobile(phone) || phone.trim();
-          setVerified({ phone: canonicalPhone, token });
+        onVerified={(proof) => {
+          if (proof.phone_access_token) setVerified({ phone: validateIndianMobile(phone) || phone.trim(), token: proof.phone_access_token });
           setOtpOpen(false);
-          void submit(token);
+          void submit(proof);
         }}
       />
     )}

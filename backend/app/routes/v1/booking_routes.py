@@ -25,7 +25,6 @@ from app.schemas.booking_schema import (
     BookingAssignCaptainRequest,
     BookingCancelRequest,
     BookingCreateRequest,
-    BookingPhoneOtpConfirm,
     BookingPhoneOtpRequest,
     BookingRescheduleRequest,
     CaptainCancelRequest,
@@ -54,12 +53,6 @@ async def request_booking_phone_otp(payload: BookingPhoneOtpRequest, db: AsyncIO
     return success(None, "Verification code sent")
 
 
-@router.post("/verify-phone/confirm")
-async def confirm_booking_phone_otp(payload: BookingPhoneOtpConfirm, db: AsyncIOMotorDatabase = Depends(get_db)):
-    token = await AuthService(db).confirm_phone_otp(payload.phone, payload.otp)
-    return success({"phone_verification_token": token}, "Phone verified")
-
-
 @router.post("/quick")
 async def quick_create_booking(
     payload: QuickBookingRequest,
@@ -67,8 +60,8 @@ async def quick_create_booking(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """Public: name + phone + what/where/when. Anonymous callers must carry
-    a phone_verification_token from /verify-phone/confirm; signed-in
-    customers are already OTP-verified. Rate-limited (core/rate_limit.py)."""
+    phone_otp or phone_access_token (same proofs as OTP login); signed-in
+    customers are already verified. Rate-limited (core/rate_limit.py)."""
     return await BookingController(db).quick_create(current_user, payload)
 
 

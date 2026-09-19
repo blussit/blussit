@@ -42,7 +42,6 @@ RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/auth/otp-login", 10, 300, None),
     ("/api/v1/auth/booking-access", 20, 60, None),
     ("/api/v1/bookings/verify-phone/request", 5, 300, None),
-    ("/api/v1/bookings/verify-phone/confirm", 10, 300, None),
     ("/api/v1/auth/login", 15, 60, None),
     ("/api/v1/auth/register", 10, 300, None),
     ("/api/v1/bookings/hold", 30, 60, None),

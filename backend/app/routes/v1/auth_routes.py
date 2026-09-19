@@ -147,10 +147,16 @@ class WidgetResetRequest(_BaseModel):
 
 
 @router.get("/otp-widget-config")
-async def otp_widget_config():
+async def otp_widget_config(db: AsyncIOMotorDatabase = Depends(get_db)):
     """Public: tells the frontend whether the MSG91 widget is configured
-    and hands it the client-side ids (never the server auth key)."""
-    return success(Msg91WidgetService().public_config())
+    and hands it the client-side ids (never the server auth key).
+    whatsapp_primary flips true once an approved WhatsApp OTP template
+    exists — until then MSG91 leads and WhatsApp is the fallback."""
+    from app.services.whatsapp_service import WhatsAppService
+
+    config = Msg91WidgetService().public_config()
+    config["whatsapp_primary"] = bool(await WhatsAppService(db).otp_template_name())
+    return success(config)
 
 
 @router.post("/verify-phone/widget")
