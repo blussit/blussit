@@ -1587,6 +1587,8 @@ class BookingService:
                 )
                 created.append(booking)
                 offset += int(booking.get("duration_minutes") or 60)
+            if payload.discount_amount > 0:
+                created = await self._apply_logged_discount(created, payload.discount_amount)
         except Exception:
             # All-or-nothing, like a real visit: nothing was announced, so
             # the half-logged cars are simply removed (and any pass value
@@ -1608,6 +1610,39 @@ class BookingService:
             "scheduled_slot": slot["key"],
             "customer_id": customer_id,
         }
+
+    async def _apply_logged_discount(self, created: list[dict], discount: float) -> list[dict]:
+        """The manager gave the customer `discount` rupees off this visit.
+        Split across the cars in proportion to what each costs (the last car
+        absorbs the rounding), and recorded as the booking's own discount so
+        total, platform earning and the cash ledger all show what was really
+        paid. Runs before anything is announced; a refusal here unwinds the
+        whole visit like any other failure."""
+        totals = [round(float(b.get("total_amount") or 0), 2) for b in created]
+        bill = round(sum(totals), 2)
+        if discount > bill:
+            raise BadRequestException(
+                f"The discount can't be more than the bill (₹{bill:g})." if bill > 0 else "There is nothing to discount on this job."
+            )
+        remaining = round(discount, 2)
+        updated: list[dict] = []
+        for index, booking in enumerate(created):
+            if index == len(created) - 1:
+                share = remaining
+            else:
+                share = round(discount * totals[index] / bill, 2)
+            share = round(max(0.0, min(share, totals[index], remaining)), 2)
+            remaining = round(remaining - share, 2)
+            new_total = round(totals[index] - share, 2)
+            fields = {
+                "total_amount": new_total,
+                "platform_earning": new_total,
+                "discount_amount": round(float(booking.get("discount_amount") or 0) + share, 2),
+                "manager_discount": share,
+            }
+            await self.repo.update_by_id(booking["id"], fields)
+            updated.append({**booking, **fields})
+        return updated
 
     async def _discard_logged_booking(self, booking_id: str) -> None:
         try:
@@ -2073,11 +2108,22 @@ class BookingService:
             ).to_list(length=200)
         }
         results = []
+        # The starting capacity of an untouched slot comes from ONE per-day
+        # policy lookup shared by every slot — it used to be re-queried for
+        # each slot (2 database round trips x ~10 slots on every availability
+        # read, which is what made the slot picker feel slow).
+        day_policy: dict | None = None
         for slot in raw_slots:
             slot_start, slot_end = _resolve_slot_window(center, scheduled_date, slot["key"], policy)
             cutoff_passed = _slot_cutoff_passed(slot_end, policy)
             doc = day_docs.get(slot["key"])
-            capacity = doc["capacity"] if doc else await self._default_slot_capacity(center, date_str, slot["key"])
+            if doc:
+                capacity = doc["capacity"]
+            else:
+                if day_policy is None:
+                    day_policy = await self.capacity_policy_service.get_effective_policy(str(center["_id"]), date_str)
+                distribution = day_policy["slot_distribution"]
+                capacity = distribution[slot["key"]] if slot["key"] in distribution else (center.get("default_slot_capacity") or 999)
             booked = doc["booked_count"] if doc else 0
             held = (doc or {}).get("held_count", 0) or 0
             is_closed = bool(doc and doc.get("is_closed"))

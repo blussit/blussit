@@ -53,9 +53,38 @@
     <meta name="twitter:description" content="Book a premium car or bike wash at your doorstep in Indore." />
     <meta name="twitter:image" content="https://blussit.com/banner.webp" />
 
+    <!-- Landing page only: start fetching the first hero picture right now,
+         in parallel with the JS bundle, instead of after React has mounted
+         and discovered it (that wait was most of the "slow home page"). -->
+    <script>
+      (function () {
+        if (location.pathname !== "/") return;
+        var hero = document.createElement("link");
+        hero.rel = "preload";
+        hero.as = "image";
+        hero.type = "image/webp";
+        hero.setAttribute("fetchpriority", "high");
+        hero.href = matchMedia("(max-width: 639px)").matches ? "/hero/home-m.webp" : "/hero/home-1600.webp";
+        document.head.appendChild(hero);
+      })();
+    </script>
+
+    <!-- Fonts load WITHOUT blocking the first paint: the page shows at once in
+         the fallback font and swaps when they arrive (display=swap). A plain
+         <link rel="stylesheet"> here made every visitor wait for two extra
+         connections (fonts.googleapis.com + fonts.gstatic.com) before
+         anything could be drawn. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;800&display=swap" rel="stylesheet" />
+    <link
+      rel="preload"
+      as="style"
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;800&display=swap"
+      onload="this.onload=null;this.rel='stylesheet'"
+    />
+    <noscript>
+      <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;800&display=swap" rel="stylesheet" />
+    </noscript>
 
     <!-- Structured data. Deliberately factual only: no ratings, awards or
          certifications we can't substantiate here (the AggregateRating on
@@ -120,14 +149,23 @@
       }
     </script>
 
-    <!-- Google Analytics (GA4) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-HLQLRBBC24"></script>
+    <!-- Google Analytics (GA4) — the 190 KB tag loads AFTER the page has
+         finished (and a couple of seconds later), so it never competes with
+         the hero picture and the booking code for a phone's bandwidth. Events
+         fired before it arrives are queued in dataLayer and sent then. -->
     <script>
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
-
       gtag('config', 'G-HLQLRBBC24');
+      window.addEventListener('load', function () {
+        setTimeout(function () {
+          var tag = document.createElement('script');
+          tag.async = true;
+          tag.src = 'https://www.googletagmanager.com/gtag/js?id=G-HLQLRBBC24';
+          document.head.appendChild(tag);
+        }, 2500);
+      });
     </script>
   </head>
   <body>

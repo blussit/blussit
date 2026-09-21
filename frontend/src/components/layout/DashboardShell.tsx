@@ -271,7 +271,7 @@ export function DashboardShell({
               aria-label="Blussit home"
             >
               <img
-                src="/blussit-logo.png"
+                src="/img/blussit-logo-480.webp"
                 alt="BLUSSIT"
                 className="h-auto w-[158px] object-contain object-left"
               />
@@ -364,7 +364,7 @@ export function DashboardShell({
               aria-label="Blussit home"
             >
               <img
-                src="/blussit-logo.png"
+                src="/img/blussit-logo-480.webp"
                 alt="BLUSSIT"
                 className="h-auto w-[104px] object-contain"
               />

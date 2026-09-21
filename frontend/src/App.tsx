@@ -15,15 +15,20 @@ import { StaffBookingRedirect } from "./routes/StaffBookingRedirect";
 import { ScrollRestoration } from "./components/shared/ScrollRestoration";
 
 import LandingPage from "./pages/public/LandingPage";
-import ServicesPage from "./pages/public/ServicesPage";
-import PlansPage from "./pages/public/PlansPage";
-import ServicePolicyPage from "./pages/public/ServicePolicyPage";
-import CancellationPolicyPage from "./pages/public/CancellationPolicyPage";
-import PrivacyPolicyPage from "./pages/public/PrivacyPolicyPage";
-import TermsPage from "./pages/public/TermsPage";
-import BookPage from "./pages/public/BookPage";
-import LoginPage from "./pages/auth/LoginPage";
-import ForgotPasswordPage from "./pages/auth/ForgotPasswordPage";
+import { loadBookPage, loadLoginPage } from "./routes/prefetch";
+
+// Only the landing page ships in the first download; everything else loads
+// on demand (the booking wizard and login are also prefetched while idle —
+// see routes/prefetch.ts — so they still open instantly).
+const ServicesPage = lazy(() => import("./pages/public/ServicesPage"));
+const PlansPage = lazy(() => import("./pages/public/PlansPage"));
+const ServicePolicyPage = lazy(() => import("./pages/public/ServicePolicyPage"));
+const CancellationPolicyPage = lazy(() => import("./pages/public/CancellationPolicyPage"));
+const PrivacyPolicyPage = lazy(() => import("./pages/public/PrivacyPolicyPage"));
+const TermsPage = lazy(() => import("./pages/public/TermsPage"));
+const BookPage = lazy(loadBookPage);
+const LoginPage = lazy(loadLoginPage);
+const ForgotPasswordPage = lazy(() => import("./pages/auth/ForgotPasswordPage"));
 
 const CustomerLayout = lazy(() => import("./pages/customer/CustomerLayout"));
 const DashboardHomePage = lazy(() => import("./pages/customer/DashboardHomePage"));

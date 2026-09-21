@@ -639,3 +639,80 @@ async def test_manager_recorded_upi_is_split_out_of_online_for_reconciliation(ri
     row = next(r for r in ledger["rows"] if r["captain_id"] == "manager")
     assert row["online_amount"] == total and row["manual_online_amount"] == total and row["cash_amount"] == 0
     assert ledger["totals"]["manual_online_amount"] == total
+
+
+# ------------------------------------------------------- manager discount
+
+
+@pytest.mark.asyncio
+async def test_a_discount_lowers_the_recorded_bill_and_everything_that_reads_it(rig, cleanup):
+    db = rig["db"]
+    phone = "9666600050"
+    _track(cleanup, phone)
+    full = (await BookingService(db).create_manager_logged_visit(
+        _log(rig, "9666600051", service_time="09:30"), manager_id=rig["manager_id"], manager_center_id=rig["center_id"]
+    ))["total_amount"]
+    _track(cleanup, "9666600051")
+
+    result = await BookingService(db).create_manager_logged_visit(
+        _log(rig, phone, discount_amount=100), manager_id=rig["manager_id"], manager_center_id=rig["center_id"]
+    )
+    b = result["bookings"][0]
+    assert b["total_amount"] == round(full - 100, 2) and result["total_amount"] == round(full - 100, 2)
+    raw = await db.bookings.find_one({"_id": ObjectId(b["id"])})
+    assert raw["discount_amount"] == 100 and raw["manager_discount"] == 100
+    assert raw["platform_earning"] == raw["total_amount"] and raw["payment_status"] == "paid"
+
+    ledger = await PaymentService(db).center_collections(rig["center_id"], "manager", rig["center_id"], None, None)
+    row = next(r for r in ledger["rows"] if r["captain_id"] == "manager")
+    assert row["cash_amount"] == round(full + full - 100, 2)  # both jobs: what was actually collected
+
+
+@pytest.mark.asyncio
+async def test_discount_on_a_two_car_visit_is_split_by_price_and_adds_up_exactly(rig, cleanup):
+    db = rig["db"]
+    phone = "9666600052"
+    _track(cleanup, phone)
+    lines = [QuickBookingLine(vehicle_type=rig["hatchback"], quantity=2, service_ids=[rig["star"]])]
+    plain = await BookingService(db).create_manager_logged_visit(
+        _log(rig, "9666600053", lines=lines, service_time="09:30"), manager_id=rig["manager_id"], manager_center_id=rig["center_id"]
+    )
+    _track(cleanup, "9666600053")
+    bill = plain["total_amount"]
+
+    result = await BookingService(db).create_manager_logged_visit(
+        _log(rig, phone, lines=lines, discount_amount=101), manager_id=rig["manager_id"], manager_center_id=rig["center_id"]
+    )
+    assert result["vehicle_count"] == 2
+    shares = [b["manager_discount"] for b in [await db.bookings.find_one({"_id": ObjectId(x["id"])}) for x in result["bookings"]]]
+    assert round(sum(shares), 2) == 101 and all(s > 0 for s in shares)
+    assert result["total_amount"] == round(bill - 101, 2)
+    assert len(await _outbox(db, phone)) == 1  # still ONE "service done" message
+
+
+@pytest.mark.asyncio
+async def test_a_discount_bigger_than_the_bill_is_refused_and_nothing_is_saved(rig, cleanup):
+    db = rig["db"]
+    phone = "9666600054"
+    _track(cleanup, phone)
+    with pytest.raises(BadRequestException) as exc:
+        await BookingService(db).create_manager_logged_visit(
+            _log(rig, phone, discount_amount=99999), manager_id=rig["manager_id"], manager_center_id=rig["center_id"]
+        )
+    assert "more than the bill" in str(exc.value.message if hasattr(exc.value, "message") else exc.value)
+    assert await db.bookings.count_documents({"customer_phone": phone}) == 0
+    assert await _outbox(db, phone) == []
+
+
+def test_negative_or_silly_discounts_are_rejected_by_the_schema():
+    from pydantic import ValidationError
+
+    base = dict(
+        customer_name="Walk In Wanda", customer_phone="9666600055", scheduled_date="2026-01-01", service_time="10:30",
+        lines=[QuickBookingLine(vehicle_type="x", quantity=1, service_ids=["s"])], address_line="12 Lane",
+    )
+    for bad in (-1, 1_000_000):
+        with pytest.raises(ValidationError):
+            ManagerLogBookingRequest(**base, discount_amount=bad)
+    assert ManagerLogBookingRequest(**base).discount_amount == 0
+    assert ManagerLogBookingRequest(**base, discount_amount=49.999).discount_amount == 50.0

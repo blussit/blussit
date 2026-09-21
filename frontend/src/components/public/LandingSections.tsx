@@ -125,6 +125,11 @@ export function OfferTicker() {
 /* HERO SLIDES                                                        */
 /* ------------------------------------------------------------------ */
 
+/** The right-sized hero files for a slide (built by frontend/scripts/optimize-images.py):
+ *  a phone crop and a 1600px version for tablets and up. */
+const heroPhone = (slug: string) => `/hero/${slug}-m.webp`;
+const heroWide = (slug: string) => `/hero/${slug}-1600.webp`;
+
 const HERO_SLIDES = [
   {
     id: "home",
@@ -135,7 +140,7 @@ const HERO_SLIDES = [
     titleAccent: "DOORSTEP",
     description:
       "We come to you. You relax.\nWe make your car shine like new.",
-    image: "/wash-image.png",
+    image: "home",
     serviceSlug: "",
   },
 
@@ -160,7 +165,7 @@ const HERO_SLIDES = [
       "Interior vacuum",
       "Dashboard polish",
     ],
-    image: "/car-wash.png",
+    image: "star-wash",
     serviceSlug: "star-wash",
   },
 
@@ -184,7 +189,7 @@ const HERO_SLIDES = [
       "Floor & mats cleaning",
       "Pedal & door cleaning",
     ],
-    image: "/hero-img3.webp",
+    image: "deep-cleaning",
     serviceSlug: "deep-cleaning",
   },
 
@@ -207,7 +212,7 @@ const HERO_SLIDES = [
       "Interior vacuum",
       "Dashboard polish",
     ],
-    image: "/hero-img4.webp",
+    image: "waterless",
     serviceSlug: "waterless-service",
   },
 
@@ -229,7 +234,7 @@ const HERO_SLIDES = [
       "Exterior foam wash",
       "Tyre polish",
     ],
-    image: "/service-jet.webp",
+    image: "jet-wash",
     serviceSlug: "jet-wash",
   },
 
@@ -252,7 +257,7 @@ const HERO_SLIDES = [
       "Add polish for ₹30",
       "Add a bike to any car wash for ₹60",
     ],
-    image: "/service-bike.webp",
+    image: "bike-wash",
     serviceSlug: "bike-wash",
   },
 ];
@@ -516,6 +521,37 @@ export function LandingHero({
   const { activeIndex: activeSlide, setActiveIndex: setActiveSlide, handlers: heroHandlers } = useCarouselSwipe(HERO_SLIDES.length, 4000);
   const { trackRef: offerTrackRef, setRef: offerSetRef, handlers: offerMarqueeHandlers } = useContinuousMarquee(45);
 
+  // Has the carousel moved off the first slide yet? (see the first picture below)
+  const advanced = useRef(false);
+  useEffect(() => {
+    if (activeSlide !== 0) advanced.current = true;
+  }, [activeSlide]);
+
+  // Once the page has finished loading, quietly fetch the other slides so
+  // each change is instant instead of a blank frame while a photo downloads.
+  useEffect(() => {
+    const saveData = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData;
+    if (saveData) return;
+    let timer = 0;
+    const warm = () => {
+      const phone = window.matchMedia("(max-width: 639px)").matches;
+      HERO_SLIDES.slice(1).forEach((s) => {
+        const img = new Image();
+        img.decoding = "async";
+        img.src = phone ? heroPhone(s.image) : heroWide(s.image);
+      });
+    };
+    const start = () => {
+      timer = window.setTimeout(warm, 800);
+    };
+    if (document.readyState === "complete") start();
+    else window.addEventListener("load", start, { once: true });
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("load", start);
+    };
+  }, []);
+
   const slide = HERO_SLIDES[activeSlide];
   const slideServiceId = slide.serviceSlug
     ? (servicesData?.data ?? []).find((svc) => svc.slug === slide.serviceSlug)?.id
@@ -545,16 +581,25 @@ export function LandingHero({
       >
         {/* A single, full-bleed image plane keeps the artwork and copy in one composition. */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <motion.img
+          {/* The very first picture is the page's biggest paint: no fade-in
+              (a fade from 0 opacity delays it), and fetched with top priority. */}
+          <motion.picture
             key={slide.id}
-            initial={{ opacity: 0, scale: 1.045 }}
+            initial={activeSlide === 0 && !advanced.current ? false : { opacity: 0, scale: 1.045 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.68, ease: [0.22, 1, 0.36, 1] }}
-            src={slide.image}
-            alt={isHome ? "BLUSSIT doorstep car wash" : slide.title}
-            className="absolute inset-0 h-full w-full object-cover will-change-transform"
-            style={{ objectPosition: heroImagePosition[slide.id] ?? "center center" }}
-          />
+            className="absolute inset-0 block h-full w-full will-change-transform"
+          >
+            <source media="(max-width: 639px)" srcSet={heroPhone(slide.image)} type="image/webp" />
+            <img
+              src={heroWide(slide.image)}
+              alt={isHome ? "BLUSSIT doorstep car wash" : slide.title}
+              className="absolute inset-0 h-full w-full object-cover"
+              style={{ objectPosition: heroImagePosition[slide.id] ?? "center center" }}
+              decoding="async"
+              {...(activeSlide === 0 && !advanced.current ? { fetchPriority: "high" as const } : {})}
+            />
+          </motion.picture>
 
           {/* Subtle left-side shading gives the copy contrast without hiding the car. */}
           <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.48)_0%,rgba(0,0,0,0.35)_22%,rgba(0,0,0,0.18)_42%,rgba(0,0,0,0.06)_65%,rgba(0,0,0,0)_100%)]" />

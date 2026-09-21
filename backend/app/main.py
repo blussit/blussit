@@ -4,6 +4,7 @@ import re
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
@@ -87,6 +88,20 @@ from app.core.rate_limit import rate_limit_middleware  # noqa: E402
 app.middleware("http")(rate_limit_middleware)
 
 
+# Catalogue endpoints anyone can read without logging in — the data behind the
+# landing page and the booking wizard's first screen. They change a few times
+# a month, so an anonymous visitor's browser (and Vercel's edge) may reuse a
+# response for a short while and refresh it in the background: repeat visits
+# and "Book Now" open with no wait. Deliberately NOT applied when the request
+# carries a login (admins/managers editing the catalogue must always see
+# their own change at once) — and `Vary: Authorization` keeps a cached
+# anonymous copy from ever being served to a logged-in request.
+_PUBLIC_CATALOGUE = re.compile(
+    r"^/api/v1/(homepage-config|testimonials|vehicle-types|subscription-plans|faqs|services|booking-policy|combo-offers|categories|coupons/public/[^/]+)/?$"
+)
+PUBLIC_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=120"
+
+
 @app.middleware("http")
 async def security_headers(request, call_next):
     """Baseline hardening on every response, plus a much tighter policy for
@@ -118,6 +133,17 @@ async def security_headers(request, call_next):
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/uploads/"):
         response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    if (
+        request.method == "GET"
+        and response.status_code == 200
+        and "authorization" not in request.headers
+        and "cache-control" not in response.headers
+        and _PUBLIC_CATALOGUE.match(request.url.path)
+    ):
+        response.headers["Cache-Control"] = PUBLIC_CACHE_CONTROL
+        vary = response.headers.get("Vary")
+        if not vary or "authorization" not in vary.lower():
+            response.headers["Vary"] = f"{vary}, Authorization" if vary else "Authorization"
     return response
 
 app.add_middleware(
@@ -127,6 +153,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# JSON compresses ~5x; on a phone connection that is the difference between
+# one packet and several for the catalogue responses. Added last = outermost.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Serves whatever app.core.storage's "local" provider writes (captain
 # before/after photos) back out as plain static files — the directory must

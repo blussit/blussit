@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
 import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
@@ -7,20 +7,42 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { User, UserRole } from "../../types";
 
+/** A pasted "+91 98765 43210" should still find the stored 10-digit number. */
+function normaliseSearch(raw: string): string {
+  const text = raw.trim();
+  if (!/^[+\d][\d\s+-]*$/.test(text)) return text;
+  let digits = text.replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) digits = digits.slice(2);
+  return digits;
+}
+
 const emptyForm = { full_name: "", email: "", phone: "", password: "", role: "captain" as UserRole, service_center_id: "" };
 
 export default function AdminUsersPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
   const [role, setRole] = useState("");
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
   const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["admin-users", role, page],
-    queryFn: () => adminUserApi.list({ role: role || undefined, page, page_size: 15 }),
+  // Search runs on the server (name / phone / email across every page), a
+  // beat after the last keystroke so typing never fires a request per letter.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebounced(normaliseSearch(search));
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["admin-users", role, debounced, page],
+    queryFn: () => adminUserApi.list({ role: role || undefined, search: debounced || undefined, page, page_size: 15 }),
+    placeholderData: keepPreviousData, // the old rows stay put while the new ones load — no flash
   });
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
@@ -62,20 +84,38 @@ export default function AdminUsersPage() {
         </Button>
       </div>
 
-      <div className="max-w-xs">
-        <Select label="Filter by role" value={role} onChange={(e) => { setRole(e.target.value); setPage(1); }}>
-          <option value="">All roles</option>
-          <option value="customer">Customer</option>
-          <option value="captain">Captain</option>
-          <option value="manager">Manager</option>
-          <option value="admin">Admin</option>
-        </Select>
+      <div className="grid grid-cols-1 items-end gap-3 sm:flex sm:flex-wrap">
+        <div className="sm:min-w-[260px] sm:max-w-md sm:flex-1">
+          <Input
+            label="Search"
+            type="search"
+            placeholder="Name, phone or email"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        <div className="sm:w-56">
+          <Select label="Filter by role" value={role} onChange={(e) => { setRole(e.target.value); setPage(1); }}>
+            <option value="">All roles</option>
+            <option value="customer">Customer</option>
+            <option value="captain">Captain</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </Select>
+        </div>
+        {data && (
+          <p className={`pb-2.5 text-sm text-[var(--color-text-secondary)] transition-opacity ${isFetching ? "opacity-50" : ""}`}>
+            {data.meta.total} {data.meta.total === 1 ? "user" : "users"}
+            {debounced ? ` matching “${search.trim()}”` : ""}
+          </p>
+        )}
       </div>
 
       <DataTable<User>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle="No users found"
+        emptyTitle={debounced ? `No users match “${search.trim()}”` : "No users found"}
         columns={[
           { header: "Name", accessor: (u) => u.full_name },
           { header: "Contact", accessor: (u) => u.email || u.phone || "—" },

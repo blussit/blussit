@@ -8,6 +8,11 @@ ENV_FILE="${DEPLOY_ENV_FILE:-backend/.env}"
 SERVICE="${CLOUD_RUN_SERVICE:-blussit-api}"
 REGION="${CLOUD_RUN_REGION:-asia-south1}"
 PORT="${CLOUD_RUN_PORT:-8080}"
+# One instance is always kept warm so the first visitor after a quiet spell
+# doesn't wait for Python + the database connection to boot (a cold start is
+# several seconds of a blank booking screen). It costs a small always-on
+# instance; set CLOUD_RUN_MIN_INSTANCES=0 to go back to scale-to-zero.
+MIN_INSTANCES="${CLOUD_RUN_MIN_INSTANCES:-1}"
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -252,6 +257,8 @@ gcloud run deploy "$SERVICE" \
   --region "$REGION" \
   --service-account "$RUNTIME_SA" \
   --port "$PORT" \
+  --min-instances "$MIN_INSTANCES" \
+  --cpu-boost \
   --allow-unauthenticated \
   --set-env-vars="^|^${NORMAL_SPEC}" \
   --set-secrets="$SECRET_SPEC" \

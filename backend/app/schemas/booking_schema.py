@@ -171,10 +171,19 @@ class ManagerLogBookingRequest(BaseModel):
     landmark: Optional[str] = Field(default=None, max_length=200)
     payment_method: PaymentMethod = PaymentMethod.CASH
     customer_notes: Optional[str] = Field(default=None, max_length=500)
+    # Rupees the manager knocked off the bill (whole visit, optional). Taken
+    # off the price BEFORE the money is recorded, so the ledger, revenue and
+    # the customer's booking all show what was actually paid.
+    discount_amount: float = Field(default=0, ge=0, le=100000)
     # True = the customer gets ONE WhatsApp: "service is done". Nothing else.
     send_whatsapp: bool = True
 
     _phone = field_validator("customer_phone")(_canonical_phone)
+
+    @field_validator("discount_amount")
+    @classmethod
+    def _round_discount(cls, v: float) -> float:
+        return round(v, 2)
 
     @field_validator("customer_name")
     @classmethod

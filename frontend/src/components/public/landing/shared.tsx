@@ -190,13 +190,15 @@ export function parseIncludes(description?: string | null): { summary: string | 
 
 const LOCAL_IMAGES = {
   // Real Blussit shoot photos (from the newimage batch, converted to WebP)
-  jet: "/service-jet.webp", // captain pressure-washing an SUV
-  foam: "/service-star.webp", // captain + full kit beside foamed SUV, branded
-  interior: "/service-deepclean.webp", // interior vacuum, branded
-  polish: "/service-4.webp", // wax/polish on bonnet
-  dashboard: "/service-5.webp",
-  bike: "/service-bike.webp", // captain washing a bike, branded
-  waterless: "/service-waterless.webp", // waterless wash spray + microfibre
+  // 640px card-sized copies (scripts/optimize-images.py) — the full shoot
+  // exports are 200 KB+ each and cards only ever show ~350px.
+  jet: "/img/service-jet-640.webp", // captain pressure-washing an SUV
+  foam: "/img/service-star-640.webp", // captain + full kit beside foamed SUV, branded
+  interior: "/img/service-deepclean-640.webp", // interior vacuum, branded
+  polish: "/img/service-4-640.webp", // wax/polish on bonnet
+  dashboard: "/img/service-5-640.webp",
+  bike: "/img/service-bike-640.webp", // captain washing a bike, branded
+  waterless: "/img/service-waterless-640.webp", // waterless wash spray + microfibre
 };
 
 /** Admin-uploaded image first; otherwise a bundled photo matched by service name. */

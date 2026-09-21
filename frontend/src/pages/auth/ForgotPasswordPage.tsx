@@ -121,7 +121,7 @@ export default function ForgotPasswordPage() {
               className="mb-5 flex w-full flex-col items-center"
             >
               <img
-                src="/blussit-logo.png"
+                src="/img/blussit-logo-480.webp"
                 alt="BLUSSIT"
                 className="h-auto w-[142px] object-contain"
               />

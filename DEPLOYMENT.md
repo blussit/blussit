@@ -170,6 +170,10 @@ service account `roles/secretmanager.secretAccessor`.
 
 ## Cloud Run Deploy
 
+> **Speed:** `scripts/deploy-gcp.sh` keeps one instance warm (`--min-instances 1`) and turns on
+> startup CPU boost, so the first request after a quiet period is not a multi-second cold start.
+> This is a small always-on cost; set `CLOUD_RUN_MIN_INSTANCES=0` to scale to zero again.
+
 Service name: `blussit-api`
 
 Region: `asia-south1`

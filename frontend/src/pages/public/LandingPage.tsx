@@ -7,6 +7,7 @@ import { LandingHero } from "../../components/public/LandingSections";
 import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 import { HowItWorksStrip } from "../../components/public/landing/HowItWorksStrip";
 import { PlansShowcase } from "../../components/public/landing/PlansShowcase";
+import { VideoReviews } from "../../components/public/landing/VideoReviews";
 import { ReviewsShowcase } from "../../components/public/landing/ReviewsShowcase";
 import { FaqSection } from "../../components/public/landing/FaqSection";
 import { LaunchOfferPopup, LaunchOfferStrip } from "../../components/public/LaunchOfferPopup";
@@ -15,7 +16,7 @@ import { useAuth } from "../../context/AuthContext";
 
 /**
  * Landing page, kept deliberately short: hero → services → how it works →
- * plans → reviews. The older sections (offers marquee, Why Blussit, premium
+ * plans → video reviews → written reviews. The older sections (offers marquee, Why Blussit, premium
  * banner) still live in LandingSections.tsx if they are ever needed again.
  */
 export default function LandingPage() {
@@ -56,6 +57,7 @@ export default function LandingPage() {
       <ServicesShowcase limit={6} />
       <HowItWorksStrip />
       <PlansShowcase />
+      <VideoReviews />
       <ReviewsShowcase />
       <FaqSection />
       <PublicFooter />

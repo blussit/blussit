@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { BadgeCheck, Banknote, Car, CheckCircle2, CreditCard, MapPin, Plus, Trash2 } from "lucide-react";
+import { BadgeCheck, Banknote, Car, CheckCircle2, CreditCard, MapPin, Plus, Trash2, ShieldCheck } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
 import { bookingApi, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
 import { addressApi } from "../../api/profile";
@@ -18,6 +18,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
+import { ensureGoogleMaps } from "../../lib/googleMaps";
 import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
@@ -144,6 +145,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // manager-log only: the clock time of the job, and the WhatsApp switch.
   const [logTime, setLogTime] = useState("");
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
+  const [discount, setDiscount] = useState("");
   const phoneRef = useRef<HTMLInputElement>(null);
 
   // ---- keep an unfinished booking for THIS browser tab ---------------------
@@ -187,6 +189,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setNotes(saved.notes || "");
         setLogTime(typeof saved.logTime === "string" ? saved.logTime : "");
         setSendWhatsApp(saved.sendWhatsApp !== false);
+        setDiscount(typeof saved.discount === "string" ? saved.discount : "");
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
@@ -210,16 +213,26 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp })
+        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp]);
+  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount]);
 
   useEffect(() => {
     scrollToTopNow();
   }, [step]);
+
+  // The address step needs Google Maps (config call + ~300 KB script + its
+  // libraries). Start that while the customer is still choosing their
+  // vehicle and service, so step 2 opens with the map already there instead
+  // of a spinner. Loads once; a no-op when maps aren't configured.
+  useEffect(() => {
+    if (isLog) return;
+    const timer = window.setTimeout(() => void ensureGoogleMaps(), 800);
+    return () => window.clearTimeout(timer);
+  }, [isLog]);
 
   // A signed-in customer books as themselves — name/phone come from the
   // account, and their default address is preselected.
@@ -420,6 +433,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const regularTotal = lines.reduce((n, l) => n + l.regularSubtotal, 0);
   const offerDiscount = lines.reduce((n, l) => n + l.offerDiscount, 0);
   const displayTotal = Math.max(0, total - offerDiscount);
+  // Log mode only: rupees the manager took off the bill. What the customer
+  // actually paid (finalTotal) drives the footer, the payment choice and the save.
+  const discountNum = isLog ? Math.round(Number(discount) || 0) : 0;
+  const finalTotal = Math.max(0, displayTotal - discountNum);
   const allServices = lines.flatMap((l) => l.services);
   const step1Ready = lines.length > 0 && lines.every((l) => !!l.base) && (!draft.typeId || draftReady);
 
@@ -517,13 +534,17 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     }
   }
 
+  const latestPincode = useRef("");
   async function checkPincode(pin: string) {
+    latestPincode.current = pin;
     setCoverage("checking");
     setCheckedPincode(pin);
     setCenterId("");
     setSlot("");
     try {
       const centers = await serviceCenterApi.lookupByPincode(pin);
+      // The customer kept typing while this was in flight — a newer check owns the screen.
+      if (latestPincode.current !== pin) return;
       if (centers.length) {
         setCenterId(centers[0].id);
         setCenterCity(centers[0].location.city);
@@ -533,7 +554,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setCoverage("uncovered");
       }
     } catch {
-      setCoverage("uncovered");
+      if (latestPincode.current === pin) setCoverage("uncovered");
     }
   }
 
@@ -560,7 +581,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         // back to the previous UTC day.
         const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
         try {
-          const slots = await serviceCenterApi.availableSlots(centerId, iso);
+          // Same cache key the slot picker reads — the day we land on is then
+          // already loaded when the picker draws it (no second request).
+          const slots = await queryClient.fetchQuery({
+            queryKey: ["available-slots", centerId, iso],
+            queryFn: () => serviceCenterApi.availableSlots(centerId, iso),
+            staleTime: 15_000,
+          });
           if (slots.some((x) => x.status !== "full")) {
             if (!cancelled && iso !== date) {
               setDate(iso);
@@ -649,6 +676,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       else if (date < oldestLogDate) next.date = "Jobs older than 90 days can't be logged.";
       const timeError = logTimeError();
       if (timeError) next.time = timeError;
+      if (discountNum > displayTotal) next.discount = `The discount can't be more than the bill (₹${displayTotal}).`;
       setFieldErrors(next);
       return Object.keys(next).length === 0;
     }
@@ -682,7 +710,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         service_time: logTime,
         address_line: line1.trim(),
         customer_notes: notes.trim() || undefined,
-        payment_method: displayTotal > 0 ? paymentMethod : "cash",
+        payment_method: finalTotal > 0 ? paymentMethod : "cash",
+        discount_amount: discountNum > 0 ? discountNum : undefined,
         send_whatsapp: sendWhatsApp,
       });
       try {
@@ -806,9 +835,20 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         <span className="text-right">
           {showFirstWash && regularTotal > total && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{regularTotal}</span>}
           {offerDiscount > 0 && <span className="mr-1.5 text-xs font-bold text-[#E11D48]">FREE bike -₹{offerDiscount}</span>}
-          <span className="font-mono-num text-lg font-bold text-black">₹{displayTotal}</span>
+          {discountNum > 0 && discountNum <= displayTotal && (
+            <span className="mr-1.5 text-xs text-gray-400">
+              <span className="line-through">₹{displayTotal}</span> <span className="font-bold text-[#E11D48]">-₹{discountNum}</span>
+            </span>
+          )}
+          <span className="font-mono-num text-lg font-bold text-black">₹{isLog ? finalTotal : displayTotal}</span>
         </span>
       </div>
+      {!isLog && (
+        <p className="flex items-center gap-1.5 text-xs font-medium text-gray-600">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-black" aria-hidden="true" />
+          Price shown is final — no extra or hidden charges.
+        </p>
+      )}
       {error && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error}</p>}
       <div className="flex items-center justify-between gap-3">
         <Button variant="outline" onClick={() => (step > 0 ? setStep(0) : navigate(-1))}>
@@ -1159,7 +1199,21 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 <Input type="time" label="Time" min={logRangeOk ? logOpens : undefined} max={logRangeOk ? logLatest : undefined} value={logTime} onChange={(e) => setLogTime(e.target.value)} error={fieldErrors.time} />
               </div>
 
-              {displayTotal > 0 && (
+              <Input
+                label="Discount given (₹, optional)"
+                inputMode="numeric"
+                value={discount}
+                onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="0"
+                error={fieldErrors.discount}
+                hint={
+                  discountNum > 0 && discountNum <= displayTotal
+                    ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.`
+                    : "Only if you gave this customer a discount — it comes off the total."
+                }
+              />
+
+              {finalTotal > 0 && (
                 <div>
                   <p className="mb-2 text-sm font-medium text-black">How was it paid?</p>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1265,8 +1319,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                       maxLength={10}
                       inputMode="numeric"
                       onChange={(e) => {
-                        setPincode(e.target.value);
+                        const value = e.target.value;
+                        setPincode(value);
                         setCoverage("idle");
+                        latestPincode.current = "";
+                        // A full pincode is checked the moment it is typed — no
+                        // need to tap away first; the slots open right under it.
+                        if (/^\d{6}$/.test(value.trim())) void checkPincode(value.trim());
                       }}
                       onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && void checkPincode(pincode.trim())}
                       error={fieldErrors.pincode}

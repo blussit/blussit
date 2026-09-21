@@ -84,7 +84,7 @@ export function PublicFooter() {
               aria-label="BLUSSIT Home"
             >
               <img
-                src="/blussit-logo.png"
+                src="/img/blussit-logo-480.webp"
                 alt="BLUSSIT"
                 className="h-[23px] w-auto object-contain"
               />

@@ -144,7 +144,7 @@ export default function LoginPage() {
       <section className="flex flex-1 items-center justify-center px-4 py-10">
         <div className="w-full max-w-[420px] rounded-[20px] border border-[#ECE7D8] bg-white px-6 py-8 shadow-[0_16px_46px_rgba(39,33,20,0.08)] sm:px-8 sm:py-9">
           <Link to="/" aria-label="Blussit home" className="mb-6 flex w-full flex-col items-center">
-            <img src="/blussit-logo.png" alt="BLUSSIT" className="h-auto w-[142px] object-contain" />
+            <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[142px] object-contain" />
             <span className="mt-0.5 whitespace-nowrap text-[7px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
               Premium Car Wash At Your Doorstep.
             </span>

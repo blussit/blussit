@@ -112,7 +112,7 @@ class BookingController:
         for b in result.get("bookings") or []:
             await self.audit.log_action(
                 current_user.id, current_user.role, "MANAGER_LOG_COMPLETED", "bookings", b["id"],
-                {"customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp},
+                {"customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp, "discount_amount": payload.discount_amount},
             )
         return success(result, "Job logged as done")
 

@@ -121,7 +121,7 @@ export function LaunchOfferPopup({ onClaim }: { onClaim: () => void }) {
 
               <div className="relative grid gap-0 sm:grid-cols-[0.92fr_1.08fr]">
                 <div className="relative min-h-[190px] overflow-hidden bg-[#111] sm:min-h-full">
-                  <img src="/service-bike.webp" alt="Bike wash" className="absolute inset-0 h-full w-full object-cover" />
+                  <img src="/img/service-bike-640.webp" alt="Bike wash" decoding="async" className="absolute inset-0 h-full w-full object-cover" />
                   <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.12),rgba(0,0,0,0.58))]" />
                   <div className="absolute bottom-4 left-4 inline-flex items-center gap-2 rounded-full bg-[#E11D48] px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white shadow-lg">
                     <Bike className="h-4 w-4" />

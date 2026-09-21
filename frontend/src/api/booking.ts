@@ -69,6 +69,8 @@ export interface ManagerLogPayload {
   landmark?: string;
   payment_method: "cash" | "online";
   customer_notes?: string;
+  /** Rupees taken off the whole bill (optional) — the saved total is what was actually paid. */
+  discount_amount?: number;
   /** true = the customer gets ONE WhatsApp: "service is done". */
   send_whatsapp: boolean;
 }

@@ -155,6 +155,7 @@ function ServiceCard({
           src={serviceImage(s, index)}
           alt={titleCase(s.name)}
           loading="lazy"
+          decoding="async"
           className="absolute inset-0 h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.03]"
         />
         <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-gold px-2.5 py-1 text-[11px] font-bold text-black shadow-sm">

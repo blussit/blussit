@@ -2,7 +2,9 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Menu, X, ArrowRight } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../context/AuthContext";
+import { prefetchBooking } from "../../routes/prefetch";
 import { roleHomePath } from "../../lib/roleHome";
 import { ContactUsModal } from "../public/ContactUsModal";
 
@@ -21,7 +23,7 @@ function BlussitLogo() {
       className="flex flex-col items-start group cursor-default"
     >
       <img
-        src="/blussit-logo.png"
+        src="/img/blussit-logo-480.webp"
         alt="BLUSSIT"
         className="h-6 md:h-7 w-auto object-contain transition-transform duration-500 group-hover:-rotate-2 group-hover:scale-105"
       />
@@ -49,6 +51,10 @@ export function PublicNavbar() {
 
   const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // Every public page has this bar: once the page is idle, quietly load the
+  // booking wizard + its catalogue so tapping "Book Now" is instant.
+  useEffect(() => prefetchBooking(queryClient), [queryClient]);
   // Quick-booking model: there is no sign-up — an account is created the
   // first time someone books, and login (OTP) is only to look things up.
   const authLabel = "Login";
