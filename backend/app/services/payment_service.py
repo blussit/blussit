@@ -949,6 +949,10 @@ class PaymentService:
         "cash_count": {"$sum": {"$cond": [{"$and": [{"$eq": ["$payment_status", "paid"]}, {"$eq": ["$payment_method", "cash"]}]}, 1, 0]}},
         "online_amount": {"$sum": {"$cond": [{"$and": [{"$eq": ["$payment_status", "paid"]}, {"$in": ["$payment_method", ["online", "online_placeholder"]]}]}, "$total_amount", 0]}},
         "online_count": {"$sum": {"$cond": [{"$and": [{"$eq": ["$payment_status", "paid"]}, {"$in": ["$payment_method", ["online", "online_placeholder"]]}]}, 1, 0]}},
+        # Part of online_amount that did NOT go through Razorpay: UPI the
+        # manager recorded on a job he did himself — so the admin can
+        # reconcile online_amount against Razorpay's settlements.
+        "manual_online_amount": {"$sum": {"$cond": [{"$and": [{"$eq": ["$payment_status", "paid"]}, {"$eq": ["$payment_method", "online"]}, {"$eq": ["$completed_by_role", "manager"]}]}, "$total_amount", 0]}},
         # Completed but nobody collected — the surveillance number: a
         # captain sitting on these has taken cash without tapping, or
         # simply forgot to settle.
@@ -958,7 +962,7 @@ class PaymentService:
 
     @staticmethod
     def _round_row(row: dict) -> dict:
-        for k in ("cash_amount", "online_amount", "uncollected_amount"):
+        for k in ("cash_amount", "online_amount", "manual_online_amount", "uncollected_amount"):
             row[k] = round(float(row.get(k) or 0), 2)
         return row
 
@@ -975,7 +979,7 @@ class PaymentService:
             "scheduled_date": self._collections_window(date_from, date_to),
         }
         rows = await self.booking_repo.collection.aggregate(
-            [{"$match": match}, {"$group": {"_id": "$captain_id", **self._COLLECTION_GROUP}}]
+            [{"$match": match}, {"$group": {"_id": {"$cond": [{"$eq": ["$completed_by_role", "manager"]}, "manager", "$captain_id"]}, **self._COLLECTION_GROUP}}]
         ).to_list(length=200)
 
         from bson import ObjectId
@@ -986,14 +990,14 @@ class PaymentService:
             for u in await self.db.users.find({"_id": {"$in": captain_ids}}, {"full_name": 1, "employee_id": 1}).to_list(length=200)
         }
         out_rows = []
-        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "uncollected_amount": 0.0, "uncollected_count": 0}
+        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0}
         for r in rows:
             if not any(r[k] for k in totals):
                 continue  # nothing money-related in range for this captain
             captain = captains.get(r["_id"] or "")
             out_rows.append(self._round_row({
                 "captain_id": r["_id"],
-                "captain_name": captain.get("full_name") if captain else ("Not yet assigned" if not r["_id"] else "Unknown"),
+                "captain_name": captain.get("full_name") if captain else ("Done by manager" if r["_id"] == "manager" else "Not yet assigned" if not r["_id"] else "Unknown"),
                 "employee_id": captain.get("employee_id") if captain else None,
                 **{k: r[k] for k in totals},
             }))
@@ -1023,7 +1027,7 @@ class PaymentService:
             for c in await self.db.service_centers.find({"_id": {"$in": center_ids}}, {"name": 1}).to_list(length=500)
         }
         out_rows = []
-        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "uncollected_amount": 0.0, "uncollected_count": 0}
+        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0}
         for r in rows:
             if not any(r[k] for k in totals):
                 continue
@@ -1134,6 +1138,31 @@ class PaymentService:
             order_doc["booking_ids"] = [str(c["_id"]) for c in cars]
         await self.orders.insert_one(order_doc)
         return {"short_url": link["short_url"], "amount": amount_paise, "link_id": link["id"]}
+
+    async def void_open_links(self, booking_ids: list[str], reason: str) -> int:
+        """A booking was settled another way (the manager did the job and
+        took the money) — cancel any still-unpaid payment link for it so the
+        customer can't pay a second time. Best effort and never raises: a
+        link is only marked voided once Razorpay confirms the cancel, so a
+        failed cancel leaves it live for the normal paid-twice safety net."""
+        if not booking_ids:
+            return 0
+        open_links = await self.orders.find(
+            {"kind": "link", "status": "created", "$or": [{"booking_id": {"$in": booking_ids}}, {"booking_ids": {"$in": booking_ids}}]}
+        ).to_list(length=20)
+        voided = 0
+        for order in open_links:
+            try:
+                if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+                    _razorpay_client().payment_link.cancel(order["razorpay_link_id"])
+                result = await self.orders.update_one(
+                    {"_id": order["_id"], "status": "created"},
+                    {"$set": {"status": "voided", "voided_at": now_ist(), "voided_reason": reason}},
+                )
+                voided += result.modified_count
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not void payment link %s", order.get("razorpay_link_id"), exc_info=True)
+        return voided
 
     async def verify_link_callback(self, params: dict) -> dict:
         """The browser lands here after paying a link. Razorpay signs the

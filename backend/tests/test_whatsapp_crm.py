@@ -120,24 +120,23 @@ async def test_otp_rows_are_redacted_in_thread(db, cleanup):
 
 @pytest.mark.asyncio
 async def test_event_template_gating_and_fallback(db, cleanup):
+    from app.services.whatsapp_crm_service import EVENT_TEMPLATES
+
     crm = WhatsAppCrmService(db)
+    name = EVENT_TEMPLATES["service_completed"]  # follows whichever version is live
     # Not approved (or absent) -> None, so notify() falls back to generic.
-    await db.whatsapp_templates.delete_one({"name": "test_event_gate"})
     assert await crm.event_template_if_ready("nonexistent_event") is None
 
     await db.whatsapp_templates.update_one(
-        {"name": "blussit_service_completed"},
-        {"$set": {"name": "blussit_service_completed", "status": "PENDING", "disabled": False}}, upsert=True)
-    cleanup.append(("whatsapp_templates", {"name": "blussit_service_completed", "status": "PENDING"}))
+        {"name": name}, {"$set": {"name": name, "status": "PENDING", "disabled": False}}, upsert=True)
+    cleanup.append(("whatsapp_templates", {"name": name, "status": "PENDING"}))
     assert await crm.event_template_if_ready("service_completed") is None  # pending != approved
 
-    await db.whatsapp_templates.update_one(
-        {"name": "blussit_service_completed"}, {"$set": {"status": "APPROVED"}})
+    await db.whatsapp_templates.update_one({"name": name}, {"$set": {"status": "APPROVED"}})
     tpl = await crm.event_template_if_ready("service_completed")
-    assert tpl and tpl["name"] == "blussit_service_completed"
+    assert tpl and tpl["name"] == name
     # restore to PENDING so the dev DB reflects Meta's actual state
-    await db.whatsapp_templates.update_one(
-        {"name": "blussit_service_completed"}, {"$set": {"status": "PENDING"}})
+    await db.whatsapp_templates.update_one({"name": name}, {"$set": {"status": "PENDING"}})
 
 
 @pytest.mark.asyncio

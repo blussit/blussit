@@ -7,7 +7,7 @@ import { reviewApi } from "../../api/engagement";
 import { Button, EmptyState, Input, PageLoader, Select, StatusBadge } from "../../components/ui";
 import { useBookingFilters, type SortOrder } from "../../lib/useBookingFilters";
 import { serviceImage } from "../../components/public/landing/shared";
-import { format } from "../../lib/date";
+import { format, formatSlot } from "../../lib/date";
 import { toSlabs } from "../../lib/bookingGroups";
 
 const STATUS_OPTIONS = ["", "awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "completed", "cancelled", "rescheduled"];
@@ -170,7 +170,7 @@ export default function MyBookingsPage() {
                       </span>
                     )}
                     <p className="text-sm text-gray-600">
-                      {format(b.scheduled_date)} · {b.scheduled_slot}
+                      {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
                     </p>
                     {isPlanBooking && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-600">

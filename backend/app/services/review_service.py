@@ -34,6 +34,8 @@ class ReviewService:
             raise BadRequestException("You can only review a completed booking")
         if booking.get("is_rated"):
             raise BadRequestException("This booking has already been reviewed")
+        if booking.get("captain_id") and payload.captain_rating is None:
+            raise BadRequestException("Please rate your captain.")
 
         doc = payload.model_dump()
         doc["customer_id"] = customer_id

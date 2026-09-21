@@ -4,7 +4,7 @@ import { AlertTriangle, BadgeCheck, Bike, CarFront, CheckCircle2, Flag, Lock, Ma
 import { useQuery } from "@tanstack/react-query";
 import { MiniPinMap } from "../shared/MiniPinMap";
 import { Badge, Button, Card, StatusBadge } from "../ui";
-import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
+import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot, formatClockIST } from "../../lib/date";
 import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 import { vehicleTypeApi } from "../../api/catalog";
@@ -27,7 +27,7 @@ export const ACTION_BUTTON_VARIANT: Record<JobAction["kind"], "primary" | "info"
 };
 
 const timeOf = (iso?: string | null) =>
-  iso ? new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : null;
+  iso ? formatClockIST(iso) : null;
 
 /** "10 h 20 min", "45 min", "now" — how long until this job's window opens.
  *  Takes the dictionary-typed `t` so a typo in a key is a build error. */
@@ -154,7 +154,7 @@ export function NowJobCard({
           <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-black">{t("captain.job.now")}</p>
           <p className="mt-0.5 font-display text-lg font-bold leading-snug text-black">{serviceName}</p>
           <p className="font-mono-num text-xs text-[var(--color-text-secondary)]">
-            {job.scheduled_slot} · {format(job.scheduled_date)}
+            {formatSlot(job.scheduled_slot)} · {format(job.scheduled_date)}
           </p>
           <p className="font-mono-num text-[11px] text-gray-400">{isVisit ? cars.map((c) => c.booking_number).join(" · ") : job.booking_number}</p>
         </div>

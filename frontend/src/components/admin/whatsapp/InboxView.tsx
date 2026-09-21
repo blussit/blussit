@@ -15,6 +15,7 @@ import { Badge, Button, Spinner } from "../../ui";
 import { whatsappCrmApi, type WaConversation, type WaMessage } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
 import { NewConversationModal, SendTemplateModal } from "./modals";
+import { formatClockIST, formatSlot } from "../../../lib/date";
 
 const FILTERS = [
   { key: "all", label: "All" },
@@ -32,7 +33,7 @@ function timeLabel(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   const today = new Date();
-  if (d.toDateString() === today.toDateString()) return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === today.toDateString()) return formatClockIST(iso);
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
 }
 
@@ -389,7 +390,7 @@ function Bubble({ m }: { m: WaMessage }) {
         )}
         <MessageBody m={m} />
         <p className="mt-0.5 flex items-center justify-end gap-1 text-[9px] text-gray-400">
-          {m.at ? new Date(m.at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : ""}
+          {formatClockIST(m.at)}
           {mine && <StatusTicks status={m.status} />}
         </p>
         {m.status === "FAILED" && m.errors?.length ? (
@@ -482,7 +483,7 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
           <PanelSection title="Current booking">
             <p className="text-xs font-semibold text-[var(--color-text-primary)]">{data.current_booking.booking_number} · {data.current_booking.status.replace(/_/g, " ")}</p>
             <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.services.join(", ")}</p>
-            <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.date} · {data.current_booking.slot}</p>
+            <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.date} · {formatSlot(data.current_booking.slot)}</p>
             {data.current_booking.captain && <p className="text-xs text-[var(--color-text-secondary)]">Captain: {data.current_booking.captain}</p>}
             <p className="text-xs font-semibold text-[var(--color-text-primary)]">₹{data.current_booking.amount}</p>
           </PanelSection>

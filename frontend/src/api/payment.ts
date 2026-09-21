@@ -73,6 +73,8 @@ export interface CollectionsRow {
   cash_count: number;
   online_amount: number;
   online_count: number;
+  /** Part of online_amount recorded by a manager (UPI) — not through Razorpay. */
+  manual_online_amount?: number;
   uncollected_amount: number;
   uncollected_count: number;
 }

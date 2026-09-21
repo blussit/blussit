@@ -58,6 +58,7 @@ from app.schemas.profile_schema import AddressCreateRequest
 from app.services.booking_service import BookingService
 from app.services.profile_service import AddressService
 from app.services.whatsapp_service import WhatsAppService
+from app.utils.slots import format_slot_12h
 from app.utils.timezone import now_ist
 
 logger = logging.getLogger(__name__)
@@ -188,9 +189,6 @@ class WhatsAppBotService:
             if updated_at and updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=timezone.utc)
             if updated_at and datetime.now(timezone.utc) - updated_at > timedelta(minutes=CONVERSATION_TTL_MINUTES):
-                # Mid-flow timeout: flag it so the menu greeting can
-                # acknowledge the restart instead of silently forgetting.
-                convo["_timed_out"] = bool(convo.get("state"))
                 convo["state"], convo["data"] = None, {}
             return convo
         return {"wa_id": wa_id, "state": None, "data": {}, "customer_id": None}
@@ -340,8 +338,6 @@ class WhatsAppBotService:
 
         # No active flow (or an explicit greeting) → main menu.
         if state is None or (kind == "text" and text_lower in _GREETING_WORDS):
-            if convo.get("_timed_out"):
-                await self.wa.send_text(phone, "Looks like our last chat timed out — no worries, let's start fresh. Your saved vehicles and addresses are still here. 👍")
             await self._send_menu(wa_id, phone)
             return
 
@@ -475,7 +471,7 @@ class WhatsAppBotService:
             rows.append({
                 "id": f"bk:{b['_id']}",
                 "title": _short(f"{b['booking_number']} · {self._fmt_date(b)}"),
-                "description": _short(f"{b.get('scheduled_slot')} · {names} · {b.get('status', '').replace('_', ' ').title()}", 72),
+                "description": _short(f"{format_slot_12h(b.get('scheduled_slot'))} · {names} · {b.get('status', '').replace('_', ' ').title()}", 72),
             })
         await self.wa.send_list(phone, "Your upcoming bookings — tap one for details:", "My bookings", rows)
         await self._set_state(wa_id, "bookings_list", {})
@@ -498,7 +494,7 @@ class WhatsAppBotService:
             f"🧾 *{booking['booking_number']}*",
             f"📌 Status: *{status}*",
             "",
-            f"📅 {self._fmt_date(booking)} · ⏰ {booking.get('scheduled_slot')}",
+            f"📅 {self._fmt_date(booking)} · ⏰ {format_slot_12h(booking.get('scheduled_slot'))}",
             f"🧽 {names}",
         ]
         vehicle = await self.vehicles.find_by_id(booking.get("vehicle_id", "")) if booking.get("vehicle_id") else None
@@ -542,7 +538,7 @@ class WhatsAppBotService:
         if action == "cancel":
             await self.wa.send_buttons(
                 phone,
-                f"Cancel booking *{booking['booking_number']}* ({self._fmt_date(booking)} · {booking.get('scheduled_slot')})?",
+                f"Cancel booking *{booking['booking_number']}* ({self._fmt_date(booking)} · {format_slot_12h(booking.get('scheduled_slot'))})?",
                 [{"id": "cxl:yes", "title": "Yes, cancel it"}, {"id": "cxl:no", "title": "Keep booking"}],
             )
             await self._set_state(wa_id, "cancel_confirm", data)
@@ -566,7 +562,7 @@ class WhatsAppBotService:
         if not open_slots:
             await self.wa.send_text(phone, "That day is fully booked 😔 — try another day.")
             return
-        rows = [{"id": f"rslot:{x['key']}", "title": f"{x['start']}–{x['end']}",
+        rows = [{"id": f"rslot:{x['key']}", "title": format_slot_12h(x["key"]),
                  "description": "Available" if x["status"] == "available" else f"Only {x['remaining']} spot(s) left"}
                 for x in open_slots[:10]]
         await self.wa.send_list(phone, "Pick the new time slot:", "New slot", rows)
@@ -591,7 +587,7 @@ class WhatsAppBotService:
         await self._set_state(wa_id, None, {})
         await self.wa.send_text(
             phone,
-            f"✅ Rescheduled!\n\n🧾 *{updated['booking_number']}*\n📅 {data['resched_date']} · {slot}\n\nType *hi* for the menu.",
+            f"✅ Rescheduled!\n\n🧾 *{updated['booking_number']}*\n📅 {data['resched_date']} · {format_slot_12h(slot)}\n\nType *hi* for the menu.",
         )
 
     async def _on_cancel_confirm(self, wa_id, phone, customer_id, data, kind, value):
@@ -947,7 +943,7 @@ class WhatsAppBotService:
                     continue
                 rows.append({
                     "id": f"when:{d.isoformat()}|{s['key']}",
-                    "title": _short(f"{label} · {s['start']}–{s['end']}"),
+                    "title": _short(f"{label} · {format_slot_12h(s['key'], compact=True)}"),
                     "description": "Available" if s["status"] == "available" else f"Only {s['remaining']} spot(s) left",
                 })
                 if len(rows) >= 10:
@@ -988,7 +984,7 @@ class WhatsAppBotService:
             "Confirm your booking:\n\n"
             f"{self._lines_summary(lines)}\n\n"
             f"📍 {data.get('address_label') or 'your address'}\n"
-            f"📅 {data.get('date')} · {data.get('slot')}\n"
+            f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
             f"💰 ₹{total:g}"
         )
         await self.wa.send_buttons(phone, summary, [{"id": "confirm:yes", "title": "✅ Confirm"}, {"id": "confirm:no", "title": "❌ Cancel"}])
@@ -1243,7 +1239,7 @@ class WhatsAppBotService:
             "🎉 Booking confirmed!\n\n"
             f"🧾 *{numbers}*\n"
             f"{self._lines_summary(lines)}\n"
-            f"📅 {data.get('date')} · {data.get('slot')}\n"
+            f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
             f"💰 Total: ₹{total:g}\n\n"
             + (f"🔐 Your service code: *{code}*\nShare it with the captain when they arrive.\n\n" if code else "")
             + "Our captain's details will be shared here once assigned.",

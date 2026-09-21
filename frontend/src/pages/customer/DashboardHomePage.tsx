@@ -11,7 +11,7 @@ import { bookingApi } from "../../api/booking";
 import { subscriptionApi } from "../../api/engagement";
 import { Badge, Card, CardBody, CardHeader, EmptyState, PageLoader, StatCard, StatusBadge } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
-import { format } from "../../lib/date";
+import { format, formatSlot } from "../../lib/date";
 import { toSlabs } from "../../lib/bookingGroups";
 
 const QUICK_LINKS = [
@@ -124,7 +124,7 @@ export default function CustomerDashboardPage() {
             {unpaid
               ? `Booking ${unpaid.booking_number} isn't confirmed yet — its payment wasn't completed.`
               : next
-                ? `Your next service is on ${format(next.scheduled_date)} · ${next.scheduled_slot}.`
+                ? `Your next service is on ${format(next.scheduled_date)} · ${formatSlot(next.scheduled_slot)}.`
                 : "Book a doorstep wash whenever you're ready."}
           </p>
         </div>
@@ -208,7 +208,7 @@ export default function CustomerDashboardPage() {
                           {nextSlab!.isVisit ? ` · ${nextSlab!.vehicleCount} vehicles` : ""}
                         </p>
                         <p className="text-sm text-gray-600">
-                          {format(next.scheduled_date)} · {next.scheduled_slot}
+                          {format(next.scheduled_date)} · {formatSlot(next.scheduled_slot)}
                         </p>
                         <p className="mt-0.5 truncate text-xs text-gray-400">
                           <span className="font-mono-num">{next.booking_number}</span>
@@ -236,7 +236,7 @@ export default function CustomerDashboardPage() {
                             {slab.isVisit ? ` · ${slab.vehicleCount} vehicles` : ""}
                           </p>
                           <p className="text-xs text-[var(--color-text-secondary)]">
-                            {format(b.scheduled_date)} · {b.scheduled_slot}
+                            {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
                           </p>
                           <p className="mt-0.5 truncate text-xs text-gray-400">
                             <span className="font-mono-num">{b.booking_number}</span>

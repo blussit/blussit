@@ -38,6 +38,16 @@ export function validateIndianMobile(raw: string): string | null {
   return digits.length === 10 && "6789".includes(digits[0]) ? digits : null;
 }
 
+/** Input-field cleaner for a mobile box: digits only, and a pasted
+ * "+91 98765 43210" / "098765 43210" keeps the 10 real digits instead of
+ * being cut to the first 10 (which would silently change the number). */
+export function cleanMobileInput(raw: string): string {
+  let digits = (raw || "").replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) digits = digits.slice(2);
+  else if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
+  return digits.slice(0, 10);
+}
+
 /** Vehicle brand/model text ("Maruti Swift", "i20", "Alto K10", "CR-V") —
  * letters, digits, spaces and hyphens only. Strips anything else (emoji,
  * punctuation, symbols) as the customer types, instead of letting a junk

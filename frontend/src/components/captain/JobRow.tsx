@@ -2,7 +2,7 @@ import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { AlertTriangle, CheckCircle2, Flag, XCircle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Button, StatusBadge } from "../ui";
-import { minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
+import { minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 import { vehicleTypeApi } from "../../api/catalog";
@@ -73,7 +73,7 @@ export function JobRow({
     >
       <button type="button" className="job-row-main-btn flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{job.scheduled_slot}</span>
+          <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{formatSlot(job.scheduled_slot)}</span>
           <span className="font-mono-num text-xs text-[var(--color-text-secondary)]">
             {isVisit ? cars.map((c) => c.booking_number).join(" · ") : job.booking_number}
           </span>

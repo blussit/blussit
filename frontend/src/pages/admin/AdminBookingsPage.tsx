@@ -8,7 +8,7 @@ import { Badge, Card, DataTable, Select, StatusBadge } from "../../components/ui
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { useBookingFilters } from "../../lib/useBookingFilters";
-import { format } from "../../lib/date";
+import { format, formatSlot } from "../../lib/date";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
 import type { Booking } from "../../types";
@@ -168,7 +168,7 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
                 </span>
               ),
           },
-          { header: "Slot", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${slab.primary.scheduled_slot}` },
+          { header: "Slot", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${formatSlot(slab.primary.scheduled_slot)}` },
           { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
           { header: "Priority", accessor: (slab) => <Badge tone={slab.primary.priority === "high" ? "error" : "neutral"}>{slab.primary.priority}</Badge> },
           { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
@@ -180,7 +180,8 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
               const ratings = slab.bookings
                 .map((b) => reviewByBooking.get(b.id))
                 .filter(Boolean)
-                .map((r) => r!.captain_rating ?? r!.rating ?? 0);
+                .map((r) => r!.captain_rating ?? r!.service_rating ?? r!.rating)
+                .filter((v): v is number => typeof v === "number");
               if (!ratings.length) return <span className="text-xs text-[var(--color-text-secondary)]">No review yet</span>;
               const rating = ratings.reduce((a, b) => a + b, 0) / ratings.length;
               return (

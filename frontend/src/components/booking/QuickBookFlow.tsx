@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { BadgeCheck, Banknote, Car, CheckCircle2, CreditCard, MapPin, Plus, Trash2 } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
 import { bookingApi, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
 import { addressApi } from "../../api/profile";
-import { Button, Input, Select, Spinner } from "../ui";
+import { adminServiceCenterApi } from "../../api/admin";
+import { Button, Input, Select, Spinner, Switch } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
 import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
@@ -17,8 +18,8 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
-import { todayIST } from "../../lib/date";
-import { validateIndianMobile } from "../../lib/validators";
+import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
+import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { parseIncludes, titleCase } from "../public/landing/shared";
 import type { Address, Service, VehicleTypeOption } from "../../types";
@@ -45,7 +46,9 @@ import type { Address, Service, VehicleTypeOption } from "../../types";
  * on ONE booking); every car of a type is its own booking on the visit —
  * exactly what the backend's group model expects.
  */
-type Mode = "public" | "customer" | "manager";
+/** "manager-log": a job the manager already did himself — same vehicle/service
+ *  picker, then who/where/when as it HAPPENED, saved directly as done. */
+type Mode = "public" | "customer" | "manager" | "manager-log";
 
 /** One vehicle line as the customer builds it: type, how many, which
  *  base service (group key) and which add-ons. */
@@ -60,6 +63,7 @@ const EMPTY_DRAFT: Draft = { typeId: "", count: 1, base: null, addons: [] };
 type Coverage = "idle" | "checking" | "covered" | "uncovered";
 
 const STEPS = ["What Are We Washing?", "Where And When?"];
+const LOG_STEPS = ["What Was Washed?", "Who, Where And When?"];
 const LAUNCH_FREE_BIKE_OFFER = "free-bike-wash";
 const LAUNCH_FREE_BIKE_COUPON = "FREEBIKE";
 
@@ -75,9 +79,11 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [searchParams] = useSearchParams();
   const { user } = useAuth();
   const { push: pushToast } = useToast();
+  const queryClient = useQueryClient();
   const isCustomer = mode === "customer";
-  const isManager = mode === "manager";
-  const launchOfferActive = searchParams.get("offer") === LAUNCH_FREE_BIKE_OFFER;
+  const isLog = mode === "manager-log";
+  const isManager = mode === "manager" || isLog;
+  const launchOfferActive = !isLog && searchParams.get("offer") === LAUNCH_FREE_BIKE_OFFER;
   // Guests are (almost always) first-time customers — quote the first-wash
   // price where one exists. The backend re-checks eligibility by phone.
   const showFirstWash = mode === "public" && !user;
@@ -134,6 +140,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // classic OTP code is spent by the booking call, so it isn't kept.
   const [verified, setVerified] = useState<{ phone: string; token: string } | null>(null);
   const [otpError, setOtpError] = useState("");
+  const [forceOtp, setForceOtp] = useState(false);
+  // manager-log only: the clock time of the job, and the WhatsApp switch.
+  const [logTime, setLogTime] = useState("");
+  const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const phoneRef = useRef<HTMLInputElement>(null);
 
   // ---- keep an unfinished booking for THIS browser tab ---------------------
@@ -175,6 +185,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setPaymentMethod(saved.paymentMethod === "online" ? "online" : "cash");
         setCouponCode(saved.couponCode || "");
         setNotes(saved.notes || "");
+        setLogTime(typeof saved.logTime === "string" ? saved.logTime : "");
+        setSendWhatsApp(saved.sendWhatsApp !== false);
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
@@ -198,12 +210,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone })
+        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone]);
+  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -343,7 +355,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           }
         }
         const addons = c.addons.map((id) => services.find((s) => s.id === id)).filter(Boolean) as Service[];
-        const requestedFreeBike = !!(kit.addBike && addons.some((a) => a.id === kit.addBike?.id));
+        const requestedFreeBike = !isLog && !!(kit.addBike && addons.some((a) => a.id === kit.addBike?.id));
         const freeBikeAddon = (launchOfferActive || requestedFreeBike) && !isBike && base && isLaunchOfferBase(base) && kit.addBike ? kit.addBike : null;
         if (freeBikeAddon && !addons.some((a) => a.id === freeBikeAddon.id)) addons.push(freeBikeAddon);
         const perUnit = (s: Service) => unit(s, t.id);
@@ -600,10 +612,46 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
   const usingPin = !savedAddressId && mapsUp && !typedAddress;
   const addressReady = savedAddressId ? true : usingPin ? !!pinned : line1.trim().length >= 3 && pincode.trim().length >= 6;
-  const step2Ready = coverage === "covered" && !!date && !!slot && addressReady && name.trim().length >= 2 && !!validateIndianMobile(phone);
+  const oldestLogDate = daysAgoIST(89);
+  // Bound the 12-hour picker to the center's working hours (and, for today,
+  // to now) so a job can't be filed at a time that can't be accepted; that
+  // also keeps AM/PM honest — the list runs in chronological order.
+  const { data: logCenter } = useQuery({
+    queryKey: ["center-detail-for-log", user?.service_center_id],
+    queryFn: () => adminServiceCenterApi.get(user!.service_center_id!),
+    enabled: isLog && !!user?.service_center_id,
+    staleTime: 5 * 60 * 1000,
+  });
+  const logOpens = logCenter?.working_hours_start;
+  const logCloses = logCenter?.working_hours_end;
+  const logLatest = logCloses && date === todayIST() && nowTimeIST() < logCloses ? nowTimeIST() : logCloses;
+  const logRangeOk = !!logOpens && !!logLatest && logOpens < logLatest;
+  const logTimeError = (): string => {
+    if (!logTime) return "Enter the time of the job.";
+    if (date === todayIST() && logTime > nowTimeIST()) return "That time hasn't happened yet — pick a time that has passed.";
+    return "";
+  };
+  // The button stays live once the fields are filled; a time that hasn't
+  // happened yet (or a date past the limit) is explained inline on tap.
+  const logReady = name.trim().length >= 2 && !!validateIndianMobile(phone) && line1.trim().length >= 3 && !!date && date <= todayIST() && !!logTime;
+  const step2Ready = isLog
+    ? logReady
+    : coverage === "covered" && !!date && !!slot && addressReady && name.trim().length >= 2 && !!validateIndianMobile(phone);
 
   const validateStep2 = (): boolean => {
     const next: Record<string, string> = {};
+    if (isLog) {
+      if (name.trim().length < 2) next.name = "Enter the customer's name.";
+      if (!validateIndianMobile(phone)) next.phone = "Enter a valid 10-digit mobile number.";
+      if (line1.trim().length < 3) next.address = "Enter where the job was done.";
+      if (!date) next.date = "Choose the date.";
+      else if (date > todayIST()) next.date = "Pick today or an earlier date.";
+      else if (date < oldestLogDate) next.date = "Jobs older than 90 days can't be logged.";
+      const timeError = logTimeError();
+      if (timeError) next.time = timeError;
+      setFieldErrors(next);
+      return Object.keys(next).length === 0;
+    }
     if (name.trim().length < 2) next.name = "Enter the name.";
     if (!validateIndianMobile(phone)) next.phone = "Enter a valid 10-digit mobile number.";
     if (!savedAddressId && usingPin && !pinned) next.location = "Drop the pin on the service address.";
@@ -620,10 +668,50 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
   // Anonymous website bookings prove the phone with an OTP as the last step;
   // signed-in customers already did (OTP login) and managers book on behalf.
-  const needsOtp = !isManager && (!user || user.role !== "customer");
+  const needsOtp = !isManager && (!user || user.role !== "customer" || forceOtp);
+
+  const submitLog = async () => {
+    setError("");
+    setSubmitting(true);
+    try {
+      const result = await bookingApi.managerLogCompleted({
+        customer_name: name.trim(),
+        customer_phone: validateIndianMobile(phone) || phone.trim(),
+        lines: lines.map((l) => l.payload!).filter(Boolean),
+        scheduled_date: date,
+        service_time: logTime,
+        address_line: line1.trim(),
+        customer_notes: notes.trim() || undefined,
+        payment_method: displayTotal > 0 ? paymentMethod : "cash",
+        send_whatsapp: sendWhatsApp,
+      });
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {
+        // ignore
+      }
+      queryClient.invalidateQueries({
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|center-captains)/.test(q.queryKey[0]),
+      });
+      pushToast({
+        tone: "success",
+        title: "Job logged as done",
+        message: `${result.booking_numbers.join(" + ")} · ₹${result.total_amount}${sendWhatsApp ? " · customer notified on WhatsApp" : ""}`,
+      });
+      navigate("/manager/bookings");
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const submit = async (freshProof?: PhoneProof) => {
     if (!validateStep2()) return;
+    if (isLog) {
+      await submitLog();
+      return;
+    }
     const canonicalPhone = validateIndianMobile(phone) || phone.trim();
     const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? { phone_access_token: verified.token } : undefined);
     if (needsOtp && !proof) {
@@ -691,7 +779,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     } catch (err) {
       const message = getErrorMessage(err);
       // The backend rejected the code (wrong/expired) — back to the popup.
-      if (needsOtp && /^(Invalid or expired code|Please verify your mobile number)/.test(message)) {
+      // A signed-in customer whose session lapsed mid-wizard reaches the
+      // server as a guest — same answer: verify the number, then retry.
+      if (!isManager && /^(Invalid or expired code|Please verify your mobile number)/.test(message)) {
+        setForceOtp(true);
         setVerified(null);
         setError("");
         setOtpError(message);
@@ -730,7 +821,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         ) : (
           <Button className="min-w-[150px]" disabled={!step2Ready} isLoading={submitting} onClick={() => void submit()}>
             <CheckCircle2 className="h-4 w-4" />
-            {displayTotal > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
+            {isLog ? "Save As Done" : displayTotal > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
           </Button>
         )}
       </div>
@@ -760,9 +851,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       />
     )}
     <WizardShell
-      eyebrow={isManager ? "Book for a customer" : "Book a wash"}
-      title={isManager ? "New Booking" : "Book Your Doorstep Wash"}
-      steps={STEPS}
+      eyebrow={isLog ? "Log a job you did" : isManager ? "Book for a customer" : "Book a wash"}
+      title={isLog ? "Log A Completed Job" : isManager ? "New Booking" : "Book Your Doorstep Wash"}
+      steps={isLog ? LOG_STEPS : STEPS}
       current={step}
       onStepClick={(i) => i < step && setStep(i)}
       footer={footer}
@@ -775,7 +866,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             description={
               launchOfferActive
                 ? "Your launch offer is ready: choose your car type, pick Star Wash or Deep Cleaning, and one Bike Wash is added free."
-                : `Pick the vehicle and the service. Up to ${maxVehicles} vehicles on one visit — one address, one slot.`
+                : isLog
+                  ? `Pick the vehicle and the service you did. Up to ${maxVehicles} vehicles on one visit.`
+                  : `Pick the vehicle and the service. Up to ${maxVehicles} vehicles on one visit — one address, one slot.`
             }
           />
 
@@ -969,7 +1062,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                       </div>
                     )}
 
-                    {editing.base && !editingIsBike && editingKit?.addBike && isLaunchOfferBase(editing.base) && (
+                    {!isLog && editing.base && !editingIsBike && editingKit?.addBike && isLaunchOfferBase(editing.base) && (
                       <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div>
@@ -1023,7 +1116,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       {/* ---------------- STEP 2 ---------------- */}
       {step === 1 && (
         <div className="space-y-6">
-          <WizardStepHeader title="Where And When?" description="The captain drives to the pin you drop. Pick a slot that suits you." />
+          <WizardStepHeader
+            title={isLog ? "Who, Where And When?" : "Where And When?"}
+            description={isLog ? "Enter the job as it happened. It is saved as done — no captain or photos needed." : "The captain drives to the pin you drop. Pick a slot that suits you."}
+          />
 
           {/* Who — a signed-in customer books as themselves, unless the
               account has no phone yet (Google sign-in) and we still need one
@@ -1035,14 +1131,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Input label={isManager ? "Customer name" : "Your name"} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
+              <Input label={isManager ? "Customer name" : "Your name"} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
               <Input
                 ref={phoneRef}
                 label={isManager ? "Customer mobile" : "Mobile number"}
                 value={phone}
                 inputMode="numeric"
-                maxLength={10}
-                onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
                 error={fieldErrors.phone}
                 placeholder="10-digit mobile"
                 hint={isManager ? undefined : "Your booking updates and service code come here on WhatsApp."}
@@ -1050,6 +1145,60 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             </div>
           )}
 
+          {isLog && (
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <p className="flex items-center gap-1.5 text-sm font-medium text-black">
+                  <MapPin className="h-3.5 w-3.5" /> Where was it done?
+                </p>
+                <Input label="Address / area" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />
+                <Input type="time" label="Time" min={logRangeOk ? logOpens : undefined} max={logRangeOk ? logLatest : undefined} value={logTime} onChange={(e) => setLogTime(e.target.value)} error={fieldErrors.time} />
+              </div>
+
+              {displayTotal > 0 && (
+                <div>
+                  <p className="mb-2 text-sm font-medium text-black">How was it paid?</p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {(
+                      [
+                        { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you" },
+                        { id: "online", icon: CreditCard, title: "Online / UPI", sub: "Paid to the business account" },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setPaymentMethod(opt.id)}
+                        className={`flex items-start gap-3 rounded-xl border-2 p-3 text-left ${paymentMethod === opt.id ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white"}`}
+                      >
+                        <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
+                        <span>
+                          <span className="block text-sm font-semibold text-black">{opt.title}</span>
+                          <span className="block text-xs text-gray-500">{opt.sub}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <Input label="Note (optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything worth remembering about this job" />
+
+              <Switch
+                checked={sendWhatsApp}
+                onChange={setSendWhatsApp}
+                label="Tell the customer on WhatsApp"
+                description={`They get one message${validateIndianMobile(phone) ? ` on +91 ${validateIndianMobile(phone)}` : ""} saying the service is done. Nothing else is sent.`}
+              />
+            </div>
+          )}
+
+          {!isLog && (
+          <>
           {/* Where */}
           <div className="space-y-3">
             <p className="flex items-center gap-1.5 text-sm font-medium text-black">
@@ -1215,8 +1364,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                     label="Second contact number"
                     value={altPhone}
                     inputMode="numeric"
-                    maxLength={10}
-                    onChange={(e) => setAltPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                    onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))}
                     error={fieldErrors.altPhone}
                   />
                 </div>
@@ -1225,6 +1373,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           </div>
 
           <ServicePrepNotice services={allServices} />
+          </>
+          )}
         </div>
       )}
     </WizardShell>

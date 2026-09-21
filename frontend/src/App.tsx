@@ -45,6 +45,7 @@ const ManagerLayout = lazy(() => import("./pages/manager/ManagerLayout"));
 const ManagerDashboardPage = lazy(() => import("./pages/manager/ManagerDashboardPage"));
 const ManagerKpiPage = lazy(() => import("./pages/manager/ManagerKpiPage"));
 const ManagerNewBookingPage = lazy(() => import("./pages/manager/ManagerNewBookingPage"));
+const ManagerLogJobPage = lazy(() => import("./pages/manager/ManagerLogJobPage"));
 const BookingQueuePage = lazy(() => import("./pages/manager/BookingQueuePage"));
 const ManagerCaptainsPage = lazy(() => import("./pages/manager/ManagerCaptainsPage"));
 const ManagerSubscribersPage = lazy(() => import("./pages/manager/ManagerSubscribersPage"));
@@ -169,6 +170,7 @@ export default function App() {
                 <Route index element={<ManagerDashboardPage />} />
                 <Route path="kpi" element={<ManagerKpiPage />} />
                 <Route path="new-booking" element={<ManagerNewBookingPage />} />
+                <Route path="log-job" element={<ManagerLogJobPage />} />
                 <Route path="bookings" element={<BookingQueuePage />} />
                 {/* Notification deep-links land here — send staff to their
                     real actionable view (the queue, highlighted), not the

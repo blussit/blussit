@@ -47,3 +47,27 @@ def generate_slots(open_str: str, close_str: str, duration_minutes: int) -> list
         slots.append({"start": start_str, "end": end_str, "key": slot_key(start_str, end_str)})
         cursor = end
     return slots
+
+
+def format_time_12h(hhmm: str, compact: bool = False) -> str:
+    """"14:30" -> "2:30 PM" (IST wall-clock, 12-hour) for anything a person
+    reads. compact drops ":00" ("9 AM") for tight spots like WhatsApp list
+    titles. Anything unparseable comes back unchanged."""
+    try:
+        h, m = [int(p) for p in str(hhmm).strip().split(":")[:2]]
+    except ValueError:
+        return str(hhmm)
+    period = "PM" if h >= 12 else "AM"
+    hour12 = h % 12 or 12
+    return f"{hour12} {period}" if compact and m == 0 else f"{hour12}:{m:02d} {period}"
+
+
+def format_slot_12h(slot: str | None, compact: bool = False) -> str:
+    """"09:00-12:00" -> "9:00 AM – 12:00 PM". The stored key stays 24-hour
+    (it's an identifier); this is display only."""
+    text = str(slot or "").strip()
+    if "-" not in text:
+        return text
+    start, end = [part.strip() for part in text.split("-", 1)]
+    sep = "–" if compact else " – "
+    return f"{format_time_12h(start, compact)}{sep}{format_time_12h(end, compact)}"

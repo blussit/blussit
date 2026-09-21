@@ -83,7 +83,7 @@ class QuickAddress(BaseModel):
 class QuickBookingLine(BaseModel):
     """One vehicle TYPE on the visit: "2 SUVs, Foam Wash". quantity > 1
     becomes that many bookings, each with the same service(s)."""
-    vehicle_type: str
+    vehicle_type: str = Field(min_length=1)
     quantity: int = Field(default=1, ge=1, le=10)
     service_ids: list[str] = Field(min_length=1)
     service_quantities: dict[str, int] = Field(default_factory=dict)
@@ -155,6 +155,59 @@ def _canonical_phone(v: str) -> str:
 class BookingPhoneOtpRequest(BaseModel):
     phone: str = Field(min_length=10, max_length=20)
     _phone = field_validator("phone")(_canonical_phone)
+
+
+class ManagerLogBookingRequest(BaseModel):
+    """A job the manager already did himself (phone-in or walk-in): it is
+    saved directly as COMPLETED — no slot capacity, no captain, no photos.
+    The time is a clock time, not a slot; the server files it under the
+    center's slot that contains it."""
+    customer_name: str = Field(min_length=2, max_length=100)
+    customer_phone: str = Field(min_length=10, max_length=20)
+    lines: list[QuickBookingLine] = Field(min_length=1)
+    scheduled_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    service_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    address_line: str = Field(min_length=3, max_length=300)
+    landmark: Optional[str] = Field(default=None, max_length=200)
+    payment_method: PaymentMethod = PaymentMethod.CASH
+    customer_notes: Optional[str] = Field(default=None, max_length=500)
+    # True = the customer gets ONE WhatsApp: "service is done". Nothing else.
+    send_whatsapp: bool = True
+
+    _phone = field_validator("customer_phone")(_canonical_phone)
+
+    @field_validator("customer_name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) < 2:
+            raise ValueError("Enter the customer's name")
+        return v
+
+    @field_validator("address_line")
+    @classmethod
+    def _address(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) < 3:
+            raise ValueError("Enter where the job was done")
+        return v
+
+    @field_validator("payment_method")
+    @classmethod
+    def _paid_method(cls, v: PaymentMethod) -> PaymentMethod:
+        if v not in (PaymentMethod.CASH, PaymentMethod.ONLINE):
+            raise ValueError("Payment must be cash or online")
+        return v
+
+    @model_validator(mode="after")
+    def _vehicle_limit(self) -> "ManagerLogBookingRequest":
+        if sum(line.quantity for line in self.lines) > 10:
+            raise ValueError("You can log up to 10 vehicles on one visit")
+        return self
+
+
+class ManagerMarkDoneRequest(BaseModel):
+    send_whatsapp: bool = True
 
 
 class ManagerBookingCreateRequest(BaseModel):

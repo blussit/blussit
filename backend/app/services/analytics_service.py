@@ -256,7 +256,7 @@ class AnalyticsService:
         unassigned_today = await self.booking_repo.count({**today_match, "status": {"$in": ["pending", "rescheduled"]}, "captain_id": None})
 
         duration_pipeline = [
-            {"$match": {**base_match, "status": "completed"}},
+            {"$match": {**base_match, "status": "completed", "completed_by_role": {"$ne": "manager"}}},
             {
                 "$project": {
                     "actual_duration_minutes": 1,

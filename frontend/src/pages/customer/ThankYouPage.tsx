@@ -6,7 +6,7 @@ import { CheckCircle2, CreditCard, Gift, Home, LayoutDashboard, LogIn, ReceiptTe
 import { purchaseConfirmationApi } from "../../api/purchaseConfirmation";
 import { Button, Card, CardBody, PageLoader, Spinner } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
-import { format } from "../../lib/date";
+import { format, formatSlot } from "../../lib/date";
 
 const ROLE_HOME: Record<string, string> = { customer: "/app", manager: "/manager", admin: "/admin", captain: "/captain" };
 
@@ -123,9 +123,9 @@ export default function ThankYouPage() {
       ? `Your ${confirmed.payload.plan_name} Subscription Is Active. You Can Start Booking Services With It Right Away.`
       : "Your Subscription Is Active. You Can Start Booking Services With It Right Away."
     : awaitingPayment
-      ? `Your slot on ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot} is held for 30 minutes. Pay online to confirm it — or we'll release it.`
+      ? `Your slot on ${format(confirmed.payload.scheduled_date!)} · ${formatSlot(confirmed.payload.scheduled_slot)} is held for 30 minutes. Pay online to confirm it — or we'll release it.`
       : confirmed.payload.booking_number
-        ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${confirmed.payload.scheduled_slot}.`
+        ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${formatSlot(confirmed.payload.scheduled_slot)}.`
         : "Your Booking Is Confirmed. We'll Notify You As Soon As A Captain Is Assigned.";
 
   return (

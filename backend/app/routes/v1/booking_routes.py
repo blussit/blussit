@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,7 @@ from app.core.dependencies import (
     require_admin,
     require_captain,
     require_customer,
+    require_manager,
     require_manager_or_admin,
 )
 from app.services.auth_service import AuthService
@@ -30,6 +31,8 @@ from app.schemas.booking_schema import (
     CaptainCancelRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
+    ManagerLogBookingRequest,
+    ManagerMarkDoneRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
     QuickBookingRequest,
@@ -70,6 +73,14 @@ async def manager_quick_create_booking(
     payload: QuickBookingRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     return await BookingController(db).manager_quick_create(current_user, payload)
+
+
+@router.post("/manager-log-completed", dependencies=[Depends(require_manager)])
+async def manager_log_completed_booking(
+    payload: ManagerLogBookingRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """A walk-in / phone-in job the manager did himself, saved as done."""
+    return await BookingController(db).manager_log_completed(current_user, payload)
 
 
 @router.post("/manager-create", dependencies=[Depends(require_manager_or_admin)])
@@ -130,6 +141,12 @@ async def get_booking(booking_id: str, current_user: CurrentUser = Depends(get_c
 @router.post("/{booking_id}/assign-captain", dependencies=[Depends(require_manager_or_admin)])
 async def assign_captain(booking_id: str, payload: BookingAssignCaptainRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).assign_captain(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/mark-done", dependencies=[Depends(require_manager_or_admin)])
+async def mark_booking_done(booking_id: str, payload: ManagerMarkDoneRequest = Body(default_factory=ManagerMarkDoneRequest), current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """The manager did this booking himself — closes it without the captain workflow."""
+    return await BookingController(db).manager_mark_done(current_user, booking_id, payload)
 
 
 @router.post("/{booking_id}/reassign-captain", dependencies=[Depends(require_manager_or_admin)])

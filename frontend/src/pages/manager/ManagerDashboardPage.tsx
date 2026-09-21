@@ -7,7 +7,7 @@ import { staffDirectoryApi, inventoryApi } from "../../api/admin";
 import { Badge, Button, EmptyState, PageLoader, Panel, StatCard } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
 import { ISSUE_LABELS, isOpenIssue, needsCaptain } from "../../lib/constants";
-import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
+import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 
 export default function ManagerDashboardPage() {
   const { user } = useAuth();
@@ -95,7 +95,7 @@ export default function ManagerDashboardPage() {
               return (
                 <div key={b.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
                   <span className="text-gray-600">
-                    <span className="font-mono-num font-semibold text-black">{b.booking_number}</span> · {format(b.scheduled_date)} · {b.scheduled_slot}
+                    <span className="font-mono-num font-semibold text-black">{b.booking_number}</span> · {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
                     {b.customer_name ? ` · ${b.customer_name}` : ""}
                   </span>
                   <span className="font-semibold text-[var(--color-error)]">
@@ -121,7 +121,7 @@ export default function ManagerDashboardPage() {
             {openIssueBookings.slice(0, 5).map((b) => (
               <div key={b.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
                 <span className="text-gray-600">
-                  <span className="font-mono-num font-semibold text-black">{b.booking_number}</span> · {format(b.scheduled_date)} · {b.scheduled_slot}
+                  <span className="font-mono-num font-semibold text-black">{b.booking_number}</span> · {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
                   {b.customer_name ? ` · ${b.customer_name}` : ""}
                 </span>
                 <Badge tone="warning">{ISSUE_LABELS[b.issue_flag!] || b.issue_flag}</Badge>

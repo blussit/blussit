@@ -5,7 +5,7 @@ import { CalendarClock, ChevronLeft, Lock, Unlock, Wand2, X } from "lucide-react
 import { adminCapacityPolicyApi, adminServiceCenterApi, adminSlotCapacityApi } from "../../api/admin";
 import { Badge, Button, Card, Input, PageLoader } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
-import { format, todayIST } from "../../lib/date";
+import { format, todayIST, formatTime12 } from "../../lib/date";
 import { useConfirm } from "../../context/ConfirmContext";
 
 type Section = "overview" | "policy";
@@ -131,7 +131,7 @@ function OverviewSection({ centerId }: { centerId: string }) {
               {data.slots.map((s) => (
                 <tr key={s.key} className={`border-b border-gray-50 last:border-0 ${s.is_closed ? "bg-gray-50/50" : ""}`}>
                   <td className="px-4 py-3 font-mono-num font-medium text-[var(--color-text-primary)]">
-                    {s.start}–{s.end}
+                    {formatTime12(s.start)} – {formatTime12(s.end)}
                     {s.is_closed && (
                       <Badge tone="neutral" className="ml-2">
                         Closed

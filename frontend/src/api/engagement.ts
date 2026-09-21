@@ -94,7 +94,7 @@ export const couponApi = {
 
 export const reviewApi = {
   mine: () => apiClient.get<ApiSuccess<Review[]>>("/reviews/my").then((r) => r.data.data),
-  create: (payload: { booking_id: string; captain_rating: number; captain_comment?: string; service_rating: number; service_comment?: string }) =>
+  create: (payload: { booking_id: string; captain_rating?: number; captain_comment?: string; service_rating: number; service_comment?: string }) =>
     apiClient.post<ApiSuccess<Review>>("/reviews", payload).then((r) => r.data.data),
   update: (id: string, payload: { captain_rating?: number; captain_comment?: string; service_rating?: number; service_comment?: string }) =>
     apiClient.put<ApiSuccess<Review>>(`/reviews/${id}`, payload).then((r) => r.data.data),

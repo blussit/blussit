@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, Clock, Phone, Sparkles } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, Phone, Sparkles } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
-import { Button, Card, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
+import { Button, Card, DataTable, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
@@ -12,7 +12,8 @@ import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useAuth } from "../../context/AuthContext";
-import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES } from "../../lib/date";
+import { useToast } from "../../context/ToastContext";
+import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { ISSUE_LABELS, isOpenIssue, needsCaptain } from "../../lib/constants";
 import { useBookingFilters } from "../../lib/useBookingFilters";
@@ -144,6 +145,11 @@ export default function BookingQueuePage() {
 
   const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+
+  const navigate = useNavigate();
+  const { push: pushToast } = useToast();
+  const [doneBooking, setDoneBooking] = useState<Booking | null>(null);
+  const [doneWhatsApp, setDoneWhatsApp] = useState(true);
 
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const { data: center } = useQuery({ queryKey: ["center-detail-for-queue", centerId], queryFn: () => adminServiceCenterApi.get(centerId), enabled: !!centerId });
@@ -314,6 +320,27 @@ export default function BookingQueuePage() {
     },
   });
 
+  const markDoneMutation = useMutation({
+    // Closes the whole visit (the backend does that); the caller only needs
+    // to know it worked.
+    mutationFn: () => bookingApi.markDone(doneBooking!.id, doneWhatsApp),
+    onSuccess: (res) => {
+      // The queue AND the dashboard tiles / KPIs (their keys share the
+      // "center-bookings-" / "manager-kpi" prefixes) move with a done job.
+      queryClient.invalidateQueries({
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|center-captains)/.test(q.queryKey[0]),
+      });
+      pushToast({
+        tone: "success",
+        title: "Marked as done",
+        message: `${res.booking_numbers.join(" + ")}${doneWhatsApp ? " · customer notified on WhatsApp" : ""}`,
+      });
+      setDoneBooking(null);
+      setError("");
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
   const cancelMutation = useMutation({
     // A car on a visit is never cancelled alone from here — the manager
     // made one decision about one visit, so this cancels every vehicle on
@@ -354,6 +381,27 @@ export default function BookingQueuePage() {
   // once they're already on the way — the heading/before-photo trail is locked in by then.
   const canReassign = (b: Booking) => b.status === "assigned";
   const canCancel = (b: Booking) => !["completed", "cancelled"].includes(b.status);
+  // Mirrors the backend: only a job the captain hasn't started can be closed
+  // by the manager — once a captain is on the way or working, they finish it.
+  const canMarkDone = (b: Booking) => ["pending", "rescheduled", "assigned"].includes(b.status);
+  const openMarkDone = (b: Booking) => {
+    setDoneBooking(b);
+    setDoneWhatsApp(true);
+    setError("");
+  };
+  // Every modal shares one `error` line — a failed mark-done must not
+  // resurface inside the next modal that opens.
+  const closeDone = () => {
+    setDoneBooking(null);
+    setError("");
+  };
+  // The whole visit closes together, so the popup speaks for every car on it.
+  const doneVisit = doneBooking
+    ? doneBooking.booking_group_id
+      ? items.filter((x) => x.booking_group_id === doneBooking.booking_group_id && x.status !== "cancelled")
+      : [doneBooking]
+    : [];
+  const doneUnpaid = doneVisit.some((x) => x.status !== "completed" && x.payment_status !== "paid");
 
   // Sits inside a row that now opens the booking detail drawer on click
   // (DataTable's onRowClick) — stopPropagation here so clicking any of
@@ -368,6 +416,11 @@ export default function BookingQueuePage() {
       {canReassign(b) && (
         <Button size="sm" variant="outline" onClick={() => openAssign(b, true)}>
           Reassign
+        </Button>
+      )}
+      {canMarkDone(b) && (
+        <Button size="sm" variant="outline" onClick={() => openMarkDone(b)}>
+          <ClipboardCheck className="h-3.5 w-3.5" /> Mark done
         </Button>
       )}
       {isOpenIssue(b) && (
@@ -390,9 +443,14 @@ export default function BookingQueuePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Booking queue</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Assign captains and handle anything that needs your attention.</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Booking queue</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Assign captains and handle anything that needs your attention.</p>
+        </div>
+        <Button onClick={() => navigate("/manager/log-job")}>
+          <ClipboardCheck className="h-4 w-4" /> Log a done job
+        </Button>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -468,7 +526,7 @@ export default function BookingQueuePage() {
                           )}
                         </p>
                         <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                          {format(b.scheduled_date)} · {b.scheduled_slot}
+                          {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
                         </p>
                       </div>
                       <div className="flex flex-col items-end gap-1.5">
@@ -527,7 +585,7 @@ export default function BookingQueuePage() {
                       <div>
                         <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
                         <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                          {format(b.scheduled_date)} · {b.scheduled_slot} · Captain: {captainName(b.captain_id)}
+                          {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
                         </p>
                       </div>
                       <div className="flex flex-col items-end gap-1.5">
@@ -592,7 +650,7 @@ export default function BookingQueuePage() {
                     <div>
                       <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
                       <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                        {format(b.scheduled_date)} · {b.scheduled_slot} · Captain: {captainName(b.captain_id)}
+                        {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
                       </p>
                     </div>
                     <StatusBadge status={b.status} />
@@ -686,7 +744,7 @@ export default function BookingQueuePage() {
                     <span className="text-xs text-[var(--color-text-secondary)]">{bookingLabel(slab.primary)}</span>
                   ),
               },
-              { header: "Date", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${slab.primary.scheduled_slot}` },
+              { header: "Date", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${formatSlot(slab.primary.scheduled_slot)}` },
               { header: "Captain", accessor: (slab) => captainName(slab.primary.captain_id) },
               { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
               { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
@@ -743,6 +801,38 @@ export default function BookingQueuePage() {
         <Button className="mt-4 w-full" isLoading={resolveMutation.isPending} onClick={() => resolveMutation.mutate()}>
           Mark resolved
         </Button>
+      </Modal>
+
+      <Modal open={!!doneBooking} onClose={closeDone} title={doneBooking?.booking_group_id ? "Mark visit as done" : "Mark as done"}>
+        {doneBooking && (
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              You did <span className="font-mono-num font-semibold text-black">{doneVisit.map((x) => x.booking_number).join(" + ")}</span> yourself, so it closes right away — no photos needed.
+              {doneBooking.booking_group_id && " Every vehicle on this visit is closed together."}
+              {doneBooking.captain_id && " The assigned captain is released and earns nothing for it."}
+            </p>
+            {doneUnpaid && (
+              <p className="rounded-xl bg-[#FAFAFA] p-3 text-xs text-gray-600">
+                Payment is recorded as <span className="font-semibold text-black">collected in cash by you</span>.
+              </p>
+            )}
+            <Switch
+              checked={doneWhatsApp}
+              onChange={setDoneWhatsApp}
+              label="Tell the customer on WhatsApp"
+              description={`They get one message${doneBooking.customer_phone ? ` on +91 ${doneBooking.customer_phone.replace(/^\+?91/, "")}` : ""} saying the service is done. Nothing else is sent.`}
+            />
+            {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+            <div className="flex gap-2">
+              <Button variant="outline" className="flex-1" onClick={closeDone}>
+                Back
+              </Button>
+              <Button className="flex-1" isLoading={markDoneMutation.isPending} onClick={() => markDoneMutation.mutate()}>
+                <ClipboardCheck className="h-4 w-4" /> Mark as done
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel visit" : "Cancel booking"}>

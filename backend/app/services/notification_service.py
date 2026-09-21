@@ -48,6 +48,7 @@ class NotificationService:
         wa_params: list[str] | None = None,
         wa_marketing: bool = False,
         background: bool = False,
+        send_whatsapp: bool = True,
     ) -> None:
         """`wa_marketing`: the WhatsApp half is a MARKETING template ("book
         again", "we miss you"). Those go out only through their approved
@@ -62,7 +63,10 @@ class NotificationService:
         notification row is still written before this returns, so anything
         reading it immediately after (a live socket push, a test) sees it.
         Default is False so every other call site keeps its exact existing
-        (synchronous, easy to assert on in tests) behaviour."""
+        (synchronous, easy to assert on in tests) behaviour.
+
+        `send_whatsapp=False`: write the in-app row only (a manager marking
+        a job done with the "notify on WhatsApp" switch off)."""
         await self.repo.create(
             {
                 "user_id": user_id,
@@ -77,7 +81,7 @@ class NotificationService:
         phone = (user or {}).get("phone")
         if wa_marketing and (user or {}).get("marketing_opt_out"):
             return
-        if phone:
+        if phone and send_whatsapp:
             coro = self._send_whatsapp(user_id, phone, title, message, wa_event, wa_params, wa_marketing, reference_id)
             if background:
                 _fire_and_forget(coro)
@@ -123,7 +127,12 @@ class NotificationService:
                         button_param = None
                         if tpl.get("has_url_param") and reference_id:
                             button_param = f"{reference_id}?review=1" if wa_event == "service_completed" else reference_id
-                        sent = await self.whatsapp.send_event_template(phone, tpl["name"], wa_params, button_param=button_param)
+                        # Templates can be shorter than the params a call site builds (the
+                        # service code was dropped from the _v5 bodies) — send exactly
+                        # as many as the approved template declares.
+                        expected = tpl.get("param_count")
+                        params = wa_params if expected is None else wa_params[:expected]
+                        sent = await self.whatsapp.send_event_template(phone, tpl["name"], params, button_param=button_param)
                 except Exception:  # noqa: BLE001 — automation must never block the fallback
                     logger.exception("WhatsApp event-template send failed (event=%s, user=%s) — falling back to generic", wa_event, user_id)
                     sent = False

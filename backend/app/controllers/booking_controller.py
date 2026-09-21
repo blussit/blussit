@@ -13,6 +13,8 @@ from app.schemas.booking_schema import (
     CaptainCancelRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
+    ManagerLogBookingRequest,
+    ManagerMarkDoneRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
     QuickBookingRequest,
@@ -101,6 +103,28 @@ class BookingController:
                 current_user.id, current_user.role, "MANAGER_CREATE_BOOKING", "bookings", b["id"], {"customer_id": str(customer["_id"])}
             )
         return success(result, "Booking created")
+
+    async def manager_log_completed(self, current_user: CurrentUser, payload: ManagerLogBookingRequest):
+        """A job the manager already did himself, saved directly as done."""
+        result = await self.service.create_manager_logged_visit(
+            payload, manager_id=current_user.id, manager_center_id=current_user.service_center_id
+        )
+        for b in result.get("bookings") or []:
+            await self.audit.log_action(
+                current_user.id, current_user.role, "MANAGER_LOG_COMPLETED", "bookings", b["id"],
+                {"customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp},
+            )
+        return success(result, "Job logged as done")
+
+    async def manager_mark_done(self, current_user: CurrentUser, booking_id: str, payload: ManagerMarkDoneRequest):
+        result = await self.service.manager_mark_done(
+            booking_id, current_user.id, current_user.role, current_user.service_center_id, payload.send_whatsapp
+        )
+        await self.audit.log_action(
+            current_user.id, current_user.role, "MANAGER_MARK_DONE", "bookings", booking_id,
+            {"send_whatsapp": payload.send_whatsapp, "completed": result["completed"], "booking_numbers": result["booking_numbers"]},
+        )
+        return success(result, "Marked as done")
 
     async def create(self, current_user: CurrentUser, payload: BookingCreateRequest):
         result = await self.service.create_booking(current_user.id, payload)

@@ -20,16 +20,11 @@ import {
 } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { translateCaptainError } from "../../lib/captainErrorTranslations";
-import { formatDateTime } from "../../lib/date";
+import { formatDateTime, formatClockIST } from "../../lib/date";
 import type { AttendanceRecord, LeaveRequest } from "../../api/staffOps";
 
 const timeOnly = (iso?: string | null) =>
-  iso
-    ? new Date(iso).toLocaleTimeString("en-IN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : null;
+  iso ? formatClockIST(iso) : null;
 
 function hoursLabel(minutes?: number | null): string | null {
   if (minutes == null) return null;

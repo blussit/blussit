@@ -362,6 +362,11 @@ export interface Booking {
   captain_earning?: number | null;
   platform_earning?: number | null;
   wallet_settled?: boolean;
+  // Set when the MANAGER did the job himself (logged directly, or marked
+  // done) — no captain and no photos, by design.
+  completed_by_role?: "manager" | null;
+  completed_by_id?: string | null;
+  logged_at?: string | null;
   coupon_code?: string | null;
   customer_notes?: string | null;
   alternate_contact_name?: string | null;
@@ -582,7 +587,8 @@ export interface Review {
   // split existed. Prefer captain_rating/service_rating below.
   rating?: number | null;
   comment?: string | null;
-  captain_rating: number;
+  // Absent for a job with no captain (done by the manager).
+  captain_rating?: number | null;
   captain_comment?: string | null;
   service_rating: number;
   service_comment?: string | null;

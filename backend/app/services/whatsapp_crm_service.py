@@ -45,24 +45,31 @@ DEFAULT_TAGS = [
 # Booking events -> the dedicated template that should carry them once
 # approved (see bootstrap_blussit_templates). Fallback is always the
 # generic update template via send_generic. The booking-referencing
-# events point at the short "_v4" templates (BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS)
+# events point at the short "_v4"/"_v5" templates (BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS;
+# _v5 = the _v4 text minus the "Code: {{n}}" line, which Meta rejected as
+# INCORRECT_CATEGORY — a code in a Utility body reads like an OTP). Headers
+# must be a DEFINITE status about the booking ("Captain assigned", "Your
+# captain is on the way"): Meta re-labelled the "-ing" headers ("Captain
+# heading out", "Assigning new captain") as MARKETING, which bills higher.
 # whose button actually deep-links to the booking, not the old static
 # ones — event_template_if_ready only returns a template once ITS name is
 # Meta-approved, so these fall back to the generic template until then.
 EVENT_TEMPLATES = {
     "welcome": "blussit_account_created",
-    "booking_confirmed": "blussit_booking_confirmed_v4",
-    "captain_assigned": "blussit_captain_assigned_v4",
-    "captain_on_the_way": "blussit_captain_on_the_way_v4",
-    "service_started": "blussit_service_started_v4",
-    "service_completed": "blussit_service_completed_v4",
+    "booking_confirmed": "blussit_booking_confirmed_v5",
+    "captain_assigned": "blussit_captain_assigned_v5",
+    "captain_on_the_way": "blussit_captain_on_the_way_v6",
+    "service_started": "blussit_service_started_v5",
+    "service_completed": "blussit_service_completed_v5",
     "review_request": "blussit_review_request",
-    "booking_reminder": "blussit_booking_reminder_v4",
-    "reschedule_confirmation": "blussit_reschedule_confirmation_v4",
+    "booking_reminder": "blussit_booking_reminder_v5",
+    "reschedule_confirmation": "blussit_reschedule_confirmation_v5",
     "payment_confirmation": "blussit_payment_confirmation_v4",
     "booking_cancelled": "blussit_booking_cancelled_v4",
     "payment_pending": "blussit_payment_pending_v4",
-    "captain_released": "blussit_captain_released_v4",
+    "captain_released": "blussit_captain_released_v5",
+    # Staff alert (to the center's managers) — see BLUSSIT_STAFF_TEMPLATE_DEFS.
+    "manager_new_booking": "blussit_manager_new_booking_v1",
     "subscription_activated": "blussit_subscription_activated",
     "subscription_renewed": "blussit_subscription_renewed",
     "subscription_expiring": "blussit_subscription_expiring",
@@ -800,17 +807,25 @@ BLUSSIT_TEMPLATE_DEFS = [
 # actually pick it (see bootstrap_blussit_templates); the originals stay
 # on the WABA, approved but unused, until then.
 BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS = [
-    ("blussit_booking_confirmed_v4", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_assigned_v4", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}} ({{3}})\n📅 {{4}} · {{5}}\n🚙 {{6}}\n🔐 Code: {{7}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_on_the_way_v4", "UTILITY", "🚗 Captain heading out\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Track Booking"),
-    ("blussit_service_started_v4", "UTILITY", "🧽 Service started\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Track Booking"),
-    ("blussit_service_completed_v4", "UTILITY", "✅ Service done\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "Rate Now"),
-    ("blussit_booking_reminder_v4", "UTILITY", "⏰ Booking reminder\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
-    ("blussit_reschedule_confirmation_v4", "UTILITY", "🔁 Booking rescheduled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n🔐 Code: {{6}}\nCall us for any query.", "View Booking"),
+    ("blussit_booking_confirmed_v5", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_assigned_v5", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}} ({{3}})\n📅 {{4}} · {{5}}\n🚙 {{6}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_on_the_way_v6", "UTILITY", "🚗 Your captain is on the way\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Track Booking"),
+    ("blussit_service_started_v5", "UTILITY", "🧽 Service started\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Track Booking"),
+    ("blussit_service_completed_v5", "UTILITY", "✅ Service done\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Rate Now"),
+    ("blussit_booking_reminder_v5", "UTILITY", "⏰ Booking reminder\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
+    ("blussit_reschedule_confirmation_v5", "UTILITY", "🔁 Booking rescheduled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
     ("blussit_payment_confirmation_v4", "UTILITY", "✅ Payment received\n🚗 {{1}} ({{2}})\n💰 ₹{{3}}\nCall us for any query.", "View Booking"),
     ("blussit_booking_cancelled_v4", "UTILITY", "❌ Booking cancelled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
     ("blussit_payment_pending_v4", "UTILITY", "💳 Payment pending\n🚗 {{1}} ({{2}})\n⏳ Pay within {{3}} minutes\nCall us for any query.", "Complete Payment"),
-    ("blussit_captain_released_v4", "UTILITY", "🧑‍🔧 Assigning new captain\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
+    ("blussit_captain_released_v5", "UTILITY", "🧑‍🔧 Captain unavailable\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nA replacement captain will be assigned.\nCall us for any query.", "View Booking"),
+]
+
+# Alert to the MANAGER when a booking comes in: who, phone, what, when,
+# where. No button (nothing to deep-link to) and no customer-facing
+# wording. Until Meta approves it the same facts go out through the generic
+# template (event_template_if_ready falls back), so nothing waits on review.
+BLUSSIT_STAFF_TEMPLATE_DEFS = [
+    ("blussit_manager_new_booking_v1", "UTILITY", "New booking received for your service center.\n\nCustomer: {{1}}, phone {{2}}\nVehicle: {{3}}\nService: {{4}}\nDate and time: {{5}}\nArea: {{6}}\n\nPlease open the booking queue and assign a captain.", None),
 ]
 
 # The GENERIC fallback template — every notify() call that doesn't (yet)
@@ -880,6 +895,17 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
         try:
             r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/app/bookings/{{1}}")
             r["note"] = "deep-links to the specific booking once approved — see EVENT_TEMPLATES"
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": name, "status": "ERROR", "note": exc.message})
+    for name, category, body, button in BLUSSIT_STAFF_TEMPLATE_DEFS:
+        existing = await db.whatsapp_templates.find_one({"name": name})
+        if existing and existing.get("status") in ("APPROVED", "PENDING"):
+            results.append({"name": name, "status": existing["status"], "note": "already exists"})
+            continue
+        try:
+            r = await crm.create_template(name, category, "en_US", body, button, None)
+            r["note"] = "manager new-booking alert — EVENT_TEMPLATES picks it up once approved"
             results.append(r)
         except BadRequestException as exc:
             results.append({"name": name, "status": "ERROR", "note": exc.message})

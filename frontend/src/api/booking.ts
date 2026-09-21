@@ -56,6 +56,23 @@ export interface QuickBookingPayload {
 
 export type PhoneProof = Pick<QuickBookingPayload, "phone_otp" | "phone_access_token">;
 
+/** A job the manager already did himself — saved directly as done. */
+export interface ManagerLogPayload {
+  customer_name: string;
+  customer_phone: string;
+  lines: QuickBookingLine[];
+  /** YYYY-MM-DD, today or earlier. */
+  scheduled_date: string;
+  /** HH:MM — filed under the center's slot that contains it. */
+  service_time: string;
+  address_line: string;
+  landmark?: string;
+  payment_method: "cash" | "online";
+  customer_notes?: string;
+  /** true = the customer gets ONE WhatsApp: "service is done". */
+  send_whatsapp: boolean;
+}
+
 /** What POST /bookings/quick returns — one shape for one car or many. */
 export interface QuickBookingResult {
   booking_group_id: string | null;
@@ -161,6 +178,12 @@ export const bookingApi = {
    *  callers carry phone_otp / phone_access_token; a signed-in customer books
    *  under their own account. */
   quick: (payload: QuickBookingPayload) => apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/quick", payload).then((r) => r.data.data),
+  /** A job the manager did himself: saved as completed, no captain / photos. */
+  managerLogCompleted: (payload: ManagerLogPayload) =>
+    apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-log-completed", payload).then((r) => r.data.data),
+  /** The manager did this (not-yet-started) booking himself — closes it, whole visit. */
+  markDone: (id: string, sendWhatsapp: boolean) =>
+    apiClient.post<ApiSuccess<{ completed: number; booking_numbers: string[] }>>(`/bookings/${id}/mark-done`, { send_whatsapp: sendWhatsapp }).then((r) => r.data.data),
   /** Same shape, booked by a manager/admin on a customer's behalf. */
   managerQuick: (payload: QuickBookingPayload) =>
     apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-quick", payload).then((r) => r.data.data),

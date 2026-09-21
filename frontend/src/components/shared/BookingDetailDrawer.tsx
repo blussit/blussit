@@ -4,7 +4,7 @@ import { AlertTriangle, Calendar, Car, Clock, CreditCard, Flag, MapPin, Navigati
 import { Badge, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
-import { formatDateTime } from "../../lib/date";
+import { formatDateTime, formatSlot } from "../../lib/date";
 import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
 import { combinedStatus } from "../../lib/bookingGroups";
 import type { Booking } from "../../types";
@@ -93,6 +93,7 @@ export function BookingDetailDrawer({
             )}
             {booking.source === "whatsapp" && <Badge tone="success">Booked via WhatsApp</Badge>}
             {booking.source === "staff" && <Badge tone="neutral">Booked by staff</Badge>}
+            {car.completed_by_role === "manager" && <Badge tone="success">Done by manager</Badge>}
             {flagged.map((f) => (
               <Badge key={f.id} tone="error">
                 <AlertTriangle className="h-3 w-3" /> {ISSUE_LABELS[f.issue_flag!] || f.issue_flag}
@@ -155,7 +156,7 @@ export function BookingDetailDrawer({
               label="Slot"
               value={
                 <span className="font-mono-num">
-                  {new Date(booking.scheduled_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · {booking.scheduled_slot}
+                  {new Date(booking.scheduled_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · {formatSlot(booking.scheduled_slot)}
                 </span>
               }
             />
@@ -207,7 +208,7 @@ export function BookingDetailDrawer({
                 </p>
               </div>
             )}
-            <Row label="Captain" value={captainName || (car.captain_id ? "Assigned" : "Not yet assigned")} />
+            <Row label="Captain" value={car.completed_by_role === "manager" ? "Done by the manager" : captainName || (car.captain_id ? "Assigned" : "Not yet assigned")} />
           </Section>
 
           <Section title="Payment" icon={CreditCard}>
@@ -332,7 +333,7 @@ export function BookingDetailDrawer({
           <Section title={isVisit ? `Review · ${carTag(car)}` : "Review"} icon={Star}>
             {review ? (
               <div className="space-y-2">
-                <StarRow label="Captain" rating={review.captain_rating ?? review.rating ?? 0} />
+                {(review.captain_rating != null || review.rating != null) && <StarRow label="Captain" rating={review.captain_rating ?? review.rating ?? 0} />}
                 <StarRow label="Service" rating={review.service_rating ?? review.rating ?? 0} />
                 {(review.captain_comment || review.service_comment || review.comment) && (
                   <p className="text-sm text-[var(--color-text-primary)]">{review.captain_comment || review.service_comment || review.comment}</p>

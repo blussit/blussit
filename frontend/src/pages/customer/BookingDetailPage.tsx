@@ -9,7 +9,7 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { Button, Card, CardBody, CardHeader, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useLiveChannel } from "../../lib/socket";
-import { formatDateTime } from "../../lib/date";
+import { formatDateTime, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
 import { vehicleLabel } from "../../lib/constants";
@@ -103,7 +103,7 @@ export default function BookingDetailPage() {
   const openReview = () => {
     setError("");
     if (myReview) {
-      setCaptainRating(myReview.captain_rating);
+      setCaptainRating(myReview.captain_rating ?? 5);
       setCaptainComment(myReview.captain_comment || "");
       setServiceRating(myReview.service_rating);
       setServiceComment(myReview.service_comment || "");
@@ -145,10 +145,13 @@ export default function BookingDetailPage() {
   });
 
   const reviewMutation = useMutation({
-    mutationFn: () =>
-      myReview
-        ? reviewApi.update(myReview.id, { captain_rating: captainRating, captain_comment: captainComment, service_rating: serviceRating, service_comment: serviceComment })
-        : reviewApi.create({ booking_id: id as string, captain_rating: captainRating, captain_comment: captainComment, service_rating: serviceRating, service_comment: serviceComment }),
+    mutationFn: () => {
+      // A job the manager did himself has no captain to rate.
+      const captainPart = booking?.captain_id ? { captain_rating: captainRating, captain_comment: captainComment } : {};
+      return myReview
+        ? reviewApi.update(myReview.id, { ...captainPart, service_rating: serviceRating, service_comment: serviceComment })
+        : reviewApi.create({ booking_id: id as string, ...captainPart, service_rating: serviceRating, service_comment: serviceComment });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["booking", id] });
       queryClient.invalidateQueries({ queryKey: ["my-reviews"] });
@@ -277,7 +280,7 @@ export default function BookingDetailPage() {
           <CardBody className="!p-5">
             <p className="font-display text-base font-bold text-black">Payment Not Completed</p>
             <p className="mt-1 text-sm text-gray-600">
-              We're holding your {booking.scheduled_slot} slot, but {visit ? "this visit isn't" : "this booking isn't"}{" "}
+              We're holding your {formatSlot(booking.scheduled_slot)} slot, but {visit ? "this visit isn't" : "this booking isn't"}{" "}
               confirmed until the payment goes through. Finish paying, or have the captain collect the cash at your
               doorstep.
               {visit ? ` One payment covers all ${visit.length} vehicles.` : ""}
@@ -355,7 +358,7 @@ export default function BookingDetailPage() {
         <CardBody className="space-y-3 text-sm">
           <div className="flex justify-between">
             <span className="text-[var(--color-text-secondary)]">Scheduled for</span>
-            <span>{new Date(booking.scheduled_date).toLocaleDateString("en-IN")} · {booking.scheduled_slot}</span>
+            <span>{new Date(booking.scheduled_date).toLocaleDateString("en-IN")} · {formatSlot(booking.scheduled_slot)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-[var(--color-text-secondary)]">Payment method</span>
@@ -685,17 +688,19 @@ export default function BookingDetailPage() {
 
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} title={myReview ? "Edit your review" : "Rate your experience"}>
         <div className="space-y-4">
-          <div>
-            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Captain</p>
-            <div className="flex gap-1">
-              {[1, 2, 3, 4, 5].map((r) => (
-                <button key={r} onClick={() => setCaptainRating(r)}>
-                  <Star className={`h-7 w-7 ${r <= captainRating ? "fill-amber-400 text-amber-400" : "text-gray-200"}`} />
-                </button>
-              ))}
+          {booking.captain_id && (
+            <div>
+              <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Captain</p>
+              <div className="flex gap-1">
+                {[1, 2, 3, 4, 5].map((r) => (
+                  <button key={r} onClick={() => setCaptainRating(r)}>
+                    <Star className={`h-7 w-7 ${r <= captainRating ? "fill-amber-400 text-amber-400" : "text-gray-200"}`} />
+                  </button>
+                ))}
+              </div>
+              <Input className="mt-2" placeholder="Comment on your captain (optional)" value={captainComment} onChange={(e) => setCaptainComment(e.target.value)} />
             </div>
-            <Input className="mt-2" placeholder="Comment on your captain (optional)" value={captainComment} onChange={(e) => setCaptainComment(e.target.value)} />
-          </div>
+          )}
           <div>
             <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Service quality</p>
             <div className="flex gap-1">

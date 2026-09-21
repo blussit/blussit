@@ -9,3 +9,4 @@ export * from "./EmptyState";
 export * from "./Modal";
 export * from "./DataTable";
 export * from "./OtpInput";
+export * from "./Switch";

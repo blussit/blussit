@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, Timer } from "lucide-react";
 import { serviceCenterApi, slotHoldApi } from "../../api/catalog";
 import { Input } from "../ui";
-import { maxBookingDateIST, todayIST } from "../../lib/date";
+import { maxBookingDateIST, todayIST, formatTime12 } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { useLiveChannel } from "../../lib/socket";
 
@@ -153,7 +153,7 @@ export function SlotPicker({
                     }`}
                   >
                     <span className="font-mono-num">
-                      {s.start}–{s.end}
+                      {formatTime12(s.start)} – {formatTime12(s.end)}
                     </span>
                     <span className={`ml-1.5 text-xs ${selected ? "text-white/80" : s.status === "low" ? "text-[var(--color-error)]" : "text-[var(--color-text-secondary)]"}`}>
                       {s.status === "full" ? "· Fully booked" : s.status === "low" ? `· Only ${s.remaining} spot${s.remaining === 1 ? "" : "s"} left` : "· Available"}

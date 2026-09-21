@@ -30,7 +30,7 @@ import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, StatusBadge 
 import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
-import { format, formatDateTime } from "../../lib/date";
+import { format, formatDateTime, formatSlot } from "../../lib/date";
 import type { Booking, Review, User } from "../../types";
 
 const ACTIVE_JOB_STATUSES = ["assigned", "captain_on_the_way", "service_started"];
@@ -693,7 +693,7 @@ function BookingWithReview({ booking, review, onOpen }: { booking: Booking; revi
         <div>
           <p className="font-mono-num font-medium text-[var(--color-text-primary)]">{booking.booking_number}</p>
           <p className="text-xs text-[var(--color-text-secondary)]">
-            {format(booking.scheduled_date)} · {booking.scheduled_slot}
+            {format(booking.scheduled_date)} · {formatSlot(booking.scheduled_slot)}
             {booking.customer_name ? ` · ${booking.customer_name}` : ""}
           </p>
         </div>

@@ -162,6 +162,13 @@ export function CollectionsReportCard({
           </div>
         )}
 
+        {!!t?.manual_online_amount && (
+          <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
+            Online includes <span className="font-mono-num font-bold text-[var(--color-text-primary)]">₹{t.manual_online_amount}</span> UPI recorded by managers on jobs
+            they did themselves — that money is not in Razorpay.
+          </p>
+        )}
+
         {data?.subscriptions && (
           <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
             Subscription revenue (online): <span className="font-mono-num font-bold text-[var(--color-text-primary)]">₹{data.subscriptions.online_amount}</span>{" "}
