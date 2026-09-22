@@ -171,7 +171,14 @@ export function CollectionsReportCard({
 
         {data?.subscriptions && (
           <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
-            Subscription revenue (online): <span className="font-mono-num font-bold text-[var(--color-text-primary)]">₹{data.subscriptions.online_amount}</span>{" "}
+            Subscription revenue: <span className="font-mono-num font-bold text-[var(--color-text-primary)]">₹{data.subscriptions.online_amount}</span> online
+            {!!data.subscriptions.cash_amount && (
+              <>
+                {" "}
+                + <span className="font-mono-num font-bold text-[var(--color-text-primary)]">₹{data.subscriptions.cash_amount}</span> cash
+                {data.subscriptions.cash_count ? ` (${data.subscriptions.cash_count} sold by managers)` : ""}
+              </>
+            )}{" "}
             across {data.subscriptions.count} purchase{data.subscriptions.count === 1 ? "" : "s"}.
           </p>
         )}

@@ -70,6 +70,9 @@ EVENT_TEMPLATES = {
     "captain_released": "blussit_captain_released_v5",
     # Staff alert (to the center's managers) — see BLUSSIT_STAFF_TEMPLATE_DEFS.
     "manager_new_booking": "blussit_manager_new_booking_v1",
+    # Manager-sold plan (see BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS).
+    "subscription_payment_link": "blussit_subscription_payment_link_v1",
+    "subscription_autopay_link": "blussit_subscription_autopay_link_v1",
     "subscription_activated": "blussit_subscription_activated",
     "subscription_renewed": "blussit_subscription_renewed",
     "subscription_expiring": "blussit_subscription_expiring",
@@ -828,6 +831,15 @@ BLUSSIT_STAFF_TEMPLATE_DEFS = [
     ("blussit_manager_new_booking_v1", "UTILITY", "New booking received for your service center.\n\nCustomer: {{1}}, phone {{2}}\nVehicle: {{3}}\nService: {{4}}\nDate and time: {{5}}\nArea: {{6}}\n\nPlease open the booking queue and assign a captain.", None),
 ]
 
+# A manager sold a plan over the phone/at the door — the link IS the message
+# (a Razorpay short_url has no fixed domain suffix, so it can't be a URL
+# BUTTON parameter the way "/app/bookings/{{1}}" is; it goes straight into
+# the body instead, which WhatsApp still renders as a tappable link).
+BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS = [
+    ("blussit_subscription_payment_link_v1", "UTILITY", "💳 Pay ₹{{1}} to activate {{2}}:\n{{3}}\nCall us for any query.", None),
+    ("blussit_subscription_autopay_link_v1", "UTILITY", "🔄 Auto-pay ₹{{1}}/mo to activate {{2}}:\n{{3}}\nCall us for any query.", None),
+]
+
 # The GENERIC fallback template — every notify() call that doesn't (yet)
 # have its own dedicated approved template above goes out through this
 # one, so it has to work for any title/message pair (booking updates,
@@ -906,6 +918,17 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
         try:
             r = await crm.create_template(name, category, "en_US", body, button, None)
             r["note"] = "manager new-booking alert — EVENT_TEMPLATES picks it up once approved"
+            results.append(r)
+        except BadRequestException as exc:
+            results.append({"name": name, "status": "ERROR", "note": exc.message})
+    for name, category, body, button in BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS:
+        existing = await db.whatsapp_templates.find_one({"name": name})
+        if existing and existing.get("status") in ("APPROVED", "PENDING"):
+            results.append({"name": name, "status": existing["status"], "note": "already exists"})
+            continue
+        try:
+            r = await crm.create_template(name, category, "en_US", body, button, None)
+            r["note"] = "manager-sold plan link — EVENT_TEMPLATES picks it up once approved"
             results.append(r)
         except BadRequestException as exc:
             results.append({"name": name, "status": "ERROR", "note": exc.message})

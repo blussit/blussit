@@ -565,6 +565,12 @@ class PaymentService:
                 if vehicle else ((vt_doc or {}).get("name") or "your vehicle")
             )
             end = sub.get("end_date")
+            # `sub` is usually the ALREADY-SERIALIZED doc subscribe()/assign()
+            # return (end_date as an ISO string, not a datetime) — every
+            # caller of this method hands that shape in, so parse it back
+            # rather than assume a raw Mongo doc and crash to_ist() on a str.
+            if isinstance(end, str):
+                end = datetime.fromisoformat(end)
             valid_till = to_ist(end).strftime("%d %b %Y") if end else "—"
             washes = str(sub.get("remaining_service_count") or sub.get("total_service_count") or "")
             notifications = NotificationService(self.db)
@@ -1040,16 +1046,30 @@ class PaymentService:
                 totals[k] += r[k]
         out_rows.sort(key=lambda x: -(x["cash_amount"] + x["online_amount"]))
 
-        # Online subscription revenue (payment_orders is the source of
-        # truth — subscriptions never touch a booking row).
+        # Subscription revenue (payment_orders is the source of truth —
+        # subscriptions never touch a booking row). Split cash (a manager
+        # collecting money in hand, `kind="cash"`) from online (Razorpay —
+        # a one-time order, a WhatsApp link, or an auto-pay charge), so cash
+        # a manager sold a plan for isn't silently missing from the total.
         window = self._collections_window(date_from, date_to)
         sub_rows = await self.orders.aggregate([
             {"$match": {"purpose": "subscription", "status": "paid", "created_at": window}},
-            {"$group": {"_id": None, "amount_paise": {"$sum": "$amount_paise"}, "count": {"$sum": 1}}},
+            {"$group": {
+                "_id": None,
+                "amount_paise": {"$sum": "$amount_paise"},
+                "count": {"$sum": 1},
+                "cash_amount_paise": {"$sum": {"$cond": [{"$eq": ["$kind", "cash"]}, "$amount_paise", 0]}},
+                "cash_count": {"$sum": {"$cond": [{"$eq": ["$kind", "cash"]}, 1, 0]}},
+            }},
         ]).to_list(length=1)
+        row = sub_rows[0] if sub_rows else {}
+        cash_amount = round((row.get("cash_amount_paise") or 0) / 100, 2)
+        total_amount = round((row.get("amount_paise") or 0) / 100, 2)
         subscriptions = {
-            "online_amount": round((sub_rows[0]["amount_paise"] / 100) if sub_rows else 0, 2),
-            "count": sub_rows[0]["count"] if sub_rows else 0,
+            "online_amount": round(total_amount - cash_amount, 2),
+            "cash_amount": cash_amount,
+            "count": row.get("count") or 0,
+            "cash_count": row.get("cash_count") or 0,
         }
 
         attention = [
@@ -1213,9 +1233,14 @@ class PaymentService:
             result = await self._apply_link_paid(order["razorpay_link_id"], payment_id or "via_link_sync")
             # Message the customer only for a CLEAN settlement — a parked
             # needs-attention order gets a human first, not a "paid ✅".
+            # Subscription links announce themselves (_announce_subscription,
+            # inside _activate_linked_subscription) — this generic "booking
+            # is paid" text is for bookings only, or a subscription purchase
+            # would get two different confirmation messages.
             if result.get("settled"):
                 settled += 1
-                await notify_customer(order)
+                if order.get("purpose") != "subscription":
+                    await notify_customer(order)
         return settled
 
     async def _apply_link_paid(self, link_id: str, payment_id: str) -> dict:
@@ -1234,6 +1259,8 @@ class PaymentService:
         )
         if not claimed:
             return {"status": "paid", "booking_number": order.get("booking_number"), "already_processed": True}
+        if claimed.get("purpose") == "subscription":
+            return await self._activate_linked_subscription(claimed)
         if claimed.get("booking_ids"):
             # A visit's link: settle each car through the same guarded path,
             # each checked against ITS own price.
@@ -1256,3 +1283,480 @@ class PaymentService:
             "booking_id": order["booking_id"],
             "settled": settled,
         }
+
+    async def _activate_linked_subscription(self, order: dict) -> dict:
+        """A manager-issued subscription LINK just settled (browser
+        callback or the sweep — see _apply_link_paid). The plan is created
+        now, at the price the link was minted for, never before. Coupon
+        USAGE is recorded here too, but only best-effort: the discount was
+        already fixed and paid for at link-creation, so a bookkeeping
+        hiccup on the counter must never cost the customer a plan they
+        already paid for."""
+        from app.schemas.subscription_schema import SubscribeRequest
+        from app.services.subscription_service import UserSubscriptionService
+
+        subs = UserSubscriptionService(self.db)
+        try:
+            sub = await subs.subscribe(
+                order["customer_id"],
+                SubscribeRequest(
+                    plan_id=order["plan_id"], vehicle_id=order.get("vehicle_id"),
+                    service_id=order.get("service_id"), vehicle_type=order.get("vehicle_type"),
+                ),
+            )
+        except Exception:
+            # Money is in but the plan can't be activated (deactivated
+            # between link creation and payment, or a race with another
+            # purchase) — never swallow the money silently.
+            await self._flag_order_attention({"_id": order["_id"]}, "paid but subscription could not be activated")
+            return {"status": "needs_attention", "settled": False, "purpose": "subscription"}
+
+        money_fields: dict = {"payment_method": "online", "amount_paid": order["amount_paise"] / 100}
+        if order.get("discount_paise"):
+            money_fields["discount_amount"] = round(order["discount_paise"] / 100, 2)
+        if order.get("coupon_code"):
+            money_fields["coupon_code"] = order["coupon_code"]
+        if order.get("issued_by"):
+            money_fields["assigned_by"] = order["issued_by"]
+        await subs.repo.update_by_id(sub["id"], money_fields)
+
+        if order.get("coupon_code"):
+            try:
+                from app.services.coupon_service import CouponService
+
+                coupon_service = CouponService(self.db)
+                coupon = await coupon_service.repo.find_by_code(order["coupon_code"])
+                if coupon:
+                    await coupon_service.record_usage(str(coupon["_id"]), order["customer_id"], sub["id"])
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not record coupon usage for subscription %s", sub["id"])
+
+        await self.orders.update_one({"_id": order["_id"]}, {"$set": {"subscription_id": sub["id"]}})
+        await self._announce_subscription(order["customer_id"], sub, renewed=False)
+        return {"status": "paid", "settled": True, "purpose": "subscription", "subscription_id": sub["id"]}
+
+    # -- Manager-issued subscription offers (WhatsApp link / auto-pay / cash) --
+    #
+    # A manager selling a plan by phone or at the door: find-or-create the
+    # customer, price the plan exactly like the customer's own purchase
+    # sheet would, then end it one of three ways —
+    #   - a Razorpay payment LINK (optionally discounted / coupon'd), the
+    #     plan activating the moment it's paid, via the SAME two paths a
+    #     WhatsApp booking link already settles through (browser callback,
+    #     or the sweep above);
+    #   - a Razorpay auto-pay MANDATE at the full undiscounted rate, its
+    #     hosted authorisation page shared on WhatsApp — there is no
+    #     browser to hand back a signature for a link opened outside our
+    #     own checkout, so this settles ONLY via sync_pending_manager_mandates
+    #     below, which asks Razorpay directly whether the first charge
+    #     actually landed (the same server-to-server trust the rest of this
+    #     file already runs on — never a client-supplied claim);
+    #   - straight CASH, activating immediately because the money is
+    #     already in the manager's hand.
+    # In every case the amount is resolved SERVER-SIDE from the plan/quote —
+    # the manager only ever picks the discount, never types the final price.
+
+    async def manager_subscription_preview(self, payload) -> dict:
+        """Read-only price for the manager's offer form — no customer
+        required yet, no side effects, nothing created. Mirrors exactly
+        what manager_subscription_offer will charge, so the number the
+        manager sees is the number that gets sent."""
+        from app.services.subscription_service import UserSubscriptionService
+
+        subs = UserSubscriptionService(self.db)
+        from app.services.subscription_service import service_price_for_type
+
+        plan, service, base_price = await subs.resolve_service_price(payload.plan_id, payload.vehicle_type, payload.service_id)
+        result = {
+            "plan_name": plan.get("name"),
+            "service_name": service.get("name"),
+            "visits": int(plan.get("total_service_count") or 1),
+            "price_per_wash": service_price_for_type(service, payload.vehicle_type),
+            "base_price": base_price,
+            "discount": 0.0,
+            "final_price": base_price,
+            "coupon_valid": None,
+            "coupon_error": None,
+            "customer_exists": False,
+            "already_has_pass": False,
+        }
+        customer_id = None
+        if payload.customer_phone:
+            from app.utils.phone import validate_indian_mobile
+
+            normalized = validate_indian_mobile(payload.customer_phone)
+            existing = await self.db.users.find_one({"phone": normalized}) if normalized else None
+            if existing:
+                customer_id = str(existing["_id"])
+                result["customer_exists"] = True
+                result["already_has_pass"] = await subs.has_active_pass(customer_id, payload.vehicle_type, payload.service_id)
+        if payload.recurring:
+            return result  # full rate only — discount/coupon fields are ignored on purpose
+        if payload.coupon_code:
+            from app.services.coupon_service import CouponService
+
+            try:
+                _coupon, discount = await CouponService(self.db).validate_and_compute_discount(
+                    payload.coupon_code, base_price, customer_id or ""
+                )
+                result["discount"] = discount
+                result["coupon_valid"] = True
+            except Exception as exc:  # noqa: BLE001 — surfaced to the manager as text, not a 500
+                result["coupon_valid"] = False
+                result["coupon_error"] = exc.message if isinstance(exc, AppException) else "Invalid coupon code"
+        elif payload.discount_amount:
+            result["discount"] = min(float(payload.discount_amount), base_price)
+        result["final_price"] = round(base_price - result["discount"], 2)
+        return result
+
+    async def manager_subscription_offer(self, actor_id: str, payload) -> dict:
+        """Creates the customer (if needed) and either a payment link, an
+        auto-pay mandate, or an immediate cash-paid subscription. Every
+        branch re-validates from scratch — the preview above is advisory
+        only, never trusted."""
+        from app.services.auth_service import AuthService
+        from app.schemas.subscription_schema import SubscribeRequest
+        from app.services.subscription_service import UserSubscriptionService
+
+        customer = await AuthService(self.db).ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
+        customer_id = str(customer["_id"])
+
+        subs = UserSubscriptionService(self.db)
+        plan, _service, base_price = await subs.resolve_service_price(payload.plan_id, payload.vehicle_type, payload.service_id)
+        # The exact same eligibility gate a self-serve purchase runs through
+        # (plan active, valid tier, no duplicate pass on this vehicle type +
+        # service) — checked NOW, before any link/mandate/money moves, and
+        # re-checked again at the moment of activation (see below / the
+        # sweep), exactly like every other payment path in this file.
+        subscribe_payload = SubscribeRequest(
+            plan_id=payload.plan_id, service_id=payload.service_id, vehicle_type=payload.vehicle_type,
+        )
+        await subs.validate_purchase(customer_id, subscribe_payload)
+
+        if payload.recurring:
+            return await self._create_manager_autopay_mandate(actor_id, customer_id, plan, payload, base_price)
+
+        discount = 0.0
+        coupon_code = None
+        if payload.coupon_code:
+            from app.services.coupon_service import CouponService
+
+            _coupon, discount = await CouponService(self.db).validate_and_compute_discount(
+                payload.coupon_code, base_price, customer_id
+            )
+            # validate_and_compute_discount only checks past USAGE — a coupon
+            # usage row is written at SETTLEMENT, not here, precisely so an
+            # abandoned link never burns it (see _activate_linked_subscription).
+            # That gap means TWO different pending links for this same
+            # customer (different vehicle type/service, so the duplicate-pass
+            # guard above doesn't catch it) could both carry this coupon and
+            # both later settle, redeeming a usage_limit_per_user=1 coupon
+            # twice. Closing it here, at creation: this customer may have at
+            # most ONE live (pending or already-paid) offer on this code.
+            clash = await self.orders.find_one({
+                "customer_id": customer_id, "coupon_code": payload.coupon_code,
+                "purpose": "subscription", "status": {"$in": ["created", "paid"]},
+            })
+            if clash:
+                raise BadRequestException("This customer already has a pending or paid offer using this coupon.")
+            coupon_code = payload.coupon_code
+        elif payload.discount_amount:
+            discount = min(float(payload.discount_amount), base_price)
+        final_price = round(base_price - discount, 2)
+
+        if payload.payment_method == "cash":
+            return await self._grant_cash_subscription(actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price)
+        return await self._create_manager_subscription_link(actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price)
+
+    async def _create_manager_subscription_link(
+        self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float, discount: float, coupon_code: str | None, final_price: float,
+    ) -> dict:
+        amount_paise = int(round(final_price * 100))
+        if amount_paise < MIN_ORDER_PAISE:
+            raise BadRequestException(
+                f"The amount to charge (₹{final_price:g}) is below the ₹1 minimum for an online link. "
+                "Reduce the discount, or collect it as cash instead."
+            )
+        customer_doc = await self.db.users.find_one({"_id": ObjectId(customer_id)})
+        client = _razorpay_client()
+        reference_id = f"sub-{(plan.get('slug') or 'plan')[:24]}-{secrets.token_hex(4)}"
+        link_payload: dict = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "reference_id": reference_id,
+            "description": f"{plan['name']} subscription"[:255],
+            "notify": {"sms": False, "email": False},  # WE deliver it, on WhatsApp
+        }
+        contact = (customer_doc or {}).get("phone")
+        if contact:
+            link_payload["customer"] = {"name": (customer_doc or {}).get("full_name") or "Blussit customer", "contact": contact}
+        if settings.PUBLIC_BASE_URL:
+            link_payload["callback_url"] = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/link-callback"
+            link_payload["callback_method"] = "get"
+        try:
+            link = client.payment_link.create(link_payload)
+        except Exception as exc:
+            if "customer" in link_payload:
+                link_payload.pop("customer")
+                try:
+                    link = client.payment_link.create(link_payload)
+                except Exception as exc2:
+                    raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc2).__name__})") from exc2
+            else:
+                raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc).__name__})") from exc
+
+        order_doc = {
+            "kind": "link", "purpose": "subscription",
+            "razorpay_link_id": link["id"], "short_url": link["short_url"], "reference_id": reference_id,
+            "customer_id": customer_id, "plan_id": str(plan["_id"]),
+            "service_id": payload.service_id, "vehicle_type": payload.vehicle_type,
+            "base_amount_paise": int(round(base_price * 100)), "discount_paise": int(round(discount * 100)),
+            "coupon_code": coupon_code, "amount_paise": amount_paise, "currency": "INR", "status": "created",
+            "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
+        }
+        result = await self.orders.insert_one(order_doc)
+        if payload.send_whatsapp:
+            await self._send_subscription_link_whatsapp(customer_id, plan, final_price, link["short_url"], autopay=False)
+        return {
+            "kind": "link", "recurring": False, "short_url": link["short_url"],
+            "order_id": str(result.inserted_id), "amount": final_price,
+        }
+
+    async def _grant_cash_subscription(
+        self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float, discount: float, coupon_code: str | None, final_price: float,
+    ) -> dict:
+        from app.schemas.subscription_schema import AssignSubscriptionRequest
+        from app.services.subscription_service import UserSubscriptionService
+
+        subs = UserSubscriptionService(self.db)
+        # assign() re-runs the same duplicate-pass guard validate_purchase
+        # already checked — the last gate before the plan actually exists,
+        # exactly like every other creation path in this file.
+        sub = await subs.assign(AssignSubscriptionRequest(
+            customer_id=customer_id, plan_id=str(plan["_id"]), vehicle_type=payload.vehicle_type, service_id=payload.service_id,
+        ))
+        money_fields: dict = {
+            "payment_method": "cash", "amount_paid": final_price, "assigned_by": actor_id,
+            "cash_collected_by": actor_id, "cash_collected_at": now_ist(),
+        }
+        if discount:
+            money_fields["discount_amount"] = round(discount, 2)
+        if coupon_code:
+            money_fields["coupon_code"] = coupon_code
+        await subs.repo.update_by_id(sub["id"], money_fields)
+
+        if coupon_code:
+            try:
+                from app.services.coupon_service import CouponService
+
+                coupon_service = CouponService(self.db)
+                coupon = await coupon_service.repo.find_by_code(coupon_code)
+                if coupon:
+                    await coupon_service.record_usage(str(coupon["_id"]), customer_id, sub["id"])
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not record coupon usage for subscription %s", sub["id"])
+
+        # A real ledger row — cash collected by a manager is revenue just
+        # like a Razorpay payment, and admin_collections reads this
+        # collection as the source of truth for subscription revenue.
+        await self.orders.insert_one({
+            "kind": "cash", "purpose": "subscription", "customer_id": customer_id, "plan_id": str(plan["_id"]),
+            "service_id": payload.service_id, "vehicle_type": payload.vehicle_type, "subscription_id": sub["id"],
+            "base_amount_paise": int(round(base_price * 100)), "discount_paise": int(round(discount * 100)),
+            "coupon_code": coupon_code, "amount_paise": int(round(final_price * 100)), "currency": "INR",
+            "status": "paid", "paid_at": now_ist(), "channel": "manager_cash", "issued_by": actor_id,
+            "created_at": now_ist(),
+        })
+        if payload.send_whatsapp:
+            await self._announce_subscription(customer_id, sub, renewed=False)
+        return {"kind": "cash", "recurring": False, "subscription": sub, "amount": final_price}
+
+    async def _create_manager_autopay_mandate(self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float) -> dict:
+        amount_paise = int(round(base_price * 100))
+        if amount_paise < MIN_ORDER_PAISE:
+            raise BadRequestException("This plan's price is below the ₹1 minimum for online payment.")
+        rzp_plan_id = await self._ensure_razorpay_plan(plan, payload.vehicle_type, amount_paise)
+        schedule = _AUTOPAY_SCHEDULE.get(plan.get("billing_cycle") or "monthly", _AUTOPAY_SCHEDULE["monthly"])
+        client = _razorpay_client()
+        try:
+            mandate = client.subscription.create({
+                "plan_id": rzp_plan_id,
+                "total_count": schedule["total_count"],
+                "quantity": 1,
+                "customer_notify": 0,  # WE deliver the link, on WhatsApp — not Razorpay's own email/SMS
+                "notes": {
+                    "purpose": "subscription", "plan_id": str(plan["_id"]), "vehicle_type": payload.vehicle_type,
+                    "customer_id": customer_id, "channel": "manager",
+                },
+            })
+        except Exception as exc:
+            raise BadRequestException(f"Couldn't set up auto-pay — please try again. ({type(exc).__name__})") from exc
+        short_url = mandate.get("short_url")
+        if not short_url:
+            # No hosted page to hand the customer — void it at the gateway
+            # rather than leave an unreachable mandate lying around.
+            try:
+                client.subscription.cancel(mandate["id"], {"cancel_at_cycle_end": 0})
+            except Exception:  # noqa: BLE001
+                pass
+            raise BadRequestException("Couldn't create an auto-pay link — please try again, or send a one-time link instead.")
+        await self.orders.insert_one({
+            "kind": "autopay", "purpose": "subscription", "razorpay_subscription_id": mandate["id"],
+            "customer_id": customer_id, "plan_id": str(plan["_id"]), "service_id": payload.service_id,
+            "vehicle_type": payload.vehicle_type, "amount_paise": amount_paise, "currency": "INR",
+            "status": "created", "cycles_applied": 0, "auto_pay_active": True,
+            "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
+        })
+        if payload.send_whatsapp:
+            await self._send_subscription_link_whatsapp(customer_id, plan, base_price, short_url, autopay=True)
+        return {"kind": "autopay", "recurring": True, "short_url": short_url, "order_id": mandate["id"], "amount": base_price}
+
+    async def _send_subscription_link_whatsapp(self, customer_id: str, plan: dict, amount: float, short_url: str, *, autopay: bool) -> None:
+        """The ONLY message this purchase sends before it's paid — a link,
+        once. Best-effort: the link/mandate already exists in Razorpay
+        either way, a messaging hiccup must never undo that."""
+        try:
+            from app.services.notification_service import NotificationService
+
+            plan_name = plan.get("name") or "Monthly pass"
+            amount_text = f"{amount:g}"
+            if autopay:
+                title = f"Set up auto-pay for {plan_name}"
+                message = f"Auto-pay ₹{amount_text}/mo to activate {plan_name}: {short_url}"
+                event, params = "subscription_autopay_link", [amount_text, plan_name, short_url]
+            else:
+                title = f"Pay to activate {plan_name}"
+                message = f"Pay ₹{amount_text} to activate {plan_name}: {short_url}"
+                event, params = "subscription_payment_link", [amount_text, plan_name, short_url]
+            await NotificationService(self.db).notify(
+                customer_id, title, message, NotificationType.SYSTEM, None, wa_event=event, wa_params=params,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not send the subscription payment link to customer %s", customer_id)
+
+    async def void_manager_subscription_offer(self, order_id: str, actor_id: str) -> dict:
+        """Cancels a still-pending manager-issued link or mandate — the
+        customer changed their mind, or the manager made a mistake. Only
+        ever touches an order that hasn't been paid yet (guarded on
+        status="created"); a paid one has already become a real
+        subscription and must be cancelled through the subscription itself,
+        not voided here.
+
+        Checks the LIVE gateway status first, not just a best-effort cancel
+        call: if the customer's payment landed a moment before this click,
+        blindly marking the order "voided" would strand real, collected
+        money with no subscription ever created and no entry in the
+        admin-collections attention queue (voided orders are never swept
+        again). Money in is settled properly instead of cancelled."""
+        order = await self.orders.find_one({"_id": ObjectId(order_id)}) if ObjectId.is_valid(order_id) else None
+        if not order or order.get("purpose") != "subscription" or order.get("channel") not in ("manager", "manager_cash"):
+            raise NotFoundException("Offer not found")
+        if order.get("status") != "created":
+            raise BadRequestException("This offer isn't pending any more.")
+        if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+            client = _razorpay_client()
+            try:
+                if order.get("kind") == "link":
+                    remote = client.payment_link.fetch(order["razorpay_link_id"])
+                    if remote.get("status") == "paid":
+                        payments = remote.get("payments") or []
+                        payment_id = (payments[0].get("payment_id") if payments else None) or "via_void_race"
+                        await self._apply_link_paid(order["razorpay_link_id"], payment_id)
+                        raise BadRequestException("The customer just paid this — it has been activated instead of cancelled.")
+                elif order.get("kind") == "autopay":
+                    remote = client.subscription.fetch(order["razorpay_subscription_id"])
+                    if int(remote.get("paid_count") or 0) >= 1:
+                        raise BadRequestException(
+                            "The customer just authorised auto-pay — it will activate on its own shortly instead of being cancelled."
+                        )
+            except BadRequestException:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not check live gateway status for manager offer %s — voiding anyway", order_id, exc_info=True)
+            try:
+                if order.get("kind") == "link":
+                    client.payment_link.cancel(order["razorpay_link_id"])
+                elif order.get("kind") == "autopay":
+                    client.subscription.cancel(order["razorpay_subscription_id"], {"cancel_at_cycle_end": 0})
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not cancel manager subscription offer %s at the gateway", order_id, exc_info=True)
+        updated = await self.orders.find_one_and_update(
+            {"_id": order["_id"], "status": "created"},
+            {"$set": {"status": "voided", "voided_at": now_ist(), "voided_by": actor_id}},
+        )
+        return {"voided": updated is not None}
+
+    async def sync_pending_manager_mandates(self) -> int:
+        """A WhatsApp-issued auto-pay mandate has no browser to hand back a
+        signature — activation is decided ENTIRELY by asking Razorpay
+        directly whether the first charge actually landed (server-to-server,
+        our own secret key: exactly the same trust model sync_pending_links
+        already runs on for payment links, never a client-supplied claim).
+        There is no other path that can mark one of these paid, so a
+        customer cannot fabricate activation by visiting any URL — the only
+        source of truth is Razorpay's own record of the mandate.
+
+        Bonus fix: this also rescues any self-serve checkout mandate that
+        got authorised but never made it back to /payments/verify (closed
+        tab, flaky network) — those were previously stuck at "created"
+        forever even though Razorpay had already charged the card."""
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            return 0
+        from datetime import timedelta
+
+        pending = await self.orders.find(
+            {"kind": "autopay", "status": "created", "created_at": {"$gte": now_ist() - timedelta(days=7)}}
+        ).to_list(length=200)
+        if not pending:
+            return 0
+
+        from app.schemas.subscription_schema import SubscribeRequest
+        from app.services.subscription_service import UserSubscriptionService
+
+        subs = UserSubscriptionService(self.db)
+        client = _razorpay_client()
+        activated = 0
+        for order in pending:
+            mandate_id = order["razorpay_subscription_id"]
+            try:
+                remote = client.subscription.fetch(mandate_id)
+            except Exception:
+                continue  # transient — the next pass retries
+            if int(remote.get("paid_count") or 0) < 1:
+                if remote.get("status") in ("cancelled", "expired", "halted"):
+                    await self.orders.update_one(
+                        {"_id": order["_id"], "status": "created"}, {"$set": {"status": "expired", "auto_pay_active": False}}
+                    )
+                continue
+            # Claim FIRST (atomic, guarded on "created") — a concurrent sweep
+            # or a late browser verify can only win this race once.
+            claimed = await self.orders.find_one_and_update(
+                {"_id": order["_id"], "status": "created"},
+                {"$set": {"status": "paid", "paid_at": now_ist(), "cycles_applied": 1, "razorpay_payment_id": "via_mandate_sync"}},
+            )
+            if not claimed:
+                continue
+            try:
+                sub = await subs.subscribe(
+                    claimed["customer_id"],
+                    SubscribeRequest(
+                        plan_id=claimed["plan_id"], service_id=claimed.get("service_id"),
+                        vehicle_type=claimed.get("vehicle_type"), auto_renew=True,
+                    ),
+                    razorpay_subscription_id=mandate_id,
+                )
+            except Exception:
+                await self.cancel_autopay(mandate_id, at_cycle_end=False)
+                await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"auto_pay_active": False}})
+                await self._flag_order_attention(
+                    {"_id": claimed["_id"]}, "auto-pay authorised but subscription could not be activated"
+                )
+                continue
+            money_fields = {"payment_method": "online"}
+            if claimed.get("issued_by"):
+                money_fields["assigned_by"] = claimed["issued_by"]
+            await subs.repo.update_by_id(sub["id"], money_fields)
+            await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"subscription_id": sub["id"]}})
+            await self._announce_subscription(claimed["customer_id"], sub, renewed=False)
+            activated += 1
+        return activated

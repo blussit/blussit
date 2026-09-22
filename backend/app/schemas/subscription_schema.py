@@ -1,8 +1,16 @@
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import BillingCycle
+from app.utils.phone import validate_indian_mobile
+
+
+def _canonical_phone(v: str) -> str:
+    phone = validate_indian_mobile(v)
+    if not phone:
+        raise ValueError("Enter a valid 10-digit mobile number")
+    return phone
 
 
 class SubscriptionPlanCreateRequest(BaseModel):
@@ -114,3 +122,86 @@ class AutoPayRequest(BaseModel):
     UserSubscriptionService.set_auto_pay for why only `false` does work."""
 
     enabled: bool
+
+
+class ManagerSubscriptionOfferRequest(BaseModel):
+    """A manager (or admin) selling a plan to a customer over the phone/at
+    the door: name + phone find-or-create the customer (same silent model
+    as a quick booking), plan + vehicle type + service price it exactly
+    like the customer's own purchase sheet would.
+
+    Three ways it can end:
+      - recurring=False, payment_method="link": a Razorpay payment LINK for
+        one cycle, optionally discounted, shared on WhatsApp; the plan
+        activates the moment it's paid (never before).
+      - recurring=True: a Razorpay auto-pay MANDATE at the plan's full,
+        undiscounted rate (no discount_amount, no coupon_code — enforced
+        below); its hosted authorisation link is shared on WhatsApp, and
+        the plan activates once Razorpay reports the first charge captured.
+      - recurring=False, payment_method="cash": the manager already has the
+        money in hand — the plan activates immediately, same as the
+        existing free `assign` grant, but with the price/discount/collector
+        recorded for the books.
+    """
+
+    customer_name: str = Field(min_length=2, max_length=100)
+    customer_phone: str = Field(min_length=10, max_length=20)
+    plan_id: str
+    vehicle_type: str
+    service_id: str
+    recurring: bool = False
+    payment_method: Literal["link", "cash"] = "link"
+    # Rupees off the plan's price — one-time purchases only. Mutually
+    # exclusive with coupon_code (pick one way to discount, not both).
+    discount_amount: float = Field(default=0, ge=0, le=100000)
+    coupon_code: Optional[str] = Field(default=None, max_length=40)
+    # True = the customer hears about the link/mandate on WhatsApp. Off
+    # still creates it — the manager can read/copy the link over a call.
+    send_whatsapp: bool = True
+
+    _phone = field_validator("customer_phone")(_canonical_phone)
+
+    @field_validator("customer_name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) < 2:
+            raise ValueError("Enter the customer's name")
+        return v
+
+    @field_validator("coupon_code")
+    @classmethod
+    def _coupon(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip().upper()
+        return v or None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "ManagerSubscriptionOfferRequest":
+        if self.recurring:
+            if self.discount_amount or self.coupon_code:
+                raise ValueError("Auto-pay plans are sold at the full price — remove the discount or coupon, or turn recurring off.")
+            if self.payment_method != "link":
+                raise ValueError("Auto-pay is set up through a payment link — cash can't start a recurring mandate.")
+        if self.discount_amount and self.coupon_code:
+            raise ValueError("Use either a discount amount or a coupon code, not both.")
+        return self
+
+
+class ManagerSubscriptionPreviewRequest(BaseModel):
+    """Read-only quote for the manager's offer form — same inputs as
+    ManagerSubscriptionOfferRequest, no customer required yet (a phone the
+    manager hasn't finished typing shouldn't error the price preview)."""
+
+    plan_id: str
+    vehicle_type: str
+    service_id: str
+    customer_phone: Optional[str] = None
+    recurring: bool = False
+    discount_amount: float = Field(default=0, ge=0, le=100000)
+    coupon_code: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("coupon_code")
+    @classmethod
+    def _coupon(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip().upper()
+        return v or None

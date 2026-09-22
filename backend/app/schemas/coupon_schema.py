@@ -20,6 +20,13 @@ class CouponCreateRequest(BaseModel):
     offer_kind: Literal["standard", "free_addon_with_service"] = "standard"
     eligible_service_keywords: list[str] = Field(default_factory=list)
     free_addon_keywords: list[str] = Field(default_factory=list)
+    # Missing before: this schema had no is_active field at all, so every
+    # admin-created coupon (everything but the hand-seeded FREEBIKE launch
+    # offer) was stored without the key CouponService._valid_coupon checks —
+    # `coupon.get("is_active")` came back None (falsy), so a BRAND NEW
+    # coupon always failed with "Invalid coupon code" until someone opened
+    # it and flipped the (already-on-looking) toggle off and back on.
+    is_active: bool = True
 
     @model_validator(mode="after")
     def _validate_offer_shape(self) -> "CouponCreateRequest":

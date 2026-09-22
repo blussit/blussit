@@ -178,6 +178,17 @@ class SubscriptionPlanService:
         if not await self.repo.soft_delete(plan_id):
             raise NotFoundException("Subscription plan not found")
 
+    async def discontinue(self, plan_id: str) -> dict:
+        """Stop SELLING a plan — is_active only, nothing else. This is the
+        manager-safe half of `update` (which stays admin-only, full-edit):
+        a manager can pull a plan off the shelf without being able to touch
+        its price or included services. A subscription already bought on it
+        keeps working exactly as before; only new purchases refuse it."""
+        updated = await self.repo.update_by_id(plan_id, {"is_active": False})
+        if not updated:
+            raise NotFoundException("Subscription plan not found")
+        return serialize_doc(updated)
+
 
 class UserSubscriptionService:
     def __init__(self, db: AsyncIOMotorDatabase):
@@ -237,6 +248,21 @@ class UserSubscriptionService:
             if plan_types and payload.vehicle_type not in plan_types:
                 raise BadRequestException("This plan isn't sold for that vehicle type.")
         await self._guard_duplicate_pass(customer_id, payload.plan_id, plan, payload.vehicle_id, payload.vehicle_type, payload.service_id)
+
+    async def resolve_service_price(self, plan_id: str, vehicle_type: str, service_id: str) -> tuple[dict, dict, float]:
+        """Plan + service + its price for a (plan, vehicle type, service)
+        combo — the pricing half of quote_pass, usable before a customer is
+        even known (the manager offer preview may run before the phone
+        number is finished). Raises the same errors quote_pass would for
+        an invalid plan/type/service combination."""
+        plan = await self.plan_repo.find_by_id(plan_id)
+        if not plan or not plan.get("is_active"):
+            raise NotFoundException("Subscription plan not found or inactive")
+        service = await self._resolve_pass_service(plan, vehicle_type, service_id)
+        return plan, service, resolve_pass_price(plan, service, vehicle_type)
+
+    async def has_active_pass(self, customer_id: str, vehicle_type: str, service_id: str) -> bool:
+        return await self._active_pass_for_type(customer_id, vehicle_type, service_id) is not None
 
     async def assign(self, payload: AssignSubscriptionRequest) -> dict:
         """Manager/admin granting a subscription to a customer directly —

@@ -54,6 +54,7 @@ const ManagerLogJobPage = lazy(() => import("./pages/manager/ManagerLogJobPage")
 const BookingQueuePage = lazy(() => import("./pages/manager/BookingQueuePage"));
 const ManagerCaptainsPage = lazy(() => import("./pages/manager/ManagerCaptainsPage"));
 const ManagerSubscribersPage = lazy(() => import("./pages/manager/ManagerSubscribersPage"));
+const ManagerSellPlanPage = lazy(() => import("./pages/manager/ManagerSellPlanPage"));
 const ManagerInventoryPage = lazy(() => import("./pages/manager/ManagerInventoryPage"));
 const ManagerComplaintsPage = lazy(() => import("./pages/manager/ManagerComplaintsPage"));
 const ManagerReviewsPage = lazy(() => import("./pages/manager/ManagerReviewsPage"));
@@ -183,6 +184,7 @@ export default function App() {
                 <Route path="bookings/:id" element={<StaffBookingRedirect base="/manager/bookings" />} />
                 <Route path="captains" element={<ManagerCaptainsPage />} />
                 <Route path="subscribers" element={<ManagerSubscribersPage />} />
+                <Route path="sell-plan" element={<ManagerSellPlanPage />} />
                 <Route path="inventory" element={<ManagerInventoryPage />} />
                 <Route path="complaints" element={<ManagerComplaintsPage />} />
                 <Route path="reviews" element={<ManagerReviewsPage />} />

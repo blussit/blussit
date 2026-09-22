@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { AlertTriangle, BarChart3, CalendarPlus, CheckCircle2, Gift, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
+import { AlertTriangle, BarChart3, CalendarPlus, CheckCircle2, CreditCard, Gift, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 
 const navItems: NavItem[] = [
@@ -10,6 +10,7 @@ const navItems: NavItem[] = [
   { label: "Booking queue", to: "/manager/bookings", icon: ListChecks },
   { label: "Captains", to: "/manager/captains", icon: Users },
   { label: "Subscriptions", to: "/manager/subscribers", icon: Gift },
+  { label: "Sell a plan", to: "/manager/sell-plan", icon: CreditCard },
   { label: "Inventory", to: "/manager/inventory", icon: Package },
   { label: "Complaints", to: "/manager/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/manager/reviews", icon: Star },

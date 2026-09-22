@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.controllers.payment_controller import PaymentController
 from app.controllers.subscription_controller import SubscriptionPlanController, UserSubscriptionController
 from app.core.dependencies import (
     CurrentUser,
@@ -15,6 +16,8 @@ from app.core.dependencies import (
 from app.schemas.subscription_schema import (
     AssignSubscriptionRequest,
     AutoPayRequest,
+    ManagerSubscriptionOfferRequest,
+    ManagerSubscriptionPreviewRequest,
     PassQuoteRequest,
     PlanEnquiryRequest,
     SubscribeRequest,
@@ -50,6 +53,15 @@ async def update_plan(plan_id: str, payload: SubscriptionPlanUpdateRequest, curr
 @plan_router.delete("/{plan_id}", dependencies=[Depends(require_admin)])
 async def delete_plan(plan_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await SubscriptionPlanController(db).delete(current_user, plan_id)
+
+
+@plan_router.post("/{plan_id}/discontinue", dependencies=[Depends(require_manager_or_admin)])
+async def discontinue_plan(plan_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Stop selling a plan — is_active only. Unlike the full PUT above
+    (admin-only), a manager can pull a plan without being able to edit its
+    price or contents; existing subscribers keep their plan exactly as
+    bought."""
+    return await SubscriptionPlanController(db).discontinue(current_user, plan_id)
 
 
 @subscription_router.post("/quote", dependencies=[Depends(require_customer)])
@@ -121,6 +133,29 @@ async def assign_subscription(payload: AssignSubscriptionRequest, current_user: 
     validation as self-purchase (vehicle ownership, vehicle-type match,
     one-active-subscription-per-vehicle)."""
     return await UserSubscriptionController(db).assign(current_user, payload)
+
+
+@subscription_router.post("/manager-offers/preview", dependencies=[Depends(require_manager_or_admin)])
+async def manager_offer_preview(payload: ManagerSubscriptionPreviewRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Read-only price for the 'sell a plan' form — no customer required
+    yet, nothing created. Purely advisory: manager-offers/create below
+    recomputes and re-validates everything from scratch."""
+    return await PaymentController(db).manager_offer_preview(payload)
+
+
+@subscription_router.post("/manager-offers", dependencies=[Depends(require_manager_or_admin)])
+async def manager_offer_create(payload: ManagerSubscriptionOfferRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Manager/admin sells a plan to a customer: a one-time WhatsApp
+    payment link (optionally discounted / coupon'd), a full-rate auto-pay
+    mandate, or straight cash collected on the spot. See
+    PaymentService.manager_subscription_offer."""
+    return await PaymentController(db).manager_offer_create(current_user, payload)
+
+
+@subscription_router.post("/manager-offers/{order_id}/void", dependencies=[Depends(require_manager_or_admin)])
+async def manager_offer_void(order_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Cancels a still-pending manager-issued link or mandate."""
+    return await PaymentController(db).manager_offer_void(current_user, order_id)
 
 
 @subscription_router.post("/{subscription_id}/cancel", dependencies=[Depends(require_customer)])

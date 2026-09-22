@@ -524,6 +524,17 @@ export interface UserSubscription {
   last_renewed_at?: string | null;
   /** Upgrade response only — the old plan's mandate had to be retired. */
   auto_pay_retired?: boolean;
+  /** How this pass was actually paid for — set on manager-issued offers
+   *  (link, auto-pay, or cash) and on a manager/admin's free `assign` grant
+   *  (absent there). */
+  payment_method?: "online" | "cash" | null;
+  amount_paid?: number | null;
+  discount_amount?: number | null;
+  coupon_code?: string | null;
+  /** The manager/admin who created this offer (link, mandate, or cash). */
+  assigned_by?: string | null;
+  cash_collected_by?: string | null;
+  cash_collected_at?: string | null;
 }
 
 export interface ServiceCenter {

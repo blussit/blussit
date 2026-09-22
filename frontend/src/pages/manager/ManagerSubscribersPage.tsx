@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlarmClock, BadgeCheck, CircleOff, Gift, Phone, Search } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gift, Phone, Search } from "lucide-react";
 import { subscriptionApi, type CenterSubscriptionRow } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
-import { Badge, Card, EmptyState, Input, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, Input, PageLoader } from "../../components/ui";
 import { format } from "../../lib/date";
 
 type Filter = "all" | "active" | "expiring" | "expired";
@@ -23,6 +24,7 @@ function rowMatches(r: CenterSubscriptionRow, filter: Filter): boolean {
 }
 
 export default function ManagerSubscribersPage() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const centerId = user?.service_center_id || "";
   const [filter, setFilter] = useState<Filter>("all");
@@ -53,11 +55,16 @@ export default function ManagerSubscribersPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Subscriptions</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Every plan held by a customer this center serves — who's covered, what they bought, and who to call before it lapses.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Subscriptions</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            Every plan held by a customer this center serves — who's covered, what they bought, and who to call before it lapses.
+          </p>
+        </div>
+        <Button onClick={() => navigate("/manager/sell-plan")}>
+          <CreditCard className="h-4 w-4" /> Sell a plan
+        </Button>
       </div>
 
       {/* Clickable KPI tiles — each one IS the filter for the list below. */}

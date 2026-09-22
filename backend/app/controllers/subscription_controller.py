@@ -44,6 +44,11 @@ class SubscriptionPlanController:
         await self.audit.log_action(current_user.id, current_user.role, "DELETE_PLAN", "subscription_plans", plan_id)
         return success(None, "Subscription plan deleted successfully")
 
+    async def discontinue(self, current_user: CurrentUser, plan_id: str):
+        result = await self.service.discontinue(plan_id)
+        await self.audit.log_action(current_user.id, current_user.role, "DISCONTINUE_PLAN", "subscription_plans", plan_id)
+        return success(result, "Plan discontinued — no longer sold, existing subscribers are unaffected")
+
 
 class UserSubscriptionController:
     def __init__(self, db: AsyncIOMotorDatabase):

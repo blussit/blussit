@@ -3,6 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser
 from app.core.responses import success
 from app.schemas.payment_schema import CollectPaymentRequest, CreateOrderRequest, VerifyPaymentRequest
+from app.schemas.subscription_schema import ManagerSubscriptionOfferRequest, ManagerSubscriptionPreviewRequest
 from app.services.audit_service import AuditService
 from app.services.payment_service import PaymentService
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
@@ -56,3 +57,30 @@ class PaymentController:
                 "subscription", sub["id"], current_user.id, {"plan_name": sub.get("plan_name")}
             )
         return success(result, "Payment verified")
+
+    # -- Manager selling a plan (WhatsApp link / auto-pay / cash) --------
+
+    async def manager_offer_preview(self, payload: ManagerSubscriptionPreviewRequest):
+        return success(await self.service.manager_subscription_preview(payload))
+
+    async def manager_offer_create(self, current_user: CurrentUser, payload: ManagerSubscriptionOfferRequest):
+        result = await self.service.manager_subscription_offer(current_user.id, payload)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "MANAGER_SUBSCRIPTION_OFFER", "payment_orders",
+            result.get("order_id") or (result.get("subscription") or {}).get("id"),
+            {
+                "plan_id": payload.plan_id, "recurring": payload.recurring, "payment_method": payload.payment_method,
+                "discount_amount": payload.discount_amount, "coupon_code": payload.coupon_code, "amount": result.get("amount"),
+            },
+        )
+        message = (
+            "Auto-pay link sent" if result["kind"] == "autopay"
+            else "Plan activated — cash recorded" if result["kind"] == "cash"
+            else "Payment link sent"
+        )
+        return success(result, message)
+
+    async def manager_offer_void(self, current_user: CurrentUser, order_id: str):
+        result = await self.service.void_manager_subscription_offer(order_id, current_user.id)
+        await self.audit.log_action(current_user.id, current_user.role, "MANAGER_SUBSCRIPTION_OFFER_VOIDED", "payment_orders", order_id)
+        return success(result, "Offer cancelled" if result.get("voided") else "This offer was already settled or cancelled")

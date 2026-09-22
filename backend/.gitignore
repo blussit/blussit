@@ -4,3 +4,8 @@ __pycache__/
 .env
 *.egg-info/
 .pytest_cache/
+
+# Backups written by app/scripts/delete_booking.py (run from here) before it
+# deletes anything — real customer/booking data pulled from production,
+# never meant to be committed.
+deleted-*.json

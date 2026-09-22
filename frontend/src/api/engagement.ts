@@ -43,6 +43,46 @@ export interface PassQuote {
   vehicle_has_pass: boolean;
 }
 
+/** Live price for the manager's "sell a plan" form — see
+ *  PaymentService.manager_subscription_preview. No side effects. */
+export interface ManagerOfferPreview {
+  plan_name: string;
+  service_name: string;
+  visits: number;
+  price_per_wash: number;
+  base_price: number;
+  discount: number;
+  final_price: number;
+  /** null = no coupon code typed yet. */
+  coupon_valid: boolean | null;
+  coupon_error?: string | null;
+  customer_exists: boolean;
+  /** This phone already holds a live pass for this vehicle type + service. */
+  already_has_pass: boolean;
+}
+
+export interface ManagerOfferPayload {
+  customer_name: string;
+  customer_phone: string;
+  plan_id: string;
+  vehicle_type: string;
+  service_id: string;
+  recurring: boolean;
+  payment_method: "link" | "cash";
+  discount_amount?: number;
+  coupon_code?: string;
+  send_whatsapp: boolean;
+}
+
+export interface ManagerOfferResult {
+  kind: "link" | "autopay" | "cash";
+  recurring: boolean;
+  amount: number;
+  short_url?: string;
+  order_id?: string;
+  subscription?: UserSubscription;
+}
+
 export interface PlanEnquiryPayload {
   name: string;
   phone: string;
@@ -79,6 +119,19 @@ export const subscriptionApi = {
     apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/auto-pay`, { enabled }).then((r) => r.data.data),
   adminAll: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<UserSubscription>>("/subscriptions/admin/all", { params }).then((r) => r.data),
+  /** Manager/admin sells a plan: a WhatsApp payment link (one-time,
+   *  optionally discounted/coupon'd), a full-rate auto-pay link, or cash
+   *  collected on the spot. See PaymentService.manager_subscription_offer. */
+  managerOfferPreview: (payload: Partial<ManagerOfferPayload>) =>
+    apiClient.post<ApiSuccess<ManagerOfferPreview>>("/subscriptions/manager-offers/preview", payload).then((r) => r.data.data),
+  managerOfferCreate: (payload: ManagerOfferPayload) =>
+    apiClient.post<ApiSuccess<ManagerOfferResult>>("/subscriptions/manager-offers", payload).then((r) => r.data.data),
+  managerOfferVoid: (orderId: string) =>
+    apiClient.post<ApiSuccess<{ voided: boolean }>>(`/subscriptions/manager-offers/${orderId}/void`).then((r) => r.data.data),
+  /** Stop SELLING a plan — is_active only, price/contents untouched.
+   *  Manager-safe (unlike the full PUT edit, which stays admin-only). */
+  discontinuePlan: (planId: string) =>
+    apiClient.post<ApiSuccess<SubscriptionPlan>>(`/subscription-plans/${planId}/discontinue`).then((r) => r.data.data),
 };
 
 export const couponApi = {

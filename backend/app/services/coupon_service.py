@@ -54,6 +54,13 @@ class CouponService:
         doc["code"] = payload.code.upper()
         doc["eligible_service_keywords"] = self._normalize_keywords(doc.get("eligible_service_keywords"))
         doc["free_addon_keywords"] = self._normalize_keywords(doc.get("free_addon_keywords"))
+        # Server-owned counter, never something a create request can set —
+        # not part of CouponCreateRequest at all, so it must be seeded here
+        # or a brand new coupon has no total_used field until its first use
+        # (record_usage's $inc still works on a missing field, but every
+        # READ of total_used before that — the admin list, this very
+        # method's own response — would be a KeyError/None instead of 0).
+        doc["total_used"] = 0
         created = await self.repo.create(doc)
         return serialize_doc(created)
 

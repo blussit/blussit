@@ -83,6 +83,6 @@ export interface CollectionsReport {
   rows: CollectionsRow[];
   totals: Omit<CollectionsRow, "captain_id" | "captain_name" | "employee_id" | "service_center_id" | "center_name">;
   /** Admin roll-up only. */
-  subscriptions?: { online_amount: number; count: number };
+  subscriptions?: { online_amount: number; cash_amount: number; count: number; cash_count: number };
   attention?: { reason?: string | null; booking_number?: string | null; purpose?: string | null; amount: number; flagged_at?: string | null }[];
 }

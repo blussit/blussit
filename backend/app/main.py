@@ -421,6 +421,13 @@ async def _reminder_loop() -> None:
                 # time is never briefly marked expired.
                 await PaymentService(db).sync_autopay_renewals()
 
+                # Auto-pay mandates still awaiting their FIRST charge (a
+                # manager-issued WhatsApp link the customer just opened, or a
+                # self-serve checkout whose browser closed before verify ran)
+                # — activated purely from what Razorpay reports, never a
+                # client-supplied claim. See sync_pending_manager_mandates.
+                await PaymentService(db).sync_pending_manager_mandates()
+
                 # Passes: a heads-up two days before one ends and a note when
                 # it has — each once — then the actual flip to EXPIRED (the
                 # stored status used to change only lazily on read/consume,
@@ -536,13 +543,26 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # pydantic v2 tucks the ORIGINAL exception object into ctx.error for any
+    # `raise ValueError(...)` from a field/model validator (e.g. every
+    # "one of X or Y, not both" cross-field check in this codebase) — a
+    # bare ValueError isn't JSON-serializable, so building this response
+    # with exc.errors() untouched crashed instead of returning 422, taking
+    # the whole request down with it (this endpoint's own error handler
+    # failing has no further net under it). Stringify ctx.error only;
+    # everything else in the error dict is already JSON-safe.
+    errors = exc.errors()
+    for error in errors:
+        ctx = error.get("ctx")
+        if isinstance(ctx, dict) and isinstance(ctx.get("error"), Exception):
+            ctx["error"] = str(ctx["error"])
     return JSONResponse(
         status_code=422,
         content={
             "success": False,
             "error_code": "VALIDATION_ERROR",
             "message": "Request validation failed",
-            "details": {"errors": exc.errors()},
+            "details": {"errors": errors},
         },
     )
 
