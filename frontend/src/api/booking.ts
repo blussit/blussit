@@ -22,6 +22,11 @@ export interface QuickBookingLine {
   quantity: number;
   service_ids: string[];
   service_quantities?: Record<string, number>;
+  /** Default true (every existing caller keeps auto-applying the
+   *  customer's matching pass, nothing to pick). A manager's booking/log
+   *  form sends false for a line they explicitly unticked "use this
+   *  customer's plan?" for. */
+  use_subscription?: boolean;
 }
 
 export interface QuickBookingPayload {

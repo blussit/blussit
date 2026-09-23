@@ -87,6 +87,14 @@ class QuickBookingLine(BaseModel):
     quantity: int = Field(default=1, ge=1, le=10)
     service_ids: list[str] = Field(min_length=1)
     service_quantities: dict[str, int] = Field(default_factory=dict)
+    # True (default — every existing caller keeps today's behavior:
+    # self-serve booking, the WhatsApp bot, and a manager who didn't send
+    # this field) auto-applies the customer's matching pass with nothing to
+    # pick, exactly as before. A manager's own booking/log-a-job form sends
+    # False for a line the manager explicitly unticked ("use this
+    # customer's plan?") — e.g. the customer wants to save the wash and pay
+    # cash this once. See BookingService._cars_for_lines.
+    use_subscription: bool = True
 
 
 class QuickBookingRequest(BaseModel):

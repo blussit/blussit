@@ -13,7 +13,6 @@ import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { QtyStepper } from "../shared/QtyStepper";
 import { CustomerNamePhoneFields } from "../shared/CustomerNamePhoneFields";
-import { CustomerActivePasses } from "../shared/CustomerActivePasses";
 import { BookingOtpModal } from "./BookingOtpModal";
 import { CoverageLeadInline } from "../public/CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
@@ -25,7 +24,8 @@ import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
 import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { parseIncludes, titleCase } from "../public/landing/shared";
-import type { Address, Service, VehicleTypeOption } from "../../types";
+import { subscriptionApi } from "../../api/engagement";
+import type { Address, Service, UserSubscription, VehicleTypeOption } from "../../types";
 
 /**
  * THE booking flow (2026-09 quick-booking model) — two steps, no account;
@@ -117,9 +117,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   // Manager modes only: set when an existing customer is picked from the
-  // typeahead, so their active passes can be shown alongside the form
-  // (booking creation itself already auto-matches a pass server-side).
+  // typeahead, so their active passes can be matched against what's being
+  // booked below.
   const [pickedCustomerId, setPickedCustomerId] = useState<string | null>(null);
+  // Per-line (index into `lines`) override of whether a matched pass is
+  // actually used — absent = default to true (use it). Manager-only; keyed
+  // by index since a line's position is stable for the life of this form.
+  const [subscriptionOverride, setSubscriptionOverride] = useState<Record<number, boolean>>({});
+  useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
   const [mapsUp, setMapsUp] = useState(true);
@@ -320,6 +325,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     regularSubtotal: number;
     offerDiscount: number;
     freeBikeAddon: Service | null;
+    baseUnitPrice: number;
     payload: QuickBookingLine | null;
     services: Service[];
   }
@@ -420,6 +426,11 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           regularSubtotal: regularSubtotal * quantity,
           offerDiscount: offerDiscount * quantity,
           freeBikeAddon,
+          // What ONE matching pass actually waives on this line — the base
+          // service's own per-unit price, same figure the backend's
+          // _subscription_discount computes (add-ons/extra-bikes never
+          // waived). Used to price the "use this customer's plan?" toggle.
+          baseUnitPrice: base ? perUnit(base) : 0,
           payload: base ? { vehicle_type: t.id, quantity, service_ids: serviceIds, service_quantities: quantities } : null,
           services: lineServices,
         };
@@ -428,6 +439,93 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const lines: Line[] = useMemo(() => drafts.map(lineFor).filter(Boolean) as Line[], [drafts, types, services, bikeIds, showFirstWash]);
+
+  // Manager modes only — which of this customer's active passes match what's
+  // actually being booked, so "use their plan?" can be offered per line
+  // instead of silently happening (or not) once the booking is submitted.
+  const { data: customerPasses } = useQuery({
+    queryKey: ["customer-active-passes", pickedCustomerId],
+    queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string),
+    enabled: isManager && !!pickedCustomerId,
+  });
+  interface LineMatch {
+    sub: UserSubscription;
+    /** How many of this line's units (bounded by the payload's own
+     *  quantity, NOT the raw bike/car count — a bike line is ONE booking
+     *  no matter how many bikes) a pass can actually cover. */
+    coveredCount: number;
+  }
+  // Same one-document-one-wash-per-request rule the backend's
+  // _cars_for_lines enforces — a pass with remaining_service_count=4 still
+  // only ever covers ONE unit per booking; walked in line order so this
+  // always agrees with what the server will actually match.
+  const lineMatches: (LineMatch | null)[] = useMemo(() => {
+    if (!isManager || !customerPasses?.length) return lines.map(() => null);
+    const usable = customerPasses.filter(
+      (s) => s.effective_status === "active" && (s.remaining_service_count ?? 0) > 0 && s.service_id && s.vehicle_type
+    );
+    const used = new Set<string>();
+    return lines.map((line) => {
+      if (!line.base) return null;
+      const cap = line.payload?.quantity ?? 1;
+      let coveredCount = 0;
+      let matchedSub: UserSubscription | null = null;
+      for (const sub of usable) {
+        if (used.has(sub.id) || coveredCount >= cap) break;
+        if (sub.vehicle_type === line.type.id && sub.service_id === line.base!.id) {
+          used.add(sub.id);
+          matchedSub = matchedSub || sub;
+          coveredCount += 1;
+        }
+      }
+      return matchedSub ? { sub: matchedSub, coveredCount } : null;
+    });
+  }, [isManager, customerPasses, lines]);
+  const passSavings = lines.reduce((sum, line, i) => {
+    const match = lineMatches[i];
+    if (!match || subscriptionOverride[i] === false) return sum;
+    return sum + match.coveredCount * line.baseUnitPrice;
+  }, 0);
+  // Passes this customer holds that don't match ANYTHING being booked right
+  // now — shown as plain context, never a checkbox (nothing to toggle).
+  const nonMatchingPasses = isManager && customerPasses
+    ? customerPasses.filter(
+        (s) => s.effective_status === "active" && !lineMatches.some((m) => m?.sub.id === s.id)
+      )
+    : [];
+
+  // "Use this customer's plan?" — one row per line with a matching pass,
+  // ticked by default (the wash IS covered unless the manager says
+  // otherwise). Shown once, right where the money is decided, in both
+  // manager forms (New booking / Log a done job).
+  const subscriptionTogglesNode = isManager && lineMatches.some(Boolean) ? (
+    <div className="space-y-2 rounded-xl border border-[#F3E5B5] bg-[#FFF9E6] p-3">
+      <p className="flex items-center gap-1.5 text-sm font-semibold text-black">
+        <BadgeCheck className="h-4 w-4 text-[var(--color-primary)]" /> This customer holds a matching plan
+      </p>
+      {lines.map((line, i) => {
+        const match = lineMatches[i];
+        if (!match) return null;
+        const on = subscriptionOverride[i] !== false;
+        const saved = match.coveredCount * line.baseUnitPrice;
+        return (
+          <Switch
+            key={i}
+            checked={on}
+            onChange={(next) => setSubscriptionOverride((prev) => ({ ...prev, [i]: next }))}
+            label={`Use ${match.sub.plan_name || "their plan"} for this ${line.type.name}${line.count > 1 ? ` (${match.coveredCount} of ${line.count})` : ""}`}
+            description={`${match.coveredCount} wash${match.coveredCount > 1 ? "es" : ""} off their plan · saves ₹${saved}`}
+          />
+        );
+      })}
+      {nonMatchingPasses.length > 0 && (
+        <p className="text-[11px] text-gray-500">
+          Also holds: {nonMatchingPasses.map((s) => s.plan_name).filter(Boolean).join(", ")} — doesn't match what's being booked here.
+        </p>
+      )}
+    </div>
+  ) : null;
+
   // The editor's own line (may be incomplete — used for the chips/prices).
   const editing = draft.typeId ? lineFor({ ...draft, base: draft.base }) : null;
   const editingGroups = draft.typeId ? baseGroups(services, draft.typeId) : [];
@@ -438,7 +536,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const total = lines.reduce((n, l) => n + l.subtotal, 0);
   const regularTotal = lines.reduce((n, l) => n + l.regularSubtotal, 0);
   const offerDiscount = lines.reduce((n, l) => n + l.offerDiscount, 0);
-  const displayTotal = Math.max(0, total - offerDiscount);
+  const displayTotal = Math.max(0, total - offerDiscount - passSavings);
   // Log mode only: rupees the manager took off the bill. What the customer
   // actually paid (finalTotal) drives the footer, the payment choice and the save.
   const discountNum = isLog ? Math.round(Number(discount) || 0) : 0;
@@ -704,6 +802,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // signed-in customers already did (OTP login) and managers book on behalf.
   const needsOtp = !isManager && (!user || user.role !== "customer" || forceOtp);
 
+  // use_subscription defaults true (server auto-applies a matching pass
+  // with nothing to pick) — only ever set to false here, for a line this
+  // manager explicitly unticked "use this customer's plan?" for.
+  const linesForPayload = (): QuickBookingLine[] =>
+    lines
+      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: subscriptionOverride[i] !== false } : null))
+      .filter(Boolean) as QuickBookingLine[];
+
   const submitLog = async () => {
     setError("");
     setSubmitting(true);
@@ -711,7 +817,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       const result = await bookingApi.managerLogCompleted({
         customer_name: name.trim(),
         customer_phone: validateIndianMobile(phone) || phone.trim(),
-        lines: lines.map((l) => l.payload!).filter(Boolean),
+        lines: linesForPayload(),
         scheduled_date: date,
         service_time: logTime,
         address_line: line1.trim(),
@@ -761,7 +867,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         customer_name: name.trim(),
         customer_phone: canonicalPhone,
         ...(needsOtp ? proof : {}),
-        lines: lines.map((l) => l.payload!).filter(Boolean),
+        lines: linesForPayload(),
         scheduled_date: date,
         scheduled_slot: slot,
         payment_method: displayTotal > 0 ? paymentMethod : "cash",
@@ -1193,7 +1299,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 phoneError={fieldErrors.phone}
                 phoneInputRef={phoneRef}
               />
-              {pickedCustomerId && <CustomerActivePasses customerId={pickedCustomerId} />}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1238,6 +1343,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                     : "Only if you gave this customer a discount — it comes off the total."
                 }
               />
+
+              {subscriptionTogglesNode}
 
               {finalTotal > 0 && (
                 <div>
@@ -1392,6 +1499,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
               {(fieldErrors.date || fieldErrors.slot) && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.date || fieldErrors.slot}</p>}
             </div>
           )}
+
+          {subscriptionTogglesNode}
 
           {/* How to pay */}
           {displayTotal > 0 && (

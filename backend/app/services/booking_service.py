@@ -1797,13 +1797,14 @@ class BookingService:
             main_ids = [sid for sid in line.service_ids]
             for _ in range(line.quantity):
                 sub_id = None
-                for sub in passes:
-                    if sub.get("_used"):
-                        continue
-                    if sub.get("service_id") in main_ids and sub.get("vehicle_type") == line.vehicle_type:
-                        sub["_used"] = True
-                        sub_id = str(sub["_id"])
-                        break
+                if line.use_subscription:
+                    for sub in passes:
+                        if sub.get("_used"):
+                            continue
+                        if sub.get("service_id") in main_ids and sub.get("vehicle_type") == line.vehicle_type:
+                            sub["_used"] = True
+                            sub_id = str(sub["_id"])
+                            break
                 cars.append(
                     GroupVehicleRequest(
                         vehicle_type=line.vehicle_type,

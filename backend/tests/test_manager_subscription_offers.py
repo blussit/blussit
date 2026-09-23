@@ -1127,3 +1127,84 @@ async def test_a_manager_sold_plan_is_correctly_spent_by_a_new_booking_then_a_lo
     booking3 = booked3["bookings"][0]
     assert booking3["total_amount"] > 0
     assert booking3["payment_method"] != "subscription" and not booking3.get("subscription_id")
+
+
+# ---------------------------------------------- opt-out of a matching pass
+#
+# Founder (looking at the Log a done job screenshot): "there should be an
+# option ... tick on that so the amount will be zero" — the manager forms
+# now show a checkbox per line when a matching pass exists, ticked by
+# default. Unticking it sends use_subscription=False for that line, which
+# must charge normally and NOT touch the pass at all — these prove the
+# opt-out itself, mirroring the previous test's proof of the opt-IN path.
+
+
+async def test_manager_unticking_use_plan_charges_full_price_and_leaves_the_pass_untouched(rig, cleanup):
+    from app.schemas.booking_schema import QuickAddress, QuickBookingLine, QuickBookingRequest
+    from app.services.booking_service import BookingService
+    from app.services.subscription_service import UserSubscriptionService as USS
+
+    phone = "9333300031"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+
+    bs = BookingService(rig["db"])
+    booked = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="2 Opt Out Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=False)],
+            scheduled_date=(now_ist() + timedelta(days=1)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    cleanup.append(("addresses", {"line1": "2 Opt Out Lane, Indore"}))
+    booking = booked["bookings"][0]
+    assert booking["total_amount"] > 0
+    assert booking["payment_method"] != "subscription" and not booking.get("subscription_id")
+
+    untouched = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert untouched["remaining_service_count"] == 1 and untouched["status"] == "active"
+
+    # Still visible and spendable normally afterwards — opting out once
+    # doesn't retire the pass.
+    overview = await USS(rig["db"]).center_overview(rig["center_id"], "manager", rig["center_id"])
+    row = next(r for r in overview["rows"] if r["customer_id"] == str(customer["_id"]))
+    assert row["remaining_service_count"] == 1
+
+
+async def test_manager_unticking_use_plan_on_a_logged_job_also_charges_full_and_leaves_the_pass_untouched(rig, cleanup):
+    from app.schemas.booking_schema import ManagerLogBookingRequest, QuickBookingLine
+    from app.services.booking_service import BookingService
+
+    phone = "9333300032"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+
+    bs = BookingService(rig["db"])
+    logged = await bs.create_manager_logged_visit(
+        ManagerLogBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=False)],
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="09:00",
+            address_line="2 Opt Out Lane, Indore", send_whatsapp=False,
+        ),
+        manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
+    )
+    booking = logged["bookings"][0]
+    assert booking["total_amount"] > 0
+    assert booking["payment_method"] != "subscription" and not booking.get("subscription_id")
+
+    untouched = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert untouched["remaining_service_count"] == 1 and untouched["status"] == "active"
