@@ -4,13 +4,21 @@
  * lays it out PRIMARY -> SECONDARY -> DETAIL, so no tab ever shows
  * everything at once.
  */
-import { useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil } from "lucide-react";
-import { Card, CardBody, CardHeader, Spinner } from "../../ui";
-import { kpiApi, type KpiPeriodParams } from "../../../api/admin";
+import { Card, CardBody, CardHeader, Spinner, StatusBadge } from "../../ui";
+import { kpiApi, adminUserApi, type KpiPeriodParams } from "../../../api/admin";
+import { bookingApi } from "../../../api/booking";
+import { complaintApi } from "../../../api/engagement";
 import { Donut, Funnel, HBars, MiniStat, RatingBars, TrendChart, formatINR } from "./charts";
 import { BusinessSettingsModal } from "./SettingsModal";
+import { KpiListModal } from "./KpiListModal";
+import { KpiBriefModal } from "./KpiBriefModal";
+import { BookingDetailDrawer } from "../../shared/BookingDetailDrawer";
+import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
+import { format, formatSlot } from "../../../lib/date";
+import type { Booking, Complaint, User } from "../../../types";
 
 function useSection<T>(section: string, params: KpiPeriodParams) {
   return useQuery({
@@ -30,6 +38,103 @@ function Loading() {
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${v}%`);
 const num = (v: number | null | undefined, unit = "") => (v == null ? "—" : `${v}${unit}`);
 
+/** A definition + breakdown popup for a ratio/computed KPI — no list of
+ *  records exists for something like "churn rate". Local to whichever tab
+ *  renders it (each tab's own numbers, already loaded, feed the breakdown). */
+function useBriefDrill() {
+  const [drill, setDrill] = useState<{ title: string; value: ReactNode; tip: string; breakdown?: { label: string; value: ReactNode }[] } | null>(null);
+  const modal = drill && (
+    <KpiBriefModal open={!!drill} onClose={() => setDrill(null)} title={drill.title} value={drill.value} tip={drill.tip} breakdown={drill.breakdown} />
+  );
+  return { open: setDrill, modal };
+}
+
+/** "Click on it to see the list of bookings" — the real records behind a
+ *  bookings/completed/cancelled/revenue tile, filtered to the SAME period
+ *  the tab itself is showing, so the tile's number and the list agree. */
+function useBookingDrill(params: KpiPeriodParams) {
+  const [filter, setFilter] = useState<{ title: string; dateField: "created" | "completed"; status?: string } | null>(null);
+  const [openBooking, setOpenBooking] = useState<Booking | null>(null);
+  const modal = (
+    <>
+      <KpiListModal<Booking>
+        open={!!filter}
+        onClose={() => setFilter(null)}
+        title={filter?.title || "Bookings"}
+        queryKey={["kpi-drill-bookings", filter, params]}
+        fetchFn={() => bookingApi.all({ ...params, page_size: 100, date_field: filter?.dateField, status: filter?.status })}
+        getRowKey={(b) => b.id}
+        renderRow={(b) => (
+          <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-black">{b.customer_name || "—"} · {b.booking_number}</p>
+              <p className="text-xs text-gray-500">{format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="font-mono-num text-sm text-black">₹{b.total_amount}</span>
+              <StatusBadge status={b.status} />
+            </div>
+          </button>
+        )}
+      />
+      <BookingDetailDrawer booking={openBooking} onClose={() => setOpenBooking(null)} />
+    </>
+  );
+  return { open: setFilter, modal };
+}
+
+/** Same idea, for a customer-count tile (new customers in period, or every
+ *  customer ever). Row click opens the full customer-360 view. */
+function useCustomerDrill(params: KpiPeriodParams) {
+  const [open, setOpen] = useState<{ title: string; allTime?: boolean } | null>(null);
+  const [openCustomerId, setOpenCustomerId] = useState<string | null>(null);
+  const modal = (
+    <>
+      <KpiListModal<User>
+        open={!!open}
+        onClose={() => setOpen(null)}
+        title={open?.title || "Customers"}
+        queryKey={["kpi-drill-customers", open, params]}
+        fetchFn={() => adminUserApi.list({ ...(open?.allTime ? {} : params), role: "customer", page_size: 100 })}
+        getRowKey={(u) => u.id}
+        renderRow={(u) => (
+          <button type="button" onClick={() => setOpenCustomerId(u.id)} className="flex w-full items-center justify-between gap-3 text-left">
+            <span className="text-sm font-medium text-black">{u.full_name}</span>
+            <span className="text-xs text-gray-500">{u.phone}</span>
+          </button>
+        )}
+      />
+      <CustomerDetailDrawer customerId={openCustomerId} onClose={() => setOpenCustomerId(null)} />
+    </>
+  );
+  return { open: setOpen, modal };
+}
+
+/** Complaints, filtered to the tab's period. */
+function useComplaintDrill(params: KpiPeriodParams) {
+  const [open, setOpen] = useState(false);
+  const modal = (
+    <KpiListModal<Complaint>
+      open={open}
+      onClose={() => setOpen(false)}
+      title="Complaints"
+      queryKey={["kpi-drill-complaints", params]}
+      fetchFn={() => complaintApi.all({ ...params, page_size: 100 })}
+      getRowKey={(c) => c.id}
+      renderRow={(c) => (
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-black">{c.subject}</p>
+            <p className="text-xs text-gray-500">{c.booking_number ? `Booking ${c.booking_number}` : ""}</p>
+          </div>
+          <StatusBadge status={c.status} />
+        </div>
+      )}
+    />
+  );
+  return { open: () => setOpen(true), modal };
+}
+
 /* ------------------------------------------------------------------ */
 /* Business                                                            */
 /* ------------------------------------------------------------------ */
@@ -43,18 +148,31 @@ type BusinessData = {
 
 export function BusinessTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<BusinessData>("business", params);
+  // Hooks run on EVERY render, loading or not — the rules of hooks don't
+  // allow calling these only once `data` exists.
+  const bookingDrill = useBookingDrill(params);
+  const briefDrill = useBriefDrill();
   if (isLoading || !data) return <Loading />;
   const t = data.totals;
   const q = data.revenue_quality;
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <MiniStat label="Bookings" value={t.bookings} tip="All bookings created in the period" />
-        <MiniStat label="Completed" value={t.completed} />
-        <MiniStat label="Cancelled" value={t.cancelled} />
-        <MiniStat label="Completion rate" value={pct(t.completion_rate)} tip="Completed ÷ all bookings in the period" />
-        <MiniStat label="Avg order value" value={formatINR(t.aov)} tip="Revenue ÷ completed washes" />
-        <MiniStat label="Growth" value={t.revenue_growth == null ? "—" : `${t.revenue_growth > 0 ? "+" : ""}${t.revenue_growth}%`} tip="Revenue vs the previous equal-length period" />
+        <MiniStat label="Bookings" value={t.bookings} tip="All bookings created in the period" onClick={() => bookingDrill.open({ title: "Bookings", dateField: "created" })} />
+        <MiniStat label="Completed" value={t.completed} onClick={() => bookingDrill.open({ title: "Completed washes", dateField: "completed", status: "completed" })} />
+        <MiniStat label="Cancelled" value={t.cancelled} onClick={() => bookingDrill.open({ title: "Cancelled bookings", dateField: "created", status: "cancelled" })} />
+        <MiniStat
+          label="Completion rate" value={pct(t.completion_rate)} tip="Completed ÷ all bookings in the period"
+          onClick={() => briefDrill.open({ title: "Completion rate", value: pct(t.completion_rate), tip: "Completed ÷ all bookings in the period", breakdown: [{ label: "Bookings", value: t.bookings }, { label: "Completed", value: t.completed }] })}
+        />
+        <MiniStat
+          label="Avg order value" value={formatINR(t.aov)} tip="Revenue ÷ completed washes"
+          onClick={() => briefDrill.open({ title: "Average order value", value: formatINR(t.aov), tip: "Revenue ÷ completed washes", breakdown: [{ label: "Revenue", value: formatINR(t.revenue) }, { label: "Completed", value: t.completed }] })}
+        />
+        <MiniStat
+          label="Growth" value={t.revenue_growth == null ? "—" : `${t.revenue_growth > 0 ? "+" : ""}${t.revenue_growth}%`} tip="Revenue vs the previous equal-length period"
+          onClick={() => briefDrill.open({ title: "Growth", value: t.revenue_growth == null ? "—" : `${t.revenue_growth > 0 ? "+" : ""}${t.revenue_growth}%`, tip: "Revenue vs the previous equal-length period", breakdown: [{ label: "Booking growth", value: t.booking_growth == null ? "—" : `${t.booking_growth > 0 ? "+" : ""}${t.booking_growth}%` }] })}
+        />
       </div>
 
       <Card>
@@ -118,6 +236,8 @@ export function BusinessTab({ params }: { params: KpiPeriodParams }) {
           </Card>
         </div>
       </div>
+      {bookingDrill.modal}
+      {briefDrill.modal}
     </div>
   );
 }
@@ -145,14 +265,22 @@ type CustomersData = {
 
 export function CustomersTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<CustomersData>("customers", params);
+  const customerDrill = useCustomerDrill(params);
+  const briefDrill = useBriefDrill();
   if (isLoading || !data) return <Loading />;
   const r = data.retention;
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <MiniStat label="New customers" value={data.new_customers} tip="Customer accounts created in the period" />
-        <MiniStat label="Repeat rate" value={pct(data.repeat_rate)} tip="Customers with more than one lifetime booking" />
-        <MiniStat label="Second wash rate" value={pct(data.second_wash_rate)} tip="Of customers whose first wash was 30+ days ago, how many came back for a second" />
+        <MiniStat label="New customers" value={data.new_customers} tip="Customer accounts created in the period" onClick={() => customerDrill.open({ title: "New customers" })} />
+        <MiniStat
+          label="Repeat rate" value={pct(data.repeat_rate)} tip="Customers with more than one lifetime booking"
+          onClick={() => briefDrill.open({ title: "Repeat rate", value: pct(data.repeat_rate), tip: "Customers with more than one lifetime booking", breakdown: [{ label: "Repeat customers", value: data.repeat_customers }] })}
+        />
+        <MiniStat
+          label="Second wash rate" value={pct(data.second_wash_rate)} tip="Of customers whose first wash was 30+ days ago, how many came back for a second"
+          onClick={() => briefDrill.open({ title: "Second wash rate", value: pct(data.second_wash_rate), tip: "Of customers whose first wash was 30+ days ago, how many came back for a second" })}
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -194,12 +322,26 @@ export function CustomersTab({ params }: { params: KpiPeriodParams }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <MiniStat label="Total customers" value={data.total_customers} />
-        <MiniStat label="Avg washes / customer" value={num(data.avg_washes_per_customer)} />
-        <MiniStat label="Avg days between washes" value={num(data.avg_days_between_washes)} />
-        <MiniStat label="Churn" value={pct(data.churn_rate)} tip="Customers whose last wash was more than 60 days ago" />
-        <MiniStat label="Lifetime value" value={formatINR(data.clv)} tip="Average completed revenue per booking customer, all time" />
+        <MiniStat label="Total customers" value={data.total_customers} onClick={() => customerDrill.open({ title: "All customers", allTime: true })} />
+        <MiniStat
+          label="Avg washes / customer" value={num(data.avg_washes_per_customer)}
+          onClick={() => briefDrill.open({ title: "Average washes per customer", value: num(data.avg_washes_per_customer), tip: "Total completed washes ÷ customers who've booked, all time" })}
+        />
+        <MiniStat
+          label="Avg days between washes" value={num(data.avg_days_between_washes)}
+          onClick={() => briefDrill.open({ title: "Average days between washes", value: num(data.avg_days_between_washes), tip: "How often a repeat customer typically comes back" })}
+        />
+        <MiniStat
+          label="Churn" value={pct(data.churn_rate)} tip="Customers whose last wash was more than 60 days ago"
+          onClick={() => briefDrill.open({ title: "Churn", value: pct(data.churn_rate), tip: "Customers whose last wash was more than 60 days ago" })}
+        />
+        <MiniStat
+          label="Lifetime value" value={formatINR(data.clv)} tip="Average completed revenue per booking customer, all time"
+          onClick={() => briefDrill.open({ title: "Lifetime value", value: formatINR(data.clv), tip: "Average completed revenue per booking customer, all time" })}
+        />
       </div>
+      {customerDrill.modal}
+      {briefDrill.modal}
     </div>
   );
 }
@@ -217,13 +359,24 @@ type CaptainsData = {
 export function CaptainsTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<CaptainsData>("captains", params);
   const [openId, setOpenId] = useState<string | null>(null);
+  const briefDrill = useBriefDrill();
   if (isLoading || !data) return <Loading />;
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <MiniStat label="Washes / captain / day" value={num(data.fleet_washes_per_captain_per_day)} tip="THE core operational KPI — fleet average for the period">
+        <MiniStat
+          label="Washes / captain / day" value={num(data.fleet_washes_per_captain_per_day)} tip="THE core operational KPI — fleet average for the period"
+          onClick={() =>
+            briefDrill.open({
+              title: "Washes per captain per day", value: num(data.fleet_washes_per_captain_per_day), tip: "THE core operational KPI — fleet average for the period",
+              breakdown: [{ label: "Target", value: `${data.target_washes_per_captain_per_day}/day` }, { label: "Active captains", value: data.captains.length }, { label: "Days in period", value: data.days_in_period }],
+            })
+          }
+        >
           <p className="mt-1 text-[10px] text-[var(--color-text-secondary)]">Target: {data.target_washes_per_captain_per_day}/day</p>
         </MiniStat>
+        {/* Active captains / days in period aren't clickable — the full
+            per-captain breakdown is already the table directly below. */}
         <MiniStat label="Active captains" value={data.captains.length} />
         <MiniStat label="Days in period" value={data.days_in_period} />
       </div>
@@ -247,8 +400,8 @@ export function CaptainsTab({ params }: { params: KpiPeriodParams }) {
             </thead>
             <tbody className="text-[var(--color-text-primary)]">
               {data.captains.map((c) => (
-                <>
-                  <tr key={c.captain_id} className="cursor-pointer border-t border-gray-50 hover:bg-[var(--color-surface)]" onClick={() => setOpenId(openId === c.captain_id ? null : c.captain_id)}>
+                <Fragment key={c.captain_id}>
+                  <tr className="cursor-pointer border-t border-gray-50 hover:bg-[var(--color-surface)]" onClick={() => setOpenId(openId === c.captain_id ? null : c.captain_id)}>
                     <td className="py-2.5 pr-3 font-medium">{c.name}</td>
                     <td className="py-2.5 pr-3 font-mono-num">{c.jobs}</td>
                     <td className="py-2.5 pr-3 font-mono-num font-semibold">{c.washes_per_day}</td>
@@ -265,7 +418,7 @@ export function CaptainsTab({ params }: { params: KpiPeriodParams }) {
                     </td>
                   </tr>
                   {openId === c.captain_id && (
-                    <tr key={`${c.captain_id}-detail`} className="border-t border-gray-50 bg-[var(--color-surface)]">
+                    <tr className="border-t border-gray-50 bg-[var(--color-surface)]">
                       <td colSpan={7} className="px-3 py-3">
                         <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
                           <span>Avg job: <b className="font-mono-num">{num(c.avg_job_minutes, " min")}</b></span>
@@ -276,13 +429,14 @@ export function CaptainsTab({ params }: { params: KpiPeriodParams }) {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>
           {!data.captains.length && <p className="py-6 text-center text-sm text-[var(--color-text-secondary)]">No captains yet.</p>}
         </CardBody>
       </Card>
+      {briefDrill.modal}
     </div>
   );
 }
@@ -303,6 +457,8 @@ export function FinancialTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<FinancialData>("financial", params);
   const [editOpen, setEditOpen] = useState(false);
   const qc = useQueryClient();
+  const bookingDrill = useBookingDrill(params);
+  const briefDrill = useBriefDrill();
   if (isLoading || !data) return <Loading />;
   const profitable = data.net_profit >= 0;
   return (
@@ -317,10 +473,19 @@ export function FinancialTab({ params }: { params: KpiPeriodParams }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <MiniStat label="Revenue" value={formatINR(data.gross_revenue)} />
-        <MiniStat label="Operating cost" value={formatINR(data.variable_cost + data.fixed_cost_period)} tip="Variable cost × washes + prorated fixed cost" />
-        <MiniStat label="Contribution margin" value={pct(data.contribution_margin_pct)} tip="(Revenue − variable costs) ÷ revenue" />
-        <MiniStat label="Net profit" value={<span className={profitable ? "text-[var(--color-success)]" : "text-[var(--color-error)]"}>{formatINR(data.net_profit)}</span>} tip="Contribution − fixed costs − marketing spend" />
+        <MiniStat label="Revenue" value={formatINR(data.gross_revenue)} onClick={() => bookingDrill.open({ title: "Completed washes (revenue)", dateField: "completed", status: "completed" })} />
+        <MiniStat
+          label="Operating cost" value={formatINR(data.variable_cost + data.fixed_cost_period)} tip="Variable cost × washes + prorated fixed cost"
+          onClick={() => briefDrill.open({ title: "Operating cost", value: formatINR(data.variable_cost + data.fixed_cost_period), tip: "Variable cost × washes + prorated fixed cost", breakdown: [{ label: "Variable cost", value: formatINR(data.variable_cost) }, { label: "Fixed cost (prorated)", value: formatINR(data.fixed_cost_period) }] })}
+        />
+        <MiniStat
+          label="Contribution margin" value={pct(data.contribution_margin_pct)} tip="(Revenue − variable costs) ÷ revenue"
+          onClick={() => briefDrill.open({ title: "Contribution margin", value: pct(data.contribution_margin_pct), tip: "(Revenue − variable costs) ÷ revenue", breakdown: [{ label: "Revenue", value: formatINR(data.gross_revenue) }, { label: "Contribution", value: formatINR(data.contribution) }] })}
+        />
+        <MiniStat
+          label="Net profit" value={<span className={profitable ? "text-[var(--color-success)]" : "text-[var(--color-error)]"}>{formatINR(data.net_profit)}</span>} tip="Contribution − fixed costs − marketing spend"
+          onClick={() => briefDrill.open({ title: "Net profit", value: formatINR(data.net_profit), tip: "Contribution − fixed costs − marketing spend", breakdown: [{ label: "Contribution", value: formatINR(data.contribution) }, { label: "Fixed cost", value: formatINR(data.fixed_cost_period) }, { label: "Marketing spend", value: formatINR(data.marketing_spend) }] })}
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -342,10 +507,19 @@ export function FinancialTab({ params }: { params: KpiPeriodParams }) {
               ))}
             </ol>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <MiniStat label="Revenue / captain" value={formatINR(data.revenue_per_captain)} />
-              <MiniStat label="Cost / booking" value={formatINR(data.cost_per_booking)} />
-              <MiniStat label="Kit payback" value={data.kit_payback_months == null ? "—" : `${data.kit_payback_months} mo`} tip="Kit cost ÷ monthly contribution per kit, at this period's pace" />
-              <MiniStat label="Marketing spend" value={formatINR(data.marketing_spend)} />
+              <MiniStat
+                label="Revenue / captain" value={formatINR(data.revenue_per_captain)}
+                onClick={() => briefDrill.open({ title: "Revenue per captain", value: formatINR(data.revenue_per_captain), tip: "Gross revenue ÷ active captains this period" })}
+              />
+              <MiniStat
+                label="Cost / booking" value={formatINR(data.cost_per_booking)}
+                onClick={() => briefDrill.open({ title: "Cost per booking", value: formatINR(data.cost_per_booking), tip: "Total operating cost ÷ bookings this period" })}
+              />
+              <MiniStat
+                label="Kit payback" value={data.kit_payback_months == null ? "—" : `${data.kit_payback_months} mo`} tip="Kit cost ÷ monthly contribution per kit, at this period's pace"
+                onClick={() => briefDrill.open({ title: "Kit payback", value: data.kit_payback_months == null ? "—" : `${data.kit_payback_months} mo`, tip: "Kit cost ÷ monthly contribution per kit, at this period's pace", breakdown: [{ label: "Kit cost", value: formatINR(data.inputs.kit_cost) }, { label: "Kits", value: data.inputs.kits_count }] })}
+              />
+              <MiniStat label="Marketing spend" value={formatINR(data.marketing_spend)} onClick={() => setEditOpen(true)} />
             </div>
           </CardBody>
         </Card>
@@ -388,6 +562,8 @@ export function FinancialTab({ params }: { params: KpiPeriodParams }) {
       </div>
 
       <BusinessSettingsModal open={editOpen} onClose={() => { setEditOpen(false); qc.invalidateQueries({ queryKey: ["kpi"] }); }} />
+      {bookingDrill.modal}
+      {briefDrill.modal}
     </div>
   );
 }
@@ -410,6 +586,7 @@ export function MarketingTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<MarketingData>("marketing", params);
   const [editOpen, setEditOpen] = useState(false);
   const qc = useQueryClient();
+  const briefDrill = useBriefDrill();
   if (isLoading || !data) return <Loading />;
   return (
     <div className="space-y-6">
@@ -423,12 +600,27 @@ export function MarketingTab({ params }: { params: KpiPeriodParams }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <MiniStat label="Spend" value={formatINR(data.spend)} />
-        <MiniStat label="Leads" value={data.leads} tip={`Includes ${data.coverage_leads} automatic coverage-area requests`} />
-        <MiniStat label="Cost / lead" value={data.cost_per_lead == null ? "—" : formatINR(data.cost_per_lead)} />
-        <MiniStat label="CAC" value={data.cac == null ? "—" : formatINR(data.cac)} tip="Spend ÷ new customers acquired" />
-        <MiniStat label="ROAS" value={data.roas == null ? "—" : `${data.roas}x`} tip="Ad-attributed revenue ÷ spend" />
-        <MiniStat label="Referral rate" value={pct(data.referral_rate)} />
+        <MiniStat label="Spend" value={formatINR(data.spend)} onClick={() => setEditOpen(true)} />
+        <MiniStat
+          label="Leads" value={data.leads} tip={`Includes ${data.coverage_leads} automatic coverage-area requests`}
+          onClick={() => briefDrill.open({ title: "Leads", value: data.leads, tip: `Includes ${data.coverage_leads} automatic coverage-area requests`, breakdown: [{ label: "Coverage-area requests", value: data.coverage_leads }, { label: "Logged manually", value: data.leads - data.coverage_leads }] })}
+        />
+        <MiniStat
+          label="Cost / lead" value={data.cost_per_lead == null ? "—" : formatINR(data.cost_per_lead)} tip="Spend ÷ leads"
+          onClick={() => briefDrill.open({ title: "Cost / lead", value: data.cost_per_lead == null ? "—" : formatINR(data.cost_per_lead), tip: "Spend ÷ leads", breakdown: [{ label: "Spend", value: formatINR(data.spend) }, { label: "Leads", value: data.leads }] })}
+        />
+        <MiniStat
+          label="CAC" value={data.cac == null ? "—" : formatINR(data.cac)} tip="Spend ÷ new customers acquired"
+          onClick={() => briefDrill.open({ title: "CAC", value: data.cac == null ? "—" : formatINR(data.cac), tip: "Spend ÷ new customers acquired", breakdown: [{ label: "Spend", value: formatINR(data.spend) }, { label: "New customers", value: data.new_customers }] })}
+        />
+        <MiniStat
+          label="ROAS" value={data.roas == null ? "—" : `${data.roas}x`} tip="Ad-attributed revenue ÷ spend"
+          onClick={() => briefDrill.open({ title: "ROAS", value: data.roas == null ? "—" : `${data.roas}x`, tip: "Ad-attributed revenue ÷ spend", breakdown: [{ label: "Ad-attributed revenue", value: formatINR(data.ad_attributed_revenue) }, { label: "Spend", value: formatINR(data.spend) }] })}
+        />
+        <MiniStat
+          label="Referral rate" value={pct(data.referral_rate)} tip="Referral customers ÷ new customers"
+          onClick={() => briefDrill.open({ title: "Referral rate", value: pct(data.referral_rate), tip: "Referral customers ÷ new customers", breakdown: [{ label: "Referral customers", value: data.referral_customers }, { label: "New customers", value: data.new_customers }] })}
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -446,9 +638,9 @@ export function MarketingTab({ params }: { params: KpiPeriodParams }) {
               ]}
             />
             <div className="mt-4 grid grid-cols-3 gap-3">
-              <MiniStat label="From ads" value={data.ad_attributed_customers} />
-              <MiniStat label="Referral" value={data.referral_customers} />
-              <MiniStat label="Organic" value={data.organic_customers} />
+              <MiniStat label="From ads" value={data.ad_attributed_customers} onClick={() => briefDrill.open({ title: "From ads", value: data.ad_attributed_customers, tip: "New customers attributed to a paid campaign", breakdown: [{ label: "New customers", value: data.new_customers }] })} />
+              <MiniStat label="Referral" value={data.referral_customers} onClick={() => briefDrill.open({ title: "Referral", value: data.referral_customers, tip: "New customers attributed to a referral", breakdown: [{ label: "New customers", value: data.new_customers }] })} />
+              <MiniStat label="Organic" value={data.organic_customers} onClick={() => briefDrill.open({ title: "Organic", value: data.organic_customers, tip: "New customers with no ad or referral attribution", breakdown: [{ label: "New customers", value: data.new_customers }] })} />
             </div>
           </CardBody>
         </Card>
@@ -492,6 +684,7 @@ export function MarketingTab({ params }: { params: KpiPeriodParams }) {
       </div>
 
       <BusinessSettingsModal open={editOpen} onClose={() => { setEditOpen(false); qc.invalidateQueries({ queryKey: ["kpi"] }); }} initialTab="marketing" />
+      {briefDrill.modal}
     </div>
   );
 }
@@ -508,6 +701,10 @@ type OperationsData = {
 
 export function OperationsTab({ params }: { params: KpiPeriodParams }) {
   const { data, isLoading } = useSection<OperationsData>("operations", params);
+  // Hooks run on EVERY render, loading or not — the rules of hooks don't
+  // allow calling these only once `data` exists.
+  const briefDrill = useBriefDrill();
+  const complaintDrill = useComplaintDrill(params);
   if (isLoading || !data) return <Loading />;
   const cap = data.capacity;
   const ex = data.experience;
@@ -527,7 +724,10 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
               <div className="h-2.5 rounded-full bg-[var(--color-primary)]" style={{ width: `${Math.min(cap.utilisation_pct ?? 0, 100)}%` }} />
             </div>
             <div className="mt-4 grid grid-cols-3 gap-3">
-              <MiniStat label="Available" value={cap.available} />
+              <MiniStat
+                label="Available" value={cap.available} tip="Open slots ÷ total slots in the period"
+                onClick={() => briefDrill.open({ title: "Available slots", value: cap.available, tip: "Total slots minus booked slots for the period", breakdown: [{ label: "Total slots", value: cap.total }, { label: "Booked", value: cap.booked }] })}
+              />
               <MiniStat label="Peak slot" value={<span className="text-sm">{cap.peak_slot || "—"}</span>} />
               <MiniStat label="Quietest slot" value={<span className="text-sm">{cap.lowest_slot || "—"}</span>} />
             </div>
@@ -543,8 +743,14 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
             <QualityRow ok={data.captain_cancellations === 0} text={`Captain cancellations: ${data.captain_cancellations}`} />
             <QualityRow ok={ex.unresolved_complaints === 0} text={`Unresolved complaints: ${ex.unresolved_complaints}`} />
             <div className="grid grid-cols-2 gap-3 pt-2">
-              <MiniStat label="Avg service time" value={num(data.avg_service_minutes, " min")} />
-              <MiniStat label="Avg travel time" value={num(data.avg_travel_minutes, " min")} />
+              <MiniStat
+                label="Avg service time" value={num(data.avg_service_minutes, " min")} tip="Average time spent on-site per wash"
+                onClick={() => briefDrill.open({ title: "Average service time", value: num(data.avg_service_minutes, " min"), tip: "Average time a captain spends on-site per wash" })}
+              />
+              <MiniStat
+                label="Avg travel time" value={num(data.avg_travel_minutes, " min")} tip="Average time between assignment and arrival"
+                onClick={() => briefDrill.open({ title: "Average travel time", value: num(data.avg_travel_minutes, " min"), tip: "Average time between a captain being assigned and arriving on-site" })}
+              />
             </div>
           </CardBody>
         </Card>
@@ -557,9 +763,18 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
           </CardHeader>
           <CardBody>
             <div className="mb-4 grid grid-cols-3 gap-3">
-              <MiniStat label="Avg rating" value={ex.avg_rating ? `${ex.avg_rating}★` : "—"} />
-              <MiniStat label="5-star share" value={pct(ex.five_star_pct)} />
-              <MiniStat label="Reviews collected" value={pct(ex.review_collection_pct)} tip="Reviews ÷ completed washes" />
+              <MiniStat
+                label="Avg rating" value={ex.avg_rating ? `${ex.avg_rating}★` : "—"}
+                onClick={() => briefDrill.open({ title: "Average rating", value: ex.avg_rating ? `${ex.avg_rating}★` : "—", tip: "Average customer rating across reviews collected this period" })}
+              />
+              <MiniStat
+                label="5-star share" value={pct(ex.five_star_pct)}
+                onClick={() => briefDrill.open({ title: "5-star share", value: pct(ex.five_star_pct), tip: "Share of reviews this period that were 5 stars" })}
+              />
+              <MiniStat
+                label="Reviews collected" value={pct(ex.review_collection_pct)} tip="Reviews ÷ completed washes"
+                onClick={() => briefDrill.open({ title: "Reviews collected", value: pct(ex.review_collection_pct), tip: "Reviews ÷ completed washes" })}
+              />
             </div>
             <RatingBars distribution={ex.rating_distribution} />
           </CardBody>
@@ -570,9 +785,15 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
           </CardHeader>
           <CardBody>
             <div className="mb-4 grid grid-cols-3 gap-3">
-              <MiniStat label="Complaints" value={ex.complaints} />
-              <MiniStat label="Complaint rate" value={pct(ex.complaint_rate_pct)} />
-              <MiniStat label="Avg resolution" value={ex.avg_resolution_hours == null ? "—" : `${ex.avg_resolution_hours} h`} />
+              <MiniStat label="Complaints" value={ex.complaints} onClick={complaintDrill.open} />
+              <MiniStat
+                label="Complaint rate" value={pct(ex.complaint_rate_pct)} tip="Complaints ÷ completed washes"
+                onClick={() => briefDrill.open({ title: "Complaint rate", value: pct(ex.complaint_rate_pct), tip: "Complaints ÷ completed washes", breakdown: [{ label: "Complaints", value: ex.complaints }] })}
+              />
+              <MiniStat
+                label="Avg resolution" value={ex.avg_resolution_hours == null ? "—" : `${ex.avg_resolution_hours} h`}
+                onClick={() => briefDrill.open({ title: "Average resolution time", value: ex.avg_resolution_hours == null ? "—" : `${ex.avg_resolution_hours} h`, tip: "Average time from a complaint being logged to being resolved" })}
+              />
             </div>
             {ex.complaint_categories.length > 0 ? (
               <HBars rows={ex.complaint_categories.map((c) => ({ label: c.category.replace(/_/g, " "), value: c.count }))} />
@@ -582,6 +803,8 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
           </CardBody>
         </Card>
       </div>
+      {briefDrill.modal}
+      {complaintDrill.modal}
     </div>
   );
 }

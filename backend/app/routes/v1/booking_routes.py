@@ -182,6 +182,12 @@ async def reassign_captain(booking_id: str, payload: ReassignCaptainRequest, cur
     return await BookingController(db).reassign_captain(current_user, booking_id, payload)
 
 
+@router.post("/{booking_id}/self-assign", dependencies=[Depends(require_manager_or_admin)])
+async def self_assign_booking(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """The manager delivering a booking personally — see BookingService.self_assign."""
+    return await BookingController(db).self_assign(current_user, booking_id)
+
+
 @router.post("/{booking_id}/captain-cancel", dependencies=[Depends(require_captain)])
 async def captain_cancel(booking_id: str, payload: CaptainCancelRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).captain_cancel(current_user, booking_id, payload)

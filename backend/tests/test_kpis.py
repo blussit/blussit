@@ -89,6 +89,39 @@ async def test_revenue_growth_vs_previous_period(rig, db):
 
 
 @pytest.mark.asyncio
+async def test_overview_combines_booking_and_plan_revenue_separately_and_together(rig, db, cleanup):
+    """Founder: 'total amount option which include plans and bookings
+    both' — plan revenue is tracked entirely separately from booking
+    revenue (payment_orders, never a bookings row), so the dashboard has to
+    explicitly add them; this pins that combined_revenue == revenue +
+    plan_revenue, and that neither a different purpose nor an unpaid order
+    leaks into the plan figure."""
+    (c1, v1), _ = rig["ids"]
+    await rig["make_booking"](c1, v1, days_ago=1, amount=500)
+
+    now = now_ist()
+    paid_plan = await db.payment_orders.insert_one({
+        "kind": "cash", "purpose": "subscription", "customer_id": c1, "status": "paid",
+        "amount_paise": 120000, "currency": "INR", "created_at": now, "paid_at": now,
+    })
+    cleanup.append(("payment_orders", {"_id": paid_plan.inserted_id}))
+    other_purpose = await db.payment_orders.insert_one(
+        {"kind": "order", "purpose": "booking", "status": "paid", "amount_paise": 999900, "created_at": now}
+    )
+    cleanup.append(("payment_orders", {"_id": other_purpose.inserted_id}))
+    still_pending = await db.payment_orders.insert_one(
+        {"kind": "cash", "purpose": "subscription", "status": "created", "amount_paise": 500000, "created_at": now}
+    )
+    cleanup.append(("payment_orders", {"_id": still_pending.inserted_id}))
+
+    s, e, ps, pe = resolve_period("7d", None, None)
+    out = await KpiService(db).overview(s, e, ps, pe)
+    assert out["current"]["plan_revenue"] >= 1200  # only the one PAID subscription order, never the booking-purpose or pending one
+    assert out["current"]["revenue"] >= 500
+    assert out["current"]["combined_revenue"] == round(out["current"]["revenue"] + out["current"]["plan_revenue"], 2)
+
+
+@pytest.mark.asyncio
 async def test_financial_break_even_math_from_settings(rig, db, cleanup):
     svc = KpiService(db)
     original = await db.business_settings.find_one({"_id": "singleton"})

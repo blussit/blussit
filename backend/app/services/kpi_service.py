@@ -146,6 +146,19 @@ class KpiService:
         """Revenue recognized on the COMPLETION date (M3 canon)."""
         return _rupees(sum(b.get("total_amount", 0) for b in bookings if self._completed_in(b, s, e)))
 
+    async def _plan_revenue(self, s, e) -> float:
+        """Money actually paid for a SUBSCRIPTION/PLAN in the window —
+        entirely separate from booking revenue (a plan is paid for once,
+        up front, never per-wash — see PaymentService.manager_subscription_offer).
+        Same source of truth and same `created_at` windowing PaymentService.
+        admin_collections already uses for its own subscriptions figure, so
+        this dashboard number and that report never disagree."""
+        rows = await self.db.payment_orders.aggregate([
+            {"$match": {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}},
+            {"$group": {"_id": None, "amount_paise": {"$sum": "$amount_paise"}}},
+        ]).to_list(length=1)
+        return _rupees((rows[0]["amount_paise"] if rows else 0) / 100)
+
     async def get_settings(self) -> dict:
         doc = await self.db.business_settings.find_one({"_id": "singleton"})
         merged = {**_DEFAULT_SETTINGS, **(doc or {})}
@@ -193,10 +206,11 @@ class KpiService:
         cur_b, prev_b = block(cur, s, e), block(prev, ps, pe)
         new_cur = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}})
         new_prev = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}})
+        plan_rev_cur, plan_rev_prev = await self._plan_revenue(s, e), await self._plan_revenue(ps, pe)
         settings = await self.get_settings()
         return {
-            "current": {**cur_b, "new_customers": new_cur},
-            "previous": {**prev_b, "new_customers": new_prev},
+            "current": {**cur_b, "new_customers": new_cur, "plan_revenue": plan_rev_cur, "combined_revenue": _rupees(cur_b["revenue"] + plan_rev_cur)},
+            "previous": {**prev_b, "new_customers": new_prev, "plan_revenue": plan_rev_prev, "combined_revenue": _rupees(prev_b["revenue"] + plan_rev_prev)},
             "targets": settings["targets"],
             "alerts": await self._alerts(s, e, ps, pe, cur_b, prev_b, settings),
         }

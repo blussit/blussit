@@ -5,6 +5,7 @@ import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gauge, Gift, Phone, Sear
 import { subscriptionApi, type CenterSubscriptionRow } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { Badge, Button, Card, EmptyState, Input, PageLoader } from "../../components/ui";
+import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
 
 type Filter = "all" | "active" | "expiring" | "expired";
@@ -23,6 +24,21 @@ function rowMatches(r: CenterSubscriptionRow, filter: Filter): boolean {
   return true;
 }
 
+/** What to show for the price — always what was actually CHARGED, never
+ *  just the plan's list price (a discounted manager sale showing the full
+ *  list price here is exactly the kind of gap that makes the register not
+ *  match what the screen says). No `?? purchased_price` fallback here on
+ *  purpose — the backend (center_overview) already backfills amount_paid
+ *  for a genuine self-serve purchase; leaving it out here too means a
+ *  TRUE free grant (amount_paid genuinely absent) reads as "—", never as
+ *  if the full list price had been paid. */
+function paidText(r: CenterSubscriptionRow): string {
+  const paid = r.amount_paid;
+  if (paid == null) return "";
+  if (r.discount_amount) return `₹${paid} (was ₹${paid + r.discount_amount})`;
+  return `₹${paid}`;
+}
+
 export default function ManagerSubscribersPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -30,6 +46,7 @@ export default function ManagerSubscribersPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [planFilter, setPlanFilter] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [usageSubscriptionId, setUsageSubscriptionId] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["center-subscription-overview", centerId],
@@ -132,14 +149,18 @@ export default function ManagerSubscribersPage() {
                 ? Math.round((r.remaining_service_count / r.total_service_count) * 100)
                 : null;
             return (
-              <Card key={r.subscription_id} className={`p-4 ${expiringSoon ? "border-amber-200" : ""}`}>
+              <Card
+                key={r.subscription_id}
+                onClick={() => setUsageSubscriptionId(r.subscription_id)}
+                className={`cursor-pointer p-4 transition-shadow hover:shadow-[var(--shadow-lifted)] ${expiringSoon ? "border-amber-200" : ""}`}
+              >
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="truncate font-semibold text-[var(--color-text-primary)]">{r.customer_name}</p>
                     <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
                       {r.plan_name}
                       {r.vehicle_type_name ? ` · ${r.vehicle_type_name} tier` : ""}
-                      {r.purchased_price != null ? ` · ₹${r.purchased_price}` : ""}
+                      {paidText(r) ? ` · ${paidText(r)}` : ""}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -149,6 +170,7 @@ export default function ManagerSubscribersPage() {
                     {r.customer_phone && (
                       <a
                         href={`tel:${r.customer_phone}`}
+                        onClick={(e) => e.stopPropagation()}
                         className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-[var(--color-text-secondary)] hover:border-black hover:text-black"
                         title={`Call ${r.customer_name}`}
                       >
@@ -188,6 +210,8 @@ export default function ManagerSubscribersPage() {
           })}
         </div>
       )}
+
+      <PlanUsageModal subscriptionId={usageSubscriptionId} onClose={() => setUsageSubscriptionId(null)} />
     </div>
   );
 }

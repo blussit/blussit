@@ -663,7 +663,8 @@ class BookingService:
             # customer when a manager books on someone's behalf) — the
             # subscription must belong to exactly that person.
             subscription_consumption = await self.subscription_service.plan_consumption(
-                payload.subscription_id, payload.vehicle_id, services, customer_id, vehicle_type=vehicle_type
+                payload.subscription_id, payload.vehicle_id, services, customer_id, vehicle_type=vehicle_type,
+                as_of=_completed_by["service_at"] if _completed_by else None,
             )
             payment_method = PaymentMethod.SUBSCRIPTION
             discount_amount = await self._subscription_discount(payload.subscription_id, services, vehicle_type, first_time_eligible)
@@ -1555,7 +1556,7 @@ class BookingService:
             )
             address_id = created_addr["id"]
 
-        cars = await self._cars_for_lines(customer_id, payload.lines)
+        cars = await self._cars_for_lines(customer_id, payload.lines, as_of=service_at)
         scheduled_date = datetime.strptime(payload.scheduled_date, "%Y-%m-%d")
         completed_by = {"id": manager_id, "service_center": center, "service_at": service_at, "payment_method": payload.payment_method}
         group_id = str(ObjectId()) if len(cars) > 1 else None
@@ -1787,10 +1788,17 @@ class BookingService:
         await self._notify_service_done(done, booking["customer_id"], send_whatsapp)
         return {"completed": len(done), "booking_numbers": [d.get("booking_number") for d in done]}
 
-    async def _cars_for_lines(self, customer_id: str, lines) -> list[GroupVehicleRequest]:
+    async def _cars_for_lines(self, customer_id: str, lines, as_of: datetime | None = None) -> list[GroupVehicleRequest]:
         """Type lines -> one car each ("2 SUVs" = two), with the customer's
         matching pass (same vehicle type + main service) attached to each car
-        it covers."""
+        it covers.
+
+        `as_of` — ONLY set by create_manager_logged_visit, the real
+        (possibly backdated) time the job happened. A pass bought/granted
+        AFTER that moment is skipped here rather than matched and then
+        refused by plan_consumption — the booking should just charge
+        normally, not blow up over an automatic match the manager never
+        asked for."""
         passes = await self._usable_passes(customer_id)
         cars: list[GroupVehicleRequest] = []
         for line in lines:
@@ -1801,10 +1809,17 @@ class BookingService:
                     for sub in passes:
                         if sub.get("_used"):
                             continue
-                        if sub.get("service_id") in main_ids and sub.get("vehicle_type") == line.vehicle_type:
-                            sub["_used"] = True
-                            sub_id = str(sub["_id"])
-                            break
+                        if sub.get("service_id") not in main_ids or sub.get("vehicle_type") != line.vehicle_type:
+                            continue
+                        if as_of is not None:
+                            start = sub.get("start_date")
+                            # Calendar-DATE comparison, not exact-instant —
+                            # see plan_consumption's identical check for why.
+                            if start is not None and from_stored(start).date() > to_ist(as_of).date():
+                                continue  # didn't exist yet, calendar-date-wise, at this logged time
+                        sub["_used"] = True
+                        sub_id = str(sub["_id"])
+                        break
                 cars.append(
                     GroupVehicleRequest(
                         vehicle_type=line.vehicle_type,
@@ -2649,7 +2664,12 @@ class BookingService:
 
     async def list_all(self, filters: dict, page: int, page_size: int):
         items, total = await self.repo.list_all(filters, page, page_size)
-        return serialize_list(items), total
+        # Same enrichment every other booking list applies (customer name,
+        # vehicle/address/service labels) — without it this admin-only list
+        # (and anything built on it, like the KPI drill-down modals) showed
+        # a bare "—" instead of the customer's name.
+        enriched = await self._enrich_bookings(items)
+        return enriched, total
 
     async def get_booking_group(self, booking_group_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> list[dict]:
         """Every car on a visit, enriched the same way a single booking is.
@@ -3061,6 +3081,72 @@ class BookingService:
             # list still needs to know this one is gone.
             await ws_manager.broadcast(f"user:{outgoing_captain_id}", {"type": "changed", "channel": f"user:{outgoing_captain_id}", "booking_id": booking_id})
         return serialize_doc(updated)
+
+    async def self_assign(self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """A manager assigning a booking to THEMSELVES — for delivering it
+        personally when needed (short-staffed, a captain fell through,
+        urgent). Deliberately bypasses every captain-specific check (role,
+        active status, wallet eligibility, KYC, schedule-conflict
+        detection, same-center-as-captain) — none of that machinery is
+        about the MANAGER, who isn't paid through the captain wallet at
+        all. manager_mark_done already unconditionally zeroes
+        captain_earning/captain_id when a manager closes a job out, exactly
+        because it was written to not care whether a captain was ever
+        really involved — self-assigning into that same field is safe for
+        the identical reason. A visit is claimed as a whole; a car already
+        past ASSIGNED (a captain is actually on the way or working) is left
+        alone rather than yanked out from under them."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        cars = await self._visit_cars(booking)
+        policy = await self.policy_service.get_policy()
+        claimed: list[dict] = []
+        for car in cars:
+            if car["status"] not in {BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value, BookingStatus.ASSIGNED.value}:
+                continue
+            _ensure_transition_allowed(car["status"], BookingStatus.ASSIGNED.value)
+            _ensure_schedulable(car, policy)
+            car_id = str(car["_id"])
+            outgoing = car.get("captain_id")
+            previous = list(car.get("previous_captain_ids", []))
+            if outgoing and outgoing not in previous:
+                previous.append(outgoing)
+            updated = await self.repo.update_by_id(car_id, {
+                "captain_id": actor_id,
+                "status": BookingStatus.ASSIGNED.value,
+                "estimated_start_at": now_ist(),
+                "assigned_at": now_ist(),
+                "previous_captain_ids": previous,
+                "issue_flag": None,
+                "issue_resolved": True,
+            })
+            await self._record_history(car_id, BookingStatus.ASSIGNED, actor_id, "Self-assigned by the manager")
+            await self._broadcast_booking_changed(updated)
+            if outgoing and outgoing != actor_id:
+                await self.notifications.notify(
+                    outgoing, "Booking reassigned",
+                    f"{car['booking_number']} has been reassigned — the manager is delivering it personally.",
+                    NotificationType.BOOKING, car_id, send_whatsapp=False,
+                )
+                await ws_manager.broadcast(f"user:{outgoing}", {"type": "changed", "channel": f"user:{outgoing}", "booking_id": car_id})
+            claimed.append(updated)
+        if not claimed:
+            raise BadRequestException("This booking can't be self-assigned in its current state — a captain may already be on the way.")
+
+        # Same customer-facing "captain assigned" WhatsApp assign_captain
+        # sends — a customer must never learn who's coming only when the
+        # job is already done. The manager's own name fills the captain slot.
+        manager = await self.user_repo.find_by_id(actor_id)
+        wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
+        await self.notifications.notify(
+            booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
+            NotificationType.BOOKING, booking_id,
+            wa_event="captain_assigned",
+            wa_params=[(manager or {}).get("full_name", "Your captain"), wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
+        )
+        return {"claimed": len(claimed), "booking_numbers": [c.get("booking_number") for c in claimed]}
 
     async def captain_cancel(self, booking_id: str, payload: CaptainCancelRequest, captain_id: str) -> dict:
         booking = await self.repo.find_by_id(booking_id)

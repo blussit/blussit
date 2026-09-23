@@ -306,6 +306,109 @@ async def test_mark_done_releases_the_captain_pays_nothing_and_sends_one_message
         await bs.manager_mark_done(booking["id"], rig["manager_id"], "manager", rig["center_id"], send_whatsapp=True)
 
 
+# ------------------------------------------------------------- self-assign
+#
+# Founder: "add a button to self assign so manager can also deliver
+# bookings when needed" — a manager claiming a booking for THEMSELVES,
+# bypassing the captain-specific machinery (wallet, KYC, schedule conflict)
+# entirely, since manager_mark_done already unconditionally zeroes
+# captain_earning/captain_id regardless of who (if anyone) was assigned.
+
+
+@pytest.mark.asyncio
+async def test_manager_can_self_assign_a_pending_booking(rig, cleanup):
+    db = rig["db"]
+    phone = "9666600020"
+    booking = (await _create_open_booking(rig, cleanup, phone))["bookings"][0]
+    bs = BookingService(db)
+    before = len(await _outbox(db, phone))
+    out = await bs.self_assign(booking["id"], rig["manager_id"], "manager", rig["center_id"])
+    assert out["claimed"] == 1
+
+    updated = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert updated["status"] == "assigned" and updated["captain_id"] == rig["manager_id"]
+
+    # The customer is told, exactly like a real captain assignment — never
+    # left to find out only when the job is already done.
+    outbox_after = await _outbox(db, phone)
+    assert len(outbox_after) == before + 1
+    assert "Captain assigned" in outbox_after[-1]["message"]
+
+    # And they can then close it out themselves, exactly like any other job.
+    done = await bs.manager_mark_done(booking["id"], rig["manager_id"], "manager", rig["center_id"], send_whatsapp=False)
+    assert done["completed"] == 1
+    closed = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert closed["status"] == "completed" and closed["captain_id"] is None
+    assert closed["captain_earning"] == 0 and closed["wallet_settled"] is True
+
+
+@pytest.mark.asyncio
+async def test_self_assign_takes_over_from_a_real_captain_and_releases_them(rig, cleanup):
+    db = rig["db"]
+    booking = (await _create_open_booking(rig, cleanup, "9666600021"))["bookings"][0]
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("captain_wallets", {"captain_id": captain_id}))
+    cleanup.append(("notifications", {"user_id": captain_id}))
+    bs = BookingService(db)
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=captain_id), rig["manager_id"], "manager", rig["center_id"])
+    wallet_before = await db.captain_wallets.find_one({"captain_id": captain_id})
+
+    out = await bs.self_assign(booking["id"], rig["manager_id"], "manager", rig["center_id"])
+    assert out["claimed"] == 1
+
+    updated = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert updated["captain_id"] == rig["manager_id"]
+    assert captain_id in updated["previous_captain_ids"]
+    # The displaced captain is told — but never touched financially just
+    # for losing a booking they hadn't started yet.
+    assert await db.notifications.count_documents({"user_id": captain_id, "title": "Booking reassigned"}) == 1
+    assert (await db.captain_wallets.find_one({"captain_id": captain_id}))["balance"] == wallet_before["balance"]
+
+
+@pytest.mark.asyncio
+async def test_self_assign_refuses_once_a_captain_is_already_on_the_way(rig, cleanup):
+    db = rig["db"]
+    booking = (await _create_open_booking(rig, cleanup, "9666600022"))["bookings"][0]
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("captain_wallets", {"captain_id": captain_id}))
+    bs = BookingService(db)
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=captain_id), rig["manager_id"], "manager", rig["center_id"])
+    await db.bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"status": "captain_on_the_way"}})
+
+    with pytest.raises(BadRequestException, match="on the way"):
+        await bs.self_assign(booking["id"], rig["manager_id"], "manager", rig["center_id"])
+    untouched = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert untouched["captain_id"] == captain_id and untouched["status"] == "captain_on_the_way"
+
+
+@pytest.mark.asyncio
+async def test_self_assign_claims_the_whole_visit(rig, cleanup):
+    db = rig["db"]
+    visit = await _create_open_booking(rig, cleanup, "9666600023", quantity=2)
+    ids = [b["id"] for b in visit["bookings"]]
+    bs = BookingService(db)
+    out = await bs.self_assign(ids[0], rig["manager_id"], "manager", rig["center_id"])
+    assert out["claimed"] == 2
+    for i in ids:
+        car = await db.bookings.find_one({"_id": ObjectId(i)})
+        assert car["status"] == "assigned" and car["captain_id"] == rig["manager_id"]
+
+
+@pytest.mark.asyncio
+async def test_self_assign_is_manager_or_admin_only_and_center_scoped(rig, cleanup):
+    from app.core.exceptions import ForbiddenException
+
+    db = rig["db"]
+    other_center = await make_service_center(db, pincode="452067")
+    cleanup.append(("service_centers", {"_id": ObjectId(other_center)}))
+    booking = (await _create_open_booking(rig, cleanup, "9666600024"))["bookings"][0]
+    bs = BookingService(db)
+    with pytest.raises(ForbiddenException):
+        await bs.self_assign(booking["id"], "some-other-manager-id", "manager", other_center)
+
+
 @pytest.mark.asyncio
 async def test_mark_done_with_the_switch_off_is_silent_on_whatsapp(rig, cleanup):
     db = rig["db"]

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Star } from "lucide-react";
+import { ChevronLeft, ChevronRight, ClipboardEdit, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { analyticsApi } from "../../api/admin";
 import { reviewApi } from "../../api/engagement";
-import { Badge, Card, DataTable, Select, StatusBadge } from "../../components/ui";
+import { Badge, Button, Card, DataTable, Select, StatusBadge } from "../../components/ui";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import BookingQueuePage from "../manager/BookingQueuePage";
 import { useBookingFilters } from "../../lib/useBookingFilters";
 import { format, formatSlot } from "../../lib/date";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
@@ -87,24 +88,53 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: "su
 function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => void }) {
   const [status, setStatus] = useState("");
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  // Read-only browse (reviews, ratings, every status at a glance) is the
+  // default; "Manage" swaps in the SAME queue a manager works from —
+  // reassign/self-assign a captain, mark done, cancel, resolve an issue —
+  // for whichever center was picked, since an admin has no center of
+  // their own for that page to default to.
+  const [manageMode, setManageMode] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-center-bookings", centerId, status],
     queryFn: () => bookingApi.forCenter(centerId, { page: 1, page_size: 100, status: status || undefined }),
+    enabled: !manageMode,
   });
 
-  const { data: reviews } = useQuery({ queryKey: ["admin-center-bookings-reviews", centerId], queryFn: () => reviewApi.forCenter(centerId, { page: 1, page_size: 100 }) });
+  const { data: reviews } = useQuery({
+    queryKey: ["admin-center-bookings-reviews", centerId],
+    queryFn: () => reviewApi.forCenter(centerId, { page: 1, page_size: 100 }),
+    enabled: !manageMode,
+  });
   const reviewByBooking = new Map((reviews?.data || []).map((r) => [r.booking_id, r]));
 
   const { filtered, search, setSearch, sortOrder, setSortOrder, dateFrom, setDateFrom, dateTo, setDateTo } = useBookingFilters(data?.data || []);
 
+  if (manageMode) {
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button onClick={() => setManageMode(false)} className="flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+            <ChevronLeft className="h-4 w-4" /> Back to browse
+          </button>
+        </div>
+        <BookingQueuePage centerIdOverride={centerId} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <div>
-        <button onClick={onBack} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-          <ChevronLeft className="h-4 w-4" /> All service centers
-        </button>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Bookings</h1>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <button onClick={onBack} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+            <ChevronLeft className="h-4 w-4" /> All service centers
+          </button>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Bookings</h1>
+        </div>
+        <Button variant="outline" onClick={() => setManageMode(true)}>
+          <ClipboardEdit className="h-4 w-4" /> Manage this center's queue
+        </Button>
       </div>
 
       <div className="space-y-3">

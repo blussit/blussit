@@ -50,7 +50,7 @@ export const adminComboOfferApi = {
 };
 
 export const adminUserApi = {
-  list: (params?: { role?: string; page?: number; page_size?: number; search?: string }) =>
+  list: (params?: { role?: string; page?: number; page_size?: number; search?: string; period?: string; start?: string; end?: string }) =>
     apiClient.get<ApiPaginated<User>>("/users", { params }).then((r) => r.data),
   get: (id: string) => apiClient.get<ApiSuccess<User>>(`/users/${id}`).then((r) => r.data.data),
   update: (id: string, payload: Partial<User>) => apiClient.put<ApiSuccess<User>>(`/users/${id}`, payload).then((r) => r.data.data),

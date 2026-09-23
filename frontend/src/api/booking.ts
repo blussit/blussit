@@ -213,8 +213,10 @@ export const bookingApi = {
       >(`/bookings/center/${serviceCenterId}/subscribers`)
       .then((r) => r.data.data),
 
-  all: (params?: { status?: string; service_center_id?: string; page?: number; page_size?: number }) =>
-    apiClient.get<ApiPaginated<Booking>>("/bookings", { params }).then((r) => r.data),
+  all: (params?: {
+    status?: string; service_center_id?: string; page?: number; page_size?: number;
+    period?: string; start?: string; end?: string; date_field?: "created" | "completed";
+  }) => apiClient.get<ApiPaginated<Booking>>("/bookings", { params }).then((r) => r.data),
 
   get: (id: string) => apiClient.get<ApiSuccess<Booking>>(`/bookings/${id}`).then((r) => r.data.data),
 
@@ -223,6 +225,10 @@ export const bookingApi = {
 
   reassignCaptain: (id: string, captainId: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/reassign-captain`, { captain_id: captainId }).then((r) => r.data.data),
+
+  /** The manager delivering this booking personally — see BookingService.self_assign. */
+  selfAssign: (id: string) =>
+    apiClient.post<ApiSuccess<{ claimed: number; booking_numbers: string[] }>>(`/bookings/${id}/self-assign`).then((r) => r.data.data),
 
   /** Every vehicle on one visit, enriched like a single booking. */
   getGroup: (groupId: string) =>

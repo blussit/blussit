@@ -1208,3 +1208,188 @@ async def test_manager_unticking_use_plan_on_a_logged_job_also_charges_full_and_
 
     untouched = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
     assert untouched["remaining_service_count"] == 1 and untouched["status"] == "active"
+
+
+# --------------------------------------- pass only ever covers its own combo
+#
+# Founder: "the car type and service is matching with the plan user
+# purchased then only manager or user can apply that plan ... otherwise can
+# not" — proved at the actual booking-creation entry point (not just the
+# lower-level plan_consumption unit tests in test_monthly_pass.py /
+# test_subscription_vehicle_type.py, which cover the vehicle_id-named and
+# legacy tier-only pass shapes — a manager-sold plan is always the
+# vehicle_type+service_id "pass" shape). A mismatched car type or service
+# must never auto-apply the pass, silently or otherwise — full price, pass
+# left completely untouched, for BOTH manager entry points.
+
+
+async def test_a_pass_never_applies_to_the_wrong_vehicle_type_or_service(rig, cleanup):
+    from app.schemas.booking_schema import QuickAddress, QuickBookingLine, QuickBookingRequest
+    from app.services.booking_service import BookingService
+    from tests.factories import get_suv_type_id
+
+    suv = await get_suv_type_id(rig["db"])
+    other_service = await rig["db"].services.find_one({"_id": {"$ne": ObjectId(rig["star"])}, "is_addon": {"$ne": True}, "is_deleted": {"$ne": True}})
+    assert other_service, "seed() should have more than one main service"
+
+    phone = "9333300033"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    # Sold for: hatchback + star-wash, exactly.
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+
+    bs = BookingService(rig["db"])
+
+    # Wrong VEHICLE TYPE, same service — must charge full price.
+    wrong_type = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="3 Mismatch Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=suv, quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=(now_ist() + timedelta(days=1)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    cleanup.append(("addresses", {"line1": "3 Mismatch Lane, Indore"}))
+    b1 = wrong_type["bookings"][0]
+    assert b1["total_amount"] > 0 and b1["payment_method"] != "subscription" and not b1.get("subscription_id")
+
+    # Wrong SERVICE, same (correct) vehicle type — must also charge full price.
+    wrong_service = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="3 Mismatch Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[str(other_service["_id"])])],
+            scheduled_date=(now_ist() + timedelta(days=2)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    b2 = wrong_service["bookings"][0]
+    assert b2["total_amount"] > 0 and b2["payment_method"] != "subscription" and not b2.get("subscription_id")
+
+    # The pass is still fully intact — neither mismatched attempt spent it.
+    untouched = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert untouched["remaining_service_count"] == 1 and untouched["status"] == "active"
+
+    # And the RIGHT combo still works, proving this isn't just a broken match.
+    correct = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="3 Mismatch Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=(now_ist() + timedelta(days=3)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    b3 = correct["bookings"][0]
+    assert b3["total_amount"] == 0 and b3["payment_method"] == "subscription" and b3["subscription_id"] == sub_id
+
+
+# --------------------------------- a pass can't retroactively cover the past
+#
+# Founder: "user purchased or assigned plan on today's date and manager can
+# log a job for him with that plan in past that ... make sure in future do
+# not do this" — a plan bought/granted TODAY must never cover a job the
+# manager logs as having happened BEFORE that moment. Caught it working
+# (wrongly) by hand; this is the fix and its proof.
+
+
+async def test_a_pass_cannot_cover_a_logged_job_from_before_it_was_granted(rig, cleanup):
+    from app.schemas.booking_schema import ManagerLogBookingRequest, QuickBookingLine
+    from app.services.booking_service import BookingService
+
+    phone = "9333300034"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+
+    bs = BookingService(rig["db"])
+    # Logged as having happened YESTERDAY — before the plan (granted just
+    # now, this second) ever existed.
+    yesterday = (now_ist() - timedelta(days=1)).strftime("%Y-%m-%d")
+    logged = await bs.create_manager_logged_visit(
+        ManagerLogBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=yesterday, service_time="10:00",
+            address_line="4 Backdated Lane, Indore", send_whatsapp=False,
+        ),
+        manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
+    )
+    booking = logged["bookings"][0]
+    assert booking["total_amount"] > 0
+    assert booking["payment_method"] != "subscription" and not booking.get("subscription_id")
+
+    untouched = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert untouched["remaining_service_count"] == 1 and untouched["status"] == "active"
+
+    # A job logged for right now (on/after the plan's own start) still
+    # works normally — this isn't broken for the ordinary case.
+    today_logged = await bs.create_manager_logged_visit(
+        ManagerLogBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="10:00",
+            address_line="4 Backdated Lane, Indore", send_whatsapp=False,
+        ),
+        manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
+    )
+    b2 = today_logged["bookings"][0]
+    assert b2["total_amount"] == 0 and b2["payment_method"] == "subscription" and b2["subscription_id"] == sub_id
+
+
+# ------------------------------------------------------------- usage history
+
+
+async def test_usage_history_shows_last_used_remaining_and_every_booking(rig, cleanup):
+    """Founder: manager 'can click on that plan and check last when the
+    service was claimed, how many remaining'."""
+    from app.schemas.booking_schema import QuickAddress, QuickBookingLine, QuickBookingRequest
+    from app.services.booking_service import BookingService
+
+    phone = "9333300035"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    two_visit_plan_id = await make_subscription_plan(
+        rig["db"], vehicle_types=[rig["hatchback"]], included_service_ids=[rig["star"]], total_service_count=2,
+    )
+    cleanup.append(("subscription_plans", {"_id": ObjectId(two_visit_plan_id)}))
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, plan_id=two_visit_plan_id, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+
+    empty = await UserSubscriptionService(rig["db"]).usage_history(sub_id)
+    assert empty["remaining_service_count"] == 2 and empty["last_used_at"] is None and empty["bookings"] == []
+
+    bs = BookingService(rig["db"])
+    await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="5 Usage Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=(now_ist() + timedelta(days=1)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    cleanup.append(("addresses", {"line1": "5 Usage Lane, Indore"}))
+
+    after = await UserSubscriptionService(rig["db"]).usage_history(sub_id)
+    assert after["remaining_service_count"] == 1
+    assert len(after["bookings"]) == 1
+    assert after["bookings"][0]["total_amount"] == 0
+    # Not completed yet (a future-dated booking) — nothing counts as "last used".
+    assert after["last_used_at"] is None

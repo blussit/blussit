@@ -106,9 +106,13 @@ function WhatHappened({ booking }: { booking: Booking }) {
   return null;
 }
 
-export default function BookingQueuePage() {
+export default function BookingQueuePage({ centerIdOverride }: { centerIdOverride?: string } = {}) {
   const { user } = useAuth();
-  const centerId = user?.service_center_id || "";
+  // Admin, managing one center's queue from AdminBookingsPage — an admin
+  // has no service_center_id of their own (they oversee every center), so
+  // the picker there supplies which one explicitly. A manager's own route
+  // never passes this and keeps using their own center, unchanged.
+  const centerId = centerIdOverride ?? (user?.service_center_id || "");
   const queryClient = useQueryClient();
 
   const [view, setView] = useState<View>("attention");
@@ -263,6 +267,21 @@ export default function BookingQueuePage() {
       setAssigningBooking(null);
       setCaptainId("");
       setError("");
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
+  // "I'll deliver this myself" — no captain wallet/KYC involved at all
+  // (see BookingService.self_assign); once claimed, closing it out is the
+  // same "Mark done" every other booking uses.
+  const selfAssignMutation = useMutation({
+    mutationFn: () => bookingApi.selfAssign(assigningBooking!.id),
+    onSuccess: () => {
+      invalidate();
+      setAssigningBooking(null);
+      setCaptainId("");
+      setError("");
+      pushToast({ tone: "success", title: "Assigned to you" });
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -757,6 +776,16 @@ export default function BookingQueuePage() {
 
       <Modal open={!!assigningBooking} onClose={() => setAssigningBooking(null)} title={isReassign ? "Reassign captain" : "Assign captain"}>
         <div className="space-y-4">
+          {assigningBooking && assigningBooking.captain_id !== user?.id && (
+            <Button
+              variant="outline"
+              className="w-full"
+              isLoading={selfAssignMutation.isPending}
+              onClick={() => selfAssignMutation.mutate()}
+            >
+              Deliver this myself
+            </Button>
+          )}
           {assigningBooking && (
             <CaptainPicker
               bookingId={assigningBooking.id}

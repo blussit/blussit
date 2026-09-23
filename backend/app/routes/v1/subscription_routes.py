@@ -113,6 +113,13 @@ async def center_subscription_overview(
     return await UserSubscriptionController(db).center_overview(current_user, service_center_id)
 
 
+@subscription_router.get("/{subscription_id}/usage", dependencies=[Depends(require_manager_or_admin)])
+async def subscription_usage_history(subscription_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """One plan's spend history — when it was last used, how many are
+    left, and the full list of bookings that drew on it."""
+    return await UserSubscriptionController(db).usage_history(subscription_id)
+
+
 @subscription_router.post("", dependencies=[Depends(require_customer)])
 async def subscribe(payload: SubscribeRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Founder rule: subscription purchases are ONLINE-PAYMENT ONLY. This

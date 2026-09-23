@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { Badge, DataTable, Input, Panel, StatCard, type Column } from "../../components/ui";
+import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
 
 type PlanFilter = "all" | "active" | "expired";
@@ -17,6 +19,8 @@ export default function AdminPurchasedPlansPage() {
   const [filter, setFilter] = useState<PlanFilter>("all");
   const [planFilter, setPlanFilter] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [detailCustomerId, setDetailCustomerId] = useState<string | null>(null);
+  const [usageSubscriptionId, setUsageSubscriptionId] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-subscriptions-overview"],
@@ -45,16 +49,46 @@ export default function AdminPurchasedPlansPage() {
       header: "Customer",
       accessor: (r) => (
         <div>
-          <p className="font-medium text-black">{r.customer_name}</p>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDetailCustomerId(r.customer_id);
+            }}
+            className="font-medium text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+          >
+            {r.customer_name}
+          </button>
           {r.customer_phone && <p className="text-xs text-gray-400">{r.customer_phone}</p>}
         </div>
       ),
     },
-    { header: "Plan", accessor: (r) => r.plan_name },
+    {
+      header: "Plan",
+      accessor: (r) => (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setUsageSubscriptionId(r.subscription_id);
+          }}
+          className="text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+        >
+          {r.plan_name}
+        </button>
+      ),
+    },
     {
       header: "Status",
       accessor: (r) => (
-        <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{r.status || "—"}</Badge>
+        <div>
+          <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{r.status || "—"}</Badge>
+          {r.total_service_count != null && (
+            <p className="mt-1 text-xs text-gray-400">
+              {r.remaining_service_count}/{r.total_service_count} washes left
+            </p>
+          )}
+        </div>
       ),
     },
     {
@@ -138,6 +172,9 @@ export default function AdminPurchasedPlansPage() {
           <DataTable columns={columns} data={rows} isLoading={isLoading} emptyTitle="No plans match" />
         </div>
       </Panel>
+
+      <CustomerDetailDrawer customerId={detailCustomerId} onClose={() => setDetailCustomerId(null)} />
+      <PlanUsageModal subscriptionId={usageSubscriptionId} onClose={() => setUsageSubscriptionId(null)} />
     </div>
   );
 }

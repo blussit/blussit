@@ -19,7 +19,7 @@ from app.schemas.subscription_schema import (
 )
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.text import slugify
-from app.utils.timezone import from_stored, now_ist
+from app.utils.timezone import from_stored, now_ist, to_ist
 
 _CYCLE_DAYS = {
     BillingCycle.MONTHLY.value: 30,
@@ -384,7 +384,40 @@ class UserSubscriptionService:
             return None
         return await self.plan_repo.find_by_id(sub["plan_id"])
 
-    async def plan_consumption(self, subscription_id: str, vehicle_id: str | None, services: list[dict], customer_id: str, vehicle_type: str | None = None) -> dict:
+    async def usage_history(self, subscription_id: str) -> dict:
+        """A manager/admin clicking one plan: every booking that actually
+        SPENT a visit off it, most recent first — "when was it last used,
+        how many are left" made concrete instead of just a bare count."""
+        sub = await self.repo.find_by_id(subscription_id)
+        if not sub:
+            raise NotFoundException("Subscription not found")
+        bookings = await self.repo.db.bookings.find(
+            {"subscription_id": subscription_id, "is_deleted": {"$ne": True}}
+        ).sort("scheduled_date", -1).to_list(length=200)
+        rows = [
+            {
+                "booking_id": str(b["_id"]),
+                "booking_number": b.get("booking_number"),
+                "status": b.get("status"),
+                "scheduled_date": b.get("scheduled_date"),
+                "scheduled_slot": b.get("scheduled_slot"),
+                "total_amount": b.get("total_amount"),
+            }
+            for b in bookings
+        ]
+        last_used = next((r["scheduled_date"] for r in rows if r["status"] == "completed"), None)
+        return {
+            "subscription_id": subscription_id,
+            "remaining_service_count": sub.get("remaining_service_count"),
+            "total_service_count": sub.get("total_service_count"),
+            "last_used_at": last_used.isoformat() if last_used else None,
+            "bookings": serialize_list(rows),
+        }
+
+    async def plan_consumption(
+        self, subscription_id: str, vehicle_id: str | None, services: list[dict], customer_id: str,
+        vehicle_type: str | None = None, as_of: datetime | None = None,
+    ) -> dict:
         """Validates the subscription can actually cover this booking's
         services and computes exactly what WOULD be deducted, without
         writing anything yet. Falls back to the flat counter for older
@@ -400,8 +433,28 @@ class UserSubscriptionService:
         vehicle_id — the subscription itself no longer names one vehicle
         (see UserSubscriptionModel.vehicle_id's docstring). Vehicle
         ownership is already verified by create_booking before this is
-        called, so it isn't re-checked here."""
+        called, so it isn't re-checked here.
+
+        `as_of` — ONLY set for a manager logging a job that already
+        happened (create_manager_logged_visit passes the real, possibly
+        backdated, service time) — a pass can't retroactively cover a wash
+        from before it was even bought. A forward-looking booking never
+        passes this."""
         sub = await self._get_active_subscription(subscription_id)
+        if as_of is not None:
+            start = sub.get("start_date")
+            # Calendar-DATE comparison (IST), not exact-instant — service_at
+            # is a manager-entered wall-clock time with only minute
+            # precision, while start_date carries full second/microsecond
+            # precision from the moment it was granted. Comparing exact
+            # instants would wrongly refuse a plan sold and immediately used
+            # inside the same clock minute; the founder's actual concern
+            # ("bought TODAY, logged a job from before that") is calendar
+            # days, not seconds.
+            if start is not None and from_stored(start).date() > to_ist(as_of).date():
+                raise BadRequestException(
+                    f"This pass wasn't active yet on that date — it started on {from_stored(start).strftime('%d %b %Y')}."
+                )
         # OWNERSHIP — the single most important line in this method. The
         # subscription_id arrives from the client; without this check any
         # customer could pass someone else's id, get their booking waived,
@@ -1002,6 +1055,17 @@ class UserSubscriptionService:
                     expiring_soon += 1
             elif status == SubscriptionStatus.EXPIRED.value:
                 expired += 1
+            # What the customer actually PAID — never just the plan's list
+            # price. A manager-sold plan almost always differs from
+            # purchased_price (a discount, a coupon), and showing the list
+            # price here instead is exactly the kind of gap that makes cash
+            # collected not match what the screen says was charged. Same
+            # fallback as admin_overview: a genuine self-serve purchase
+            # never stamps amount_paid, so purchased_price IS what they
+            # paid in that one case.
+            amount_paid = s.get("amount_paid")
+            if amount_paid is None and not s.get("service_center_id"):
+                amount_paid = s.get("purchased_price")
             rows.append({
                 "subscription_id": s["id"],
                 "customer_id": s["customer_id"],
@@ -1013,6 +1077,10 @@ class UserSubscriptionService:
                 "vehicle_type": s.get("vehicle_type"),
                 "vehicle_type_name": type_names.get(s.get("vehicle_type") or ""),
                 "purchased_price": s.get("purchased_price"),
+                "amount_paid": amount_paid,
+                "discount_amount": s.get("discount_amount"),
+                "coupon_code": s.get("coupon_code"),
+                "payment_method": s.get("payment_method"),
                 "remaining_service_count": s.get("remaining_service_count"),
                 "total_service_count": s.get("total_service_count"),
                 "start_date": s.get("start_date"),
@@ -1096,6 +1164,8 @@ class UserSubscriptionService:
                 "auto_renew": s.get("auto_renew", False),
                 "service_center_id": s.get("service_center_id"),
                 "service_center_name": centers.get(s.get("service_center_id") or ""),
+                "remaining_service_count": s.get("remaining_service_count"),
+                "total_service_count": s.get("total_service_count"),
                 "start_date": s.get("start_date"),
                 "end_date": s.get("end_date"),
             })

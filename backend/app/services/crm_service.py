@@ -12,6 +12,7 @@ from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.user_schema import UserPublic
+from app.services.subscription_service import _with_effective_statuses
 from app.utils.serializers import serialize_list
 
 
@@ -59,13 +60,44 @@ class CRMService:
         if not user or user.get("role") != UserRole.CUSTOMER.value:
             raise NotFoundException("Customer not found")
 
-        bookings, _ = await self.booking_repo.list_for_customer(customer_id, None, 1, 50)
-        subscriptions = await self.subscription_repo.list_for_customer(customer_id)
+        # High page_size, not the usual UI-page 20/50 — lifetime_spend,
+        # total_bookings and same_day_repeat_dates below all need the
+        # customer's REAL full history, not a truncated recent slice (this
+        # silently under-counted a loyal repeat customer's lifetime value
+        # before — found while adding those two fields).
+        bookings, _ = await self.booking_repo.list_for_customer(customer_id, None, 1, 2000)
+        # _with_effective_statuses corrects for expiry-by-date even when the
+        # stored `status` hasn't been lazily flipped yet — without it this
+        # view's plan badges read raw `status` and can show a stale "active"
+        # (or, with no `effective_status` key at all, "Unknown") on a plan
+        # that's actually expired.
+        subscriptions = _with_effective_statuses(await self.subscription_repo.list_for_customer(customer_id))
         complaints, _ = await self.complaint_repo.list_for_customer(customer_id, 1, 50)
 
         completed_bookings = [b for b in bookings if b["status"] == "completed"]
         lifetime_spend = sum(b.get("total_amount", 0) for b in completed_bookings)
         last_service_date = max((b["scheduled_date"] for b in completed_bookings), default=None)
+
+        # Plan spend is tracked separately from booking spend (a plan's
+        # amount_paid is charged once, up front — never per-wash), but the
+        # combined figure is what "how much has this customer actually
+        # brought in" really means.
+        lifetime_plan_spend = 0.0
+        for s in subscriptions:
+            paid = s.get("amount_paid")
+            if paid is None and not s.get("service_center_id"):
+                paid = s.get("purchased_price")
+            lifetime_plan_spend += float(paid or 0)
+
+        # Same-CALENDAR-DAY (IST) repeat bookings — a founder-requested flag,
+        # since two bookings from one customer on one day is worth a manual
+        # look (an accidental double-book, or a genuinely busy customer).
+        from collections import Counter
+
+        from app.utils.timezone import from_stored
+
+        day_counts = Counter(from_stored(b["created_at"]).strftime("%Y-%m-%d") for b in bookings if b.get("created_at"))
+        same_day_repeat_dates = sorted(day for day, count in day_counts.items() if count > 1)
 
         center_counts: dict[str, int] = {}
         for b in bookings:
@@ -115,8 +147,11 @@ class CRMService:
             "vehicles": serialize_list(enriched_vehicles),
             "addresses": serialize_list(addresses),
             "lifetime_spend": round(lifetime_spend, 2),
+            "lifetime_plan_spend": round(lifetime_plan_spend, 2),
+            "lifetime_total_spend": round(lifetime_spend + lifetime_plan_spend, 2),
             "last_service_date": last_service_date.isoformat() if last_service_date else None,
             "preferred_service_center_id": preferred_center_id,
             "preferred_service_center_name": centers.get(preferred_center_id or ""),
             "total_bookings": len(bookings),
+            "same_day_repeat_dates": same_day_repeat_dates,
         }

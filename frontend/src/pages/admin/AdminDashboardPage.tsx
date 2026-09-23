@@ -9,14 +9,21 @@
  * everything; every number compares against the previous equal-length
  * period.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
-import { kpiApi } from "../../api/admin";
-import { Card, CardBody, PageLoader, Panel, StatCard } from "../../components/ui";
+import { kpiApi, adminUserApi } from "../../api/admin";
+import { bookingApi } from "../../api/booking";
+import { Card, CardBody, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
 import { DatePicker } from "../../components/ui/DatePicker";
 import { DeltaPill, InfoTip, TargetChip, formatINR } from "../../components/admin/kpi/charts";
 import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, MarketingTab, OperationsTab } from "../../components/admin/kpi/sections";
+import { KpiListModal } from "../../components/admin/kpi/KpiListModal";
+import { KpiBriefModal } from "../../components/admin/kpi/KpiBriefModal";
+import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { format, formatSlot } from "../../lib/date";
+import type { Booking, User } from "../../types";
 
 const PERIODS = [
   { key: "today", label: "Today" },
@@ -37,18 +44,41 @@ const TABS = [
   { key: "areas", label: "Areas" },
 ] as const;
 
+type OverviewBlock = {
+  bookings: number; completed: number; revenue: number; completion_rate: number | null; repeat_customer_rate: number | null;
+  new_customers: number;
+  /** Money paid for subscription plans in the period — separate from booking revenue. */
+  plan_revenue: number;
+  /** revenue + plan_revenue — the one number that's "everything we took in". */
+  combined_revenue: number;
+};
 type OverviewData = {
-  current: { bookings: number; completed: number; revenue: number; completion_rate: number | null; repeat_customer_rate: number | null; new_customers: number };
-  previous: { bookings: number; completed: number; revenue: number; completion_rate: number | null; repeat_customer_rate: number | null; new_customers: number };
+  current: OverviewBlock;
+  previous: OverviewBlock;
   targets: { repeat_rate_pct: number };
   alerts: { severity: string; text: string }[];
 };
+
+type RevenueScope = "combined" | "bookings" | "plans";
+const REVENUE_SCOPES: { key: RevenueScope; label: string }[] = [
+  { key: "combined", label: "Bookings + Plans" },
+  { key: "bookings", label: "Bookings only" },
+  { key: "plans", label: "Plans only" },
+];
 
 export default function AdminDashboardPage() {
   const [periodKey, setPeriodKey] = useState<string>("today");
   const [custom, setCustom] = useState<{ start: string; end: string }>({ start: "", end: "" });
   const [showCustom, setShowCustom] = useState(false);
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("business");
+  const [revenueScope, setRevenueScope] = useState<RevenueScope>("combined");
+  // Which primary tile's drill-down is open — a real list for a count that
+  // maps to actual records, a brief popup (definition + numbers already on
+  // screen) for a ratio. Only one of these two is ever non-null at once.
+  const [listDrill, setListDrill] = useState<"bookings-created" | "bookings-completed" | "new-customers" | null>(null);
+  const [briefDrill, setBriefDrill] = useState<{ title: string; value: ReactNode; tip: string; breakdown?: { label: string; value: ReactNode }[] } | null>(null);
+  const [openBooking, setOpenBooking] = useState<Booking | null>(null);
+  const [openCustomerId, setOpenCustomerId] = useState<string | null>(null);
 
   const params = useMemo(
     () => (periodKey === "custom" && custom.start && custom.end ? { start: custom.start, end: custom.end } : { period: periodKey === "custom" ? "30d" : periodKey }),
@@ -67,21 +97,71 @@ export default function AdminDashboardPage() {
   const prev = data?.previous;
   const alerts = data?.alerts || [];
 
+  const revenueFor = (block?: OverviewBlock) =>
+    !block ? 0 : revenueScope === "bookings" ? block.revenue : revenueScope === "plans" ? block.plan_revenue : block.combined_revenue;
+  const revenueLabel =
+    (periodKey === "today" ? "Today's revenue" : "Revenue") +
+    (revenueScope === "bookings" ? " — bookings" : revenueScope === "plans" ? " — plans" : "");
+  const revenueTip =
+    revenueScope === "bookings"
+      ? "Completed-wash revenue in the period"
+      : revenueScope === "plans"
+        ? "Money paid for subscription plans in the period"
+        : "Completed-wash revenue + plan/subscription revenue in the period — everything taken in";
+
   const primary = cur && prev ? [
-    { label: periodKey === "today" ? "Today's bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag, delta: <DeltaPill current={cur.bookings} previous={prev.bookings} />, tip: "Bookings created in the selected period" },
-    { label: "Completed washes", value: String(cur.completed), icon: CheckCircle2, delta: <DeltaPill current={cur.completed} previous={prev.completed} />, tip: "Washes finished in the selected period" },
-    { label: periodKey === "today" ? "Today's revenue" : "Revenue", value: formatINR(cur.revenue), icon: IndianRupee, delta: <DeltaPill current={cur.revenue} previous={prev.revenue} />, tip: "Completed-wash revenue in the period" },
-    { label: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent, delta: <DeltaPill current={cur.completion_rate} previous={prev.completion_rate} />, tip: "Completed ÷ all bookings" },
-    { label: "New customers", value: String(cur.new_customers), icon: UserPlus, delta: <DeltaPill current={cur.new_customers} previous={prev.new_customers} />, tip: "Customer accounts created in the period" },
+    {
+      label: periodKey === "today" ? "Today's bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag,
+      delta: <DeltaPill current={cur.bookings} previous={prev.bookings} />, tip: "Bookings created in the selected period",
+      onClick: () => setListDrill("bookings-created"),
+    },
+    {
+      label: "Completed washes", value: String(cur.completed), icon: CheckCircle2,
+      delta: <DeltaPill current={cur.completed} previous={prev.completed} />, tip: "Washes finished in the selected period",
+      onClick: () => setListDrill("bookings-completed"),
+    },
+    {
+      label: revenueLabel, value: formatINR(revenueFor(cur)), icon: IndianRupee,
+      delta: <DeltaPill current={revenueFor(cur)} previous={revenueFor(prev)} />, tip: revenueTip,
+      onClick: () =>
+        revenueScope === "plans"
+          ? setBriefDrill({
+              title: "Plan revenue", value: formatINR(cur.plan_revenue), tip: revenueTip,
+              breakdown: [{ label: "vs previous period", value: formatINR(prev.plan_revenue) }],
+            })
+          : setListDrill("bookings-completed"),
+    },
+    {
+      label: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
+      delta: <DeltaPill current={cur.completion_rate} previous={prev.completion_rate} />, tip: "Completed ÷ all bookings",
+      onClick: () =>
+        setBriefDrill({
+          title: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, tip: "Completed ÷ all bookings in the period",
+          breakdown: [
+            { label: "Bookings created", value: cur.bookings },
+            { label: "Completed", value: cur.completed },
+          ],
+        }),
+    },
+    {
+      label: "New customers", value: String(cur.new_customers), icon: UserPlus,
+      delta: <DeltaPill current={cur.new_customers} previous={prev.new_customers} />, tip: "Customer accounts created in the period",
+      onClick: () => setListDrill("new-customers"),
+    },
     {
       label: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`, icon: Repeat,
       delta: <DeltaPill current={cur.repeat_customer_rate} previous={prev.repeat_customer_rate} />, tip: "Share of this period's customers who had booked before it",
       target: <TargetChip actual={cur.repeat_customer_rate} target={data?.targets?.repeat_rate_pct} unit="%" />,
+      onClick: () =>
+        setBriefDrill({
+          title: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`,
+          tip: "Share of this period's customers who had booked before it started — a rising rate means BLUSSIT is becoming a habit, not a one-time purchase.",
+        }),
     },
   ] : [];
 
   // Revenue leads (it is THE business number); the rest support it.
-  const hero = primary.find((p) => p.label.includes("evenue"));
+  const hero = primary.find((p) => p.label.startsWith(periodKey === "today" ? "Today's revenue" : "Revenue"));
   const rest = primary.filter((p) => p !== hero);
 
   return (
@@ -132,17 +212,33 @@ export default function AdminDashboardPage() {
       {/* PRIMARY — revenue is the headline, the rest are supporting tiles.
           Same console shape as every other panel in the product. */}
       {hero && (
-        <StatCard
-          label={hero.label}
-          labelAfter={<InfoTip text={hero.tip} />}
-          value={hero.value}
-          hint={
-            <span className="flex items-center gap-1.5">
-              {hero.delta} <span>vs {periodNoun}</span>
-            </span>
-          }
-          icon={hero.icon}
-        />
+        <div>
+          <div className="mb-1.5 flex gap-1.5">
+            {REVENUE_SCOPES.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => setRevenueScope(s.key)}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-500 hover:border-black"}`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <StatCard
+            label={hero.label}
+            labelAfter={<InfoTip text={hero.tip} />}
+            value={hero.value}
+            hint={
+              <span className="flex items-center gap-1.5">
+                {hero.delta} <span>vs {periodNoun}</span>
+              </span>
+            }
+            icon={hero.icon}
+            onClick={hero.onClick}
+            linkLabel="Details"
+          />
+        </div>
       )}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         {rest.map((s) => (
@@ -158,6 +254,8 @@ export default function AdminDashboardPage() {
                 {"target" in s ? s.target : null}
               </span>
             }
+            onClick={s.onClick}
+            linkLabel="Details"
           />
         ))}
       </div>
@@ -203,6 +301,54 @@ export default function AdminDashboardPage() {
       {tab === "marketing" && <MarketingTab params={params} />}
       {tab === "operations" && <OperationsTab params={params} />}
       {tab === "areas" && <AreasTab params={params} />}
+
+      <KpiListModal<Booking>
+        open={listDrill === "bookings-created" || listDrill === "bookings-completed"}
+        onClose={() => setListDrill(null)}
+        title={listDrill === "bookings-completed" ? "Completed washes" : "Bookings"}
+        queryKey={["kpi-drill", listDrill, params]}
+        fetchFn={() =>
+          bookingApi.all({
+            ...params, page_size: 100,
+            date_field: listDrill === "bookings-completed" ? "completed" : "created",
+            status: listDrill === "bookings-completed" ? "completed" : undefined,
+          })
+        }
+        getRowKey={(b) => b.id}
+        renderRow={(b) => (
+          <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-black">{b.customer_name || "—"} · {b.booking_number}</p>
+              <p className="text-xs text-gray-500">{format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="font-mono-num text-sm text-black">₹{b.total_amount}</span>
+              <StatusBadge status={b.status} />
+            </div>
+          </button>
+        )}
+      />
+
+      <KpiListModal<User>
+        open={listDrill === "new-customers"}
+        onClose={() => setListDrill(null)}
+        title="New customers"
+        queryKey={["kpi-drill-new-customers", params]}
+        fetchFn={() => adminUserApi.list({ ...params, role: "customer", page_size: 100 })}
+        getRowKey={(u) => u.id}
+        renderRow={(u) => (
+          <button type="button" onClick={() => setOpenCustomerId(u.id)} className="flex w-full items-center justify-between gap-3 text-left">
+            <span className="text-sm font-medium text-black">{u.full_name}</span>
+            <span className="text-xs text-gray-500">{u.phone}</span>
+          </button>
+        )}
+      />
+
+      {briefDrill && (
+        <KpiBriefModal open={!!briefDrill} onClose={() => setBriefDrill(null)} title={briefDrill.title} value={briefDrill.value} tip={briefDrill.tip} breakdown={briefDrill.breakdown} />
+      )}
+      <BookingDetailDrawer booking={openBooking} onClose={() => setOpenBooking(null)} />
+      <CustomerDetailDrawer customerId={openCustomerId} onClose={() => setOpenCustomerId(null)} />
     </div>
   );
 }

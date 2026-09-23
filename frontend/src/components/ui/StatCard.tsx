@@ -21,6 +21,7 @@ export function StatCard({
   hint,
   icon: Icon,
   to,
+  onClick,
   linkLabel = "View all",
   tone = "default",
   className,
@@ -32,8 +33,11 @@ export function StatCard({
   /** One short line of context under the number (e.g. "from 6 washes"). */
   hint?: ReactNode;
   icon?: LucideIcon;
-  /** Drill-down target — makes the whole card clickable. */
+  /** Drill-down target — makes the whole card clickable (a real page). */
   to?: string;
+  /** Drill-down as an in-place action (a modal) instead of navigation —
+   *  ignored when `to` is also given. */
+  onClick?: () => void;
   linkLabel?: string;
   tone?: "default" | "success" | "warning" | "error" | "muted";
   className?: string;
@@ -46,11 +50,12 @@ export function StatCard({
     muted: "text-gray-300",
   }[tone];
 
+  const clickable = !!to || !!onClick;
   const body = (
     <div
       className={cn(
         "group relative flex h-full flex-col rounded-2xl border border-[#F3E5B5] bg-white p-5 transition-colors",
-        to && "hover:border-black",
+        clickable && "hover:border-black",
         className
       )}
     >
@@ -60,7 +65,7 @@ export function StatCard({
           {label}
           {labelAfter}
         </span>
-        {to && (
+        {clickable && (
           <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-black opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100">
             {linkLabel} <ArrowRight className="h-3 w-3" />
           </span>
@@ -71,13 +76,21 @@ export function StatCard({
     </div>
   );
 
-  return to ? (
-    <Link to={to} className="block h-full">
-      {body}
-    </Link>
-  ) : (
-    body
-  );
+  if (to) {
+    return (
+      <Link to={to} className="block h-full">
+        {body}
+      </Link>
+    );
+  }
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} className="block h-full w-full text-left">
+        {body}
+      </button>
+    );
+  }
+  return body;
 }
 
 /**

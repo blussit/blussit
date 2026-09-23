@@ -35,6 +35,7 @@ async def seed() -> None:
                 "role": "admin",
                 "status": "active",
                 "is_deleted": False,
+                "created_at": datetime.now(timezone.utc),
             }
         )
         print(f"Created super admin -> {admin_email} / Admin@12345")
@@ -233,6 +234,7 @@ async def seed() -> None:
                 "status": "active",
                 "service_center_id": center_id,
                 "is_deleted": False,
+                "created_at": datetime.now(timezone.utc),
             }
         )
         await db.service_centers.update_one({"_id": result.inserted_id}, {"$set": {"manager_id": str(manager_result.inserted_id)}})
@@ -249,6 +251,7 @@ async def seed() -> None:
                 "status": "active",
                 "service_center_id": center_id,
                 "is_deleted": False,
+                "created_at": datetime.now(timezone.utc),
             }
         )
         captain_id = str(captain_result.inserted_id)

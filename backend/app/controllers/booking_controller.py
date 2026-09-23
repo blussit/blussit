@@ -199,6 +199,11 @@ class BookingController:
         await self.audit.log_action(current_user.id, current_user.role, "REASSIGN_CAPTAIN", "bookings", booking_id, {"captain_id": payload.captain_id})
         return success(result, "Booking reassigned successfully")
 
+    async def self_assign(self, current_user: CurrentUser, booking_id: str):
+        result = await self.service.self_assign(booking_id, current_user.id, current_user.role, current_user.service_center_id)
+        await self.audit.log_action(current_user.id, current_user.role, "SELF_ASSIGN_BOOKING", "bookings", booking_id, None)
+        return success(result, "Assigned to you")
+
     async def captain_cancel(self, current_user: CurrentUser, booking_id: str, payload: CaptainCancelRequest):
         result = await self.service.captain_cancel(booking_id, payload, current_user.id)
         return success(result, "Booking released back to the queue")

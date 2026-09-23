@@ -204,18 +204,35 @@ export function Funnel({ steps }: { steps: { label: string; value: number }[] })
 /* ------------------------------------------------------------------ */
 /* Small building blocks                                               */
 /* ------------------------------------------------------------------ */
-export function MiniStat({ label, value, tip, children }: { label: string; value: ReactNode; tip?: string; children?: ReactNode }) {
+export function MiniStat({
+  label, value, tip, children, onClick,
+}: { label: string; value: ReactNode; tip?: string; children?: ReactNode; onClick?: () => void }) {
   // Same console language as ui/StatCard (the blueprint tile), one size
   // down: hairline card, sentence-case grey label, big mono number.
-  return (
-    <div className="rounded-xl border border-[#F3E5B5] bg-white p-4">
+  // onClick makes the whole tile a button — every stat on the dashboard is
+  // meant to drill in somewhere, a real list where one exists, a brief
+  // definition + breakdown otherwise (see KpiListModal / KpiBriefModal).
+  const body = (
+    <>
       <p className="flex items-center gap-1 text-xs font-medium text-gray-500">
         {label} {tip && <InfoTip text={tip} />}
       </p>
       <p className="font-mono-num mt-1.5 text-xl font-bold text-black">{value}</p>
       {children}
-    </div>
+    </>
   );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="w-full rounded-xl border border-[#F3E5B5] bg-white p-4 text-left transition-colors hover:border-black hover:bg-[#FFFCF0]"
+      >
+        {body}
+      </button>
+    );
+  }
+  return <div className="rounded-xl border border-[#F3E5B5] bg-white p-4">{body}</div>;
 }
 
 export function SectionCaption({ children }: { children: ReactNode }) {

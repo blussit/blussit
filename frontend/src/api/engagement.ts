@@ -12,7 +12,13 @@ export interface CenterSubscriptionRow {
   status?: string | null;
   vehicle_type?: string | null;
   vehicle_type_name?: string | null;
+  /** The plan's list price — NOT what this customer necessarily paid, see amount_paid. */
   purchased_price?: number | null;
+  /** What was actually charged (after any discount/coupon) — always prefer this for display. */
+  amount_paid?: number | null;
+  discount_amount?: number | null;
+  coupon_code?: string | null;
+  payment_method?: "online" | "cash" | null;
   remaining_service_count?: number | null;
   total_service_count?: number | null;
   start_date?: string | null;
@@ -43,6 +49,8 @@ export interface AdminSubscriptionRow {
   auto_renew: boolean;
   service_center_id?: string | null;
   service_center_name?: string | null;
+  remaining_service_count?: number | null;
+  total_service_count?: number | null;
   start_date?: string | null;
   end_date?: string | null;
 }
@@ -51,6 +59,23 @@ export interface AdminSubscriptionOverview {
   kpis: { total: number; active: number; expired: number; total_revenue: number };
   plan_breakdown: { plan_name: string; count: number }[];
   rows: AdminSubscriptionRow[];
+}
+
+export interface SubscriptionUsageBooking {
+  booking_id: string;
+  booking_number?: string | null;
+  status?: string | null;
+  scheduled_date?: string | null;
+  scheduled_slot?: string | null;
+  total_amount?: number | null;
+}
+
+export interface SubscriptionUsageHistory {
+  subscription_id: string;
+  remaining_service_count?: number | null;
+  total_service_count?: number | null;
+  last_used_at?: string | null;
+  bookings: SubscriptionUsageBooking[];
 }
 
 /** What a monthly pass would cost for one car + one service. Priced by the
@@ -129,6 +154,9 @@ export const subscriptionApi = {
     apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
   /** Admin-only: every plan ever purchased or granted, platform-wide. */
   adminOverview: () => apiClient.get<ApiSuccess<AdminSubscriptionOverview>>("/subscriptions/admin/overview").then((r) => r.data.data),
+  /** One plan's spend history — when it was last used, bookings that drew on it. */
+  usageHistory: (subscriptionId: string) =>
+    apiClient.get<ApiSuccess<SubscriptionUsageHistory>>(`/subscriptions/${subscriptionId}/usage`).then((r) => r.data.data),
   plans: (activeOnly = true) =>
     apiClient.get<ApiSuccess<SubscriptionPlan[]>>("/subscription-plans", { params: { active_only: activeOnly } }).then((r) => r.data.data),
   mySubscriptions: () => apiClient.get<ApiSuccess<UserSubscription[]>>("/subscriptions/my").then((r) => r.data.data),
@@ -209,7 +237,7 @@ export const complaintApi = {
     apiClient.get<ApiPaginated<Complaint>>("/complaints/my", { params }).then((r) => r.data),
   forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Complaint>>(`/complaints/center/${serviceCenterId}`, { params }).then((r) => r.data),
-  all: (params?: { status?: string; page?: number; page_size?: number }) =>
+  all: (params?: { status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string }) =>
     apiClient.get<ApiPaginated<Complaint>>("/complaints", { params }).then((r) => r.data),
   update: (id: string, payload: { status?: string; priority?: string; resolution_note?: string }) =>
     apiClient.put<ApiSuccess<Complaint>>(`/complaints/${id}`, payload).then((r) => r.data.data),

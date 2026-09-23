@@ -3,6 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
 import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
+import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { User, UserRole } from "../../types";
@@ -36,6 +37,9 @@ export default function AdminUsersPage() {
   const [editUser, setEditUser] = useState<User | null>(null);
   const [editForm, setEditForm] = useState({ full_name: "", role: "captain" as UserRole, service_center_id: "" });
   const [editError, setEditError] = useState("");
+  // A customer's name opens their full purchase history (bookings + plans);
+  // get_customer_360 is customer-only, so staff rows don't get this.
+  const [detailCustomerId, setDetailCustomerId] = useState<string | null>(null);
 
   // Search runs on the server (name / phone / email across every page), a
   // beat after the last keystroke so typing never fires a request per letter.
@@ -140,7 +144,24 @@ export default function AdminUsersPage() {
         data={data?.data || []}
         emptyTitle={debounced ? `No users match “${search.trim()}”` : "No users found"}
         columns={[
-          { header: "Name", accessor: (u) => u.full_name },
+          {
+            header: "Name",
+            accessor: (u) =>
+              u.role === "customer" ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDetailCustomerId(u.id);
+                  }}
+                  className="font-medium text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+                >
+                  {u.full_name}
+                </button>
+              ) : (
+                u.full_name
+              ),
+          },
           { header: "Contact", accessor: (u) => u.email || u.phone || "—" },
           { header: "Role", accessor: (u) => <span className="capitalize">{u.role}</span> },
           { header: "Status", accessor: (u) => <StatusBadge status={u.status} /> },
@@ -262,6 +283,8 @@ export default function AdminUsersPage() {
           </Button>
         </form>
       </Modal>
+
+      <CustomerDetailDrawer customerId={detailCustomerId} onClose={() => setDetailCustomerId(null)} />
     </div>
   );
 }

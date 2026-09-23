@@ -1,17 +1,36 @@
 import { apiClient, type ApiSuccess } from "../lib/api-client";
-import type { Address, Complaint, User, UserSubscription, Vehicle } from "../types";
+import type { Address, Booking, Complaint, User, UserSubscription, Vehicle } from "../types";
+
+/** A customer-360 booking row — the same Booking shape, plus the display
+ *  names CRMService.get_customer_360 resolves server-side. */
+export type Customer360Booking = Booking & {
+  vehicle_label?: string | null;
+  service_names?: string[];
+  address_text?: string | null;
+  service_center_name?: string | null;
+};
+
+export type Customer360Subscription = UserSubscription & { plan_name?: string };
+export type Customer360Vehicle = Vehicle & { vehicle_type_name?: string | null };
 
 export interface Customer360 {
   profile: User;
-  bookings: unknown[];
-  subscriptions: UserSubscription[];
+  bookings: Customer360Booking[];
+  subscriptions: Customer360Subscription[];
   complaints: Complaint[];
-  vehicles: Vehicle[];
+  vehicles: Customer360Vehicle[];
   addresses: Address[];
   lifetime_spend: number;
+  /** Total ever paid across all subscriptions/plans — separate from booking spend. */
+  lifetime_plan_spend: number;
+  /** lifetime_spend + lifetime_plan_spend — "how much has this customer actually brought in". */
+  lifetime_total_spend: number;
   last_service_date: string | null;
   preferred_service_center_id: string | null;
+  preferred_service_center_name?: string | null;
   total_bookings: number;
+  /** YYYY-MM-DD (IST) dates this customer created 2+ bookings on. */
+  same_day_repeat_dates: string[];
 }
 
 export const crmApi = {
