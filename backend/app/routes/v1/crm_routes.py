@@ -18,6 +18,14 @@ async def search_customer_by_phone(phone: str, db: AsyncIOMotorDatabase = Depend
     return success(await CRMService(db).find_customer_by_phone(phone))
 
 
+@router.get("/customers/typeahead")
+async def search_customers_typeahead(q: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Live suggestions as a manager types a name or number into a booking
+    or plan-sale form, so an existing customer is picked directly instead
+    of a duplicate account getting created."""
+    return success(await CRMService(db).search_customers(q))
+
+
 @router.get("/customers/{customer_id}")
 async def get_customer_360(customer_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await CRMService(db).get_customer_360(customer_id))

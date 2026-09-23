@@ -16,8 +16,8 @@ class UserController:
         result = await self.service.update_profile(current_user.id, payload)
         return success(result, "Profile updated successfully")
 
-    async def list_users(self, role: str | None, pagination: PaginationParams):
-        items, total = await self.service.list_users(role, pagination.page, pagination.page_size, pagination.search)
+    async def list_users(self, role: str | None, period: str | None, start: str | None, end: str | None, pagination: PaginationParams):
+        items, total = await self.service.list_users(role, pagination.page, pagination.page_size, pagination.search, period, start, end)
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def get_user(self, user_id: str):

@@ -12,6 +12,8 @@ import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { QtyStepper } from "../shared/QtyStepper";
+import { CustomerNamePhoneFields } from "../shared/CustomerNamePhoneFields";
+import { CustomerActivePasses } from "../shared/CustomerActivePasses";
 import { BookingOtpModal } from "./BookingOtpModal";
 import { CoverageLeadInline } from "../public/CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
@@ -114,6 +116,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // ---- step 2 state ------------------------------------------------------
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  // Manager modes only: set when an existing customer is picked from the
+  // typeahead, so their active passes can be shown alongside the form
+  // (booking creation itself already auto-matches a pass server-side).
+  const [pickedCustomerId, setPickedCustomerId] = useState<string | null>(null);
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
   const [mapsUp, setMapsUp] = useState(true);
@@ -1169,18 +1175,38 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
               Booking as <span className="font-semibold text-black">{user.full_name}</span>
               {user.phone ? <span className="text-gray-500"> · {user.phone}</span> : null}
             </div>
+          ) : isManager ? (
+            <div className="space-y-3">
+              <CustomerNamePhoneFields
+                name={name}
+                phone={phone}
+                onChangeName={(v) => {
+                  setName(v);
+                  setPickedCustomerId(null);
+                }}
+                onChangePhone={(v) => {
+                  setPhone(v);
+                  setPickedCustomerId(null);
+                }}
+                onPick={(c) => setPickedCustomerId(c.id)}
+                nameError={fieldErrors.name}
+                phoneError={fieldErrors.phone}
+                phoneInputRef={phoneRef}
+              />
+              {pickedCustomerId && <CustomerActivePasses customerId={pickedCustomerId} />}
+            </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Input label={isManager ? "Customer name" : "Your name"} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
+              <Input label="Your name" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
               <Input
                 ref={phoneRef}
-                label={isManager ? "Customer mobile" : "Mobile number"}
+                label="Mobile number"
                 value={phone}
                 inputMode="numeric"
                 onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
                 error={fieldErrors.phone}
                 placeholder="10-digit mobile"
-                hint={isManager ? undefined : "Your booking updates and service code come here on WhatsApp."}
+                hint="Your booking updates and service code come here on WhatsApp."
               />
             </div>
           )}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, RotateCcw, Trash2, UserX } from "lucide-react";
+import { Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
 import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -28,6 +28,14 @@ export default function AdminUsersPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
+  // Editing an EXISTING account — most often to link/relink a manager's
+  // service center. adminUserApi.update (PUT /users/:id) already existed
+  // and already supported this field; it just had no UI to reach it, which
+  // is how a manager account with no center could exist with no way to fix
+  // it short of a raw API call — a real incident this closes.
+  const [editUser, setEditUser] = useState<User | null>(null);
+  const [editForm, setEditForm] = useState({ full_name: "", role: "captain" as UserRole, service_center_id: "" });
+  const [editError, setEditError] = useState("");
 
   // Search runs on the server (name / phone / email across every page), a
   // beat after the last keystroke so typing never fires a request per letter.
@@ -71,6 +79,21 @@ export default function AdminUsersPage() {
     mutationFn: (id: string) => adminUserApi.remove(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
   });
+
+  const updateMutation = useMutation({
+    mutationFn: () => adminUserApi.update(editUser!.id, { ...editForm, service_center_id: editForm.service_center_id || null }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      setEditUser(null);
+    },
+    onError: (err) => setEditError(getErrorMessage(err)),
+  });
+
+  const openEdit = (u: User) => {
+    setEditError("");
+    setEditForm({ full_name: u.full_name, role: u.role, service_center_id: u.service_center_id || "" });
+    setEditUser(u);
+  };
 
   return (
     <div className="space-y-6">
@@ -125,6 +148,9 @@ export default function AdminUsersPage() {
             header: "",
             accessor: (u) => (
               <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => openEdit(u)}>
+                  <Pencil className="h-3.5 w-3.5" /> Edit
+                </Button>
                 {u.status !== "suspended" ? (
                   <Button size="sm" variant="outline" isLoading={suspendMutation.isPending} onClick={() => suspendMutation.mutate(u.id)}>
                     <UserX className="h-3.5 w-3.5" /> Suspend
@@ -190,6 +216,49 @@ export default function AdminUsersPage() {
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createStaffMutation.isPending}>
             Create account
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal open={!!editUser} onClose={() => setEditUser(null)} title={`Edit ${editUser?.full_name || "user"}`}>
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setEditError("");
+            updateMutation.mutate();
+          }}
+        >
+          <Input label="Full name" value={editForm.full_name} onChange={(e) => setEditForm({ ...editForm, full_name: e.target.value })} required />
+          {editUser && editUser.role !== "customer" && (
+            <>
+              <Select label="Role" value={editForm.role} onChange={(e) => setEditForm({ ...editForm, role: e.target.value as UserRole })}>
+                <option value="captain">Captain</option>
+                <option value="manager">Manager</option>
+                <option value="admin">Admin</option>
+              </Select>
+              <Select
+                label="Service center"
+                value={editForm.service_center_id}
+                onChange={(e) => setEditForm({ ...editForm, service_center_id: e.target.value })}
+              >
+                <option value="">Not assigned</option>
+                {(centers?.data || []).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+              {editForm.role === "manager" && !editForm.service_center_id && (
+                <p className="text-xs text-amber-600">
+                  A manager with no center can't sell/assign plans, or see their own Subscriptions or KPI pages.
+                </p>
+              )}
+            </>
+          )}
+          {editError && <p className="text-sm text-[var(--color-error)]">{editError}</p>}
+          <Button type="submit" className="w-full" isLoading={updateMutation.isPending}>
+            Save changes
           </Button>
         </form>
       </Modal>

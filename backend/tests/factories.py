@@ -155,8 +155,9 @@ async def make_captain(db, service_center_id: str | None = None, *, wallet_balan
     return captain_id
 
 
-async def make_manager(db, service_center_id: str) -> str:
+async def make_manager(db, service_center_id: str | None) -> str:
     n = _n()
+    now = datetime.now(timezone.utc)
     result = await db.users.insert_one({
         "full_name": f"Test Manager {n}",
         "email": f"test.manager.{n}@example.com",
@@ -166,6 +167,11 @@ async def make_manager(db, service_center_id: str) -> str:
         "status": "active",
         "service_center_id": service_center_id,
         "is_deleted": False,
+        # Same UserPublic.from_doc requirement as make_customer above — any
+        # test reading this manager back through an admin/auth endpoint
+        # (e.g. PUT /users/:id) needs it.
+        "created_at": now,
+        "updated_at": now,
     })
     return str(result.inserted_id)
 

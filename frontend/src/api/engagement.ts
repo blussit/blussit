@@ -26,6 +26,33 @@ export interface CenterSubscriptionOverview {
   rows: CenterSubscriptionRow[];
 }
 
+/** One row on the admin's "all purchased plans" view — every subscription
+ *  platform-wide, who paid what and which center (if any) sold it. */
+export interface AdminSubscriptionRow {
+  subscription_id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone?: string | null;
+  plan_id?: string | null;
+  plan_name: string;
+  status?: string | null;
+  amount_paid?: number | null;
+  discount_amount?: number | null;
+  coupon_code?: string | null;
+  payment_method?: "online" | "cash" | null;
+  auto_renew: boolean;
+  service_center_id?: string | null;
+  service_center_name?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface AdminSubscriptionOverview {
+  kpis: { total: number; active: number; expired: number; total_revenue: number };
+  plan_breakdown: { plan_name: string; count: number }[];
+  rows: AdminSubscriptionRow[];
+}
+
 /** What a monthly pass would cost for one car + one service. Priced by the
  *  same backend code that charges for it. */
 export interface PassQuote {
@@ -100,6 +127,8 @@ export const subscriptionApi = {
     apiClient.post<ApiSuccess<null>>("/subscriptions/enquiries", payload).then((r) => r.data),
   centerOverview: (centerId: string) =>
     apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
+  /** Admin-only: every plan ever purchased or granted, platform-wide. */
+  adminOverview: () => apiClient.get<ApiSuccess<AdminSubscriptionOverview>>("/subscriptions/admin/overview").then((r) => r.data.data),
   plans: (activeOnly = true) =>
     apiClient.get<ApiSuccess<SubscriptionPlan[]>>("/subscription-plans", { params: { active_only: activeOnly } }).then((r) => r.data.data),
   mySubscriptions: () => apiClient.get<ApiSuccess<UserSubscription[]>>("/subscriptions/my").then((r) => r.data.data),

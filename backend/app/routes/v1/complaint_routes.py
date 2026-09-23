@@ -40,8 +40,20 @@ async def list_for_center(
 
 
 @router.get("", dependencies=[Depends(require_admin)])
-async def list_all(status: Optional[str] = None, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    filters = {"status": status} if status else {}
+async def list_all(
+    status: Optional[str] = None,
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    filters: dict = {"status": status} if status else {}
+    if period or (start and end):
+        from app.services.kpi_service import resolve_period
+
+        s, e, _ps, _pe = resolve_period(period, start, end)
+        filters["created_at"] = {"$gte": s, "$lt": e}
     return await ComplaintController(db).list_all(filters, pagination)
 
 

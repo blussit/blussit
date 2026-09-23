@@ -23,16 +23,28 @@ class UserService:
             raise NotFoundException("User not found")
         return UserPublic.from_doc(updated).model_dump()
 
-    async def list_users(self, role: str | None, page: int, page_size: int, search: str | None):
+    async def list_users(
+        self, role: str | None, page: int, page_size: int, search: str | None,
+        period: str | None = None, start: str | None = None, end: str | None = None,
+    ):
         filters = {"role": role} if role else {}
         if search:
             from app.repositories.base_repository import build_search_filter
             filters.update(build_search_filter(search, ["full_name", "email", "phone"]))
+        if period or (start and end):
+            from app.services.kpi_service import resolve_period
+
+            s, e, _ps, _pe = resolve_period(period, start, end)
+            filters["created_at"] = {"$gte": s, "$lt": e}
         items, total = await self.repo.find_many(filters, page=page, page_size=page_size)
         return [UserPublic.from_doc(u).model_dump() for u in items], total
 
     async def admin_update_user(self, user_id: str, payload: AdminUserUpdateRequest) -> dict:
-        data = {k: v.value if hasattr(v, "value") else v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        # exclude_unset (not `is not None`) is what lets a manager's
+        # service_center_id be explicitly CLEARED back to null — dropping
+        # `is not None` here used to silently ignore that, the one field on
+        # this form that legitimately needs to go from "set" back to "unset".
+        data = {k: v.value if hasattr(v, "value") else v for k, v in payload.model_dump(exclude_unset=True).items()}
         updated = await self.repo.update_by_id(user_id, data)
         if not updated:
             raise NotFoundException("User not found")

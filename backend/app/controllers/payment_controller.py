@@ -64,7 +64,10 @@ class PaymentController:
         return success(await self.service.manager_subscription_preview(payload))
 
     async def manager_offer_create(self, current_user: CurrentUser, payload: ManagerSubscriptionOfferRequest):
-        result = await self.service.manager_subscription_offer(current_user.id, payload)
+        from app.core.authz import resolve_grant_center_id
+
+        center_id = resolve_grant_center_id(current_user.role, current_user.service_center_id, payload.service_center_id)
+        result = await self.service.manager_subscription_offer(current_user.id, payload, actor_center_id=center_id)
         await self.audit.log_action(
             current_user.id, current_user.role, "MANAGER_SUBSCRIPTION_OFFER", "payment_orders",
             result.get("order_id") or (result.get("subscription") or {}).get("id"),

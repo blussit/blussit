@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Banknote, Check, Copy, CreditCard, Power, RefreshCw } from "lucide-react";
+import { Banknote, Check, Copy, CreditCard, Gauge, Power, RefreshCw } from "lucide-react";
 import { subscriptionApi, type ManagerOfferResult } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
-import { Badge, Button, Input, Select, Spinner, Switch } from "../../components/ui";
+import { Badge, Button, EmptyState, Input, Select, Spinner, Switch } from "../../components/ui";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
+import { CustomerNamePhoneFields } from "../../components/shared/CustomerNamePhoneFields";
+import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { baseGroups } from "../../lib/serviceMix";
-import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
+import { validateIndianMobile } from "../../lib/validators";
 import type { SubscriptionPlan } from "../../types";
 
 type DiscountMode = "none" | "amount" | "coupon";
@@ -28,6 +30,7 @@ export default function ManagerSellPlanPage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
+  const { user } = useAuth();
 
   const { data: plans } = useQuery({ queryKey: ["subscription-plans-for-sale"], queryFn: () => subscriptionApi.plans(true) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
@@ -184,6 +187,21 @@ export default function ManagerSellPlanPage() {
     setCouponCode("");
   };
 
+  // A plan sold/granted by a manager with no center linked has nowhere to
+  // attribute the sale to — the backend now refuses it outright (a real
+  // incident: a subscription that existed in the database but never
+  // appeared on any manager's Subscriptions page). Block the form here too
+  // so the manager gets a clear reason up front, not a submit-time error.
+  if (!user?.service_center_id) {
+    return (
+      <EmptyState
+        icon={Gauge}
+        title="No service center linked"
+        description="Your manager account isn't linked to a service center yet — ask an admin to assign one before selling or assigning a plan."
+      />
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -235,17 +253,14 @@ export default function ManagerSellPlanPage() {
         </div>
       ) : (
         <div className="max-w-xl space-y-6 rounded-2xl border border-[#F3E5B5] bg-white p-5">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input label="Customer name" value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
-            <Input
-              label="Customer mobile"
-              value={phone}
-              inputMode="numeric"
-              onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
-              error={fieldErrors.phone}
-              placeholder="10-digit mobile"
-            />
-          </div>
+          <CustomerNamePhoneFields
+            name={name}
+            phone={phone}
+            onChangeName={setName}
+            onChangePhone={setPhone}
+            nameError={fieldErrors.name}
+            phoneError={fieldErrors.phone}
+          />
 
           <Select label="Plan" value={planId} onChange={(e) => setPlanId(e.target.value)} error={fieldErrors.plan}>
             <option value="">Select a plan</option>

@@ -86,6 +86,9 @@ class AssignSubscriptionRequest(BaseModel):
     service_id: Optional[str] = None
     vehicle_type: Optional[str] = None
     auto_renew: bool = False
+    # Same rule as ManagerSubscriptionOfferRequest.service_center_id — only
+    # read for an admin, who has no center of their own.
+    service_center_id: Optional[str] = None
 
 
 class PassQuoteRequest(BaseModel):
@@ -158,6 +161,13 @@ class ManagerSubscriptionOfferRequest(BaseModel):
     # True = the customer hears about the link/mandate on WhatsApp. Off
     # still creates it — the manager can read/copy the link over a call.
     send_whatsapp: bool = True
+    # A manager selling a plan is always attributed to THEIR OWN center
+    # (current_user.service_center_id) — this is ignored for them. It only
+    # matters for an admin, who has no single center of their own: the
+    # controller requires one or the other to be present, so a plan is
+    # never granted with nowhere for a manager's Subscriptions page to find
+    # it (see UserSubscriptionService.center_overview).
+    service_center_id: Optional[str] = None
 
     _phone = field_validator("customer_phone")(_canonical_phone)
 

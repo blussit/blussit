@@ -107,7 +107,10 @@ class UserSubscriptionController:
         return success(result, "Subscribed successfully")
 
     async def assign(self, current_user: CurrentUser, payload: AssignSubscriptionRequest):
-        result = await self.service.assign(payload)
+        from app.core.authz import resolve_grant_center_id
+
+        center_id = resolve_grant_center_id(current_user.role, current_user.service_center_id, payload.service_center_id)
+        result = await self.service.assign(payload, actor_center_id=center_id)
         await self.audit.log_action(
             current_user.id, current_user.role, "ASSIGN_SUBSCRIPTION", "user_subscriptions", result["id"], {"customer_id": payload.customer_id}
         )
@@ -136,3 +139,6 @@ class UserSubscriptionController:
     async def list_all_for_admin(self, pagination: PaginationParams):
         items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
+
+    async def admin_overview(self):
+        return success(await self.service.admin_overview())

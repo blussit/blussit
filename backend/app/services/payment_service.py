@@ -1303,6 +1303,7 @@ class PaymentService:
                     plan_id=order["plan_id"], vehicle_id=order.get("vehicle_id"),
                     service_id=order.get("service_id"), vehicle_type=order.get("vehicle_type"),
                 ),
+                service_center_id=order.get("service_center_id"),
             )
         except Exception:
             # Money is in but the plan can't be activated (deactivated
@@ -1409,7 +1410,7 @@ class PaymentService:
         result["final_price"] = round(base_price - result["discount"], 2)
         return result
 
-    async def manager_subscription_offer(self, actor_id: str, payload) -> dict:
+    async def manager_subscription_offer(self, actor_id: str, payload, *, actor_center_id: str | None = None) -> dict:
         """Creates the customer (if needed) and either a payment link, an
         auto-pay mandate, or an immediate cash-paid subscription. Every
         branch re-validates from scratch — the preview above is advisory
@@ -1434,7 +1435,7 @@ class PaymentService:
         await subs.validate_purchase(customer_id, subscribe_payload)
 
         if payload.recurring:
-            return await self._create_manager_autopay_mandate(actor_id, customer_id, plan, payload, base_price)
+            return await self._create_manager_autopay_mandate(actor_id, customer_id, plan, payload, base_price, actor_center_id)
 
         discount = 0.0
         coupon_code = None
@@ -1465,11 +1466,16 @@ class PaymentService:
         final_price = round(base_price - discount, 2)
 
         if payload.payment_method == "cash":
-            return await self._grant_cash_subscription(actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price)
-        return await self._create_manager_subscription_link(actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price)
+            return await self._grant_cash_subscription(
+                actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price, actor_center_id,
+            )
+        return await self._create_manager_subscription_link(
+            actor_id, customer_id, plan, payload, base_price, discount, coupon_code, final_price, actor_center_id,
+        )
 
     async def _create_manager_subscription_link(
         self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float, discount: float, coupon_code: str | None, final_price: float,
+        actor_center_id: str | None = None,
     ) -> dict:
         amount_paise = int(round(final_price * 100))
         if amount_paise < MIN_ORDER_PAISE:
@@ -1513,6 +1519,12 @@ class PaymentService:
             "base_amount_paise": int(round(base_price * 100)), "discount_paise": int(round(discount * 100)),
             "coupon_code": coupon_code, "amount_paise": amount_paise, "currency": "INR", "status": "created",
             "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
+            # Carried through to settlement (browser callback or the sweep,
+            # both go through _activate_linked_subscription) — that's the
+            # only place left that still knows which manager/center sold
+            # this plan, since settlement can happen minutes or days later
+            # with no request/current_user in scope at all.
+            "service_center_id": actor_center_id,
         }
         result = await self.orders.insert_one(order_doc)
         if payload.send_whatsapp:
@@ -1524,6 +1536,7 @@ class PaymentService:
 
     async def _grant_cash_subscription(
         self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float, discount: float, coupon_code: str | None, final_price: float,
+        actor_center_id: str | None = None,
     ) -> dict:
         from app.schemas.subscription_schema import AssignSubscriptionRequest
         from app.services.subscription_service import UserSubscriptionService
@@ -1534,7 +1547,7 @@ class PaymentService:
         # exactly like every other creation path in this file.
         sub = await subs.assign(AssignSubscriptionRequest(
             customer_id=customer_id, plan_id=str(plan["_id"]), vehicle_type=payload.vehicle_type, service_id=payload.service_id,
-        ))
+        ), actor_center_id=actor_center_id)
         money_fields: dict = {
             "payment_method": "cash", "amount_paid": final_price, "assigned_by": actor_id,
             "cash_collected_by": actor_id, "cash_collected_at": now_ist(),
@@ -1571,7 +1584,9 @@ class PaymentService:
             await self._announce_subscription(customer_id, sub, renewed=False)
         return {"kind": "cash", "recurring": False, "subscription": sub, "amount": final_price}
 
-    async def _create_manager_autopay_mandate(self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float) -> dict:
+    async def _create_manager_autopay_mandate(
+        self, actor_id: str, customer_id: str, plan: dict, payload, base_price: float, actor_center_id: str | None = None,
+    ) -> dict:
         amount_paise = int(round(base_price * 100))
         if amount_paise < MIN_ORDER_PAISE:
             raise BadRequestException("This plan's price is below the ₹1 minimum for online payment.")
@@ -1606,6 +1621,7 @@ class PaymentService:
             "vehicle_type": payload.vehicle_type, "amount_paise": amount_paise, "currency": "INR",
             "status": "created", "cycles_applied": 0, "auto_pay_active": True,
             "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
+            "service_center_id": actor_center_id,
         })
         if payload.send_whatsapp:
             await self._send_subscription_link_whatsapp(customer_id, plan, base_price, short_url, autopay=True)
@@ -1744,6 +1760,7 @@ class PaymentService:
                         vehicle_type=claimed.get("vehicle_type"), auto_renew=True,
                     ),
                     razorpay_subscription_id=mandate_id,
+                    service_center_id=claimed.get("service_center_id"),
                 )
             except Exception:
                 await self.cancel_autopay(mandate_id, at_cycle_end=False)

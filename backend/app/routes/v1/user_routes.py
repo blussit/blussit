@@ -22,10 +22,16 @@ async def update_my_profile(
 @router.get("", dependencies=[Depends(require_admin)])
 async def list_users(
     role: Optional[str] = None,
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return await UserController(db).list_users(role, pagination)
+    """`period`/`start`/`end` match the admin KPI dashboard's "New
+    customers" tile exactly (see KpiService.resolve_period) — filters on
+    created_at, the same field that tile counts."""
+    return await UserController(db).list_users(role, period, start, end, pagination)
 
 
 @router.get("/{user_id}", dependencies=[Depends(require_admin)])

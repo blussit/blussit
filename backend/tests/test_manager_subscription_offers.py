@@ -23,6 +23,7 @@ per the suite's standing rule (no external call is ever made).
 import hashlib
 import hmac as hmac_mod
 import itertools
+from datetime import timedelta
 
 import pytest
 from bson import ObjectId
@@ -34,10 +35,11 @@ from app.schemas.subscription_schema import ManagerSubscriptionOfferRequest, Man
 from app.services import payment_service
 from app.services.coupon_service import CouponService
 from app.services.payment_service import PaymentService
-from app.services.subscription_service import resolve_pass_price
+from app.schemas.subscription_schema import AssignSubscriptionRequest
+from app.services.subscription_service import UserSubscriptionService, resolve_pass_price
 from app.utils.timezone import now_ist
 
-from tests.factories import get_hatchback_type_id, get_star_wash_service_id, make_manager, make_service_center, make_subscription_plan
+from tests.factories import get_hatchback_type_id, get_star_wash_service_id, make_customer, make_manager, make_service_center, make_subscription_plan
 
 pytestmark = pytest.mark.asyncio
 
@@ -666,3 +668,462 @@ async def test_hack_voiding_an_autopay_mandate_the_instant_it_authorises_refuses
     # Still pending locally (the sweep, not this call, activates it) — not voided.
     assert (await rig["db"].payment_orders.find_one({"_id": order["_id"]}))["status"] == "created"
     assert await svc.sync_pending_manager_mandates() == 1
+
+
+# ------------------------------------------------- manager-center visibility
+#
+# Bug fix: a plan a manager granted/sold directly used to be invisible on
+# their OWN Subscriptions page until the customer's first booking at that
+# center — center_overview only ever looked at booking history to find its
+# customer universe, and a fresh grant never triggers a booking. Every
+# manager-issued grant now stamps service_center_id at the moment it
+# actually becomes a real subscription (cash: immediately; link/autopay: at
+# settlement, since that's the earliest point a subscription exists at all).
+
+
+async def test_cash_grant_is_visible_on_the_managers_center_immediately_with_no_booking_ever_made(rig, cleanup):
+    phone = "9333300020"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    result = await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    stored = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(result["subscription"]["id"])})
+    assert stored["service_center_id"] == rig["center_id"]
+    assert await rig["db"].bookings.count_documents({"customer_id": str(customer["_id"])}) == 0
+
+    overview = await UserSubscriptionService(rig["db"]).center_overview(rig["center_id"], "manager", rig["center_id"])
+    assert any(r["customer_id"] == str(customer["_id"]) for r in overview["rows"])
+
+
+async def test_link_settlement_also_stamps_the_managers_center(rig, cleanup):
+    phone = "9333300021"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    result = await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone), actor_center_id=rig["center_id"])
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    order = await rig["db"].payment_orders.find_one({"_id": ObjectId(result["order_id"])})
+    good = _expected_link_signature(order["razorpay_link_id"], order["reference_id"], "pay_center_link")
+    await svc.verify_link_callback({
+        "razorpay_payment_link_id": order["razorpay_link_id"], "razorpay_payment_link_reference_id": order["reference_id"],
+        "razorpay_payment_link_status": "paid", "razorpay_payment_id": "pay_center_link", "razorpay_signature": good,
+    })
+    sub = await rig["db"].user_subscriptions.find_one({"customer_id": str(customer["_id"])})
+    assert sub["service_center_id"] == rig["center_id"]
+
+
+async def test_autopay_settlement_via_the_sweep_also_stamps_the_managers_center(rig, cleanup, gateway):
+    phone = "9333300022"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, recurring=True), actor_center_id=rig["center_id"])
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    gateway.subscription.remote = {"status": "active", "paid_count": 1}
+    assert await svc.sync_pending_manager_mandates() == 1
+    sub = await rig["db"].user_subscriptions.find_one({"customer_id": str(customer["_id"])})
+    assert sub["service_center_id"] == rig["center_id"]
+
+
+async def test_assign_stamps_the_granting_managers_center(rig, cleanup):
+    customer_id = await make_customer(rig["db"])
+    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    cleanup.append(("user_subscriptions", {"customer_id": customer_id}))
+    sub = await UserSubscriptionService(rig["db"]).assign(
+        AssignSubscriptionRequest(customer_id=customer_id, plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"]),
+        actor_center_id=rig["center_id"],
+    )
+    stored = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub["id"])})
+    assert stored["service_center_id"] == rig["center_id"]
+
+
+async def test_self_serve_purchase_still_carries_no_service_center_id(rig, cleanup):
+    """A customer's own purchase (never touched by a manager) must NOT be
+    tagged with any center — center_overview finds it through THEIR booking
+    history instead, exactly as before this fix."""
+    from app.schemas.subscription_schema import SubscribeRequest
+
+    customer_id = await make_customer(rig["db"])
+    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    cleanup.append(("user_subscriptions", {"customer_id": customer_id}))
+    sub = await UserSubscriptionService(rig["db"]).subscribe(
+        customer_id, SubscribeRequest(plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"]),
+    )
+    stored = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub["id"])})
+    assert stored.get("service_center_id") is None
+
+
+async def test_center_overview_never_shows_a_plan_granted_by_a_different_center(rig, cleanup):
+    other_center_id = await make_service_center(rig["db"], pincode="452067")
+    cleanup.append(("service_centers", {"_id": ObjectId(other_center_id)}))
+    phone = "9333300023"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, payment_method="cash"), actor_center_id=rig["center_id"])
+    customer = await _track_customer(cleanup, rig["db"], phone)
+
+    other_overview = await UserSubscriptionService(rig["db"]).center_overview(other_center_id, "manager", other_center_id)
+    assert not any(r["customer_id"] == str(customer["_id"]) for r in other_overview["rows"])
+
+
+# ------------------------------------------------------------ admin overview
+
+
+async def test_admin_overview_lists_every_plan_with_who_paid_what(rig, cleanup):
+    phone = "9333300024"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    await svc.manager_subscription_offer(
+        rig["manager_id"], _offer(rig, phone, payment_method="cash", discount_amount=10), actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+
+    overview = await UserSubscriptionService(rig["db"]).admin_overview()
+    row = next(r for r in overview["rows"] if r["customer_id"] == str(customer["_id"]))
+    assert row["plan_name"] and row["amount_paid"] == rig["base_price"] - 10
+    assert row["payment_method"] == "cash" and row["service_center_name"]
+    assert overview["kpis"]["total_revenue"] >= rig["base_price"] - 10
+    assert overview["kpis"]["total"] >= 1
+
+
+# --------------------------------------------------- customer typeahead (CRM)
+
+
+async def test_manager_with_no_center_is_refused_not_silently_granted_with_nowhere_to_show(rig, cleanup):
+    """The actual production incident this guard exists for: a manager
+    account with no service_center_id could still sell/grant a plan, which
+    silently created a subscription with service_center_id=None — invisible
+    on every manager's own Subscriptions page (center_overview is always
+    center-scoped) and undiscoverable by the backfill script (it traces a
+    grant back to the granting manager's center; if that manager has none,
+    there's nothing to trace to). Refused outright now, before any order or
+    subscription is created."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    centerless_manager = await make_manager(rig["db"], service_center_id=None)
+    cleanup.append(("users", {"_id": ObjectId(centerless_manager)}))
+    phone = "9333300025"
+    _track(cleanup, phone)
+    body = {
+        "customer_name": "No Center Customer", "customer_phone": phone, "plan_id": rig["plan_id"],
+        "vehicle_type": rig["hatchback"], "service_id": rig["star"], "payment_method": "cash",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/v1/subscriptions/manager-offers", json=body, headers=_auth(centerless_manager, "manager", None))
+        assert res.status_code == 400 and "service center" in res.json()["message"].lower()
+    # Refused before the customer account, the subscription, or the ledger
+    # row were ever created — not just before it was tagged.
+    assert not await rig["db"].users.find_one({"phone": phone})
+
+
+async def test_assign_with_no_manager_center_is_also_refused(rig, cleanup):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    centerless_manager = await make_manager(rig["db"], service_center_id=None)
+    cleanup.append(("users", {"_id": ObjectId(centerless_manager)}))
+    customer_id = await make_customer(rig["db"])
+    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    body = {"customer_id": customer_id, "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/v1/subscriptions/assign", json=body, headers=_auth(centerless_manager, "manager", None))
+        assert res.status_code == 400 and "service center" in res.json()["message"].lower()
+    assert await rig["db"].user_subscriptions.count_documents({"customer_id": customer_id}) == 0
+
+
+async def test_admin_can_explicitly_pick_a_center_when_granting_but_manager_cannot_spoof_one(rig, cleanup):
+    """An admin has no center of their own, so the payload's
+    service_center_id is honoured for them. A MANAGER passing that same
+    field must be ignored — trusting it would let a manager attribute a
+    sale to a center they don't belong to."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    other_center_id = await make_service_center(rig["db"], pincode="452068")
+    cleanup.append(("service_centers", {"_id": ObjectId(other_center_id)}))
+    admin_result = await rig["db"].users.insert_one({
+        "full_name": "Test Admin", "email": f"test.admin.{next(_seq)}@example.com", "phone": f"8{next(_seq):09d}",
+        "password_hash": "x", "role": "admin", "status": "active", "is_deleted": False,
+    })
+    admin_id = str(admin_result.inserted_id)
+    cleanup.append(("users", {"_id": admin_result.inserted_id}))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Admin, no center of their own — must supply one.
+        admin_body = {
+            "customer_name": "Admin Granted", "customer_phone": "9333300026", "plan_id": rig["plan_id"],
+            "vehicle_type": rig["hatchback"], "service_id": rig["star"], "payment_method": "cash",
+        }
+        _track(cleanup, "9333300026")
+        refused = await client.post("/api/v1/subscriptions/manager-offers", json=admin_body, headers=_auth(admin_id, "admin", None))
+        assert refused.status_code == 400
+
+        granted = await client.post(
+            "/api/v1/subscriptions/manager-offers", json={**admin_body, "service_center_id": other_center_id}, headers=_auth(admin_id, "admin", None),
+        )
+        assert granted.status_code == 200, granted.text
+        sub_id = granted.json()["data"]["subscription"]["id"]
+        cleanup.append(("payment_orders", {"subscription_id": sub_id}))
+        cleanup.append(("user_subscriptions", {"_id": ObjectId(sub_id)}))
+        stored = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+        assert stored["service_center_id"] == other_center_id
+
+        # A MANAGER trying the same trick — spoofing a different center in
+        # the payload — is ignored; the grant is attributed to THEIR OWN
+        # center regardless of what they typed.
+        mgr_body = {
+            "customer_name": "Manager Spoof Attempt", "customer_phone": "9333300027", "plan_id": rig["plan_id"],
+            "vehicle_type": rig["hatchback"], "service_id": rig["star"], "payment_method": "cash",
+            "service_center_id": other_center_id,
+        }
+        _track(cleanup, "9333300027")
+        spoofed = await client.post(
+            "/api/v1/subscriptions/manager-offers", json=mgr_body, headers=_auth(rig["manager_id"], "manager", rig["center_id"]),
+        )
+        assert spoofed.status_code == 200, spoofed.text
+        sub_id2 = spoofed.json()["data"]["subscription"]["id"]
+        cleanup.append(("payment_orders", {"subscription_id": sub_id2}))
+        cleanup.append(("user_subscriptions", {"_id": ObjectId(sub_id2)}))
+        stored2 = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id2)})
+        assert stored2["service_center_id"] == rig["center_id"]
+        assert stored2["service_center_id"] != other_center_id
+
+
+async def test_customer_typeahead_matches_by_name_or_phone_customers_only(rig, cleanup):
+    from app.services.crm_service import CRMService
+
+    customer_id = await make_customer(rig["db"], name="Ramesh Typeahead Kumar")
+    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    customer = await rig["db"].users.find_one({"_id": ObjectId(customer_id)})
+
+    by_name = await CRMService(rig["db"]).search_customers("Typeahead")
+    assert any(u["id"] == customer_id for u in by_name)
+
+    by_phone = await CRMService(rig["db"]).search_customers(customer["phone"][-6:])
+    assert any(u["id"] == customer_id for u in by_phone)
+
+    # A single character never runs a broad scan.
+    assert await CRMService(rig["db"]).search_customers("a") == []
+
+    # The manager account created by `rig` must never surface here — staff
+    # accounts are excluded even if their name/phone happens to match.
+    manager = await rig["db"].users.find_one({"_id": ObjectId(rig["manager_id"])})
+    assert not any(u["id"] == rig["manager_id"] for u in await CRMService(rig["db"]).search_customers(manager["full_name"]))
+
+
+# ------------------------------------------------ admin links a manager's center
+#
+# The end-to-end fix for the actual incident: a manager account with no
+# service_center_id had NO way to be linked to one through the admin UI at
+# all (PUT /users/:id already supported it, but nothing called it) — an
+# admin was stuck. Confirms the whole chain now works: admin links the
+# center, then the SAME manager who was refused a moment ago can sell a
+# plan and it shows up on their own Subscriptions page.
+
+
+async def test_admin_links_a_centerless_managers_account_and_they_can_then_sell_a_plan(rig, cleanup):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    centerless_manager = await make_manager(rig["db"], service_center_id=None)
+    cleanup.append(("users", {"_id": ObjectId(centerless_manager)}))
+    admin_result = await rig["db"].users.insert_one({
+        "full_name": "Test Admin Links", "email": f"test.admin.links.{next(_seq)}@example.com", "phone": f"8{next(_seq):09d}",
+        "password_hash": "x", "role": "admin", "status": "active", "is_deleted": False,
+    })
+    cleanup.append(("users", {"_id": admin_result.inserted_id}))
+    admin_auth = _auth(str(admin_result.inserted_id), "admin", None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Refused before the fix.
+        phone = "9333300028"
+        _track(cleanup, phone)
+        body = {
+            "customer_name": "Linked Later", "customer_phone": phone, "plan_id": rig["plan_id"],
+            "vehicle_type": rig["hatchback"], "service_id": rig["star"], "payment_method": "cash",
+        }
+        blocked = await client.post(
+            "/api/v1/subscriptions/manager-offers", json=body, headers=_auth(centerless_manager, "manager", None),
+        )
+        assert blocked.status_code == 400
+
+        # Admin links the manager's account to a center — the fix path this
+        # session added a UI for (AdminUsersPage's new Edit action).
+        linked = await client.put(
+            f"/api/v1/users/{centerless_manager}", json={"service_center_id": rig["center_id"]}, headers=admin_auth,
+        )
+        assert linked.status_code == 200, linked.text
+        assert linked.json()["data"]["service_center_id"] == rig["center_id"]
+
+        # The SAME manager, same token claims (service_center_id lives in
+        # the DB lookup inside get_current_user for this endpoint's
+        # dependency, but this app signs it into the JWT — a fresh token
+        # reflecting the just-linked center is what a real re-login would
+        # carry), can now sell the plan.
+        sold = await client.post(
+            "/api/v1/subscriptions/manager-offers", json=body, headers=_auth(centerless_manager, "manager", rig["center_id"]),
+        )
+        assert sold.status_code == 200, sold.text
+        sub_id = sold.json()["data"]["subscription"]["id"]
+        cleanup.append(("payment_orders", {"subscription_id": sub_id}))
+        cleanup.append(("user_subscriptions", {"_id": ObjectId(sub_id)}))
+
+        # And it is now visible on that manager's own Subscriptions page.
+        overview = await UserSubscriptionService(rig["db"]).center_overview(rig["center_id"], "manager", rig["center_id"])
+        customer = await rig["db"].users.find_one({"phone": phone})
+        assert any(r["customer_id"] == str(customer["_id"]) for r in overview["rows"])
+
+
+async def test_admin_can_clear_a_managers_center_back_to_unassigned(rig, cleanup):
+    """The one field on this form that legitimately needs to go from "set"
+    back to "unset" — a pre-existing filter in admin_update_user silently
+    dropped a null service_center_id, so this never actually worked."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    admin_result = await rig["db"].users.insert_one({
+        "full_name": "Test Admin Clears", "email": f"test.admin.clears.{next(_seq)}@example.com", "phone": f"8{next(_seq):09d}",
+        "password_hash": "x", "role": "admin", "status": "active", "is_deleted": False,
+    })
+    cleanup.append(("users", {"_id": admin_result.inserted_id}))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.put(
+            f"/api/v1/users/{rig['manager_id']}", json={"service_center_id": None},
+            headers=_auth(str(admin_result.inserted_id), "admin", None),
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["data"]["service_center_id"] is None
+    stored = await rig["db"].users.find_one({"_id": ObjectId(rig["manager_id"])})
+    assert stored["service_center_id"] is None
+    # Restore it — `rig` is reused by nothing after this test, but leaving
+    # the manager centerless would be a surprising side effect to debug.
+    await rig["db"].users.update_one({"_id": ObjectId(rig["manager_id"])}, {"$set": {"service_center_id": rig["center_id"]}})
+
+
+# ------------------------------------------------------- end to end: the money
+#
+# Pre-production sanity check (founder: "properly managed the amount that
+# should be wired correctly" before pushing this to prod): a manager SELLS a
+# plan, that plan is then actually USED — once via a normal "New booking",
+# once via "Log a done job" — and the amount charged on each is exactly what
+# the plan's own service coverage rules say it should be, all the way
+# through to the plan running out and the NEXT booking charging full price.
+# _cars_for_lines/_usable_passes (booking_service.py) do the actual
+# auto-matching — untouched by this session's service_center_id work — this
+# proves a manager-SOLD pass flows through that exact same, already-tested
+# engine with no special-casing anywhere.
+
+
+async def test_a_manager_sold_plan_is_correctly_spent_by_a_new_booking_then_a_logged_job_then_runs_out(rig, cleanup):
+    from app.schemas.booking_schema import ManagerLogBookingRequest, QuickAddress, QuickBookingLine, QuickBookingRequest
+    from app.services.auth_service import AuthService
+    from app.services.booking_service import BookingService
+
+    phone = "9333300030"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+
+    # Two-visit plan so both "New booking" and "Log a done job" each get to
+    # spend one real visit off the SAME plan.
+    two_visit_plan_id = await make_subscription_plan(
+        rig["db"], vehicle_types=[rig["hatchback"]], included_service_ids=[rig["star"]], total_service_count=2,
+    )
+    cleanup.append(("subscription_plans", {"_id": ObjectId(two_visit_plan_id)}))
+    plan = await rig["db"].subscription_plans.find_one({"_id": ObjectId(two_visit_plan_id)})
+    service = await rig["db"].services.find_one({"_id": ObjectId(rig["star"])})
+    plan_price = resolve_pass_price(plan, service, rig["hatchback"])
+
+    # 1) Manager sells it for cash — the "Sell a plan" form, cash branch.
+    sold = await svc.manager_subscription_offer(
+        rig["manager_id"],
+        _offer(rig, phone, plan_id=two_visit_plan_id, payment_method="cash", discount_amount=20),
+        actor_center_id=rig["center_id"],
+    )
+    customer = await _track_customer(cleanup, rig["db"], phone)
+    sub_id = sold["subscription"]["id"]
+    assert sold["amount"] == plan_price - 20
+
+    # 2) Visible on the manager's own Subscriptions page (their own center)…
+    overview = await UserSubscriptionService(rig["db"]).center_overview(rig["center_id"], "manager", rig["center_id"])
+    row = next(r for r in overview["rows"] if r["customer_id"] == str(customer["_id"]))
+    assert row["plan_name"] == plan["name"] and row["remaining_service_count"] == 2
+
+    # …and on the admin's platform-wide Purchased Plans view, with what was
+    # actually PAID for the plan itself (unaffected by anything below).
+    admin_view = await UserSubscriptionService(rig["db"]).admin_overview()
+    admin_row = next(r for r in admin_view["rows"] if r["customer_id"] == str(customer["_id"]))
+    assert admin_row["amount_paid"] == plan_price - 20 and admin_row["payment_method"] == "cash"
+
+    # 3) "New booking" (QuickBookFlow, manager mode) for the SAME customer,
+    # matching vehicle type + the plan's covered service — the pass is
+    # applied with no explicit picker, exactly like a self-serve customer's
+    # own pass would be.
+    bs = BookingService(rig["db"])
+    booked = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="1 Manager Booking Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=(now_ist() + timedelta(days=1)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    cleanup.append(("addresses", {"line1": "1 Manager Booking Lane, Indore"}))
+    booking1 = booked["bookings"][0]
+    assert booking1["total_amount"] == 0
+    assert booking1["payment_method"] == "subscription" and booking1["subscription_id"] == sub_id
+
+    after_booking = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert after_booking["remaining_service_count"] == 1 and after_booking["status"] == "active"
+
+    # 4) "Log a done job" for the SAME customer, same plan's SECOND (and
+    # last) visit — the manager-logged-visit path, priced through the exact
+    # same _subscription_discount/_cars_for_lines engine as any other
+    # booking, not a separate money path.
+    logged = await bs.create_manager_logged_visit(
+        ManagerLogBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="10:00",
+            address_line="1 Manager Booking Lane, Indore", send_whatsapp=False,
+        ),
+        manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
+    )
+    booking2 = logged["bookings"][0]
+    assert booking2["total_amount"] == 0
+    assert booking2["payment_method"] == "subscription" and booking2["subscription_id"] == sub_id
+    assert booking2["status"] == "completed"  # a logged job is saved already-done
+
+    exhausted = await rig["db"].user_subscriptions.find_one({"_id": ObjectId(sub_id)})
+    assert exhausted["remaining_service_count"] == 0 and exhausted["status"] == "expired"
+
+    # 5) The plan's original purchase price is untouched by any of the
+    # consumption above — amount_paid records what the plan itself cost,
+    # never per-wash accounting.
+    admin_view_after = await UserSubscriptionService(rig["db"]).admin_overview()
+    admin_row_after = next(r for r in admin_view_after["rows"] if r["customer_id"] == str(customer["_id"]))
+    assert admin_row_after["amount_paid"] == plan_price - 20
+
+    # 6) A THIRD booking, plan now exhausted — must NOT be free. Proves the
+    # pass isn't over-applied once it's actually run out.
+    booked3 = await bs.create_quick_booking(
+        QuickBookingRequest(
+            customer_name="Plan Customer", customer_phone=phone,
+            address=QuickAddress(line1="1 Manager Booking Lane, Indore", pincode="452066"),
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            scheduled_date=(now_ist() + timedelta(days=2)).strftime("%Y-%m-%d"),
+            scheduled_slot="09:00-12:00",
+        ),
+        customer=customer, source="staff", allow_pinless=True, notify_background=False,
+    )
+    booking3 = booked3["bookings"][0]
+    assert booking3["total_amount"] > 0
+    assert booking3["payment_method"] != "subscription" and not booking3.get("subscription_id")

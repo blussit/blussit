@@ -210,7 +210,10 @@ class UserSubscriptionService:
         subs = await self.repo.list_for_customer(customer_id)
         return _with_effective_statuses(subs)
 
-    async def subscribe(self, customer_id: str, payload: SubscribeRequest, razorpay_subscription_id: str | None = None) -> dict:
+    async def subscribe(
+        self, customer_id: str, payload: SubscribeRequest, razorpay_subscription_id: str | None = None,
+        *, service_center_id: str | None = None,
+    ) -> dict:
         # A purchase needs a signed-in customer (the route enforces that);
         # customers sign in by phone OTP, so there is no separate
         # verification gate here any more (2026-09 quick model).
@@ -219,7 +222,7 @@ class UserSubscriptionService:
             raise NotFoundException("Customer not found")
         return await self._create_subscription(
             customer_id, payload.plan_id, payload.auto_renew, payload.vehicle_type, razorpay_subscription_id,
-            vehicle_id=payload.vehicle_id, service_id=payload.service_id,
+            vehicle_id=payload.vehicle_id, service_id=payload.service_id, service_center_id=service_center_id,
         )
 
     async def validate_purchase(self, customer_id: str, payload: SubscribeRequest) -> None:
@@ -264,13 +267,17 @@ class UserSubscriptionService:
     async def has_active_pass(self, customer_id: str, vehicle_type: str, service_id: str) -> bool:
         return await self._active_pass_for_type(customer_id, vehicle_type, service_id) is not None
 
-    async def assign(self, payload: AssignSubscriptionRequest) -> dict:
+    async def assign(self, payload: AssignSubscriptionRequest, *, actor_center_id: str | None = None) -> dict:
         """Manager/admin granting a subscription to a customer directly —
         same validation as self-purchase, just with an explicit target
-        customer instead of the caller themselves."""
+        customer instead of the caller themselves. `actor_center_id` (the
+        granting manager's own center) is what lets this show up on that
+        center's Subscriptions page — a directly-granted plan has no
+        booking yet for the usual booking-history linkage to find (see
+        center_overview)."""
         return await self._create_subscription(
             payload.customer_id, payload.plan_id, payload.auto_renew, payload.vehicle_type,
-            vehicle_id=payload.vehicle_id, service_id=payload.service_id,
+            vehicle_id=payload.vehicle_id, service_id=payload.service_id, service_center_id=actor_center_id,
         )
 
     async def _create_subscription(
@@ -282,6 +289,7 @@ class UserSubscriptionService:
         razorpay_subscription_id: str | None = None,
         vehicle_id: str | None = None,
         service_id: str | None = None,
+        service_center_id: str | None = None,
     ) -> dict:
         """A monthly pass names ONE car and ONE service (founder model): the
         car sets the vehicle type that prices it, the service is the only
@@ -328,6 +336,11 @@ class UserSubscriptionService:
         doc = {
             "customer_id": customer_id,
             "plan_id": plan_id,
+            # Only ever set for a STAFF-granted plan (cash/link/auto-pay/free
+            # assign) — the manager's own center at the moment of granting.
+            # A self-serve purchase has none; center_overview finds those
+            # through the customer's booking history instead (see there).
+            "service_center_id": service_center_id,
             "vehicle_id": vehicle_id,
             "service_id": service_id if service else None,
             "vehicle_type": vehicle_type,
@@ -931,14 +944,20 @@ class UserSubscriptionService:
         customer_ids = await self.repo.db.bookings.distinct(
             "customer_id", {"service_center_id": service_center_id, "is_deleted": {"$ne": True}}
         )
-        if not customer_ids:
-            return {"kpis": {"total": 0, "active": 0, "expiring_soon": 0, "expired": 0}, "plan_breakdown": [], "rows": []}
-
+        # A plan a manager grants/sells directly (cash / WhatsApp link /
+        # auto-pay) is tagged with their own center at creation — that
+        # customer may never have a booking here at all yet, so the
+        # booking-history list above alone would hide them. Union both so
+        # a just-assigned plan shows up immediately, not only after the
+        # customer's first visit.
+        query = {"is_deleted": {"$ne": True}, "$or": [{"service_center_id": service_center_id}]}
+        if customer_ids:
+            query["$or"].append({"customer_id": {"$in": customer_ids}})
         subs = _with_effective_statuses(
-            await self.repo.collection.find({"customer_id": {"$in": customer_ids}, "is_deleted": {"$ne": True}})
-            .sort("created_at", -1)
-            .to_list(length=2000)
+            await self.repo.collection.find(query).sort("created_at", -1).to_list(length=2000)
         )
+        if not subs:
+            return {"kpis": {"total": 0, "active": 0, "expiring_soon": 0, "expired": 0}, "plan_breakdown": [], "rows": []}
 
         plan_ids = {ObjectId(s["plan_id"]) for s in subs if s.get("plan_id") and ObjectId.is_valid(s["plan_id"])}
         plans = {
@@ -1005,6 +1024,86 @@ class UserSubscriptionService:
             "plan_breakdown": sorted(
                 ({"plan_name": name, "active_count": count} for name, count in plan_counts.items()),
                 key=lambda x: -x["active_count"],
+            ),
+            "rows": rows,
+        }
+
+    async def admin_overview(self) -> dict:
+        """Every plan ever purchased or granted, platform-wide — the admin's
+        answer to "who bought what, for how much". Unlike center_overview
+        (one manager's own center, booking-history-derived customer list)
+        this has no center scope at all: every user_subscriptions row,
+        enriched with who paid what and which center (if any) sold it."""
+        subs = _with_effective_statuses(
+            await self.repo.collection.find({"is_deleted": {"$ne": True}}).sort("created_at", -1).to_list(length=5000)
+        )
+        if not subs:
+            return {"kpis": {"total": 0, "active": 0, "expired": 0, "total_revenue": 0.0}, "plan_breakdown": [], "rows": []}
+
+        plan_ids = {ObjectId(s["plan_id"]) for s in subs if s.get("plan_id") and ObjectId.is_valid(s["plan_id"])}
+        plans = {
+            str(p["_id"]): p
+            for p in await self.plan_repo.collection.find({"_id": {"$in": list(plan_ids)}}).to_list(length=500)
+        }
+        holder_ids = {ObjectId(s["customer_id"]) for s in subs if ObjectId.is_valid(s["customer_id"])}
+        users = {
+            str(u["_id"]): u
+            for u in await self.user_repo.collection.find(
+                {"_id": {"$in": list(holder_ids)}}, {"full_name": 1, "phone": 1}
+            ).to_list(length=5000)
+        }
+        center_ids = {s["service_center_id"] for s in subs if s.get("service_center_id")}
+        centers = {
+            str(c["_id"]): c.get("name")
+            for c in await self.repo.db.service_centers.find(
+                {"_id": {"$in": [ObjectId(c) for c in center_ids if ObjectId.is_valid(c)]}}, {"name": 1}
+            ).to_list(length=200)
+        }
+
+        rows = []
+        active = expired = 0
+        total_revenue = 0.0
+        plan_counts: dict[str, int] = {}
+        for s in subs:
+            plan = plans.get(s.get("plan_id") or "")
+            holder = users.get(s["customer_id"], {})
+            status = s.get("effective_status")
+            if status == SubscriptionStatus.ACTIVE.value:
+                active += 1
+            elif status == SubscriptionStatus.EXPIRED.value:
+                expired += 1
+            plan_name = plan.get("name") if plan else "Unknown plan"
+            plan_counts[plan_name] = plan_counts.get(plan_name, 0) + 1
+            amount_paid = s.get("amount_paid")
+            if amount_paid is None and not s.get("service_center_id"):
+                # A self-serve purchase never stamped amount_paid (that field
+                # only exists for staff-issued offers) — purchased_price is
+                # the actual amount charged for it at the time.
+                amount_paid = s.get("purchased_price")
+            total_revenue += float(amount_paid or 0)
+            rows.append({
+                "subscription_id": s["id"],
+                "customer_id": s["customer_id"],
+                "customer_name": holder.get("full_name", "Unknown"),
+                "customer_phone": holder.get("phone"),
+                "plan_id": s.get("plan_id"),
+                "plan_name": plan_name,
+                "status": status,
+                "amount_paid": amount_paid,
+                "discount_amount": s.get("discount_amount"),
+                "coupon_code": s.get("coupon_code"),
+                "payment_method": s.get("payment_method"),
+                "auto_renew": s.get("auto_renew", False),
+                "service_center_id": s.get("service_center_id"),
+                "service_center_name": centers.get(s.get("service_center_id") or ""),
+                "start_date": s.get("start_date"),
+                "end_date": s.get("end_date"),
+            })
+        return {
+            "kpis": {"total": len(rows), "active": active, "expired": expired, "total_revenue": round(total_revenue, 2)},
+            "plan_breakdown": sorted(
+                ({"plan_name": name, "count": count} for name, count in plan_counts.items()),
+                key=lambda x: -x["count"],
             ),
             "rows": rows,
         }

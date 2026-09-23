@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gift, Phone, Search } from "lucide-react";
+import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gauge, Gift, Phone, Search } from "lucide-react";
 import { subscriptionApi, type CenterSubscriptionRow } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { Badge, Button, Card, EmptyState, Input, PageLoader } from "../../components/ui";
@@ -44,6 +44,16 @@ export default function ManagerSubscribersPage() {
       .filter((r) => !planFilter || r.plan_name === planFilter)
       .filter((r) => !q || r.customer_name.toLowerCase().includes(q) || (r.customer_phone || "").includes(q) || r.plan_name.toLowerCase().includes(q));
   }, [data, filter, planFilter, search]);
+
+  if (!centerId) {
+    return (
+      <EmptyState
+        icon={Gauge}
+        title="No service center linked"
+        description="Your manager account isn't linked to a service center yet — ask an admin to assign one, then plans held by this center's customers show up here."
+      />
+    );
+  }
 
   const kpis = data?.kpis;
   const tiles: { key: Filter; label: string; value: number | string; icon: typeof Gift; accent?: string }[] = [

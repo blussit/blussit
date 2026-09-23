@@ -181,3 +181,10 @@ async def upgrade_subscription(subscription_id: str, payload: UpgradeSubscriptio
 @subscription_router.get("/admin/all", dependencies=[Depends(require_admin)])
 async def list_all_subscriptions(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await UserSubscriptionController(db).list_all_for_admin(pagination)
+
+
+@subscription_router.get("/admin/overview", dependencies=[Depends(require_admin)])
+async def subscriptions_admin_overview(db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Every plan ever purchased or granted, platform-wide, with who paid
+    what — the admin's revenue/ownership view (see UserSubscriptionService.admin_overview)."""
+    return await UserSubscriptionController(db).admin_overview()

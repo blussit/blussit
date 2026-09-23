@@ -16,5 +16,6 @@ export interface Customer360 {
 
 export const crmApi = {
   searchCustomerByPhone: (phone: string) => apiClient.get<ApiSuccess<User | null>>("/crm/customers/search", { params: { phone } }).then((r) => r.data.data),
+  customerTypeahead: (q: string) => apiClient.get<ApiSuccess<User[]>>("/crm/customers/typeahead", { params: { q } }).then((r) => r.data.data),
   customer360: (id: string) => apiClient.get<ApiSuccess<Customer360>>(`/crm/customers/${id}`).then((r) => r.data.data),
 };

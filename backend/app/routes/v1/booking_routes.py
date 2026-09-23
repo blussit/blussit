@@ -124,12 +124,40 @@ async def list_subscribers_for_center(
 
 
 @router.get("", dependencies=[Depends(require_admin)])
-async def list_all(status: Optional[str] = None, service_center_id: Optional[str] = None, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def list_all(
+    status: Optional[str] = None,
+    service_center_id: Optional[str] = None,
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    date_field: str = "created",
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """`period`/`start`/`end` are the SAME period the admin KPI dashboard
+    uses (see KpiService.resolve_period) — a dashboard tile's drill-down
+    list is built from this exact filter, so the count on the tile and the
+    number of rows in the list always agree. `date_field="completed"`
+    matches revenue/completed-washes tiles (closed_at, falling back to
+    created_at — mirrors KpiService._completed_in); the default "created"
+    matches bookings/cancelled tiles."""
     filters: dict = {}
     if status:
         filters["status"] = status
     if service_center_id:
         filters["service_center_id"] = service_center_id
+    if period or (start and end):
+        from app.services.kpi_service import resolve_period
+
+        s, e, _ps, _pe = resolve_period(period, start, end)
+        if date_field == "completed":
+            filters["status"] = "completed"
+            filters["$or"] = [
+                {"closed_at": {"$gte": s, "$lt": e}},
+                {"closed_at": {"$in": [None]}, "created_at": {"$gte": s, "$lt": e}},
+            ]
+        else:
+            filters["created_at"] = {"$gte": s, "$lt": e}
     return await BookingController(db).list_all(filters, pagination)
 
 

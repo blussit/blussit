@@ -76,6 +76,7 @@ const AdminWhatsAppPage = lazy(() => import("./pages/admin/AdminWhatsAppPage"));
 const AdminCoverageLeadsPage = lazy(() => import("./pages/admin/AdminCoverageLeadsPage"));
 const AdminPricingPage = lazy(() => import("./pages/admin/AdminPricingPage"));
 const AdminSubscriptionPlansPage = lazy(() => import("./pages/admin/AdminSubscriptionPlansPage"));
+const AdminPurchasedPlansPage = lazy(() => import("./pages/admin/AdminPurchasedPlansPage"));
 const AdminCouponsPage = lazy(() => import("./pages/admin/AdminCouponsPage"));
 const AdminComplaintsPage = lazy(() => import("./pages/admin/AdminComplaintsPage"));
 const AdminReviewsPage = lazy(() => import("./pages/admin/AdminReviewsPage"));
@@ -213,6 +214,7 @@ export default function App() {
                 <Route path="coverage-requests" element={<AdminCoverageLeadsPage />} />
                 <Route path="pricing" element={<AdminPricingPage />} />
                 <Route path="subscription-plans" element={<AdminSubscriptionPlansPage />} />
+                <Route path="purchased-plans" element={<AdminPurchasedPlansPage />} />
                 <Route path="coupons" element={<AdminCouponsPage />} />
                 <Route path="complaints" element={<AdminComplaintsPage />} />
                 <Route path="reviews" element={<AdminReviewsPage />} />
