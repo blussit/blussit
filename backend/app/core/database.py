@@ -138,6 +138,16 @@ async def create_indexes() -> None:
     # on this visit") goes through this.
     await db.bookings.create_index("booking_group_id", sparse=True)
 
+    # Recycle bin (admin soft-delete/restore) + the 30-day auto-purge sweep
+    # in main.py's _reminder_loop, which runs this exact query every 60s,
+    # forever, for as long as the app is up. Partial: almost no booking is
+    # ever soft-deleted, so indexing only the deleted ones keeps this tiny
+    # instead of scanning the whole collection on every tick.
+    await db.bookings.create_index(
+        "deleted_at", name="recycle_bin_deleted_at",
+        partialFilterExpression={"is_deleted": True},
+    )
+
     await db.booking_status_history.create_index("booking_id")
 
     # Slot/daily capacity reservation counters — see
@@ -289,6 +299,17 @@ async def create_indexes() -> None:
     )
     await db.payment_orders.create_index([("customer_id", 1), ("created_at", -1)])
     await db.payment_orders.create_index([("kind", 1), ("status", 1), ("created_at", -1)])
+    # Plan-revenue reporting: admin dashboard's plan-revenue tile and the
+    # manager Sales section (both KPI figure and drill-down list) all match
+    # on purpose+status+created_at, which no other index above starts with —
+    # without this every dashboard load was a full collection scan.
+    await db.payment_orders.create_index([("purpose", 1), ("status", 1), ("created_at", -1)])
+    # Recycle-bin delete/permanent-delete money-attached checks — an $or
+    # across these two fields, each served by its own sparse index (only
+    # group-payment orders carry booking_ids; only single-booking orders
+    # carry booking_id).
+    await db.payment_orders.create_index("booking_id", sparse=True)
+    await db.payment_orders.create_index("booking_ids", sparse=True)
     # Auto-pay: one Razorpay plan per (our plan, vehicle tier, price) — the
     # unique key is what keeps _ensure_razorpay_plan from minting a new
     # gateway plan on every purchase.

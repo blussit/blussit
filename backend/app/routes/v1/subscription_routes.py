@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -195,3 +197,42 @@ async def subscriptions_admin_overview(db: AsyncIOMotorDatabase = Depends(get_db
     """Every plan ever purchased or granted, platform-wide, with who paid
     what — the admin's revenue/ownership view (see UserSubscriptionService.admin_overview)."""
     return await UserSubscriptionController(db).admin_overview()
+
+
+@subscription_router.get("/admin/plan-purchases", dependencies=[Depends(require_admin)])
+async def subscriptions_admin_plan_purchases(
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """`period`/`start`/`end` are the SAME period the admin KPI dashboard
+    uses (see KpiService.resolve_period) — the plan-revenue tile's
+    drill-down list is built from this exact filter, so the tile's number
+    and the sum of rows here always agree."""
+    from app.services.kpi_service import resolve_period
+
+    s, e, _ps, _pe = resolve_period(period, start, end)
+    return await UserSubscriptionController(db).plan_purchases(s, e, pagination)
+
+
+@subscription_router.get("/center/{service_center_id}/plan-purchases", dependencies=[Depends(require_manager_or_admin)])
+async def center_plan_purchases(
+    service_center_id: str,
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Same shape as /admin/plan-purchases, scoped to one center — a
+    manager's own Plans tab on their Sales drill-down (see
+    UserSubscriptionService.plan_purchases' service_center_id param)."""
+    from app.core.authz import ensure_own_center
+    from app.services.kpi_service import resolve_period
+
+    ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
+    s, e, _ps, _pe = resolve_period(period, start, end)
+    return await UserSubscriptionController(db).plan_purchases(s, e, pagination, service_center_id)

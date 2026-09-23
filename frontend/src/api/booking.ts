@@ -201,8 +201,10 @@ export const bookingApi = {
   myJobs: (params?: { status?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Booking>>("/bookings/my-jobs", { params }).then((r) => r.data),
 
-  forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number }) =>
-    apiClient.get<ApiPaginated<Booking>>(`/bookings/center/${serviceCenterId}`, { params }).then((r) => r.data),
+  forCenter: (
+    serviceCenterId: string,
+    params?: { status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string; date_field?: "created" | "completed" },
+  ) => apiClient.get<ApiPaginated<Booking>>(`/bookings/center/${serviceCenterId}`, { params }).then((r) => r.data),
 
   subscribersForCenter: (serviceCenterId: string) =>
     apiClient
@@ -219,6 +221,16 @@ export const bookingApi = {
   }) => apiClient.get<ApiPaginated<Booking>>("/bookings", { params }).then((r) => r.data),
 
   get: (id: string) => apiClient.get<ApiSuccess<Booking>>(`/bookings/${id}`).then((r) => r.data.data),
+
+  /** Admin-only recycle bin. Never blocked by attached captain-wallet
+   *  money / a paid online payment / a complaint — that gate is on
+   *  permanentlyDelete instead, see BookingService.soft_delete_booking. */
+  recycleBin: (params?: { page?: number; page_size?: number }) =>
+    apiClient.get<ApiPaginated<Booking>>("/bookings/recycle-bin", { params }).then((r) => r.data),
+  softDelete: (id: string) => apiClient.post<ApiSuccess<{ deleted_count: number }>>(`/bookings/${id}/delete`).then((r) => r.data.data),
+  restore: (id: string) => apiClient.post<ApiSuccess<{ restored_count: number }>>(`/bookings/${id}/restore`).then((r) => r.data.data),
+  permanentlyDelete: (id: string, force = false) =>
+    apiClient.delete<ApiSuccess<{ deleted_count: number }>>(`/bookings/${id}/permanent`, { params: { force } }).then((r) => r.data.data),
 
   assignCaptain: (id: string, captainId: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/assign-captain`, { captain_id: captainId }).then((r) => r.data.data),
@@ -270,6 +282,11 @@ export const bookingApi = {
 
   reschedule: (id: string, scheduled_date: string, scheduled_slot: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/reschedule`, { scheduled_date, scheduled_slot }).then((r) => r.data.data),
+
+  /** Notes / alternate contact only — never price, capacity or
+   *  assignment. Locked once the booking is completed or cancelled. */
+  updateDetails: (id: string, payload: { customer_notes?: string; alternate_contact_name?: string; alternate_contact_phone?: string }) =>
+    apiClient.patch<ApiSuccess<Booking>>(`/bookings/${id}/details`, payload).then((r) => r.data.data),
 
   // Captain job-progression flow — geo-tagged & time-gated, mirrors backend/LOGIC_README.md
   captainCancel: (id: string, reason: string) =>

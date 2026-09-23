@@ -30,6 +30,7 @@ from app.schemas.booking_schema import (
     BookingCancelRequest,
     BookingCreateRequest,
     BookingRescheduleRequest,
+    BookingUpdateDetailsRequest,
     CaptainCancelRequest,
     GroupVehicleRequest,
     HeadingRequest,
@@ -1655,6 +1656,36 @@ class BookingService:
         except Exception:  # noqa: BLE001
             logger.exception("Could not discard half-logged booking %s", booking_id)
 
+    async def _plan_usage_note(self, car: dict) -> str:
+        """One extra sentence for the service-done message when this wash
+        was covered by a plan — "Booked from your Monthly Shine plan · 3
+        washes left · valid till 12 Oct." Empty string when the visit
+        wasn't plan-covered, or best-effort empty on any lookup failure —
+        this must never block the completion notification itself."""
+        subscription_id = car.get("subscription_id")
+        if not subscription_id or not ObjectId.is_valid(subscription_id):
+            return ""
+        try:
+            sub = await self.repo.db.user_subscriptions.find_one({"_id": ObjectId(subscription_id)})
+            if not sub:
+                return ""
+            plan_name = "your plan"
+            if sub.get("plan_id") and ObjectId.is_valid(sub["plan_id"]):
+                plan = await self.repo.db.subscription_plans.find_one({"_id": ObjectId(sub["plan_id"])}, {"name": 1})
+                if plan and plan.get("name"):
+                    plan_name = plan["name"]
+            parts = [f"Booked from your {plan_name} plan"]
+            remaining = sub.get("remaining_service_count")
+            if remaining is not None:
+                parts.append(f"{remaining} wash{'es' if remaining != 1 else ''} left")
+            end_date = sub.get("end_date")
+            if end_date:
+                parts.append(f"valid till {from_stored(end_date).strftime('%d %b')}")
+            return " · ".join(parts) + "."
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not build a plan-usage note for subscription %s", subscription_id)
+            return ""
+
     async def _notify_service_done(self, cars: list[dict], customer_id: str, send_whatsapp: bool) -> None:
         """The ONLY customer message for a manager-done job: "service done",
         once per visit. With the switch off the in-app row is still written
@@ -1666,10 +1697,12 @@ class BookingService:
             wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(lead, cars)
             reference = self._visit_numbers(cars) if len(cars) > 1 else str(lead.get("booking_number") or "")
             done = f"Booking {reference} is complete." if len(cars) == 1 else f"All {len(cars)} vehicles are done ({reference})."
+            plan_note = await self._plan_usage_note(lead)
+            message = f"{done} {plan_note} Thanks for choosing Blussit!" if plan_note else f"{done} Thanks for choosing Blussit!"
             await self.notifications.notify(
                 customer_id,
                 "Service completed",
-                f"{done} Thanks for choosing Blussit!",
+                message,
                 NotificationType.BOOKING,
                 str(lead["_id"]),
                 wa_event="service_completed",
@@ -1766,7 +1799,11 @@ class BookingService:
             done.append(updated)
             await self._broadcast_booking_changed(updated)
             released = car.get("captain_id")
-            if released:
+            # Skip telling a self-assigned "captain" that their own job was
+            # "completed by the manager" — that's the same person who just
+            # completed it themselves; a real released captain still needs
+            # the heads-up.
+            if released and released != actor_id:
                 await ws_manager.broadcast(f"user:{released}", {"type": "changed", "channel": f"user:{released}", "booking_id": car_id})
                 try:
                     await self.notifications.notify(
@@ -2624,10 +2661,16 @@ class BookingService:
         return results
 
     async def list_for_center(
-        self, service_center_id: str, status: str | None, page: int, page_size: int, actor_role: str, actor_center_id: str | None
+        self, service_center_id: str, extra_filters: dict, page: int, page_size: int, actor_role: str, actor_center_id: str | None
     ):
+        """extra_filters carries status and/or the period-window filter the
+        route builds (see booking_routes.py's _apply_period_filters) —
+        same shape list_all (the admin GET /bookings) uses, so a manager's
+        own KPI drill-down can reuse the exact same RevenueDrillModal
+        component, just scoped to their center."""
         ensure_own_center(actor_role, actor_center_id, service_center_id)
-        items, total = await self.repo.list_for_center(service_center_id, status, page, page_size)
+        filters: dict = {"service_center_id": service_center_id, **extra_filters}
+        items, total = await self.repo.list_all(filters, page, page_size)
         enriched = await self._enrich_bookings(items)
         return enriched, total
 
@@ -2669,6 +2712,20 @@ class BookingService:
         # (and anything built on it, like the KPI drill-down modals) showed
         # a bare "—" instead of the customer's name.
         enriched = await self._enrich_bookings(items)
+        return enriched, total
+
+    async def list_recycle_bin(self, page: int, page_size: int) -> tuple[list[dict], int]:
+        """Soft-deleted bookings, most-recently-deleted first. Each row
+        gets days_remaining until the 30-day auto-purge sweep (main.py)
+        removes it for good."""
+        items, total = await self.repo.find_many(
+            {"is_deleted": True}, page, page_size, sort_by="deleted_at", sort_order=-1, include_deleted=True,
+        )
+        enriched = await self._enrich_bookings(items)
+        now = now_ist()
+        for row, item in zip(enriched, items):
+            deleted_at = item.get("deleted_at")
+            row["days_remaining"] = max(0, round(30 - (now - from_stored(deleted_at)).total_seconds() / 86400)) if deleted_at else None
         return enriched, total
 
     async def get_booking_group(self, booking_group_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> list[dict]:
@@ -3024,6 +3081,15 @@ class BookingService:
                     "previous_captain_ids": previous,
                     "issue_flag": None,
                     "issue_resolved": True,
+                    # A fresh captain's own lateness is a new situation, not
+                    # a repeat of whatever the PREVIOUS captain's was — an
+                    # acknowledged issue must not silently suppress it.
+                    "resolved_issue_flag": None,
+                    # Handing a self-assigned booking to a REAL captain
+                    # (reassign_captain only ever accepts role="captain",
+                    # see the check above) means it now DOES follow the
+                    # normal heading-out/verify flow — resume the nudge.
+                    "self_assigned": False,
                 },
                 session=session,
             )
@@ -3116,11 +3182,34 @@ class BookingService:
             updated = await self.repo.update_by_id(car_id, {
                 "captain_id": actor_id,
                 "status": BookingStatus.ASSIGNED.value,
-                "estimated_start_at": now_ist(),
+                # The booking's own slot start, exactly like assign_captain
+                # computes it (_resolve_estimated_start) — NOT now_ist().
+                # Hardcoding "now" here meant self-assigning a booking days
+                # in the future immediately anchored its lateness check to
+                # the moment of assignment, so find_bookings_late_to_start
+                # flagged it "hasn't started — past scheduled time" within
+                # the very next sweep tick, sometimes days before the
+                # actual slot. A real bug, not a stale-data artifact.
+                "estimated_start_at": _resolve_estimated_start(car, None),
                 "assigned_at": now_ist(),
+                # A manager who takes a job personally never goes through
+                # the captain heading-out/vehicle-verify flow at all (those
+                # endpoints are require_captain-gated, unreachable to a
+                # manager even for their own booking) — this flag lets
+                # find_bookings_late_to_start exempt them from the "captain
+                # hasn't started heading out" nudge, which assumes exactly
+                # that flow and makes no sense for a self-delivered job.
+                "self_assigned": True,
                 "previous_captain_ids": previous,
                 "issue_flag": None,
                 "issue_resolved": True,
+                # A manager taking the job over is a fresh start, same as
+                # reassign_captain/reschedule_booking — nothing carried
+                # over from a previous captain's history should linger
+                # (moot today since self_assigned bookings are exempt from
+                # the sweep that reads this, but kept consistent in case
+                # that ever changes).
+                "resolved_issue_flag": None,
             })
             await self._record_history(car_id, BookingStatus.ASSIGNED, actor_id, "Self-assigned by the manager")
             await self._broadcast_booking_changed(updated)
@@ -3135,16 +3224,19 @@ class BookingService:
         if not claimed:
             raise BadRequestException("This booking can't be self-assigned in its current state — a captain may already be on the way.")
 
-        # Same customer-facing "captain assigned" WhatsApp assign_captain
-        # sends — a customer must never learn who's coming only when the
-        # job is already done. The manager's own name fills the captain slot.
+        # Same WhatsApp template assign_captain's "captain assigned" event
+        # uses (unchanged — it already puts the manager's name in param 1),
+        # but the in-app title/message names the manager directly instead
+        # of the generic captain-assigned wording, which reads oddly when
+        # there's no captain at all, just the manager handling it himself.
         manager = await self.user_repo.find_by_id(actor_id)
+        manager_name = (manager or {}).get("full_name") or "Our manager"
         wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
         await self.notifications.notify(
-            booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
+            booking["customer_id"], "Booking assigned", f"{manager_name} will personally handle your booking.",
             NotificationType.BOOKING, booking_id,
             wa_event="captain_assigned",
-            wa_params=[(manager or {}).get("full_name", "Your captain"), wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
+            wa_params=[manager_name, wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
         )
         return {"claimed": len(claimed), "booking_numbers": [c.get("booking_number") for c in claimed]}
 
@@ -3656,10 +3748,12 @@ class BookingService:
             reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
             done = f"All {len(cars)} vehicles are done ({reference})." if len(cars) > 1 else f"Booking {reference} is complete."
             wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
+            plan_note = await self._plan_usage_note(updated)
+            message = f"{done} {plan_note} Please rate your captain!" if plan_note else f"{done} Please rate your captain!"
             await self.notifications.notify(
                 booking["customer_id"],
                 "Service completed",
-                f"{done} Please rate your captain!",
+                message,
                 NotificationType.BOOKING,
                 booking_id,
                 wa_event="service_completed",
@@ -3878,6 +3972,11 @@ class BookingService:
             "reminder_sent": False,
             "issue_flag": None,
             "issue_resolved": True,
+            # A clean slate — whoever gets assigned next (self-assigned or
+            # not, late or not) is a fresh situation, never suppressed by
+            # whatever was acknowledged/self-assigned before the move.
+            "resolved_issue_flag": None,
+            "self_assigned": False,
             "captain_start_stage": None,
             "late_penalty_pct": 0,
             # Just re-entered "needs a captain" — restart the clock on
@@ -3971,6 +4070,246 @@ class BookingService:
             await self._broadcast_slots_changed(center_id, new_date_str)
         return serialize_doc(updated)
 
+    async def update_details(
+        self, booking_id: str, payload: BookingUpdateDetailsRequest, actor_role: str, actor_center_id: str | None,
+    ) -> dict:
+        """Manager/admin correcting notes or the alternate contact — pure
+        metadata, never price/capacity/assignment (see the schema's own
+        docstring for why those stay out of scope), so unlike
+        reschedule_booking this never touches slot capacity or status and
+        needs no transaction. Locked once the booking is done — "editing"
+        a completed job's paperwork isn't a real edit, it's rewriting
+        history."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if actor_role == "manager":
+            ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        if booking["status"] in {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value}:
+            raise BadRequestException("This booking is already closed and can no longer be edited")
+
+        update_data = payload.model_dump(exclude_unset=True)
+        if not update_data:
+            return serialize_doc(booking)
+
+        # customer_notes/alternate_contact are per-VISIT, denormalized onto
+        # every car at creation (create_booking_group passes the SAME
+        # values to each) — editing only the clicked car would silently
+        # leave its siblings out of sync with what's now "the" note for
+        # the visit. A car already completed is left alone (its own
+        # paperwork is locked, same reasoning as the guard above); every
+        # other live car on the visit gets the same update.
+        cars = await self._visit_cars(booking)
+        updated = None
+        for car in cars:
+            if car["status"] == BookingStatus.COMPLETED.value:
+                continue
+            result = await self.repo.update_by_id(str(car["_id"]), update_data)
+            await self._broadcast_booking_changed(result or car)
+            if str(car["_id"]) == booking_id:
+                updated = result
+        return serialize_doc(updated) if updated else serialize_doc(booking)
+
+    # -- Recycle bin (admin only) --------------------------------------
+    # Statuses where a booking actually holds a slot-capacity seat —
+    # mirrors app/scripts/delete_booking.py's own _ACTIVE_SEAT_STATUSES: a
+    # manager-logged job never took a seat, and a cancelled one already
+    # gave it back.
+    _SEAT_HOLDING_STATUSES = {
+        BookingStatus.PENDING.value, BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value,
+        BookingStatus.SERVICE_STARTED.value, BookingStatus.RESCHEDULED.value, BookingStatus.COMPLETED.value,
+    }
+
+    async def soft_delete_booking(self, booking_id: str, actor_id: str) -> dict:
+        """Admin-only "delete" — moves this booking, and every other live
+        car on its visit (_visit_cars), into the recycle bin. Reversible
+        for 30 days (see main.py's purge sweep), so unlike
+        permanently_delete_booking this is NEVER blocked by attached
+        captain-wallet money, a paid online payment, or a complaint — it's
+        the irreversible step that gates on those, not this one. Still
+        hands back what each car was holding (slot seat, subscription
+        consumption, coupon use) immediately, the same way a hard delete
+        already does, since a "deleted" booking must stop counting against
+        capacity/plan-balance/coupon-limit right away, not just disappear
+        from the UI."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        cars = await self._visit_cars(booking)
+        car_ids = [str(c["_id"]) for c in cars]
+
+        had_wallet = await self.db.wallet_transactions.count_documents({"booking_id": {"$in": car_ids}}) > 0
+        had_paid_payment = await self.db.payment_orders.count_documents(
+            {"$or": [{"booking_id": {"$in": car_ids}}, {"booking_ids": {"$in": car_ids}}], "status": {"$in": ["paid", "paid_attention"]}}
+        ) > 0
+        had_complaints = await self.db.complaints.count_documents({"booking_id": {"$in": car_ids}}) > 0
+        # Informational only (shown as a warning chip in the recycle-bin
+        # UI) — never blocks the soft delete itself, see the docstring.
+        deleted_flags = {"had_captain_earning": had_wallet, "had_paid_online_payment": had_paid_payment, "had_complaints": had_complaints}
+
+        seats_released: set[tuple] = set()
+        claimed_cars = []
+        for car in cars:
+            car_id = str(car["_id"])
+            # Atomic claim — update_if only flips is_deleted on a still-live
+            # doc, in one round trip. If two requests race on the same
+            # booking (double-click, a client retry), only the first one to
+            # land here gets None back for the loser, which skips every side
+            # effect below — without this, both could restore the same
+            # subscription wash / coupon use / slot seat twice.
+            claimed = await self.repo.update_if(
+                car_id, {}, {"is_deleted": True, "deleted_at": now_ist(), "updated_by": actor_id, "deleted_flags": deleted_flags}
+            )
+            if not claimed:
+                continue
+            claimed_cars.append(car)
+            if car.get("subscription_id") and car.get("subscription_consumption"):
+                await UserSubscriptionService(self.db).restore_consumption(car["subscription_id"], car["subscription_consumption"])
+            if car.get("coupon_code"):
+                await CouponService(self.db).reverse_usage(car["coupon_code"], car["customer_id"], car_id)
+            if car.get("completed_by_role") != "manager" and car.get("status") in self._SEAT_HOLDING_STATUSES:
+                seat_key = (car["service_center_id"], to_ist(car["scheduled_date"]).strftime("%Y-%m-%d"), car["scheduled_slot"])
+                if seat_key not in seats_released:
+                    seats_released.add(seat_key)
+                    await self._release_slot_capacity(*seat_key)
+            await self._broadcast_booking_changed(car)
+        cars = claimed_cars
+        car_ids = [str(c["_id"]) for c in cars]
+
+        # Same courtesy cancel_booking already extends to the customer and
+        # any assigned captain — from their side, "deleted" and
+        # "cancelled" look identical: the job simply isn't happening.
+        # Without this, a captain already on the way to a car that just
+        # got deleted from under them had no way to find out except
+        # noticing it silently vanished from their job list. Skipped for
+        # an already-completed/cancelled visit — nothing live to warn
+        # anyone about, this is just admin record-keeping on history.
+        live_cars = [c for c in cars if c["status"] not in {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value}]
+        if live_cars:
+            lead = live_cars[0]
+            label = await self._visit_label(live_cars)
+            reference = self._visit_numbers(live_cars) if len(live_cars) > 1 else str(lead.get("booking_number") or "")
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, _wa_code = await self._wa_details(lead, live_cars)
+            await self.notifications.notify(
+                lead["customer_id"], f"{label} removed", f"Your booking ({reference}) has been removed by our team.",
+                NotificationType.BOOKING, str(lead["_id"]),
+                wa_event="booking_cancelled", wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
+            )
+            for captain_id in {c.get("captain_id") for c in live_cars if c.get("captain_id")}:
+                await self.notifications.notify(
+                    captain_id, f"{label} removed", f"Booking {reference} was removed by an admin — no action needed.",
+                    NotificationType.BOOKING, str(lead["_id"]), send_whatsapp=False,
+                )
+        return {"deleted_count": len(cars), "booking_ids": car_ids, "deleted_flags": deleted_flags}
+
+    async def restore_booking(self, booking_id: str) -> dict:
+        """Reverses soft_delete_booking — brings the whole visit back
+        together. Best-effort re-reserves each car's seat: doesn't hard-fail
+        if the slot's since filled up elsewhere, the booking still comes
+        back, just possibly over capacity for the manager to notice."""
+        booking = await self.repo.find_by_id(booking_id, include_deleted=True)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if not booking.get("is_deleted"):
+            raise BadRequestException("This booking isn't in the recycle bin")
+        group_id = booking.get("booking_group_id")
+        cars = (
+            await self.repo.collection.find({"booking_group_id": group_id, "is_deleted": True}).to_list(length=20)
+            if group_id
+            else [booking]
+        )
+
+        centers: dict[str, dict | None] = {}
+        seats_reserved: set[tuple] = set()
+        restored_ids = []
+        for car in cars:
+            car_id = str(car["_id"])
+            actually_restored = await self.repo.restore(car_id)
+            if actually_restored:
+                restored_ids.append(car_id)
+            if actually_restored and car.get("completed_by_role") != "manager" and car.get("status") in self._SEAT_HOLDING_STATUSES:
+                date_str = to_ist(car["scheduled_date"]).strftime("%Y-%m-%d")
+                seat_key = (car["service_center_id"], date_str, car["scheduled_slot"])
+                if seat_key not in seats_reserved:
+                    seats_reserved.add(seat_key)
+                    center = centers.setdefault(car["service_center_id"], await self.center_repo.find_by_id(car["service_center_id"]))
+                    if center:
+                        try:
+                            await self._reserve_slot_capacity(None, center, date_str, car["scheduled_slot"])
+                        except Exception:  # noqa: BLE001
+                            logger.warning("Restoring booking %s: could not re-reserve its slot — it may now be over capacity", car_id)
+            restored_doc = await self.repo.find_by_id(car_id)
+            if restored_doc:
+                await self._broadcast_booking_changed(restored_doc)
+
+        # Closes the loop on soft_delete_booking's own "removed" notice —
+        # without this, a delete-then-restore (the exact "oops, undo that"
+        # case the recycle bin exists for) left the customer's last word on
+        # it being "removed" forever, with no follow-up once it came back.
+        live_cars = [c for c in cars if str(c["_id"]) in restored_ids and c["status"] not in {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value}]
+        if live_cars:
+            lead = live_cars[0]
+            label = await self._visit_label(live_cars)
+            reference = self._visit_numbers(live_cars) if len(live_cars) > 1 else str(lead.get("booking_number") or "")
+            await self.notifications.notify(
+                lead["customer_id"], f"{label} restored", f"Your booking ({reference}) is back on — sorry for the mix-up.",
+                NotificationType.BOOKING, str(lead["_id"]), send_whatsapp=False,
+            )
+        return {"restored_count": len(restored_ids), "booking_ids": restored_ids}
+
+    async def permanently_delete_booking(self, booking_id: str, *, force: bool = False) -> dict:
+        """Irreversible — only ever reachable from the recycle bin (a
+        booking must be soft-deleted first) or the 30-day auto-purge sweep.
+        Mirrors app/scripts/delete_booking.py's own guard and cascade for a
+        single visit (keep the two in sync if either one changes): refuses
+        unless force=True when captain-wallet money, a paid online payment,
+        or a complaint is attached — those need a human decision, not a
+        delete."""
+        booking = await self.repo.find_by_id(booking_id, include_deleted=True)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if not booking.get("is_deleted"):
+            raise BadRequestException("This booking isn't in the recycle bin — delete it first")
+        group_id = booking.get("booking_group_id")
+        cars = (
+            await self.repo.collection.find({"booking_group_id": group_id, "is_deleted": True}).to_list(length=20)
+            if group_id
+            else [booking]
+        )
+        car_ids = [str(c["_id"]) for c in cars]
+
+        wallet = await self.db.wallet_transactions.count_documents({"booking_id": {"$in": car_ids}})
+        paid_orders = await self.db.payment_orders.count_documents(
+            {"$or": [{"booking_id": {"$in": car_ids}}, {"booking_ids": {"$in": car_ids}}], "status": {"$in": ["paid", "paid_attention"]}}
+        )
+        complaints = await self.db.complaints.count_documents({"booking_id": {"$in": car_ids}})
+        if (wallet or paid_orders or complaints) and not force:
+            reasons = []
+            if wallet:
+                reasons.append(f"{wallet} captain wallet transaction(s)")
+            if paid_orders:
+                reasons.append(f"{paid_orders} paid online payment(s)")
+            if complaints:
+                reasons.append(f"{complaints} complaint(s)")
+            raise BadRequestException(f"Can't permanently delete — {', '.join(reasons)} attached. Use force to delete anyway.")
+
+        child_filters = {
+            "booking_status_history": {"booking_id": {"$in": car_ids}},
+            "notifications": {"reference_id": {"$in": car_ids}},
+            "reviews": {"booking_id": {"$in": car_ids}},
+            "captain_locations": {"booking_id": {"$in": car_ids}},
+            "purchase_confirmations": {"reference_id": {"$in": car_ids}},
+            "payment_orders": {
+                "$or": [{"booking_id": {"$in": car_ids}}, {"booking_ids": {"$in": car_ids}}],
+                "status": {"$nin": ["paid", "paid_attention"]},
+            },
+        }
+        for name, flt in child_filters.items():
+            await self.db[name].delete_many(flt)
+        for car_id in car_ids:
+            await self.repo.hard_delete(car_id)
+        return {"deleted_count": len(car_ids), "booking_ids": car_ids}
+
     async def find_bookings_needing_reminder(self) -> list[dict]:
         candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value, "reminder_sent": {"$ne": True}})
         now = now_ist()
@@ -4032,8 +4371,11 @@ class BookingService:
         as long as it stays unstarted. Deliberately does NOT filter on
         issue_flag being unset — this needs to keep firing on its own
         throttle even while flagged, which find_bookings_captain_not_reached
-        doesn't need since it only ever fires once."""
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value})
+        doesn't need since it only ever fires once. Excludes self_assigned
+        bookings entirely — a manager delivering it personally never goes
+        through the heading-out flow this nudge is about (see self_assign's
+        own comment)."""
+        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value, "self_assigned": {"$ne": True}})
         now = now_ist()
         policy = await self.policy_service.get_policy()
         threshold = timedelta(minutes=LATE_START_NUDGE_MINUTES)
@@ -4092,7 +4434,23 @@ class BookingService:
         # report_risk) — only set/refresh captain_not_started when there
         # isn't a more specific issue already active.
         is_different_open_flag = bool(existing_flag) and existing_flag != "captain_not_started" and not booking.get("issue_resolved")
-        if not is_different_open_flag:
+        # Once a manager has explicitly resolved THIS exact nudge, re-
+        # flagging the identical still-ongoing situation every
+        # LATE_START_NUDGE_MINUTES would silently undo their own Resolve
+        # click — flag_issue always resets issue_resolved=False and sends
+        # a fresh "🚨 Urgent" manager ping, so calling it again here is
+        # exactly the "keeps notifying after I acknowledged it" spam
+        # reported. It only becomes relevant again once the situation
+        # actually escalates (captain_missed_window, a distinct flag) or
+        # the booking gets reassigned (which resets these fields) — a
+        # genuinely new event, not a repeat of this one.
+        # existing_flag/issue_resolved alone can't tell "already resolved"
+        # apart from "never flagged at all" — resolve_issue clears
+        # issue_flag to None in BOTH cases, so resolved_issue_flag (the
+        # flag value resolve_issue last cleared) is the only reliable
+        # signal (see the model field's own comment).
+        already_acknowledged = existing_flag is None and booking.get("resolved_issue_flag") == "captain_not_started"
+        if not is_different_open_flag and not already_acknowledged:
             await self.flag_issue(str(booking["_id"]), "captain_not_started", note)
         if booking.get("captain_id"):
             await self.notifications.notify(
@@ -4325,7 +4683,12 @@ class BookingService:
         if not booking:
             raise NotFoundException("Booking not found")
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
-        updated = await self.repo.update_by_id(booking_id, {"issue_flag": None, "issue_resolved": True})
+        # Remember WHICH flag this was, even after clearing issue_flag —
+        # resolved_issue_flag is what lets flag_late_to_start later tell
+        # "captain_not_started was already acknowledged" apart from "never
+        # flagged at all" (see the model field's own comment).
+        resolved_flag = {"issue_flag": None, "issue_resolved": True, "resolved_issue_flag": booking.get("issue_flag")}
+        updated = await self.repo.update_by_id(booking_id, resolved_flag)
         await self._record_history(booking_id, BookingStatus(booking["status"]), resolved_by, note)
         # Resolving a visit-wide flag on one car resolves it on the others
         # carrying the same flag — the manager fixed the trip, not a car.
@@ -4333,7 +4696,7 @@ class BookingService:
             for sib in await self._visit_siblings(booking):
                 if sib.get("issue_flag") != booking.get("issue_flag") or sib.get("issue_resolved"):
                     continue
-                mirrored = await self.repo.update_by_id(str(sib["_id"]), {"issue_flag": None, "issue_resolved": True})
+                mirrored = await self.repo.update_by_id(str(sib["_id"]), resolved_flag)
                 await self._record_history(str(sib["_id"]), BookingStatus(sib["status"]), resolved_by, note)
                 if mirrored:
                     await self._broadcast_booking_changed(mirrored)

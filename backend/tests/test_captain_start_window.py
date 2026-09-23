@@ -169,3 +169,70 @@ async def test_sweep_flags_missed_window_distinctly_once_locked_out(rig):
     flagged = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
     assert flagged["issue_flag"] == "captain_missed_window"
     assert flagged["issue_resolved"] is False
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_reflag_once_a_manager_has_resolved_it(rig):
+    """Founder-reported bug: flag_issue always resets issue_resolved=False
+    and pings the manager fresh — since find_bookings_late_to_start
+    deliberately re-calls flag_late_to_start every LATE_START_NUDGE_MINUTES
+    with no issue_flag filter at all, a manager clicking Resolve on
+    "captain hasn't started" used to get silently undone by the very next
+    sweep tick, re-flagging (and re-notifying) the identical still-ongoing
+    situation. Once resolved, it must stay quiet unless the situation
+    genuinely escalates (a DIFFERENT flag, e.g. captain_missed_window)."""
+    bs = BookingService(rig["db"])
+    now = datetime.now(timezone.utc)
+    target_date, slot_key = _find_slot_far_in_future(now)
+    booking = await bs.create_booking(rig["customer_id"], BookingCreateRequest(vehicle_id=rig["vehicle_id"], address_id=rig["address_id"], service_ids=[rig["foam"]], scheduled_date=target_date, scheduled_slot=slot_key))
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=rig["captain_id"]), "system", "admin", None)
+
+    from app.utils.timezone import now_ist
+
+    # Late enough to trip the nudge, nowhere near the lockout threshold.
+    far_past = now_ist() - timedelta(hours=1)
+    await rig["db"].bookings.update_one(
+        {"_id": ObjectId(booking["id"])},
+        {"$set": {"estimated_start_at": far_past, "assigned_at": far_past - timedelta(minutes=5)}},
+    )
+
+    fresh = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
+    await bs.flag_late_to_start(fresh)
+    flagged = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert flagged["issue_flag"] == "captain_not_started"
+
+    # The manager clicks Resolve — the real method, so it also stamps
+    # resolved_issue_flag exactly like production would.
+    await bs.resolve_issue(booking["id"], "test-manager", "Called captain, on the way now", "manager", rig["center_id"])
+
+    # The next sweep tick still finds it "late" (nothing else changed) —
+    # must NOT re-flag the identical, already-acknowledged situation.
+    resolved = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
+    await bs.flag_late_to_start(resolved)
+    still = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert still["issue_flag"] is None
+    assert still["issue_resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_late_start_sweep_excludes_self_assigned_bookings(rig):
+    """A manager who self-assigned a booking never goes through the
+    captain heading-out flow this nudge is about (self_assign sets
+    self_assigned=True) — find_bookings_late_to_start must not even
+    consider it a candidate, however late it looks."""
+    bs = BookingService(rig["db"])
+    now = datetime.now(timezone.utc)
+    target_date, slot_key = _find_slot_far_in_future(now)
+    booking = await bs.create_booking(rig["customer_id"], BookingCreateRequest(vehicle_id=rig["vehicle_id"], address_id=rig["address_id"], service_ids=[rig["foam"]], scheduled_date=target_date, scheduled_slot=slot_key))
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=rig["captain_id"]), "system", "admin", None)
+
+    from app.utils.timezone import now_ist
+
+    far_past = now_ist() - timedelta(hours=1)
+    await rig["db"].bookings.update_one(
+        {"_id": ObjectId(booking["id"])},
+        {"$set": {"estimated_start_at": far_past, "assigned_at": far_past - timedelta(minutes=5), "self_assigned": True}},
+    )
+
+    due = await bs.find_bookings_late_to_start()
+    assert booking["id"] not in {str(b["_id"]) for b in due}

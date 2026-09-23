@@ -317,6 +317,10 @@ export interface Booking {
   address_id: string;
   service_center_id: string;
   captain_id?: string | null;
+  // True when captain_id is the assigning MANAGER's own id (self-assign,
+  // "Deliver this myself") — never goes through the captain heading-
+  // out/verify flow, see BookingService.self_assign.
+  self_assigned?: boolean;
   captain_profile?: CaptainProfileSnapshot | null;
   service_ids: string[];
   /** Only counts above 1 are stored — { [serviceId]: 3 } means "×3". */
@@ -385,6 +389,10 @@ export interface Booking {
   manager_notified_at?: string | null;
   closed_at?: string | null;
   status_history?: { status: string; note?: string; created_at: string }[];
+  // Recycle bin only (GET /bookings/recycle-bin) — see BookingService.soft_delete_booking.
+  deleted_at?: string | null;
+  days_remaining?: number | null;
+  deleted_flags?: { had_captain_earning: boolean; had_paid_online_payment: boolean; had_complaints: boolean } | null;
   // Denormalized onto the response for display — see BookingService._enrich_bookings.
   customer_name?: string | null;
   customer_phone?: string | null;

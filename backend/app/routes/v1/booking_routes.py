@@ -28,6 +28,7 @@ from app.schemas.booking_schema import (
     BookingCreateRequest,
     BookingPhoneOtpRequest,
     BookingRescheduleRequest,
+    BookingUpdateDetailsRequest,
     CaptainCancelRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
@@ -43,6 +44,30 @@ from app.schemas.booking_schema import (
 )
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
+
+
+def _apply_period_filters(filters: dict, period: Optional[str], start: Optional[str], end: Optional[str], date_field: str) -> None:
+    """Mutates `filters` in place — the SAME period the admin/manager KPI
+    dashboards use (see KpiService.resolve_period), so a dashboard tile's
+    drill-down list and the tile's own number always agree.
+    `date_field="completed"` matches revenue/completed-washes tiles
+    (closed_at, falling back to created_at — mirrors
+    KpiService._completed_in); the default "created" matches
+    bookings/cancelled tiles. Shared by list_all (admin) and
+    list_for_center (manager, scoped)."""
+    if not (period or (start and end)):
+        return
+    from app.services.kpi_service import resolve_period
+
+    s, e, _ps, _pe = resolve_period(period, start, end)
+    if date_field == "completed":
+        filters["status"] = "completed"
+        filters["$or"] = [
+            {"closed_at": {"$gte": s, "$lt": e}},
+            {"closed_at": {"$in": [None]}, "created_at": {"$gte": s, "$lt": e}},
+        ]
+    else:
+        filters["created_at"] = {"$gte": s, "$lt": e}
 
 
 @router.post("", dependencies=[Depends(require_customer)])
@@ -107,11 +132,23 @@ async def list_my_jobs(status: Optional[str] = None, pagination: PaginationParam
 async def list_for_center(
     service_center_id: str,
     status: Optional[str] = None,
+    period: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    date_field: str = "created",
     pagination: PaginationParams = Depends(),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return await BookingController(db).list_for_center(current_user, service_center_id, status, pagination)
+    """`period`/`start`/`end`/`date_field` — same meaning as GET /bookings
+    (admin, see its own docstring) — lets a manager's own KPI drill-down
+    reuse the exact same RevenueDrillModal component the admin dashboard
+    uses, scoped to their center."""
+    filters: dict = {}
+    if status:
+        filters["status"] = status
+    _apply_period_filters(filters, period, start, end, date_field)
+    return await BookingController(db).list_for_center(current_user, service_center_id, filters, pagination)
 
 
 @router.get("/center/{service_center_id}/subscribers", dependencies=[Depends(require_manager_or_admin)])
@@ -146,19 +183,39 @@ async def list_all(
         filters["status"] = status
     if service_center_id:
         filters["service_center_id"] = service_center_id
-    if period or (start and end):
-        from app.services.kpi_service import resolve_period
-
-        s, e, _ps, _pe = resolve_period(period, start, end)
-        if date_field == "completed":
-            filters["status"] = "completed"
-            filters["$or"] = [
-                {"closed_at": {"$gte": s, "$lt": e}},
-                {"closed_at": {"$in": [None]}, "created_at": {"$gte": s, "$lt": e}},
-            ]
-        else:
-            filters["created_at"] = {"$gte": s, "$lt": e}
+    _apply_period_filters(filters, period, start, end, date_field)
     return await BookingController(db).list_all(filters, pagination)
+
+
+@router.get("/recycle-bin", dependencies=[Depends(require_admin)])
+async def list_recycle_bin(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Soft-deleted bookings, most-recently-deleted first, each with
+    days_remaining until the 30-day auto-purge sweep removes it for good."""
+    return await BookingController(db).list_recycle_bin(pagination)
+
+
+@router.post("/{booking_id}/delete", dependencies=[Depends(require_admin)])
+async def soft_delete_booking(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Moves this booking (and every other live car on its visit) to the
+    recycle bin — reversible for 30 days. Never blocked by attached
+    captain-wallet money / a paid online payment / a complaint; see
+    BookingService.soft_delete_booking for why."""
+    return await BookingController(db).soft_delete(current_user, booking_id)
+
+
+@router.post("/{booking_id}/restore", dependencies=[Depends(require_admin)])
+async def restore_booking(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await BookingController(db).restore(current_user, booking_id)
+
+
+@router.delete("/{booking_id}/permanent", dependencies=[Depends(require_admin)])
+async def permanently_delete_booking(
+    booking_id: str, force: bool = False, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Irreversible. Only reachable on a booking already in the recycle
+    bin. Refuses (400) unless force=true when captain-wallet money, a paid
+    online payment, or a complaint is attached."""
+    return await BookingController(db).permanently_delete(current_user, booking_id, force)
 
 
 @router.get("/{booking_id}")
@@ -304,6 +361,16 @@ async def reschedule_booking(booking_id: str, payload: BookingRescheduleRequest,
     """Customers reschedule their own bookings; managers/admins can also reschedule
     as a remediation path when a captain issue was flagged (see resolve_issue)."""
     return await BookingController(db).reschedule(current_user, booking_id, payload)
+
+
+@router.patch("/{booking_id}/details", dependencies=[Depends(require_manager_or_admin)])
+async def update_booking_details(
+    booking_id: str, payload: BookingUpdateDetailsRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Notes / alternate contact only — never price, capacity or
+    assignment (see BookingUpdateDetailsRequest's own docstring). Locked
+    once the booking is completed or cancelled."""
+    return await BookingController(db).update_details(current_user, booking_id, payload)
 
 
 

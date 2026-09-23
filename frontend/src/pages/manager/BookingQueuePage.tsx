@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, Phone, Sparkles } from "lucide-react";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
@@ -10,8 +10,10 @@ import { vehicleLabel } from "../../lib/constants";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { EditBookingModal } from "../../components/shared/EditBookingModal";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useAuth } from "../../context/AuthContext";
+import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
@@ -150,8 +152,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
+  const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
+
   const navigate = useNavigate();
   const { push: pushToast } = useToast();
+  const confirm = useConfirm();
   const [doneBooking, setDoneBooking] = useState<Booking | null>(null);
   const [doneWhatsApp, setDoneWhatsApp] = useState(true);
 
@@ -185,7 +190,14 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     enabled: !!centerId,
   });
 
-  const captainName = (id?: string | null) => captains?.data.find((c) => c.id === id)?.full_name || "—";
+  // A self-assigned booking's captain_id is the MANAGER's own id, which
+  // never appears in the captains-only list above — without this check it
+  // rendered as a bare "—", indistinguishable from "nobody assigned".
+  const captainName = (id?: string | null) => {
+    if (!id) return "—";
+    if (id === user?.id) return `${user?.full_name || "You"} (you)`;
+    return captains?.data.find((c) => c.id === id)?.full_name || "—";
+  };
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["center-bookings"] });
 
   // Excludes anything already flagged (isOpenIssue) — once the automated
@@ -296,6 +308,15 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       setError("");
     },
     onError: (err) => setError(getErrorMessage(err)),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.softDelete(id),
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Moved to recycle bin" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   const priorityMutation = useMutation({
@@ -453,8 +474,32 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
         </>
       )}
       {canCancel(b) && (
+        <Button size="sm" variant="outline" onClick={() => setEditingBooking(b)}>
+          <Pencil className="h-3.5 w-3.5" /> Edit
+        </Button>
+      )}
+      {canCancel(b) && (
         <Button size="sm" variant="ghost" onClick={() => setCancellingBooking(b)}>
           <Ban className="h-3.5 w-3.5" /> Cancel
+        </Button>
+      )}
+      {user?.role === "admin" && (
+        <Button
+          size="sm"
+          variant="ghost"
+          isLoading={deleteMutation.isPending}
+          onClick={async () => {
+            if (
+              await confirm({
+                title: `Delete ${b.booking_number}?`,
+                message: "Moves it to the recycle bin — reversible for 30 days, or permanently removable from there.",
+                tone: "danger",
+              })
+            )
+              deleteMutation.mutate(b.id);
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
         </Button>
       )}
     </div>
@@ -900,6 +945,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
         captainName={selectedBooking ? captainName(selectedBooking.captain_id) : null}
         centerName={center?.name}
       />
+
+      <EditBookingModal booking={editingBooking} onClose={() => setEditingBooking(null)} onSaved={invalidate} />
     </div>
   );
 }

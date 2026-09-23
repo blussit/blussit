@@ -1,11 +1,15 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle, CalendarClock, Gauge, Star, UserX } from "lucide-react";
-import { analyticsApi } from "../../api/admin";
+import { AlertTriangle, CalendarClock, Gauge, Gift, IndianRupee, ShoppingBag, Star, UserX } from "lucide-react";
+import { analyticsApi, kpiApi } from "../../api/admin";
 import { EmptyState, PageLoader, Panel, StatCard } from "../../components/ui";
 import { CollectionsReportCard } from "../../components/shared/CollectionsReport";
+import { RevenueDrillModal } from "../../components/admin/kpi/RevenueDrillModal";
+import { formatINR } from "../../components/admin/kpi/charts";
 import { paymentApi } from "../../api/payment";
 import { useAuth } from "../../context/AuthContext";
+import { PERIODS, REVENUE_SCOPES, type RevenueScope } from "../../lib/kpiPeriods";
 
 /**
  * The manager's daily operating picture, in the console shape the founder
@@ -13,13 +17,30 @@ import { useAuth } from "../../context/AuthContext";
  * decision today, and every supporting metric demoted to a quiet strip
  * below — not twelve competing tiles. Each tile drills into the page
  * where the number is actually explained.
+ *
+ * The Sales section above it is a different lens on the same center —
+ * period-selectable (not locked to "today" like the operational tiles
+ * below), combined bookings+plans revenue with the exact same drill-down
+ * the admin dashboard's hero tile uses, just scoped to this one center.
  */
 export default function ManagerKpiPage() {
   const { user } = useAuth();
   const centerId = user?.service_center_id || "";
+
+  const [periodKey, setPeriodKey] = useState<string>("today");
+  const [revenueScope, setRevenueScope] = useState<RevenueScope>("combined");
+  const [revenueDrillOpen, setRevenueDrillOpen] = useState(false);
+  const params = useMemo(() => ({ period: periodKey }), [periodKey]);
+
   const { data, isLoading } = useQuery({
     queryKey: ["manager-kpi", centerId],
     queryFn: () => analyticsApi.managerSummary(centerId),
+    enabled: !!centerId,
+  });
+
+  const { data: sales, isLoading: salesLoading } = useQuery({
+    queryKey: ["manager-kpi-sales", centerId, params],
+    queryFn: () => kpiApi.managerOverview(centerId, params),
     enabled: !!centerId,
   });
 
@@ -35,6 +56,11 @@ export default function ManagerKpiPage() {
 
   const unassigned = data.unassigned_today ?? 0;
   const delayed = data.delayed_today ?? 0;
+  const cur = sales?.current;
+  const periodNoun = periodKey === "today" ? "yesterday" : "previous period";
+  const revenueFor = (block: typeof cur) =>
+    !block ? 0 : revenueScope === "bookings" ? block.revenue : revenueScope === "plans" ? block.plan_revenue : block.combined_revenue;
+  const revenueLabel = revenueScope === "plans" ? "Plan revenue" : revenueScope === "bookings" ? "Booking revenue" : "Total sales";
 
   // Supporting metrics — real, but not decisions: one quiet row, not tiles.
   const detail = [
@@ -48,9 +74,48 @@ export default function ManagerKpiPage() {
 
   return (
     <div className="space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-black">KPIs</h1>
+          <p className="mt-1 text-sm text-gray-500">Sales, compared with {periodNoun}, and today's operations for your center.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {PERIODS.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              onClick={() => setPeriodKey(p.key)}
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div>
-        <h1 className="text-2xl font-bold text-black">KPIs</h1>
-        <p className="mt-1 text-sm text-gray-500">Today's operations for your center.</p>
+        <div className="mb-1.5 flex gap-1.5">
+          {REVENUE_SCOPES.map((s) => (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => setRevenueScope(s.key)}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-500 hover:border-black"}`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        {salesLoading || !cur ? (
+          <div className="h-[104px] animate-pulse rounded-2xl border border-[#F3E5B5] bg-gray-50" />
+        ) : (
+          <StatCard label={revenueLabel} value={formatINR(revenueFor(cur))} icon={IndianRupee} onClick={() => setRevenueDrillOpen(true)} linkLabel="Details" />
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <StatCard label="Bookings" value={cur?.bookings ?? 0} hint={`${cur?.completed ?? 0} completed`} icon={ShoppingBag} />
+        <StatCard label="Plans sold" value={cur?.plans_sold ?? 0} icon={Gift} />
       </div>
 
       <StatCard
@@ -101,8 +166,8 @@ export default function ManagerKpiPage() {
         </dl>
       </Panel>
 
-      {/* Who collected what — the manager's acknowledgment ledger per
-          captain (cash vs online vs completed-but-uncollected). */}
+      {/* Who delivered what and collected what — washes (incl. plan
+          washes) and cash/online/uncollected, per captain. */}
       <CollectionsReportCard
         title="Collections by captain"
         entityLabel="Captain"
@@ -119,6 +184,14 @@ export default function ManagerKpiPage() {
           .
         </p>
       )}
+
+      <RevenueDrillModal
+        open={revenueDrillOpen}
+        onClose={() => setRevenueDrillOpen(false)}
+        params={params}
+        defaultTab={revenueScope === "plans" ? "plans" : "bookings"}
+        serviceCenterId={centerId}
+      />
     </div>
   );
 }

@@ -16,6 +16,25 @@ async def manager_summary(service_center_id: str, current_user: CurrentUser = De
     return success(await AnalyticsService(db).manager_summary(service_center_id))
 
 
+@router.get("/kpis/manager-overview/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
+async def manager_kpi_overview(
+    service_center_id: str,
+    period: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """A manager's own combined bookings+plans revenue, bookings and plans
+    sold — the Sales section on their KPI page, scoped to one center. See
+    KpiService.manager_overview."""
+    from app.services.kpi_service import KpiService, resolve_period
+
+    ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
+    s, e, ps, pe = resolve_period(period, start, end)
+    return success(await KpiService(db).manager_overview(service_center_id, s, e, ps, pe))
+
+
 @router.get("/dashboard", dependencies=[Depends(require_admin)])
 async def dashboard_summary(db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await AnalyticsService(db).dashboard_summary())

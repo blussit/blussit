@@ -130,6 +130,8 @@ export function CollectionsReportCard({
               <thead>
                 <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-[var(--color-text-secondary)]">
                   <th className="py-2 pr-3 font-medium">{entityLabel}</th>
+                  <th className="py-2 pr-3 font-medium">Washes</th>
+                  <th className="py-2 pr-3 font-medium">Plan washes</th>
                   <th className="py-2 pr-3 font-medium">Cash</th>
                   <th className="py-2 pr-3 font-medium">Online</th>
                   <th className="py-2 font-medium">Uncollected</th>
@@ -142,6 +144,8 @@ export function CollectionsReportCard({
                       <span className="font-medium text-[var(--color-text-primary)]">{r.captain_name || r.center_name || "—"}</span>
                       {r.employee_id && <span className="ml-1.5 rounded-full bg-black px-1.5 py-0.5 font-mono-num text-[9px] font-bold text-white">{r.employee_id}</span>}
                     </td>
+                    <td className="py-2.5 pr-3 font-mono-num">{r.washes_count}</td>
+                    <td className="py-2.5 pr-3 font-mono-num">{r.plan_washes_count}</td>
                     <td className="py-2.5 pr-3 font-mono-num">₹{r.cash_amount} <span className="text-xs text-gray-400">({r.cash_count})</span></td>
                     <td className="py-2.5 pr-3 font-mono-num">₹{r.online_amount} <span className="text-xs text-gray-400">({r.online_count})</span></td>
                     <td className={`py-2.5 font-mono-num ${r.uncollected_amount > 0 ? "font-bold text-amber-600" : "text-gray-400"}`}>
@@ -152,6 +156,8 @@ export function CollectionsReportCard({
                 {t && (
                   <tr className="border-t border-gray-200 font-bold text-[var(--color-text-primary)]">
                     <td className="py-2.5 pr-3">Total</td>
+                    <td className="py-2.5 pr-3 font-mono-num">{t.washes_count}</td>
+                    <td className="py-2.5 pr-3 font-mono-num">{t.plan_washes_count}</td>
                     <td className="py-2.5 pr-3 font-mono-num">₹{t.cash_amount}</td>
                     <td className="py-2.5 pr-3 font-mono-num">₹{t.online_amount}</td>
                     <td className={`py-2.5 font-mono-num ${t.uncollected_amount > 0 ? "text-amber-600" : ""}`}>₹{t.uncollected_amount}</td>

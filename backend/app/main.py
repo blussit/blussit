@@ -232,6 +232,36 @@ async def _reminder_loop() -> None:
                 # abandoned checkouts free their seats within a minute.
                 await booking_service._sweep_holds()
 
+                # Recycle bin: hard-delete anything soft-deleted more than
+                # 30 days ago — same cascade an admin's manual "force
+                # delete" already gives, just auto-triggered once the
+                # grace window an admin had to restore it has passed.
+                from app.services.audit_service import AuditService
+
+                purge_cutoff = _dt.now(_tz.utc) - _td(days=30)
+                overdue = await db.bookings.find(
+                    {"is_deleted": True, "deleted_at": {"$lt": purge_cutoff}}, {"_id": 1}
+                ).to_list(length=200)
+                # permanently_delete_booking purges a whole visit at once —
+                # a multi-car group's OTHER cars are already gone by the
+                # time this loop reaches their own row, which would
+                # otherwise raise (and log) a spurious NotFoundException
+                # for each one.
+                already_purged: set[str] = set()
+                for row in overdue:
+                    booking_id = str(row["_id"])
+                    if booking_id in already_purged:
+                        continue
+                    try:
+                        result = await booking_service.permanently_delete_booking(booking_id, force=True)
+                        already_purged.update(result.get("booking_ids") or [booking_id])
+                        await AuditService(db).log_action(
+                            "system", "system", "PERMANENTLY_DELETE_BOOKING", "bookings", booking_id,
+                            {"reason": "30-day recycle-bin auto-purge"},
+                        )
+                    except Exception:
+                        logger.exception("Recycle-bin auto-purge failed for booking %s", booking_id)
+
                 due = await booking_service.find_bookings_needing_reminder()
                 for booking in due:
                     if booking.get("captain_id"):

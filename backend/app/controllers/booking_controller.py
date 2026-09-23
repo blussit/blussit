@@ -10,6 +10,7 @@ from app.schemas.booking_schema import (
     BookingCancelRequest,
     BookingCreateRequest,
     BookingRescheduleRequest,
+    BookingUpdateDetailsRequest,
     CaptainCancelRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
@@ -176,9 +177,9 @@ class BookingController:
         items, total = await self.service.list_for_captain(current_user.id, status, pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def list_for_center(self, current_user: CurrentUser, service_center_id: str, status: str | None, pagination: PaginationParams):
+    async def list_for_center(self, current_user: CurrentUser, service_center_id: str, extra_filters: dict, pagination: PaginationParams):
         items, total = await self.service.list_for_center(
-            service_center_id, status, pagination.page, pagination.page_size, current_user.role, current_user.service_center_id
+            service_center_id, extra_filters, pagination.page, pagination.page_size, current_user.role, current_user.service_center_id
         )
         return paginated(items, pagination.page, pagination.page_size, total)
 
@@ -188,6 +189,25 @@ class BookingController:
     async def list_all(self, filters: dict, pagination: PaginationParams):
         items, total = await self.service.list_all(filters, pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
+
+    async def list_recycle_bin(self, pagination: PaginationParams):
+        items, total = await self.service.list_recycle_bin(pagination.page, pagination.page_size)
+        return paginated(items, pagination.page, pagination.page_size, total)
+
+    async def soft_delete(self, current_user: CurrentUser, booking_id: str):
+        result = await self.service.soft_delete_booking(booking_id, current_user.id)
+        await self.audit.log_action(current_user.id, current_user.role, "DELETE_BOOKING", "bookings", booking_id, result)
+        return success(result, "Moved to recycle bin")
+
+    async def restore(self, current_user: CurrentUser, booking_id: str):
+        result = await self.service.restore_booking(booking_id)
+        await self.audit.log_action(current_user.id, current_user.role, "RESTORE_BOOKING", "bookings", booking_id, result)
+        return success(result, "Restored")
+
+    async def permanently_delete(self, current_user: CurrentUser, booking_id: str, force: bool):
+        result = await self.service.permanently_delete_booking(booking_id, force=force)
+        await self.audit.log_action(current_user.id, current_user.role, "PERMANENTLY_DELETE_BOOKING", "bookings", booking_id, {**result, "force": force})
+        return success(result, "Permanently deleted")
 
     async def assign_captain(self, current_user: CurrentUser, booking_id: str, payload: BookingAssignCaptainRequest):
         result = await self.service.assign_captain(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)
@@ -319,3 +339,11 @@ class BookingController:
             {"new_date": payload.scheduled_date.isoformat(), "new_slot": payload.scheduled_slot},
         )
         return success(result, "Booking rescheduled successfully")
+
+    async def update_details(self, current_user: CurrentUser, booking_id: str, payload: BookingUpdateDetailsRequest):
+        result = await self.service.update_details(booking_id, payload, current_user.role, current_user.service_center_id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "UPDATE_BOOKING_DETAILS", "bookings", booking_id,
+            payload.model_dump(exclude_unset=True),
+        )
+        return success(result, "Booking updated")

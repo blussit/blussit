@@ -192,6 +192,19 @@ class BaseRepository:
         )
         return result.modified_count > 0
 
+    async def restore(self, id: str) -> bool:
+        """Reverses soft_delete — only ever meaningful on a doc that IS
+        currently soft-deleted (the filter below is the mirror of
+        soft_delete's own guard: that one only ever writes to a live doc,
+        this one only ever writes to a tombstoned one)."""
+        if not ObjectId.is_valid(id):
+            return False
+        result = await self.collection.update_one(
+            {"_id": self._oid(id), "is_deleted": True},
+            {"$set": {"is_deleted": False, "updated_at": datetime.now(timezone.utc)}, "$unset": {"deleted_at": ""}},
+        )
+        return result.modified_count > 0
+
     async def hard_delete(self, id: str) -> bool:
         if not ObjectId.is_valid(id):
             return False

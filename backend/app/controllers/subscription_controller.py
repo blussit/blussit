@@ -145,3 +145,7 @@ class UserSubscriptionController:
 
     async def admin_overview(self):
         return success(await self.service.admin_overview())
+
+    async def plan_purchases(self, s, e, pagination: PaginationParams, service_center_id: str | None = None):
+        items, total = await self.service.plan_purchases(s, e, pagination.page, pagination.page_size, service_center_id)
+        return paginated(items, pagination.page, pagination.page_size, total)

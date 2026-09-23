@@ -143,32 +143,16 @@ export default function AdminUsersPage() {
         isLoading={isLoading}
         data={data?.data || []}
         emptyTitle={debounced ? `No users match “${search.trim()}”` : "No users found"}
+        onRowClick={(u) => (u.role === "customer" ? setDetailCustomerId(u.id) : openEdit(u))}
         columns={[
-          {
-            header: "Name",
-            accessor: (u) =>
-              u.role === "customer" ? (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDetailCustomerId(u.id);
-                  }}
-                  className="font-medium text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
-                >
-                  {u.full_name}
-                </button>
-              ) : (
-                u.full_name
-              ),
-          },
+          { header: "Name", accessor: (u) => <span className="font-medium text-black">{u.full_name}</span> },
           { header: "Contact", accessor: (u) => u.email || u.phone || "—" },
           { header: "Role", accessor: (u) => <span className="capitalize">{u.role}</span> },
           { header: "Status", accessor: (u) => <StatusBadge status={u.status} /> },
           {
             header: "",
             accessor: (u) => (
-              <div className="flex gap-2">
+              <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
                 <Button size="sm" variant="outline" onClick={() => openEdit(u)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>

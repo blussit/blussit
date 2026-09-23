@@ -262,6 +262,19 @@ class ManagerBookingCreateRequest(BaseModel):
         return self
 
 
+class BookingUpdateDetailsRequest(BaseModel):
+    """Manager/admin correcting the metadata on an existing booking — notes
+    and the alternate contact, not anything that drives price, capacity or
+    captain assignment (service/vehicle/address/time). See
+    BookingService.update_details. All fields optional: only the ones sent
+    are changed, so a client can PATCH just the one field it edited."""
+    customer_notes: Optional[str] = Field(default=None, max_length=500)
+    alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
+    alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
+
+    _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+
+
 class ReportRiskRequest(BaseModel):
     """Captain self-reporting they may not make their next booking on time
     because their current job is running long — see

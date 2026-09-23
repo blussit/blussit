@@ -188,6 +188,12 @@ class BookingModel(BusinessRecordBase):
     issue_notes: Optional[str] = None
     issue_flagged_at: Optional[datetime] = None
     issue_resolved: bool = True
+    # Which flag value resolve_issue() most recently cleared — issue_flag
+    # itself goes back to None on resolve, so this is the only way to tell
+    # "captain_not_started was already acknowledged" from "never flagged at
+    # all" (both look identical as issue_flag=None, issue_resolved=True).
+    # See BookingService.flag_late_to_start's already_acknowledged check.
+    resolved_issue_flag: Optional[str] = None
     reminder_sent: bool = False
 
     before_photo: Optional[PhotoProof] = None

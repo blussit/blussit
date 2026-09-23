@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.dependencies import get_db, require_manager_or_admin
+from app.core.dependencies import CurrentUser, get_current_user, get_db, require_manager_or_admin
 from app.core.responses import success
 from app.services.crm_service import CRMService
 
@@ -27,5 +27,8 @@ async def search_customers_typeahead(q: str, db: AsyncIOMotorDatabase = Depends(
 
 
 @router.get("/customers/{customer_id}")
-async def get_customer_360(customer_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await CRMService(db).get_customer_360(customer_id))
+async def get_customer_360(customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """A manager only ever sees this customer's activity at THEIR OWN
+    center (see CRMService.get_customer_360's own comment) — admin is
+    unrestricted."""
+    return success(await CRMService(db).get_customer_360(customer_id, current_user.role, current_user.service_center_id))

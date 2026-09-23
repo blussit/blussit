@@ -29,7 +29,7 @@ from app.services.auth_service import AuthService
 from app.services.booking_service import BookingService
 from app.services.payment_service import PaymentService
 from app.services.review_service import ReviewService
-from app.utils.timezone import from_stored
+from app.utils.timezone import from_stored, to_ist
 from tests.conftest import cleanup, db  # noqa: F401 — fixtures
 from tests.factories import get_hatchback_type_id, get_star_wash_service_id, make_captain, make_manager, make_service_center
 
@@ -329,10 +329,19 @@ async def test_manager_can_self_assign_a_pending_booking(rig, cleanup):
     assert updated["status"] == "assigned" and updated["captain_id"] == rig["manager_id"]
 
     # The customer is told, exactly like a real captain assignment — never
-    # left to find out only when the job is already done.
+    # left to find out only when the job is already done. Named-manager
+    # wording (not the generic "Captain assigned"), since there's no
+    # captain at all here — just the manager handling it himself.
     outbox_after = await _outbox(db, phone)
     assert len(outbox_after) == before + 1
-    assert "Captain assigned" in outbox_after[-1]["message"]
+    assert "will personally handle your booking" in outbox_after[-1]["message"]
+
+    # And self_assign's own estimated_start_at is the booking's real slot
+    # date, never "now" — hardcoding now_ist() here previously anchored a
+    # future booking's lateness check to the moment of self-assignment,
+    # flagging it "hasn't started" before its slot had even arrived.
+    assert updated["self_assigned"] is True
+    assert from_stored(updated["estimated_start_at"]).date() == to_ist(updated["scheduled_date"]).date()
 
     # And they can then close it out themselves, exactly like any other job.
     done = await bs.manager_mark_done(booking["id"], rig["manager_id"], "manager", rig["center_id"], send_whatsapp=False)
@@ -819,3 +828,124 @@ def test_negative_or_silly_discounts_are_rejected_by_the_schema():
             ManagerLogBookingRequest(**base, discount_amount=bad)
     assert ManagerLogBookingRequest(**base).discount_amount == 0
     assert ManagerLogBookingRequest(**base, discount_amount=49.999).discount_amount == 50.0
+
+
+# ------------------------------------------------------- plan-usage note
+#
+# Founder: "if booking is done from plan then the message should contain
+# booked from plan and remaining washes and expiry date of that plan."
+
+
+@pytest.mark.asyncio
+async def test_plan_usage_note_includes_plan_name_remaining_washes_and_expiry(rig, cleanup):
+    from app.utils.timezone import now_ist
+
+    db = rig["db"]
+    plan_result = await db.subscription_plans.insert_one({
+        "name": "Monthly Shine", "is_deleted": False, "is_active": True, "created_at": datetime.now(),
+    })
+    cleanup.append(("subscription_plans", {"_id": plan_result.inserted_id}))
+    end_date = now_ist() + timedelta(days=12)
+    sub_result = await db.user_subscriptions.insert_one({
+        "plan_id": str(plan_result.inserted_id), "customer_id": "some-customer", "status": "active",
+        "remaining_service_count": 3, "total_service_count": 4, "end_date": end_date, "is_deleted": False,
+        "created_at": datetime.now(),
+    })
+    cleanup.append(("user_subscriptions", {"_id": sub_result.inserted_id}))
+
+    bs = BookingService(db)
+    note = await bs._plan_usage_note({"subscription_id": str(sub_result.inserted_id)})
+    assert "Booked from your Monthly Shine plan" in note
+    assert "3 washes left" in note
+    assert to_ist(end_date).strftime("%d %b") in note
+
+    # No subscription at all -> no note, not an error.
+    assert await bs._plan_usage_note({}) == ""
+    assert await bs._plan_usage_note({"subscription_id": None}) == ""
+
+
+@pytest.mark.asyncio
+async def test_manager_mark_done_does_not_notify_itself_about_a_self_assigned_job(rig, cleanup):
+    """manager_mark_done tells a RELEASED captain their job was closed —
+    for a self-assigned booking that "captain" is the same manager who
+    just closed it, so that notification is just noise about themselves."""
+    db = rig["db"]
+    phone = "9666600099"
+    booking = (await _create_open_booking(rig, cleanup, phone))["bookings"][0]
+    bs = BookingService(db)
+    await bs.self_assign(booking["id"], rig["manager_id"], "manager", rig["center_id"])
+
+    before = await db.notifications.count_documents({"user_id": rig["manager_id"]})
+    await bs.manager_mark_done(booking["id"], rig["manager_id"], "manager", rig["center_id"], send_whatsapp=False)
+    after = await db.notifications.count_documents({"user_id": rig["manager_id"]})
+    assert await db.notifications.count_documents({"user_id": rig["manager_id"], "title": "Job completed by the manager"}) == 0
+    assert after == before
+
+
+# ------------------------------------------------------- recycle bin
+
+
+@pytest.mark.asyncio
+async def test_soft_deleting_a_live_booking_tells_the_customer_and_captain(rig, cleanup):
+    """Founder-recheck finding: soft_delete_booking told nobody at all —
+    a captain already assigned (or on the way) to a car that gets deleted
+    from under them had no way to find out except it silently vanishing
+    from their job list. Matches cancel_booking's own established courtesy
+    (customer + any assigned captain), minus WhatsApp for the captain side
+    (in-app only, same as manager_mark_done's own captain-release notice)."""
+    db = rig["db"]
+    phone = "9666600077"
+    booking = (await _create_open_booking(rig, cleanup, phone))["bookings"][0]
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("captain_wallets", {"captain_id": captain_id}))
+    cleanup.append(("notifications", {"user_id": captain_id}))
+    bs = BookingService(db)
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=captain_id), rig["manager_id"], "manager", rig["center_id"])
+    customer_id = booking["customer_id"]
+
+    result = await bs.soft_delete_booking(booking["id"], rig["manager_id"])
+    assert result["deleted_count"] == 1
+
+    customer_note = await db.notifications.find_one({"user_id": customer_id, "title": {"$regex": "removed$"}})
+    assert customer_note and booking["booking_number"] in customer_note["message"]
+    captain_note = await db.notifications.find_one({"user_id": captain_id, "title": {"$regex": "removed$"}})
+    assert captain_note is not None
+
+    deleted = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert deleted["is_deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_soft_deleting_an_already_completed_booking_notifies_nobody(rig, cleanup):
+    """Deleting a historical record is admin record-keeping, not a live
+    service change — nothing to warn a customer or captain about."""
+    db = rig["db"]
+    phone = "9666600078"
+    booking = (await _create_open_booking(rig, cleanup, phone))["bookings"][0]
+    bs = BookingService(db)
+    await bs.manager_mark_done(booking["id"], rig["manager_id"], "manager", rig["center_id"], send_whatsapp=False)
+    customer_id = booking["customer_id"]
+
+    before = await db.notifications.count_documents({"user_id": customer_id})
+    await bs.soft_delete_booking(booking["id"], rig["manager_id"])
+    after = await db.notifications.count_documents({"user_id": customer_id})
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_restore_tells_the_customer_the_booking_is_back(rig, cleanup):
+    db = rig["db"]
+    phone = "9666600079"
+    booking = (await _create_open_booking(rig, cleanup, phone))["bookings"][0]
+    bs = BookingService(db)
+    customer_id = booking["customer_id"]
+
+    await bs.soft_delete_booking(booking["id"], rig["manager_id"])
+    result = await bs.restore_booking(booking["id"])
+    assert result["restored_count"] == 1
+
+    restored_note = await db.notifications.find_one({"user_id": customer_id, "title": {"$regex": "restored$"}})
+    assert restored_note is not None
+    restored = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert restored["is_deleted"] is False

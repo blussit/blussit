@@ -77,6 +77,12 @@ export interface CollectionsRow {
   manual_online_amount?: number;
   uncollected_amount: number;
   uncollected_count: number;
+  /** Completed washes in range — separate from the money fields since a
+   *  plan-covered wash is usually ₹0 (paid up front when the plan itself
+   *  was bought). */
+  washes_count: number;
+  /** Of washes_count, how many drew on a subscription/plan. */
+  plan_washes_count: number;
 }
 
 export interface CollectionsReport {

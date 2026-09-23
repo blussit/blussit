@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, ClipboardEdit, Star } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, RotateCcw, Star, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { analyticsApi } from "../../api/admin";
 import { reviewApi } from "../../api/engagement";
@@ -9,6 +9,9 @@ import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import BookingQueuePage from "../manager/BookingQueuePage";
 import { useBookingFilters } from "../../lib/useBookingFilters";
+import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
+import { getErrorMessage } from "../../lib/api-client";
 import { format, formatSlot } from "../../lib/date";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
@@ -23,22 +26,29 @@ import type { Booking } from "../../types";
  */
 export default function AdminBookingsPage() {
   const [selectedCenterId, setSelectedCenterId] = useState<string | null>(null);
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
 
+  if (showRecycleBin) return <RecycleBinView onBack={() => setShowRecycleBin(false)} />;
   return selectedCenterId ? (
     <CenterBookings centerId={selectedCenterId} onBack={() => setSelectedCenterId(null)} />
   ) : (
-    <ServiceCenterOverview onSelect={setSelectedCenterId} />
+    <ServiceCenterOverview onSelect={setSelectedCenterId} onShowRecycleBin={() => setShowRecycleBin(true)} />
   );
 }
 
-function ServiceCenterOverview({ onSelect }: { onSelect: (centerId: string) => void }) {
+function ServiceCenterOverview({ onSelect, onShowRecycleBin }: { onSelect: (centerId: string) => void; onShowRecycleBin: () => void }) {
   const { data, isLoading } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Bookings</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Select a service center to see its bookings.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Bookings</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Select a service center to see its bookings.</p>
+        </div>
+        <Button variant="outline" onClick={onShowRecycleBin}>
+          <Trash2 className="h-4 w-4" /> Recycle bin
+        </Button>
       </div>
 
       {isLoading ? (
@@ -226,6 +236,170 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
       />
 
       <BookingDetailDrawer booking={selectedBooking} onClose={() => setSelectedBooking(null)} />
+    </div>
+  );
+}
+
+/** Soft-deleted bookings, platform-wide (deletion isn't center-scoped —
+ *  an admin can delete from any center). Reversible for 30 days (see
+ *  main.py's purge sweep) via Restore; "Force delete permanently" is the
+ *  one irreversible action here, gated by its own confirmation plus the
+ *  money-attached warning chips already visible inline on the row. */
+function RecycleBinView({ onBack }: { onBack: () => void }) {
+  const queryClient = useQueryClient();
+  const confirm = useConfirm();
+  const { push: pushToast } = useToast();
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin-recycle-bin"] });
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["admin-recycle-bin"],
+    queryFn: () => bookingApi.recycleBin({ page: 1, page_size: 100 }),
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.restore(id),
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Restored" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
+  });
+
+  // Deliberately NOT a plain useMutation(force: true) — that would send
+  // force on every click, making the backend's money-attached gate
+  // (captain wallet / paid online payment / complaint) unreachable from
+  // the product entirely. Try un-forced first; only on that specific
+  // refusal does this escalate to a second, more explicit confirmation
+  // before retrying with force — matching "admin FORCEFULLY deleted" as
+  // a deliberate override, not the default path.
+  const [permanentlyDeletingId, setPermanentlyDeletingId] = useState<string | null>(null);
+  const permanentlyDelete = async (id: string, label: string) => {
+    if (
+      !(await confirm({
+        title: `Permanently delete ${label}?`,
+        message: "This cannot be undone — the booking and everything tied to it (status history, notifications, review, GPS trail) is gone for good.",
+        tone: "danger",
+      }))
+    )
+      return;
+    setPermanentlyDeletingId(id);
+    try {
+      await bookingApi.permanentlyDelete(id, false);
+      invalidate();
+      pushToast({ tone: "success", title: "Permanently deleted" });
+    } catch (err) {
+      const message = getErrorMessage(err);
+      if (!message.includes("Use force to delete anyway")) {
+        pushToast({ tone: "error", title: message });
+        return;
+      }
+      const forced = await confirm({
+        title: "Money is attached to this booking",
+        message: `${message} Deleting it here does not reverse any payment, payout, or refund — that stays a manual (or Razorpay) matter. Force delete anyway?`,
+        tone: "danger",
+        confirmLabel: "Force delete",
+      });
+      if (!forced) return;
+      try {
+        await bookingApi.permanentlyDelete(id, true);
+        invalidate();
+        pushToast({ tone: "success", title: "Permanently deleted" });
+      } catch (err2) {
+        pushToast({ tone: "error", title: getErrorMessage(err2) });
+      }
+    } finally {
+      setPermanentlyDeletingId(null);
+    }
+  };
+
+  // Group multi-car visits into one row, same as the browse table above —
+  // without this a 2-car visit's soft-delete showed as two identical-
+  // looking rows, and restoring/deleting either one (both already expand
+  // to the whole group server-side) left the OTHER row stale until refetch.
+  const slabs = toSlabs(data?.data || []).map((slab) => ({ ...slab, id: slab.key }));
+
+  const flagChips = (b: Booking) => {
+    const flags = b.deleted_flags;
+    if (!flags) return null;
+    const labels = [
+      flags.had_captain_earning && "Captain already paid",
+      flags.had_paid_online_payment && "Customer paid online",
+      flags.had_complaints && "Has a complaint",
+    ].filter(Boolean) as string[];
+    if (!labels.length) return null;
+    return (
+      <div className="mt-1 flex flex-wrap gap-1">
+        {labels.map((l) => (
+          <span key={l} className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+            <AlertTriangle className="h-2.5 w-2.5" /> {l}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <button onClick={onBack} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+          <ChevronLeft className="h-4 w-4" /> All service centers
+        </button>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Recycle bin</h1>
+        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+          Deleted bookings stay here for 30 days before they're removed automatically — restore one, or delete it permanently now.
+        </p>
+      </div>
+
+      <DataTable<BookingSlab & { id: string }>
+        isLoading={isLoading}
+        data={slabs}
+        emptyTitle="Recycle bin is empty"
+        columns={[
+          {
+            header: "Booking",
+            accessor: (slab) => (
+              <div>
+                <span className="font-mono-num font-medium text-black">
+                  {slab.isVisit ? slab.bookings.map((b) => b.booking_number).join(" · ") : slab.primary.booking_number}
+                </span>
+                <p className="text-xs text-[var(--color-text-secondary)]">{slab.primary.customer_name || "—"}</p>
+                {flagChips(slab.primary)}
+              </div>
+            ),
+          },
+          { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
+          { header: "Status when deleted", accessor: (slab) => <StatusBadge status={slab.status} /> },
+          { header: "Deleted", accessor: (slab) => (slab.primary.deleted_at ? format(slab.primary.deleted_at) : "—") },
+          {
+            header: "Purge in",
+            accessor: (slab) => (
+              <span className={slab.primary.days_remaining != null && slab.primary.days_remaining <= 3 ? "font-semibold text-[var(--color-error)]" : ""}>
+                {slab.primary.days_remaining != null ? `${slab.primary.days_remaining} day${slab.primary.days_remaining === 1 ? "" : "s"}` : "—"}
+              </span>
+            ),
+          },
+          {
+            header: "",
+            accessor: (slab) => (
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" isLoading={restoreMutation.isPending} onClick={() => restoreMutation.mutate(slab.primary.id)}>
+                  <RotateCcw className="h-3.5 w-3.5" /> Restore
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  isLoading={permanentlyDeletingId === slab.primary.id}
+                  onClick={() =>
+                    permanentlyDelete(slab.primary.id, slab.isVisit ? slab.bookings.map((b) => b.booking_number).join(", ") : slab.primary.booking_number)
+                  }
+                >
+                  <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" /> Delete permanently
+                </Button>
+              </div>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }

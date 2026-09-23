@@ -215,6 +215,33 @@ class KpiService:
             "alerts": await self._alerts(s, e, ps, pe, cur_b, prev_b, settings),
         }
 
+    async def manager_overview(self, service_center_id: str, s, e, ps, pe) -> dict:
+        """Center-scoped sibling of overview() — this manager's own
+        bookings + plan revenue for their center, current vs previous-
+        equal-length period. Booking side is a plain service_center_id
+        filter (bookings already carry it); plan side goes through
+        UserSubscriptionService.center_plan_revenue since payment_orders
+        doesn't uniformly carry the field itself (see that method's own
+        docstring for which kinds do and don't)."""
+        from app.services.subscription_service import UserSubscriptionService
+
+        extra = {"service_center_id": service_center_id}
+        cur, prev = await self._bookings_between(s, e, extra), await self._bookings_between(ps, pe, extra)
+
+        def block(bookings, bs, be):
+            created = [b for b in bookings if self._created_in(b, bs, be)]
+            completed = [b for b in bookings if self._completed_in(b, bs, be)]
+            return {"bookings": len(created), "completed": len(completed), "revenue": self._revenue(bookings, bs, be)}
+
+        cur_b, prev_b = block(cur, s, e), block(prev, ps, pe)
+        subs = UserSubscriptionService(self.db)
+        cur_plan_rev, cur_plans_sold = await subs.center_plan_revenue(service_center_id, s, e)
+        prev_plan_rev, prev_plans_sold = await subs.center_plan_revenue(service_center_id, ps, pe)
+        return {
+            "current": {**cur_b, "plans_sold": cur_plans_sold, "plan_revenue": cur_plan_rev, "combined_revenue": _rupees(cur_b["revenue"] + cur_plan_rev)},
+            "previous": {**prev_b, "plans_sold": prev_plans_sold, "plan_revenue": prev_plan_rev, "combined_revenue": _rupees(prev_b["revenue"] + prev_plan_rev)},
+        }
+
     async def _alerts(self, s, e, ps, pe, cur_b, prev_b, settings) -> list[dict]:
         """Only meaningful exceptions — an empty list is the good outcome."""
         alerts: list[dict] = []

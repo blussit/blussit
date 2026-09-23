@@ -277,9 +277,24 @@ export const auditLogApi = {
 // ---- Management KPI engine (admin dashboard analytics tabs) --------------
 export type KpiPeriodParams = { period?: string; start?: string; end?: string };
 
+export interface ManagerOverviewBlock {
+  bookings: number;
+  completed: number;
+  revenue: number;
+  plans_sold: number;
+  plan_revenue: number;
+  combined_revenue: number;
+}
+
 export const kpiApi = {
   section: <T = Record<string, unknown>>(section: string, params: KpiPeriodParams) =>
     apiClient.get<ApiSuccess<T>>(`/analytics/kpis/${section}`, { params }).then((r) => r.data.data),
+  /** A manager's own combined bookings+plans revenue for their center —
+   *  the Sales section on ManagerKpiPage. */
+  managerOverview: (serviceCenterId: string, params: KpiPeriodParams) =>
+    apiClient
+      .get<ApiSuccess<{ current: ManagerOverviewBlock; previous: ManagerOverviewBlock }>>(`/analytics/kpis/manager-overview/${serviceCenterId}`, { params })
+      .then((r) => r.data.data),
   getSettings: () => apiClient.get<ApiSuccess<BusinessSettings>>("/analytics/business-settings").then((r) => r.data.data),
   updateSettings: (payload: Partial<BusinessSettings>) =>
     apiClient.put<ApiSuccess<BusinessSettings>>("/analytics/business-settings", payload).then((r) => r.data.data),

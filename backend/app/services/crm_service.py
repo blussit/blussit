@@ -52,7 +52,7 @@ class CRMService:
         )
         return [UserPublic.from_doc(u).model_dump() for u in items]
 
-    async def get_customer_360(self, customer_id: str) -> dict:
+    async def get_customer_360(self, customer_id: str, actor_role: str | None = None, actor_center_id: str | None = None) -> dict:
         user = await self.user_repo.find_by_id(customer_id)
         # Customers only — same rule as find_customer_by_phone above. Without
         # this, passing a STAFF user id here dumped that staff member's
@@ -73,6 +73,25 @@ class CRMService:
         # that's actually expired.
         subscriptions = _with_effective_statuses(await self.subscription_repo.list_for_customer(customer_id))
         complaints, _ = await self.complaint_repo.list_for_customer(customer_id, 1, 50)
+
+        # A manager only ever reaches a customer through THEIR OWN center's
+        # own booking/plan lists — without this, everything below (spend,
+        # dates, what was bought, where) was this customer's FULL history
+        # platform-wide, leaking a different center's activity to a
+        # manager with no reason to see it. Admin is unrestricted (oversees
+        # every center) — this only narrows the manager path, and it
+        # narrows the SOURCE lists so every figure derived below (lifetime
+        # spend, same-day-repeat, preferred center) is naturally correct
+        # for the scoped view too, not just the raw lists.
+        if actor_role == "manager" and actor_center_id:
+            bookings = [b for b in bookings if b.get("service_center_id") == actor_center_id]
+            # A self-serve plan has no service_center_id at all (no center
+            # owns it) — still shown, since a manager legitimately needs to
+            # know a customer's own active pass regardless of who sold it.
+            # Only a plan explicitly granted by a DIFFERENT center is hidden.
+            subscriptions = [s for s in subscriptions if s.get("service_center_id") in (None, actor_center_id)]
+            own_booking_ids = {str(b["_id"]) for b in bookings}
+            complaints = [c for c in complaints if c.get("booking_id") in own_booking_ids]
 
         completed_bookings = [b for b in bookings if b["status"] == "completed"]
         lifetime_spend = sum(b.get("total_amount", 0) for b in completed_bookings)

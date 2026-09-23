@@ -66,7 +66,7 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
         return parts[1] == user.id  # only ever your own personal channel
 
     if kind == "booking" and len(parts) == 2:
-        booking = await db.bookings.find_one({"_id": _safe_object_id(parts[1])})
+        booking = await db.bookings.find_one({"_id": _safe_object_id(parts[1]), "is_deleted": {"$ne": True}})
         if not booking:
             return False
         if user.role == "admin":

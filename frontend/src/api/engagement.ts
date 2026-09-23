@@ -70,6 +70,25 @@ export interface SubscriptionUsageBooking {
   total_amount?: number | null;
 }
 
+/** One row in the plan-revenue drill-down — an individual plan PAYMENT
+ *  settled in the selected period (the exact same set KpiService's
+ *  plan_revenue tile sums), not every subscription ever like
+ *  AdminSubscriptionRow. */
+export interface PlanPurchaseRow {
+  id: string;
+  customer_id?: string | null;
+  customer_name: string;
+  customer_phone?: string | null;
+  plan_id?: string | null;
+  plan_name: string;
+  amount: number;
+  discount?: number | null;
+  coupon_code?: string | null;
+  payment_method?: string | null;
+  subscription_id?: string | null;
+  created_at: string;
+}
+
 export interface SubscriptionUsageHistory {
   subscription_id: string;
   remaining_service_count?: number | null;
@@ -154,6 +173,14 @@ export const subscriptionApi = {
     apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
   /** Admin-only: every plan ever purchased or granted, platform-wide. */
   adminOverview: () => apiClient.get<ApiSuccess<AdminSubscriptionOverview>>("/subscriptions/admin/overview").then((r) => r.data.data),
+  /** Admin-only: individual plan payments settled in a period — the
+   *  plan-revenue tile's drill-down. Same `period`/`start`/`end` shape as
+   *  bookingApi.all(), so a dashboard tile's number and this list agree. */
+  planPurchases: (params: { period?: string; start?: string; end?: string; page_size?: number }) =>
+    apiClient.get<ApiPaginated<PlanPurchaseRow>>("/subscriptions/admin/plan-purchases", { params }).then((r) => r.data),
+  /** Same shape, scoped to one center — a manager's own Plans tab. */
+  centerPlanPurchases: (centerId: string, params: { period?: string; start?: string; end?: string; page_size?: number }) =>
+    apiClient.get<ApiPaginated<PlanPurchaseRow>>(`/subscriptions/center/${centerId}/plan-purchases`, { params }).then((r) => r.data),
   /** One plan's spend history — when it was last used, bookings that drew on it. */
   usageHistory: (subscriptionId: string) =>
     apiClient.get<ApiSuccess<SubscriptionUsageHistory>>(`/subscriptions/${subscriptionId}/usage`).then((r) => r.data.data),

@@ -964,6 +964,14 @@ class PaymentService:
         # simply forgot to settle.
         "uncollected_amount": {"$sum": {"$cond": [{"$and": [{"$eq": ["$status", "completed"]}, {"$eq": ["$payment_status", "pending"]}]}, "$total_amount", 0]}},
         "uncollected_count": {"$sum": {"$cond": [{"$and": [{"$eq": ["$status", "completed"]}, {"$eq": ["$payment_status", "pending"]}]}, 1, 0]}},
+        # Washes actually delivered — separate from the money fields above
+        # since a plan-covered wash is usually ₹0 (paid up front when the
+        # plan itself was bought), so without this a captain who only did
+        # plan washes in the window had nothing in any money field and was
+        # silently dropped from the report entirely (see the skip-guard
+        # below, which now checks these too).
+        "washes_count": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+        "plan_washes_count": {"$sum": {"$cond": [{"$and": [{"$eq": ["$status", "completed"]}, {"$ne": ["$subscription_id", None]}]}, 1, 0]}},
     }
 
     @staticmethod
@@ -996,10 +1004,10 @@ class PaymentService:
             for u in await self.db.users.find({"_id": {"$in": captain_ids}}, {"full_name": 1, "employee_id": 1}).to_list(length=200)
         }
         out_rows = []
-        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0}
+        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0, "washes_count": 0, "plan_washes_count": 0}
         for r in rows:
             if not any(r[k] for k in totals):
-                continue  # nothing money-related in range for this captain
+                continue  # nothing money OR washes in range for this captain
             captain = captains.get(r["_id"] or "")
             out_rows.append(self._round_row({
                 "captain_id": r["_id"],
@@ -1033,7 +1041,7 @@ class PaymentService:
             for c in await self.db.service_centers.find({"_id": {"$in": center_ids}}, {"name": 1}).to_list(length=500)
         }
         out_rows = []
-        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0}
+        totals = {"cash_amount": 0.0, "cash_count": 0, "online_amount": 0.0, "online_count": 0, "manual_online_amount": 0.0, "uncollected_amount": 0.0, "uncollected_count": 0, "washes_count": 0, "plan_washes_count": 0}
         for r in rows:
             if not any(r[k] for k in totals):
                 continue

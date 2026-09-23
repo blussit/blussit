@@ -319,3 +319,31 @@ async def test_assigning_a_split_visit_to_the_already_assigned_captain_moves_onl
     assert await db.notifications.count_documents({"user_id": rig["captain_id"], "title": {"$regex": "^New job"}}) == 2, (
         "one for the first car's own assignment, one for the visit-wide notice when the second car joins"
     )
+
+
+async def test_editing_details_on_one_car_updates_every_live_car_on_the_visit(rig, db):
+    """customer_notes/alternate_contact are per-VISIT, denormalized onto
+    every car at creation (create_booking_group passes the same values to
+    each) — editing via just one car's booking_id must not leave its
+    siblings silently out of sync with what's now "the" note for the
+    visit."""
+    from app.schemas.booking_schema import BookingUpdateDetailsRequest
+
+    group_id, ids = await _visit(rig, db)
+    bs = BookingService(db)
+
+    # One car finishes early; the visit is otherwise still live.
+    await db.bookings.update_one({"_id": ObjectId(ids[0])}, {"$set": {"status": "completed"}})
+
+    updated = await bs.update_details(
+        ids[1], BookingUpdateDetailsRequest(customer_notes="Gate code 4521", alternate_contact_name="Ravi"),
+        "manager", rig["center_id"],
+    )
+    assert updated["customer_notes"] == "Gate code 4521"
+
+    cars = await _cars(db, group_id)
+    live = next(c for c in cars if str(c["_id"]) == ids[1])
+    done = next(c for c in cars if str(c["_id"]) == ids[0])
+    assert live["customer_notes"] == "Gate code 4521" and live["alternate_contact_name"] == "Ravi"
+    # The already-completed sibling's own paperwork is left alone.
+    assert done.get("customer_notes") != "Gate code 4521"

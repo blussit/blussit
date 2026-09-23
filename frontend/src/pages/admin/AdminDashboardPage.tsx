@@ -20,19 +20,12 @@ import { DeltaPill, InfoTip, TargetChip, formatINR } from "../../components/admi
 import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, MarketingTab, OperationsTab } from "../../components/admin/kpi/sections";
 import { KpiListModal } from "../../components/admin/kpi/KpiListModal";
 import { KpiBriefModal } from "../../components/admin/kpi/KpiBriefModal";
+import { RevenueDrillModal } from "../../components/admin/kpi/RevenueDrillModal";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { format, formatSlot } from "../../lib/date";
+import { PERIODS, REVENUE_SCOPES, type RevenueScope } from "../../lib/kpiPeriods";
 import type { Booking, User } from "../../types";
-
-const PERIODS = [
-  { key: "today", label: "Today" },
-  { key: "yesterday", label: "Yesterday" },
-  { key: "7d", label: "7 days" },
-  { key: "30d", label: "30 days" },
-  { key: "this_month", label: "This month" },
-  { key: "last_month", label: "Last month" },
-] as const;
 
 const TABS = [
   { key: "business", label: "Business" },
@@ -59,13 +52,6 @@ type OverviewData = {
   alerts: { severity: string; text: string }[];
 };
 
-type RevenueScope = "combined" | "bookings" | "plans";
-const REVENUE_SCOPES: { key: RevenueScope; label: string }[] = [
-  { key: "combined", label: "Bookings + Plans" },
-  { key: "bookings", label: "Bookings only" },
-  { key: "plans", label: "Plans only" },
-];
-
 export default function AdminDashboardPage() {
   const [periodKey, setPeriodKey] = useState<string>("today");
   const [custom, setCustom] = useState<{ start: string; end: string }>({ start: "", end: "" });
@@ -79,6 +65,10 @@ export default function AdminDashboardPage() {
   const [briefDrill, setBriefDrill] = useState<{ title: string; value: ReactNode; tip: string; breakdown?: { label: string; value: ReactNode }[] } | null>(null);
   const [openBooking, setOpenBooking] = useState<Booking | null>(null);
   const [openCustomerId, setOpenCustomerId] = useState<string | null>(null);
+  // The revenue tile can be explained by bookings, plans, or both — its own
+  // tabbed drill-down (not listDrill/briefDrill) so a plans-only period
+  // doesn't show an empty bookings list with no hint the money was a plan sale.
+  const [revenueDrillOpen, setRevenueDrillOpen] = useState(false);
 
   const params = useMemo(
     () => (periodKey === "custom" && custom.start && custom.end ? { start: custom.start, end: custom.end } : { period: periodKey === "custom" ? "30d" : periodKey }),
@@ -123,13 +113,7 @@ export default function AdminDashboardPage() {
     {
       label: revenueLabel, value: formatINR(revenueFor(cur)), icon: IndianRupee,
       delta: <DeltaPill current={revenueFor(cur)} previous={revenueFor(prev)} />, tip: revenueTip,
-      onClick: () =>
-        revenueScope === "plans"
-          ? setBriefDrill({
-              title: "Plan revenue", value: formatINR(cur.plan_revenue), tip: revenueTip,
-              breakdown: [{ label: "vs previous period", value: formatINR(prev.plan_revenue) }],
-            })
-          : setListDrill("bookings-completed"),
+      onClick: () => setRevenueDrillOpen(true),
     },
     {
       label: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
@@ -347,6 +331,12 @@ export default function AdminDashboardPage() {
       {briefDrill && (
         <KpiBriefModal open={!!briefDrill} onClose={() => setBriefDrill(null)} title={briefDrill.title} value={briefDrill.value} tip={briefDrill.tip} breakdown={briefDrill.breakdown} />
       )}
+      <RevenueDrillModal
+        open={revenueDrillOpen}
+        onClose={() => setRevenueDrillOpen(false)}
+        params={params}
+        defaultTab={revenueScope === "plans" ? "plans" : "bookings"}
+      />
       <BookingDetailDrawer booking={openBooking} onClose={() => setOpenBooking(null)} />
       <CustomerDetailDrawer customerId={openCustomerId} onClose={() => setOpenCustomerId(null)} />
     </div>

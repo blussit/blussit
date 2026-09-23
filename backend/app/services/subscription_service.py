@@ -1178,6 +1178,140 @@ class UserSubscriptionService:
             "rows": rows,
         }
 
+    async def _resolve_order_centers(self, orders: list[dict]) -> dict[str, str | None]:
+        """Maps a payment_order's str _id -> its service_center_id. A
+        manager-issued link or auto-pay order stamps this directly at
+        creation (payment_service.py's _create_manager_subscription_link /
+        _create_manager_autopay_mandate); a cash sale, an autopay renewal
+        row, and a customer's own self-serve autopay checkout never do —
+        for those the center only lives on the subscription doc the order
+        settled into, so it's resolved through subscription_id instead."""
+        result: dict[str, str | None] = {}
+        need_lookup: dict[str, str] = {}
+        for o in orders:
+            oid = str(o["_id"])
+            if o.get("service_center_id"):
+                result[oid] = o["service_center_id"]
+            elif o.get("subscription_id"):
+                need_lookup[oid] = o["subscription_id"]
+            else:
+                result[oid] = None
+        if need_lookup:
+            sub_ids = [ObjectId(v) for v in set(need_lookup.values()) if ObjectId.is_valid(v)]
+            subs = (
+                {
+                    str(s["_id"]): s.get("service_center_id")
+                    for s in await self.repo.collection.find({"_id": {"$in": sub_ids}}, {"service_center_id": 1}).to_list(length=len(sub_ids))
+                }
+                if sub_ids
+                else {}
+            )
+            for oid, sub_id in need_lookup.items():
+                result[oid] = subs.get(sub_id)
+        return result
+
+    async def center_plan_revenue(self, service_center_id: str, s: datetime, e: datetime) -> tuple[float, int]:
+        """This center's plan revenue + count of plans sold in the window —
+        the manager-KPI sibling of KpiService._plan_revenue (platform-
+        wide). Resolves every matching order's center first (see
+        _resolve_order_centers) since payment_orders doesn't uniformly
+        carry service_center_id, then sums just this center's rows."""
+        match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
+        # Sorted so that IF a window ever has more than 5000 platform-wide
+        # subscription payments (not realistic at today's volume, but this
+        # cap is a real long-term scaling limit — see this method's own
+        # docstring), the most RECENT ones are what gets kept, not an
+        # arbitrary slice.
+        orders = await self.repo.db.payment_orders.find(match).sort("created_at", -1).to_list(length=5000)
+        centers = await self._resolve_order_centers(orders)
+        matching = [o for o in orders if centers.get(str(o["_id"])) == service_center_id]
+        revenue = round(sum(o.get("amount_paise") or 0 for o in matching) / 100, 2)
+        return revenue, len(matching)
+
+    async def plan_purchases(
+        self, s: datetime, e: datetime, page: int, page_size: int, service_center_id: str | None = None,
+    ) -> tuple[list[dict], int]:
+        """Every individual plan PAYMENT settled in the window — literally
+        the same payment_orders match KpiService._plan_revenue sums, so
+        this list's total and that dashboard tile's number always agree.
+        Deliberately NOT admin_overview: that lists every subscription
+        ever (all-time, no period) and sums a different field
+        (user_subscriptions.amount_paid, which a manager-granted FREE plan
+        has but a payment_orders row never will — the two would silently
+        disagree with the revenue tile if reused here).
+
+        service_center_id (optional): scopes to one center's own sales —
+        a manager's own drill-down. Not every order carries this field
+        directly (see _resolve_order_centers), so a scoped call resolves
+        every row in the window and filters/paginates in Python instead
+        of pushing the filter into the initial Mongo query the unscoped
+        (admin) path below still uses — a center's own volume is small
+        enough for this to be cheap, and the admin path is untouched."""
+        match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
+        if service_center_id is None:
+            total = await self.repo.db.payment_orders.count_documents(match)
+            orders = (
+                await self.repo.db.payment_orders.find(match)
+                .sort("created_at", -1)
+                .skip((page - 1) * page_size)
+                .limit(page_size)
+                .to_list(length=page_size)
+            )
+        else:
+            all_orders = await self.repo.db.payment_orders.find(match).sort("created_at", -1).to_list(length=5000)
+            centers = await self._resolve_order_centers(all_orders)
+            matching = [o for o in all_orders if centers.get(str(o["_id"])) == service_center_id]
+            total = len(matching)
+            start = (page - 1) * page_size
+            orders = matching[start : start + page_size]
+        if not orders:
+            return [], total
+
+        customer_ids = [ObjectId(o["customer_id"]) for o in orders if o.get("customer_id") and ObjectId.is_valid(o["customer_id"])]
+        plan_ids = [ObjectId(o["plan_id"]) for o in orders if o.get("plan_id") and ObjectId.is_valid(o["plan_id"])]
+        users = (
+            {
+                str(u["_id"]): u
+                for u in await self.user_repo.collection.find(
+                    {"_id": {"$in": customer_ids}}, {"full_name": 1, "phone": 1}
+                ).to_list(length=len(customer_ids))
+            }
+            if customer_ids
+            else {}
+        )
+        plans = (
+            {str(p["_id"]): p for p in await self.plan_repo.collection.find({"_id": {"$in": plan_ids}}).to_list(length=len(plan_ids))}
+            if plan_ids
+            else {}
+        )
+
+        # payment_orders.kind -> a label a manager/admin actually reads on
+        # screen (never "manager_cash" verbatim).
+        payment_method_labels = {"cash": "Cash", "manager_cash": "Cash", "link": "Online", "autopay": "Online (auto-pay)"}
+        rows = []
+        for o in orders:
+            holder = users.get(o.get("customer_id") or "", {})
+            plan = plans.get(o.get("plan_id") or "", {})
+            rows.append(
+                serialize_doc(
+                    {
+                        "_id": o["_id"],
+                        "customer_id": o.get("customer_id"),
+                        "customer_name": holder.get("full_name", "Unknown"),
+                        "customer_phone": holder.get("phone"),
+                        "plan_id": o.get("plan_id"),
+                        "plan_name": plan.get("name", "Unknown plan"),
+                        "amount": round((o.get("amount_paise") or 0) / 100, 2),
+                        "discount": round((o.get("discount_paise") or 0) / 100, 2) if o.get("discount_paise") else None,
+                        "coupon_code": o.get("coupon_code"),
+                        "payment_method": payment_method_labels.get(o.get("kind") or "", o.get("kind")),
+                        "subscription_id": o.get("subscription_id"),
+                        "created_at": o.get("created_at"),
+                    }
+                )
+            )
+        return rows, total
+
     async def _get_active_subscription(self, subscription_id: str) -> dict:
         sub = await self.repo.find_by_id(subscription_id)
         if not sub:
