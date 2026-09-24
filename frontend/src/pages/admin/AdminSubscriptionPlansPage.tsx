@@ -313,7 +313,7 @@ export default function AdminSubscriptionPlansPage() {
               <div className="mt-4 border-t border-gray-100 pt-3">
                 <p className="text-sm font-medium text-[var(--color-text-primary)]">Monthly price per wash</p>
                 <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
-                  Leave blank to calculate it ({form.total_service_count} washes less the discount below). Steps of ₹20 — type any figure.
+                  Leave blank to calculate it ({form.total_service_count} washes less the discount below). Type any figure.
                 </p>
                 <div className="space-y-3">
                   {form.included_service_ids.map((sid) => {
@@ -329,7 +329,7 @@ export default function AdminSubscriptionPlansPage() {
                               label={vehicleTypeName(tid)}
                               type="number"
                               min={0}
-                              step={20}
+                              step="any"
                               placeholder="auto"
                               value={form.service_pass_prices[passKey(sid, tid)] || ""}
                               onChange={(e) =>

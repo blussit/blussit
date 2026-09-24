@@ -340,11 +340,11 @@ export default function AdminServicesPage() {
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Input label="Selling price (₹)" type="number" step={20} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
+            <Input label="Selling price (₹)" type="number" step="any" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} required />
             <Input
               label="Actual price (₹)"
               type="number"
-              step={20}
+              step="any"
               hint="Shown struck through on the website; never charged"
               value={form.original_price}
               onChange={(e) => setForm({ ...form, original_price: e.target.value })}
@@ -352,7 +352,7 @@ export default function AdminServicesPage() {
             <Input
               label="First-time price (₹)"
               type="number"
-              step={20}
+              step="any"
               hint="Only applied if this exact vehicle & phone have no prior booking"
               value={form.discounted_price}
               onChange={(e) => setForm({ ...form, discounted_price: e.target.value })}
@@ -368,7 +368,7 @@ export default function AdminServicesPage() {
           <Input
             label="Captain fee override (₹, optional)"
             type="number"
-            step={20}
+            step="any"
             hint="Leave blank to use the platform's default captain fee from Pricing & wallets."
             value={form.captain_fee ?? ""}
             onChange={(e) => setForm({ ...form, captain_fee: e.target.value === "" ? undefined : Number(e.target.value) })}
@@ -456,7 +456,7 @@ export default function AdminServicesPage() {
                     <Input
                       placeholder={`₹${form.price || 0}`}
                       type="number"
-                      step={20}
+                      step="any"
                       value={form.vehicle_type_prices[vt] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_prices: { ...form.vehicle_type_prices, [vt]: e.target.value } })}
                     />
