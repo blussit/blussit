@@ -176,7 +176,7 @@ async def seed() -> None:
                 "usage_limit_per_user": 1,
                 "total_usage_limit": None,
                 "valid_from": datetime(2026, 9, 1, 0, 0, 0, tzinfo=ist),
-                "valid_until": datetime(2026, 9, 24, 23, 59, 59, tzinfo=ist),
+                "valid_until": datetime(2026, 10, 5, 23, 59, 59, tzinfo=ist),
                 "is_active": True,
                 "offer_kind": "free_addon_with_service",
                 "eligible_service_keywords": ["star", "deep cleaning"],

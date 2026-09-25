@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { couponApi } from "../../api/engagement";
 
-const OFFER_END = new Date("2026-09-25T00:00:00+05:30").getTime();
+const OFFER_END = new Date("2026-10-06T00:00:00+05:30").getTime();
 const OFFER_CODE = "FREEBIKE";
 
 function useOfferCountdown() {
@@ -147,7 +147,7 @@ export function LaunchOfferPopup({ onClaim }: { onClaim: () => void }) {
                     <p className="text-sm font-semibold text-white">Valid With Star Wash Or Deep Cleaning.</p>
                     <p className="flex items-center gap-2 text-sm font-semibold text-white/70">
                       <CalendarDays className="h-4 w-4 shrink-0 text-[#E8A900]" />
-                      Limited Time Offer Till 24 Sep.
+                      Limited Time Offer Till 5 Oct.
                     </p>
                   </div>
 
