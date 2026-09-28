@@ -1,7 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { MapPin, Users } from "lucide-react";
 import { coverageLeadApi, type CoverageLead } from "../../api/admin";
 import { Badge, Card, CardBody, DataTable } from "../../components/ui";
+import { Pager } from "../../components/shared/ListControls";
 import { format } from "../../lib/date";
 
 /**
@@ -12,7 +14,12 @@ import { format } from "../../lib/date";
  * data any center manager acts on.
  */
 export default function AdminCoverageLeadsPage() {
-  const { data, isLoading } = useQuery({ queryKey: ["coverage-leads"], queryFn: () => coverageLeadApi.list({ page: 1, page_size: 100 }) });
+  const [page, setPage] = useState(1);
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["coverage-leads", page],
+    queryFn: () => coverageLeadApi.list({ page, page_size: 50 }),
+    placeholderData: keepPreviousData,
+  });
   const { data: summary } = useQuery({ queryKey: ["coverage-leads-summary"], queryFn: coverageLeadApi.summary });
 
   return (
@@ -71,6 +78,8 @@ export default function AdminCoverageLeadsPage() {
           { header: "Last asked", accessor: (l) => format(l.last_requested_at) },
         ]}
       />
+
+      {data?.meta && <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />}
     </div>
   );
 }

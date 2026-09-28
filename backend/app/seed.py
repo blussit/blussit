@@ -93,16 +93,22 @@ async def seed() -> None:
     def stepped(base: float) -> dict[str, float]:
         return {vt_id: float(base + 10 * i) for i, vt_id in enumerate(car_type_ids)}
 
-    def car(name, price, original, minutes, includes, *, order, featured=True, addon=False):
+    def car(name, price, original, minutes, includes, *, order, featured=True, addon=False, flat=False, offer=None):
         return {
             "category": "car-care", "name": name, "vehicle_types": car_type_ids,
             "price": float(price), "original_price": float(original) if original else None,
-            # Add-ons are a flat charge; main services carry the ₹10 steps.
-            "vehicle_type_prices": {} if addon else stepped(price),
+            # Add-ons are a flat charge; main services carry the ₹10 steps
+            # unless `flat` (one offer price for every car type).
+            "vehicle_type_prices": {} if addon else ({vt_id: float(price) for vt_id in car_type_ids} if flat else stepped(price)),
             "vehicle_type_original_prices": stepped(original) if original and not addon else {},
             "duration_minutes": minutes, "description": "\n".join(includes),
             "is_featured": featured, "is_addon": addon, "variant_group": None, "variant_label": None,
             "display_order": order,
+            # An offer service is prepaid, pays the distance charge, and
+            # carries the tag the landing popup promotes — and no first-time
+            # price may undercut the offer price.
+            "prepaid_only": bool(offer), "charges_travel": bool(offer), "offer_tag": offer,
+            **({"discounted_price": None, "vehicle_type_discounted_prices": {}} if offer else {}),
         }
 
     def bike(name, price, minutes, includes, *, order, label=None, featured=False, addon=False):
@@ -114,6 +120,7 @@ async def seed() -> None:
             "is_featured": featured, "is_addon": addon,
             "variant_group": None if addon else "bike-wash", "variant_label": label,
             "display_order": order,
+            "prepaid_only": False, "charges_travel": False, "offer_tag": None,
         }
 
     star_wash_includes = ["Exterior foam wash", "Interior vacuum", "Dashboard polish"]
@@ -121,7 +128,8 @@ async def seed() -> None:
         car("Waterless Service", 319, 399, 45, ["Waterless exterior clean", "Interior vacuum", "Dashboard polish"], order=1),
         car("Star Wash", 349, 449, 45, star_wash_includes, order=2),
         car("Deep Cleaning", 699, 999, 90, ["Foam wash, vacuum & dashboard polish", "Seat cleaning", "Floor & mats cleaning", "Pedal & door (gate) cleaning"], order=3),
-        car("Jet Wash", 249, 299, 30, ["Exterior foam wash", "Tyre polish"], order=4),
+        # ₹149 launch offer for every car type, struck against the old MRP.
+        car("Jet Wash", 149, 299, 30, ["Exterior foam wash", "Tyre polish"], order=4, flat=True, offer="Special offer"),
         # Standalone bike wash: ₹99 for one bike or the ₹159 two-bike combo.
         # Each is its own variant so both prices stay editable in Admin →
         # Services; more counts can be added there with the same variant group.
@@ -176,8 +184,10 @@ async def seed() -> None:
                 "usage_limit_per_user": 1,
                 "total_usage_limit": None,
                 "valid_from": datetime(2026, 9, 1, 0, 0, 0, tzinfo=ist),
-                "valid_until": datetime(2026, 10, 5, 23, 59, 59, tzinfo=ist),
-                "is_active": True,
+                "valid_until": datetime(2026, 9, 27, 23, 59, 59, tzinfo=ist),
+                # Discontinued 2026-09-27 (replaced by the Jet Wash ₹149 offer) —
+                # a re-seed must never switch it back on.
+                "is_active": False,
                 "offer_kind": "free_addon_with_service",
                 "eligible_service_keywords": ["star", "deep cleaning"],
                 "free_addon_keywords": ["extra bike wash"],
@@ -197,12 +207,12 @@ async def seed() -> None:
                 "name": "Indore Central Service Hub",
                 "code": "IND-0001",
                 "location": {
-                    "address": "AB Road, Indore",
+                    "address": "Star building, 129, Lay Park Colony, Shivampuri Colony, Indore",
                     "city": "Indore",
                     "state": "Madhya Pradesh",
                     "pincode": "452001",
-                    "latitude": 22.7196,
-                    "longitude": 75.8577,
+                    "latitude": 22.68328,
+                    "longitude": 75.866354,
                     "service_pincodes": ["452001", "452002", "452003", "452010"],
                     "radius_km": 6.0,
                 },
@@ -266,8 +276,8 @@ async def seed() -> None:
         await db.settings.insert_one(
             {
                 "key": "pricing_config",
-                "value": {"per_km_rate": 5.0, "default_captain_service_fee": 40.0},
-                "description": "Global captain payout configuration",
+                "value": {"per_km_rate": 5.0, "default_captain_service_fee": 40.0, "customer_free_km": 5.0, "customer_per_km_rate": 2.0},
+                "description": "Captain payout + customer distance charge configuration",
                 "is_deleted": False,
             }
         )

@@ -18,4 +18,6 @@ export const VIDEO_REVIEWS: VideoReviewConfig[] = [
   { url: "https://youtube.com/shorts/5VzN6nqD4l0" },
   { url: "https://youtube.com/shorts/qfccA7rUcDc" },
   { url: "https://youtube.com/shorts/-kO3kGo0ikg" },
+  { url: "https://youtube.com/shorts/DQ0c50riCu4" },
+  { url: "https://youtube.com/shorts/KePrxQ3ZTRs" },
 ];

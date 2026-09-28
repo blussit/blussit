@@ -11,8 +11,8 @@
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
-import { kpiApi, adminUserApi } from "../../api/admin";
+import { AlertTriangle, CheckCircle2, Globe, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
+import { analyticsApi, kpiApi, adminUserApi } from "../../api/admin";
 import { bookingApi } from "../../api/booking";
 import { Card, CardBody, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
 import { DatePicker } from "../../components/ui/DatePicker";
@@ -36,6 +36,8 @@ const TABS = [
   { key: "operations", label: "Operations" },
   { key: "areas", label: "Areas" },
 ] as const;
+
+const VISITORS_TIP = "Unique devices on the website each day — a device counts once per day, so a longer period adds the days up.";
 
 type OverviewBlock = {
   bookings: number; completed: number; revenue: number; completion_rate: number | null; repeat_customer_rate: number | null;
@@ -78,6 +80,10 @@ export default function AdminDashboardPage() {
   const { data, isLoading } = useQuery({
     queryKey: ["kpi", "overview", params],
     queryFn: () => kpiApi.section<OverviewData>("overview", params),
+  });
+  const { data: visitors } = useQuery({
+    queryKey: ["analytics-visitors", params],
+    queryFn: () => analyticsApi.visitors(params),
   });
 
   if (isLoading && !data) return <PageLoader />;
@@ -224,7 +230,7 @@ export default function AdminDashboardPage() {
           />
         </div>
       )}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
         {rest.map((s) => (
           <StatCard
             key={s.label}
@@ -242,6 +248,30 @@ export default function AdminDashboardPage() {
             linkLabel="Details"
           />
         ))}
+        <StatCard
+          label="Website visitors"
+          labelAfter={<InfoTip text={VISITORS_TIP} />}
+          value={visitors ? visitors.total.toLocaleString("en-IN") : "—"}
+          icon={Globe}
+          hint={
+            <span className="flex flex-wrap items-center gap-1.5">
+              <DeltaPill current={visitors?.total} previous={visitors?.previous_total} /> <span>vs {periodNoun}</span>
+              {visitors && periodKey !== "today" && <span>· {visitors.today.toLocaleString("en-IN")} today</span>}
+            </span>
+          }
+          onClick={
+            visitors
+              ? () =>
+                  setBriefDrill({
+                    title: "Website visitors",
+                    value: visitors.total.toLocaleString("en-IN"),
+                    tip: VISITORS_TIP,
+                    breakdown: [...visitors.daily].reverse().map((d) => ({ label: format(d.date), value: d.visitors })),
+                  })
+              : undefined
+          }
+          linkLabel="Details"
+        />
       </div>
 
       {/* Action required — only triggered exceptions, invisible when healthy. */}
@@ -291,9 +321,9 @@ export default function AdminDashboardPage() {
         onClose={() => setListDrill(null)}
         title={listDrill === "bookings-completed" ? "Completed washes" : "Bookings"}
         queryKey={["kpi-drill", listDrill, params]}
-        fetchFn={() =>
+        fetchFn={(page) =>
           bookingApi.all({
-            ...params, page_size: 100,
+            ...params, page, page_size: 50,
             date_field: listDrill === "bookings-completed" ? "completed" : "created",
             status: listDrill === "bookings-completed" ? "completed" : undefined,
           })
@@ -318,7 +348,7 @@ export default function AdminDashboardPage() {
         onClose={() => setListDrill(null)}
         title="New customers"
         queryKey={["kpi-drill-new-customers", params]}
-        fetchFn={() => adminUserApi.list({ ...params, role: "customer", page_size: 100 })}
+        fetchFn={(page) => adminUserApi.list({ ...params, role: "customer", page, page_size: 50 })}
         getRowKey={(u) => u.id}
         renderRow={(u) => (
           <button type="button" onClick={() => setOpenCustomerId(u.id)} className="flex w-full items-center justify-between gap-3 text-left">

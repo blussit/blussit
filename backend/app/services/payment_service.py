@@ -35,16 +35,30 @@ The `payment_orders` doc doubles as the idempotency guard: verify claims
 it atomically (created -> paid), so a replayed verify can't double-apply
 (double-subscribe, double-mark) — the replay just gets the same success
 back.
+
+A one-time order has three independent ways to become paid, and all three
+go through the SAME claim (_apply_order_paid): the browser's verify, the
+Razorpay webhook, and the reconciliation sweep (sync_pending_orders) that
+asks Razorpay directly — so a customer whose tab closed after paying is
+still settled, and whichever path lands first wins while the others are
+no-ops.
 """
+import asyncio
+import functools
 import hashlib
 import hmac
+import json
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from bson import ObjectId
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
 from app.core.exceptions import AppException, BadRequestException, NotFoundException
@@ -53,7 +67,7 @@ from app.repositories.booking_repository import BookingRepository
 from app.repositories.subscription_repository import SubscriptionPlanRepository
 from app.schemas.payment_schema import CreateOrderRequest, VerifyPaymentRequest
 from app.utils.serializers import serialize_doc
-from app.utils.timezone import now_ist
+from app.utils.timezone import from_stored, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +85,99 @@ _AUTOPAY_SCHEDULE = {
     "yearly": {"period": "yearly", "interval": 1, "total_count": 10},
 }
 
+# (connect, read) seconds for every SDK request — the SDK sets none itself.
+_RZP_TIMEOUT = (5, 15)
+_RZP_WORKERS = 8
+# Own pool, not asyncio's default one, which also serves DNS lookups for httpx.
+_RZP_POOL = ThreadPoolExecutor(max_workers=_RZP_WORKERS, thread_name_prefix="razorpay")
+_RZP_CLIENT: tuple | None = None
+
+# Per sweep pass: at most this many gateway lookups, none started after the budget.
+_SWEEP_MAX_CALLS = 50
+_SWEEP_BUDGET_SECONDS = 15
+# Never-checked first, then whatever was checked longest ago.
+_SWEEP_ORDER = [("last_checked_at", 1), ("created_at", 1)]
+_SWEEP_PAUSE_SECONDS = 30
+_sweeps_paused_until = 0.0
+
+# A one-time order is still "open" (payable) in either state: a failed
+# attempt keeps the checkout modal open for a retry on the same order.
+_OPEN = ["created", "failed"]
+# The browser's verify is the fast path; the sweep gives it this long first.
+_ORDER_SWEEP_MIN_AGE = timedelta(minutes=2)
+_ORDER_SWEEP_MAX_AGE = timedelta(hours=48)
+_ORDER_RECHECK_FIRST = timedelta(minutes=2)
+_ORDER_RECHECK_MAX = timedelta(hours=2)
+# Payment links and pending auto-pay mandates live for days. While this
+# fresh the customer is most likely paying right now, so the sweep checks
+# every pass; after that they go on the checkout-order backoff — every
+# pass for 2-7 days was ~2,900 Razorpay calls per unpaid link. The
+# webhook (link paid / mandate activated) and the captain's QR poll still
+# settle a late payment straight away.
+_PENDING_FRESH = timedelta(minutes=15)
+# The captain's QR modal polls every few seconds; Razorpay is asked about a
+# given link at most this often.
+_CAPTAIN_LINK_CHECK_EVERY = timedelta(seconds=10)
+# The expiry sweep leaves a booking alone while a checkout opened this
+# recently may still be on a bank/OTP page or in a UPI app...
+_CHECKOUT_GRACE = timedelta(minutes=10)
+# ...but never longer than this past the payment window.
+_EXPIRY_HARD_STOP = timedelta(minutes=20)
+# A claim whose settlement never finished (instance killed mid-request).
+_STALE_SETTLING = timedelta(minutes=10)
+
+ATTENTION_MESSAGE = (
+    "We received this payment, but couldn't apply it automatically (the booking was already paid, cancelled "
+    "or changed). Our team has been flagged and will fix or refund it — please don't pay again."
+)
+PLAN_ATTENTION_MESSAGE = (
+    "Payment received, but the plan couldn't be activated automatically — our team has been flagged "
+    "and will activate it or refund you."
+)
 
 
 def _razorpay_client():
-    """Lazily built so tests (which never call external APIs) can run
-    without credentials, and so a misconfigured deployment fails with a
-    clear message instead of an SDK auth traceback."""
+    """Lazily built (then reused) so tests (which never call external APIs)
+    can run without credentials, and so a misconfigured deployment fails
+    with a clear message instead of an SDK auth traceback."""
+    global _RZP_CLIENT
     if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
         raise BadRequestException("Online payments aren't configured yet — please pay by cash, or contact support.")
-    import razorpay
+    auth = (settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    if _RZP_CLIENT is None or _RZP_CLIENT[0] != auth:
+        _RZP_CLIENT = (auth, _build_razorpay_client(auth))
+    return _RZP_CLIENT[1]
 
-    return razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+
+def _build_razorpay_client(auth: tuple[str, str]):
+    import razorpay
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    class _TimeoutAdapter(HTTPAdapter):
+        def send(self, request, stream=False, timeout=None, **kwargs):
+            return super().send(request, stream=stream, timeout=_RZP_TIMEOUT if timeout is None else timeout, **kwargs)
+
+    session = requests.Session()
+    session.mount("https://", _TimeoutAdapter(pool_maxsize=_RZP_WORKERS))
+    return razorpay.Client(session=session, auth=auth)
+
+
+async def _rzp(call, *args):
+    """Every SDK call goes through here: it blocks, and on the loop it would stall the whole instance."""
+    return await asyncio.get_running_loop().run_in_executor(_RZP_POOL, functools.partial(call, *args))
+
+
+def _gateway_unreachable(exc: BaseException) -> bool:
+    """Razorpay itself is down or slow, as opposed to one bad record."""
+    import requests
+
+    return isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+
+
+def _iso(value) -> str | None:
+    """A stored instant (read back naive-UTC) as an offset-carrying string."""
+    return from_stored(value).isoformat() if isinstance(value, datetime) else None
 
 
 def _expected_signature(order_id: str, payment_id: str) -> str:
@@ -112,6 +208,14 @@ class PaymentService:
         Razorpay order for it."""
         auto_pay_unavailable = False
         if payload.purpose == "booking":
+            group_id = await self._unpaid_visit_of(customer_id, payload.booking_id)
+            if group_id:
+                # One car of a visit whose other cars are unpaid too: the
+                # customer pays for the visit once (and its expiry cancels it
+                # as one thing), so a single-car order would confirm one car
+                # and leave the rest to be released.
+                payload = payload.model_copy(update={"purpose": "booking_group", "booking_group_id": group_id})
+        if payload.purpose == "booking":
             amount_paise, description, reference = await self._booking_order(customer_id, payload)
         elif payload.purpose == "booking_group":
             amount_paise, description, reference = await self._booking_group_order(customer_id, payload)
@@ -138,12 +242,13 @@ class PaymentService:
 
         client = _razorpay_client()
         try:
-            order = client.order.create(
+            order = await _rzp(
+                client.order.create,
                 {
                     "amount": amount_paise,
                     "currency": "INR",
                     "receipt": reference["receipt"],
-                    "notes": {"purpose": payload.purpose, **{k: v for k, v in reference.items() if k != "receipt"}},
+                    "notes": {"purpose": payload.purpose, **{k: v for k, v in reference.items() if k not in ("receipt", "booking_ids")}},
                 }
             )
         except Exception as exc:  # SDK raises its own error hierarchy — surface a clean 400/500 story
@@ -185,6 +290,8 @@ class PaymentService:
         booking = await self.booking_repo.find_by_id(payload.booking_id)
         if not booking or booking.get("customer_id") != customer_id:
             raise NotFoundException("Booking not found")
+        if booking.get("payment_status") != PaymentStatus.PAID.value and await self._settle_open_payments([payload.booking_id]):
+            booking = await self.booking_repo.find_by_id(payload.booking_id) or booking
         # Founder rule: ANY unpaid booking can be paid online at any point
         # — before, during, or after the service — even one that was
         # booked as cash on delivery (verify flips the method to online).
@@ -209,6 +316,10 @@ class PaymentService:
             raise NotFoundException("Booking not found")
         if any(b.get("customer_id") != customer_id for b in bookings):
             raise NotFoundException("Booking not found")
+        if await self._settle_open_payments([str(b["_id"]) for b in bookings], payload.booking_group_id):
+            bookings = await self.booking_repo.collection.find(
+                {"booking_group_id": payload.booking_group_id, "is_deleted": {"$ne": True}}
+            ).to_list(length=20)
 
         payable = [
             b for b in bookings
@@ -221,6 +332,9 @@ class PaymentService:
         return amount_paise, f"{len(payable)} vehicles — {numbers}"[:255], {
             "receipt": f"grp-{payload.booking_group_id[-12:]}",
             "booking_group_id": payload.booking_group_id,
+            # So every per-booking lookup (reconciliation, the recycle-bin
+            # money guard) finds the visit's order too.
+            "booking_ids": [str(b["_id"]) for b in payable],
         }
 
     async def _subscription_order(self, customer_id: str, payload: CreateOrderRequest) -> tuple[int, str, dict]:
@@ -269,8 +383,9 @@ class PaymentService:
 
     async def verify_payment(self, customer_id: str, payload: VerifyPaymentRequest) -> dict:
         """Recompute the signature and, only on an exact match, apply the
-        purchase. The atomic created->paid claim on payment_orders makes
-        this replay-safe."""
+        purchase through the shared claim (_apply_order_paid) — the same one
+        the webhook and the reconciliation sweep use, so whichever of them
+        lands first settles it and the others just read the outcome."""
         if payload.razorpay_subscription_id:
             return await self._verify_autopay(customer_id, payload)
         order = await self.orders.find_one({"razorpay_order_id": payload.razorpay_order_id})
@@ -287,74 +402,153 @@ class PaymentService:
             )
             raise BadRequestException("Payment verification failed — the signature doesn't match. No money was applied.")
 
-        # Atomic claim: exactly one verify applies the side effects.
+        result = await self._apply_order_paid(
+            order, payload.razorpay_payment_id, via="verify", signature=payload.razorpay_signature
+        )
+        if result["status"] != "paid":
+            raise BadRequestException(PLAN_ATTENTION_MESSAGE if result["purpose"] == "subscription" else ATTENTION_MESSAGE)
+        if result["purpose"] == "subscription":
+            result["first_confirmation"] = await self._first_client_confirmation(order["_id"])
+        return result
+
+    async def _apply_order_paid(self, order: dict, payment_id: str, *, via: str, signature: str | None = None) -> dict:
+        """The one way a one-time order becomes paid. The atomic open->paid
+        claim decides which caller settles; `settling` stays on the doc until
+        the settlement finishes, so an instance killed in between is caught
+        by the sweep (see _flag_stale_settlements) instead of leaving money
+        with nothing to show for it. Returns the outcome — status "paid" or
+        "needs_attention" — never raises for a business problem."""
+        fields = {"status": "paid", "paid_at": now_ist(), "razorpay_payment_id": payment_id, "settled_via": via, "settling": True}
+        if signature:
+            fields["razorpay_signature"] = signature
         claimed = await self.orders.find_one_and_update(
-            {"razorpay_order_id": payload.razorpay_order_id, "status": {"$in": ["created", "failed"]}},
-            {"$set": {"status": "paid", "paid_at": now_ist(), "razorpay_payment_id": payload.razorpay_payment_id, "razorpay_signature": payload.razorpay_signature}},
+            {"_id": order["_id"], "status": {"$in": _OPEN}}, {"$set": fields}, return_document=ReturnDocument.AFTER
         )
         if not claimed:
-            # Already applied by an earlier verify — idempotent success.
-            fresh = await self.orders.find_one({"razorpay_order_id": payload.razorpay_order_id})
-            return {"status": "paid", "purpose": order["purpose"], "already_processed": True, "subscription_id": (fresh or {}).get("subscription_id")}
+            return await self._order_outcome(order["_id"], payment_id, via)
 
-        if order["purpose"] == "booking":
-            applied = await self._settle_booking_payment(
-                order, payload.razorpay_order_id, payload.razorpay_payment_id, via="order"
-            )
-            if not applied:
-                raise BadRequestException(
-                    "Payment received, but this booking can't be marked paid automatically "
-                    "(it changed since the payment started). Our team has been flagged and will sort the refund/credit."
-                )
-            return {"status": "paid", "purpose": "booking", "booking_id": order["booking_id"]}
+        purpose = claimed["purpose"]
+        result: dict = {"purpose": purpose}
+        try:
+            if purpose == "booking":
+                ok = await self._settle_booking_payment(claimed, claimed["razorpay_order_id"], payment_id, via="order")
+                result["booking_id"] = claimed["booking_id"]
+            elif purpose == "booking_group":
+                # Some cars on the visit may not settle. The money is in and
+                # the rest of the visit IS paid, so this needs a human rather
+                # than a rollback — the order is parked with exactly which
+                # cars are short.
+                settled, failed = await self._settle_booking_group(claimed, claimed["razorpay_order_id"], payment_id)
+                ok = not failed
+                result.update(booking_group_id=claimed["booking_group_id"], settled_count=settled)
+            else:
+                sub = await self._activate_order_subscription(claimed)
+                ok = sub is not None
+                if sub:
+                    result.update(subscription=sub, subscription_id=sub["id"])
+        except Exception:  # noqa: BLE001 — money is in; a crash must park it, not lose it
+            logger.exception("Settling Razorpay order %s failed", claimed["razorpay_order_id"])
+            await self._flag_order_attention({"_id": claimed["_id"]}, f"paid, but applying the payment failed ({via}) — check it")
+            ok = False
+        await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
+        return {**result, "status": "paid" if ok else "needs_attention", "settled": ok}
 
-        if order["purpose"] == "booking_group":
-            settled, failed = await self._settle_booking_group(order, payload.razorpay_order_id, payload.razorpay_payment_id)
-            if failed:
-                # Some cars on the visit couldn't be marked paid. The money is
-                # in and the rest of the visit IS paid, so this needs a human
-                # rather than a rollback — the order is parked with exactly
-                # which cars are short.
-                raise BadRequestException(
-                    "Payment received, but not every vehicle on this visit could be marked paid "
-                    "(it changed since the payment started). Our team has been flagged and will sort it out."
-                )
-            return {
-                "status": "paid",
-                "purpose": "booking_group",
-                "booking_group_id": order["booking_group_id"],
-                "settled_count": settled,
-            }
+    async def _order_outcome(self, order_id, payment_id: str, via: str) -> dict:
+        """What an order that someone else already claimed ended up as. A
+        DIFFERENT payment id on it means the same order was paid twice —
+        the second one is parked for a refund, never applied."""
+        fresh = await self._wait_settled(order_id)
+        if not fresh:
+            raise NotFoundException("Payment order not found")
+        result: dict = {"purpose": fresh.get("purpose"), "already_processed": True}
+        for key in ("booking_id", "booking_group_id", "subscription_id"):
+            if fresh.get(key):
+                result[key] = fresh[key]
+        if fresh.get("razorpay_payment_id") and fresh["razorpay_payment_id"] != payment_id and fresh.get("status") in ("paid", "paid_attention"):
+            await self._record_duplicate_payment(fresh, payment_id, via)
+            return {**result, "status": "needs_attention", "settled": False, "duplicate": True}
+        if fresh.get("status") != "paid":
+            return {**result, "status": "needs_attention", "settled": False}
+        if fresh.get("purpose") == "subscription" and fresh.get("subscription_id"):
+            result["subscription"] = await self._subscription_view(fresh["subscription_id"])
+        return {**result, "status": "paid", "settled": True}
 
-        # Subscription: the verified payment IS the purchase — create it now.
+    async def _wait_settled(self, order_id, attempts: int = 16) -> dict | None:
+        """A concurrent path may be mid-settlement; its outcome (paid or
+        parked) is what the caller should report, not the claim alone."""
+        for _ in range(attempts):
+            doc = await self.orders.find_one({"_id": order_id})
+            if not doc or not doc.get("settling"):
+                return doc
+            await asyncio.sleep(0.25)
+        return await self.orders.find_one({"_id": order_id})
+
+    async def _activate_order_subscription(self, order: dict) -> dict | None:
+        """A paid one-time order IS the plan purchase — create it now. None
+        (order parked for a human) when the plan can't be activated."""
         from app.schemas.subscription_schema import SubscribeRequest
         from app.services.subscription_service import UserSubscriptionService
 
         try:
             sub = await UserSubscriptionService(self.db).subscribe(
-                customer_id,
+                order["customer_id"],
                 SubscribeRequest(
                     plan_id=order["plan_id"], vehicle_id=order.get("vehicle_id"),
                     service_id=order.get("service_id"), vehicle_type=order.get("vehicle_type"),
                 ),
             )
-        except Exception:
-            # Money is in but the plan can't be activated (deactivated/
-            # deleted between order and verify). NEVER swallow the money
-            # silently: park the order where the admin collections view
-            # surfaces it for a manual refund/activation.
-            await self._flag_order_attention(
-                {"razorpay_order_id": payload.razorpay_order_id}, "paid but subscription could not be activated"
-            )
-            raise BadRequestException(
-                "Payment received, but the plan couldn't be activated automatically — our team has been flagged "
-                "and will activate it or refund you."
-            )
-        await self.orders.update_one(
-            {"razorpay_order_id": payload.razorpay_order_id}, {"$set": {"subscription_id": sub["id"]}}
-        )
-        await self._announce_subscription(customer_id, sub, renewed=False)
-        return {"status": "paid", "purpose": "subscription", "subscription": serialize_doc(sub) if "_id" in sub else sub}
+        except Exception:  # noqa: BLE001 — deactivated/deleted/duplicate since the order was minted
+            await self._flag_order_attention({"_id": order["_id"]}, "paid but subscription could not be activated")
+            return None
+        await self.orders.update_one({"_id": order["_id"]}, {"$set": {"subscription_id": sub["id"]}})
+        await self._announce_subscription(order["customer_id"], sub, renewed=False)
+        return serialize_doc(sub) if "_id" in sub else sub
+
+    async def _subscription_view(self, subscription_id: str) -> dict | None:
+        from app.services.subscription_service import UserSubscriptionService
+
+        sub = await UserSubscriptionService(self.db).get_subscription(subscription_id)
+        if not sub:
+            return None
+        view = serialize_doc(sub)
+        plan = await self.plan_repo.find_by_id(str(sub.get("plan_id") or ""))
+        view["plan_name"] = (plan or {}).get("name")
+        return view
+
+    async def _first_client_confirmation(self, order_id) -> bool:
+        """True exactly once per order — the browser that first learns a
+        plan purchase went through gets the thank-you ticket (an ad
+        conversion), whichever path actually settled it."""
+        result = await self.orders.update_one({"_id": order_id, "client_confirmed_at": None}, {"$set": {"client_confirmed_at": now_ist()}})
+        return result.modified_count == 1
+
+    async def _record_duplicate_payment(self, order: dict, payment_id: str, via: str) -> None:
+        """A second captured payment for an order that's already paid. Its
+        own ledger row (keyed on the payment id, so every path that notices
+        it records it once) in the attention queue, for a refund."""
+        doc = {
+            "_id": f"dup_{payment_id}",
+            "kind": "duplicate_payment",
+            "purpose": order.get("purpose"),
+            "customer_id": order.get("customer_id"),
+            "parent_order_id": order.get("razorpay_order_id") or order.get("razorpay_link_id"),
+            "razorpay_payment_id": payment_id,
+            "amount_paise": order.get("amount_paise", 0),
+            "currency": "INR",
+            "status": "paid_attention",
+            "attention_reason": "second payment for an order that was already paid — refund it",
+            "detected_via": via,
+            "created_at": now_ist(),
+            "flagged_at": now_ist(),
+        }
+        for key in ("booking_id", "booking_ids", "booking_group_id", "booking_number", "receipt", "plan_id"):
+            if order.get(key):
+                doc[key] = order[key]
+        try:
+            await self.orders.insert_one(doc)
+        except DuplicateKeyError:
+            return
+        await self._alert_attention(doc)
 
     # -- Auto-pay: Razorpay Subscriptions --------------------------------
     #
@@ -386,7 +580,8 @@ class PaymentService:
 
         schedule = _AUTOPAY_SCHEDULE.get(plan.get("billing_cycle") or "monthly", _AUTOPAY_SCHEDULE["monthly"])
         client = _razorpay_client()
-        created = client.plan.create(
+        created = await _rzp(
+            client.plan.create,
             {
                 "period": schedule["period"],
                 "interval": schedule["interval"],
@@ -419,7 +614,8 @@ class PaymentService:
         rzp_plan_id = await self._ensure_razorpay_plan(plan, payload.vehicle_type, amount_paise)
 
         client = _razorpay_client()
-        mandate = client.subscription.create(
+        mandate = await _rzp(
+            client.subscription.create,
             {
                 "plan_id": rzp_plan_id,
                 "total_count": schedule["total_count"],
@@ -498,13 +694,20 @@ class PaymentService:
             },
         )
         if not claimed:
-            fresh = await self.orders.find_one({"razorpay_subscription_id": mandate_id})
+            fresh = await self.orders.find_one({"razorpay_subscription_id": mandate_id}) or {}
+            if fresh.get("status") == "paid_attention":
+                raise BadRequestException(PLAN_ATTENTION_MESSAGE)
+            sub_id = fresh.get("subscription_id")
             return {
                 "status": "paid",
                 "purpose": "subscription",
                 "already_processed": True,
                 "auto_pay": True,
-                "subscription_id": (fresh or {}).get("subscription_id"),
+                "subscription_id": sub_id,
+                # The mandate sweep may have activated it before this browser
+                # got here — it still gets its plan and thank-you ticket.
+                **({"subscription": await self._subscription_view(sub_id)} if sub_id else {}),
+                "first_confirmation": bool(sub_id) and await self._first_client_confirmation(fresh["_id"]),
             }
 
         from app.schemas.subscription_schema import SubscribeRequest
@@ -539,6 +742,7 @@ class PaymentService:
             "purpose": "subscription",
             "auto_pay": True,
             "subscription": serialize_doc(sub) if "_id" in sub else sub,
+            "first_confirmation": await self._first_client_confirmation(claimed["_id"]),
         }
 
     async def _announce_subscription(self, customer_id: str, sub: dict, *, renewed: bool) -> None:
@@ -603,11 +807,43 @@ class PaymentService:
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             return False
         try:
-            _razorpay_client().subscription.cancel(mandate_id, {"cancel_at_cycle_end": 1 if at_cycle_end else 0})
+            await _rzp(_razorpay_client().subscription.cancel, mandate_id, {"cancel_at_cycle_end": 1 if at_cycle_end else 0})
             return True
         except Exception:
             logger.warning("Could not cancel Razorpay mandate %s", mandate_id, exc_info=True)
             return False
+
+    async def _gateway_sweep(self, docs: list[dict], fetch, id_field: str, what: str, schedule=None):
+        """Yields (doc, remote record) per doc Razorpay answers for, stamping
+        last_checked_at so the next pass starts with whatever waited longest.
+        Stops at the time budget, or when Razorpay is unreachable — then the
+        other sweeps pause too, so an outage costs one timeout per pass.
+        `schedule(doc)` adds fields to that stamp (e.g. a backoff)."""
+        global _sweeps_paused_until
+        if time.monotonic() < _sweeps_paused_until:
+            return
+        deadline = time.monotonic() + _SWEEP_BUDGET_SECONDS
+        for doc in docs:
+            if time.monotonic() > deadline:
+                logger.info("Razorpay %s sweep used its %ss budget — the rest go first next pass", what, _SWEEP_BUDGET_SECONDS)
+                return
+            gateway_id = doc[id_field]
+            try:
+                remote = await _rzp(fetch, gateway_id)
+            except Exception as exc:  # noqa: BLE001
+                if _gateway_unreachable(exc):
+                    _sweeps_paused_until = time.monotonic() + _SWEEP_PAUSE_SECONDS
+                    logger.warning("Razorpay unreachable (%s) — %s sweep stopped for this pass", type(exc).__name__, what)
+                    return
+                logger.warning("Razorpay %s check failed for %s: %s", what, gateway_id, exc)
+                remote = None
+            stamp: dict = {"$set": {"last_checked_at": now_ist()}}
+            if schedule:
+                for op, fields in schedule(doc).items():
+                    stamp.setdefault(op, {}).update(fields)
+            await self.orders.update_one({"_id": doc["_id"]}, stamp)
+            if remote is not None:
+                yield doc, remote
 
     async def sync_autopay_renewals(self) -> int:
         """Reminder-loop sweep: ask Razorpay how many cycles each live
@@ -630,7 +866,7 @@ class PaymentService:
                 "auto_pay_active": True,
                 "$or": [{"next_check_at": {"$exists": False}}, {"next_check_at": {"$lte": now_ist()}}],
             }
-        ).to_list(length=500)
+        ).sort(_SWEEP_ORDER).limit(_SWEEP_MAX_CALLS).to_list(length=_SWEEP_MAX_CALLS)
         if not mandates:
             return 0
 
@@ -639,12 +875,10 @@ class PaymentService:
         subscriptions = UserSubscriptionService(self.db)
         client = _razorpay_client()
         renewed = 0
-        for mandate in mandates:
+        async for mandate, remote in self._gateway_sweep(
+            mandates, client.subscription.fetch, "razorpay_subscription_id", "auto-pay renewal"
+        ):
             mandate_id = mandate["razorpay_subscription_id"]
-            try:
-                remote = client.subscription.fetch(mandate_id)
-            except Exception:
-                continue  # transient — the next pass retries
             paid_count = int(remote.get("paid_count") or 0)
             applied = int(mandate.get("cycles_applied") or 0)
             cycle_end = remote.get("current_end")
@@ -695,15 +929,77 @@ class PaymentService:
                 )
                 renewed += 1
 
-            if remote.get("status") in ("cancelled", "completed", "expired", "halted"):
-                await self.orders.update_one(
-                    {"_id": mandate["_id"]}, {"$set": {"auto_pay_active": False, "mandate_status": remote.get("status")}}
+            remote_status = remote.get("status")
+            if remote_status in ("cancelled", "completed", "expired", "halted"):
+                # Claimed atomically: only the pass that flips it off tells
+                # anyone, so a second sweeper (or a retry) never re-sends.
+                stopped = await self.orders.find_one_and_update(
+                    {"_id": mandate["_id"], "auto_pay_active": True},
+                    {"$set": {"auto_pay_active": False, "mandate_status": remote_status}},
                 )
                 if mandate.get("subscription_id"):
                     await subscriptions.mark_auto_renew_off(mandate["subscription_id"])
+                # The customer's own turn-off / cancel / upgrade already set
+                # auto_pay_active False (cancel_autopay), so this mandate is
+                # never even polled — reaching here means Razorpay stopped
+                # it (retries exhausted, card/UPI mandate revoked at the bank).
+                if stopped and not mandate.get("cancel_requested_at"):
+                    await self._announce_autopay_stopped(mandate)
                 continue
+            if mandate.get("subscription_id"):
+                # "pending" = a renewal charge failed and Razorpay is
+                # retrying it. The pass is left alone meanwhile (the
+                # ended-pass sweep gives it extra grace) and nobody is
+                # messaged — a retry that works just renews it, one that
+                # doesn't ends as "halted" above.
+                await subscriptions.set_autopay_state(
+                    mandate["subscription_id"], "pending" if remote_status == "pending" else None
+                )
             await self._schedule_next_autopay_check(mandate, subscriptions)
         return renewed
+
+    async def _announce_autopay_stopped(self, mandate: dict) -> None:
+        """Auto-pay stopped without the customer asking: they hear it
+        (in-app + WhatsApp, the normal utility path) so the pass doesn't
+        quietly lapse, and the center's managers see it in-app (a manager's
+        WhatsApp carries new bookings only). Best effort."""
+        try:
+            from app.services.booking_service import BookingService
+            from app.services.notification_service import NotificationService
+
+            sub_id = str(mandate.get("subscription_id") or "")
+            sub = await self.db.user_subscriptions.find_one({"_id": ObjectId(sub_id)}) if ObjectId.is_valid(sub_id) else None
+            plan_id = str((sub or {}).get("plan_id") or mandate.get("plan_id") or "")
+            plan = await self.plan_repo.find_by_id(plan_id) if plan_id else None
+            plan_name = (plan or {}).get("name") or "Monthly"
+            customer_id = str(mandate.get("customer_id") or (sub or {}).get("customer_id") or "")
+            notifications = NotificationService(self.db)
+            if customer_id:
+                await notifications.notify(
+                    customer_id, "Auto-pay stopped",
+                    f"Auto-pay for your {plan_name} pass stopped — renew from your dashboard.",
+                    NotificationType.SYSTEM, sub_id or None,
+                )
+            # Which center: the one that sold it, else the customer's latest booking's.
+            center_id = (sub or {}).get("service_center_id") or mandate.get("service_center_id")
+            if not center_id and customer_id:
+                last = await self.db.bookings.find_one(
+                    {"customer_id": customer_id, "is_deleted": {"$ne": True}}, {"service_center_id": 1}, sort=[("created_at", -1)]
+                )
+                center_id = (last or {}).get("service_center_id")
+            if not center_id:
+                return
+            center = await self.db.service_centers.find_one({"_id": ObjectId(center_id)}, {"manager_id": 1}) if ObjectId.is_valid(center_id) else None
+            customer = await self.db.users.find_one({"_id": ObjectId(customer_id)}, {"full_name": 1, "phone": 1}) if ObjectId.is_valid(customer_id) else None
+            who = (customer or {}).get("full_name") or (customer or {}).get("phone") or "A customer"
+            for manager_id in await BookingService(self.db)._manager_recipients(center_id, (center or {}).get("manager_id")):
+                await notifications.notify(
+                    manager_id, "Auto-pay stopped",
+                    f"Auto-pay stopped for {who}'s {plan_name} pass. They've been asked to renew.",
+                    NotificationType.SYSTEM, sub_id or None,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not announce the stopped mandate %s", mandate.get("razorpay_subscription_id"))
 
     async def _schedule_next_autopay_check(self, mandate: dict, subscriptions) -> None:
         """How long until this mandate is worth asking Razorpay about again:
@@ -754,12 +1050,22 @@ class PaymentService:
             update["razorpay_order_id"] = gateway_order_id
         if via == "link":
             update["razorpay_link_id"] = order["razorpay_link_id"]
-        updated = await self.booking_repo.update_if(order["booking_id"], {"payment_status": PaymentStatus.PENDING.value}, update)
+        updated = await self.booking_repo.update_if(
+            order["booking_id"],
+            {"payment_status": PaymentStatus.PENDING.value, "status": {"$ne": "cancelled"}},
+            update,
+        )
         if not updated:
-            # Raced by another settlement path (e.g. captain's cash tap a
-            # heartbeat earlier) — money in, booking already settled another
-            # way: needs a human decision, not a silent overwrite.
-            await self._flag_order_attention({"_id": order["_id"]}, "paid online but the booking was already settled another way")
+            # Raced by another settlement path (e.g. captain's cash tap or a
+            # second order paid a heartbeat earlier) or a cancellation —
+            # money in, booking settled/closed another way: needs a human
+            # decision, not a silent overwrite.
+            current = await self.booking_repo.find_by_id(order["booking_id"])
+            if current and current.get("status") == "cancelled":
+                reason = "paid for a booking that was cancelled meanwhile"
+            else:
+                reason = "paid online but the booking was already settled another way"
+            await self._flag_order_attention({"_id": order["_id"]}, reason)
             return False
         # A booking the customer chose to pay online for was parked as
         # awaiting_payment and told nobody about itself. THIS is the moment
@@ -771,6 +1077,13 @@ class PaymentService:
         await BookingService(self.db).confirm_awaiting_payment_booking(
             order["booking_id"], "Online payment received — booking confirmed"
         )
+        # The payment flip and the confirm are two writes; a cancellation
+        # (expiry sweep, the customer) landing between them leaves a PAID
+        # CANCELLED booking — money for nothing unless someone sees it.
+        after = await self.booking_repo.find_by_id(order["booking_id"])
+        if after and after.get("status") == "cancelled":
+            await self._flag_order_attention({"_id": order["_id"]}, "paid, but the booking was cancelled at the same moment")
+            return False
         return True
 
     async def _settle_booking_group(self, order: dict, gateway_order_id: str, payment_id: str) -> tuple[int, list[str]]:
@@ -778,13 +1091,33 @@ class PaymentService:
         the SAME guarded path a single booking uses, so a car that was
         cancelled or re-priced meanwhile is caught rather than silently
         marked paid. Returns (settled, booking numbers that couldn't be)."""
-        bookings = await self.booking_repo.collection.find(
-            {"booking_group_id": order["booking_group_id"], "is_deleted": {"$ne": True}}
-        ).to_list(length=20)
+        charged_for = order.get("booking_ids")
+        if charged_for:
+            # Exactly the cars this order was priced for — a car cancelled
+            # BEFORE checkout was never charged and isn't a problem, and the
+            # visit's current total must still be what was charged.
+            bookings = await self.booking_repo.collection.find(
+                {"_id": {"$in": [ObjectId(i) for i in charged_for if ObjectId.is_valid(i)]}}
+            ).to_list(length=20)
+            now_owed = sum(int(round(float(b.get("total_amount") or 0) * 100)) for b in bookings)
+            if len(bookings) != len(charged_for) or now_owed != order.get("amount_paise"):
+                await self._flag_order_attention(
+                    {"_id": order["_id"]},
+                    f"visit paid ₹{order.get('amount_paise', 0) / 100:g} but its vehicles now total ₹{now_owed / 100:g}",
+                )
+                return 0, [b.get("booking_number") or str(b["_id"]) for b in bookings]
+        else:
+            bookings = await self.booking_repo.collection.find(
+                {"booking_group_id": order["booking_group_id"], "is_deleted": {"$ne": True}}
+            ).to_list(length=20)
         settled, failed = 0, []
         for booking in bookings:
             if booking.get("payment_status") == PaymentStatus.PAID.value:
-                continue  # already settled another way — not a failure
+                if charged_for and booking.get("razorpay_payment_id") != payment_id:
+                    # Unpaid when the order was minted, paid some other way
+                    # since — this payment covered it a second time.
+                    failed.append(booking.get("booking_number") or str(booking["_id"]))
+                continue  # already settled another way
             per_car = {
                 **order,
                 "booking_id": str(booking["_id"]),
@@ -804,7 +1137,489 @@ class PaymentService:
         return settled, failed
 
     async def _flag_order_attention(self, filter_: dict, reason: str) -> None:
-        await self.orders.update_one(filter_, {"$set": {"status": "paid_attention", "attention_reason": reason, "flagged_at": now_ist()}})
+        before = await self.orders.find_one_and_update(
+            filter_,
+            {"$set": {"status": "paid_attention", "attention_reason": reason, "flagged_at": now_ist()}, "$unset": {"settling": ""}},
+        )
+        # Re-flags (a visit's per-car reasons, then its summary) update the
+        # reason but alert only once.
+        if before and before.get("status") != "paid_attention":
+            await self._alert_attention({**before, "attention_reason": reason})
+
+    @staticmethod
+    def _order_reference(order: dict) -> str:
+        if order.get("booking_number"):
+            return str(order["booking_number"])
+        if order.get("purpose") == "booking" and order.get("receipt"):
+            return str(order["receipt"])
+        return {"booking_group": "your visit", "subscription": "your plan"}.get(order.get("purpose") or "", "your booking")
+
+    async def _alert_attention(self, order: dict) -> None:
+        """Money landed that couldn't be applied: every admin sees it in-app
+        (and in the collections attention queue), and the customer is told
+        plainly that it's being handled, so they don't pay a second time.
+        Best-effort — never undoes or blocks the flag itself."""
+        try:
+            from app.services.notification_service import NotificationService
+
+            notifications = NotificationService(self.db)
+            amount = f"₹{(order.get('amount_paise') or 0) / 100:g}"
+            reference = self._order_reference(order)
+            admins = await self.db.users.find(
+                {"role": "admin", "is_deleted": {"$ne": True}, "is_active": {"$ne": False}}, {"_id": 1}
+            ).to_list(length=20)
+            for admin in admins:
+                await notifications.notify(
+                    str(admin["_id"]), "Payment needs attention",
+                    f"{amount} · {reference}: {order.get('attention_reason')}. See Collections → needs attention.",
+                    NotificationType.SYSTEM, None, send_whatsapp=False,
+                )
+            if order.get("customer_id"):
+                await notifications.notify(
+                    order["customer_id"], "Payment received — under review",
+                    f"We got your {amount} payment for {reference} but couldn't apply it automatically. "
+                    "Our team will fix or refund it — no need to pay again.",
+                    NotificationType.SYSTEM, order.get("booking_id"),
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not send the payment-attention alert for order %s", order.get("_id"))
+
+    # -- Reconciliation: money Razorpay has that we haven't applied -------
+    #
+    # The browser's verify is only the FAST path. A customer who pays and
+    # then loses the tab/network never reaches it, so the truth is asked of
+    # Razorpay directly (server-to-server, our own key): by the sweep a few
+    # minutes after checkout, by the expiry sweep right before it would
+    # release an unpaid slot, before a second order is minted for the same
+    # booking, and by the browser's own "confirming…" poll. Every one of
+    # them settles through _apply_order_paid / _apply_link_paid, the same
+    # claims verify, the webhook and the link callback use.
+
+    async def _unpaid_visit_of(self, customer_id: str, booking_id: str | None) -> str | None:
+        """The visit to pay for instead of this one car, when other cars on
+        it are still owed for too."""
+        booking = await self.booking_repo.find_by_id(booking_id) if booking_id else None
+        if not booking or booking.get("customer_id") != customer_id or not booking.get("booking_group_id"):
+            return None
+        owed = await self.booking_repo.collection.count_documents({
+            "booking_group_id": booking["booking_group_id"],
+            "is_deleted": {"$ne": True},
+            "status": {"$ne": "cancelled"},
+            "payment_status": {"$ne": PaymentStatus.PAID.value},
+            "total_amount": {"$gt": 0},
+        })
+        return booking["booking_group_id"] if owed > 1 else None
+
+    async def _open_payments(self, booking_ids: list[str], group_id: str | None = None) -> list[dict]:
+        """Still-payable checkout orders and payment links for these cars."""
+        match: list[dict] = [{"booking_id": {"$in": booking_ids}}, {"booking_ids": {"$in": booking_ids}}]
+        if group_id:
+            match.append({"booking_group_id": group_id})
+        return await self.orders.find(
+            {"$or": match, "status": {"$in": _OPEN}, "kind": {"$in": [None, "link"]}}
+        ).sort("created_at", -1).to_list(length=10)
+
+    async def _reconcile_one(self, doc: dict, client, via: str) -> str:
+        """Ask Razorpay about one open order/link and settle it if the money
+        is in. "paid" | "open" | "pending" (authorised but not captured —
+        can't be called yet). Raises on a gateway error."""
+        if doc.get("kind") == "link":
+            link = await _rzp(client.payment_link.fetch, doc["razorpay_link_id"])
+            if link.get("status") != "paid":
+                return "open"
+            payments = link.get("payments") or []
+            await self._apply_link_paid(doc["razorpay_link_id"], (payments[0].get("payment_id") if payments else None) or f"via_{via}")
+            return "paid"
+        remote = await _rzp(client.order.payments, doc["razorpay_order_id"])
+        return await self._apply_order_payments(doc, remote, client, via)
+
+    async def _apply_order_payments(self, doc: dict, remote: dict, client, via: str) -> str:
+        items = sorted((remote or {}).get("items") or [], key=lambda p: p.get("created_at") or 0)
+        captured = [p for p in items if p.get("status") == "captured"]
+        for payment in captured:
+            # The first one settles the order; any other is a second
+            # payment for the same thing and is parked for a refund.
+            await self._apply_order_paid(doc, payment["id"], via=via)
+        if captured:
+            return "paid"
+        authorized = [p for p in items if p.get("status") == "authorized"]
+        if authorized:
+            payment = authorized[0]
+            if not await self._target_still_payable(doc):
+                # Uncaptured money is refunded by Razorpay on its own —
+                # capturing it for a closed booking would only make a refund
+                # case out of it.
+                await self.orders.update_one({"_id": doc["_id"]}, {"$set": {"uncaptured_payment_id": payment["id"]}})
+                return "open"
+            try:
+                await _rzp(client.payment.capture, payment["id"], int(payment.get("amount") or doc["amount_paise"]), {"currency": "INR"})
+            except Exception as exc:  # noqa: BLE001
+                if "already been captured" not in str(exc).lower():
+                    if _gateway_unreachable(exc):
+                        raise
+                    logger.warning("Could not capture authorised payment %s: %s", payment["id"], exc)
+                    return "pending"
+            await self._apply_order_paid(doc, payment["id"], via=via)
+            return "paid"
+        failed = [p for p in items if p.get("status") == "failed"]
+        if failed and doc.get("status") in _OPEN:
+            last = failed[-1]
+            await self._record_failure(doc, {
+                "payment_id": last.get("id"), "code": last.get("error_code"), "description": last.get("error_description"),
+                "reason": last.get("error_reason"), "step": last.get("error_step"), "source": last.get("error_source"),
+            }, via)
+        return "open"
+
+    async def _target_still_payable(self, doc: dict) -> bool:
+        if doc.get("purpose") == "subscription":
+            return True
+        if doc.get("purpose") == "booking_group":
+            query: dict = {"booking_group_id": doc.get("booking_group_id")}
+        else:
+            if not ObjectId.is_valid(str(doc.get("booking_id") or "")):
+                return False
+            query = {"_id": ObjectId(doc["booking_id"])}
+        return await self.booking_repo.collection.count_documents({
+            **query, "is_deleted": {"$ne": True}, "status": {"$ne": "cancelled"}, "payment_status": {"$ne": PaymentStatus.PAID.value},
+        }) > 0
+
+    async def _settle_open_payments(self, booking_ids: list[str], group_id: str | None = None) -> bool:
+        """Before a NEW order is minted: did an earlier checkout or link for
+        these cars already take the money? Settles it if so (True) — the
+        caller then refuses the new order instead of charging twice. A
+        Razorpay error just lets the new order through (the paid-twice
+        safety net still parks a genuine double payment)."""
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET or time.monotonic() < _sweeps_paused_until:
+            return False
+        docs = await self._open_payments(booking_ids, group_id)
+        if not docs:
+            return False
+        client = _razorpay_client()
+        paid = False
+        for doc in docs[:3]:
+            try:
+                paid = (await self._reconcile_one(doc, client, via="create_order")) == "paid" or paid
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Pre-order payment check failed for %s: %s", doc.get("razorpay_order_id") or doc.get("razorpay_link_id"), exc)
+                if _gateway_unreachable(exc):
+                    break
+        return paid
+
+    @staticmethod
+    def _order_backoff(doc: dict) -> dict:
+        checks = int(doc.get("checks") or 0)
+        delay = min(_ORDER_RECHECK_MAX, _ORDER_RECHECK_FIRST * (2 ** min(checks, 12)))
+        return {"$set": {"next_check_at": now_ist() + delay}, "$inc": {"checks": 1}}
+
+    @classmethod
+    def _pending_backoff(cls, doc: dict) -> dict:
+        """Links and mandates: every pass while fresh (_PENDING_FRESH), then
+        _order_backoff (2, 4, 8… minutes, capped at every 2 h)."""
+        created = doc.get("created_at")
+        if created is not None and now_ist() - from_stored(created) < _PENDING_FRESH:
+            return {}
+        return cls._order_backoff(doc)
+
+    async def sync_pending_orders(self) -> int:
+        """Reminder-loop sweep for one-time checkout orders nobody verified:
+        from 2 minutes old (verify's head start) up to 2 days, backing off
+        per order (2, 4, 8… minutes, then every 2 h), a capped batch per
+        pass, longest-unchecked first. Captured → settled exactly like a
+        verify; authorised → captured first. Also parks any claim whose
+        settlement was interrupted. Returns how many orders it settled."""
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            return 0
+        await self._flag_stale_settlements()
+        now = now_ist()
+        due = await self.orders.find({
+            "kind": None,
+            "razorpay_order_id": {"$exists": True},
+            "status": {"$in": _OPEN},
+            "created_at": {"$lte": now - _ORDER_SWEEP_MIN_AGE, "$gte": now - _ORDER_SWEEP_MAX_AGE},
+            "$or": [{"next_check_at": None}, {"next_check_at": {"$lte": now}}],
+        }).sort(_SWEEP_ORDER).limit(_SWEEP_MAX_CALLS).to_list(length=_SWEEP_MAX_CALLS)
+        if not due:
+            return 0
+        client = _razorpay_client()
+        settled = 0
+        async for doc, remote in self._gateway_sweep(
+            due, client.order.payments, "razorpay_order_id", "checkout order", schedule=self._order_backoff
+        ):
+            try:
+                if await self._apply_order_payments(doc, remote, client, via="sweep") == "paid":
+                    settled += 1
+            except Exception:  # noqa: BLE001 — one bad order must not end the pass
+                logger.exception("Reconciling checkout order %s failed", doc.get("razorpay_order_id"))
+        return settled
+
+    async def _flag_stale_settlements(self) -> None:
+        stale = await self.orders.find(
+            {"settling": True, "paid_at": {"$lt": now_ist() - _STALE_SETTLING}}, {"_id": 1}
+        ).to_list(length=20)
+        for doc in stale:
+            await self._flag_order_attention(
+                {"_id": doc["_id"], "settling": True},
+                "payment was taken but applying it was interrupted — check the booking/plan",
+            )
+
+    async def prepare_expiry(self, booking: dict, window_minutes: int) -> bool:
+        """Called by the payment-window sweep right before it releases an
+        unpaid booking (or visit). Asks Razorpay about every open order and
+        link for it first and settles whatever was actually paid. True only
+        when it's safe to cancel: still unpaid, nothing mid-checkout, and
+        Razorpay reachable. A payment that lands after this is still settled
+        by the usual paths — and, the booking being gone, parked for refund."""
+        group_id = booking.get("booking_group_id")
+        cars = (
+            await self.booking_repo.collection.find({"booking_group_id": group_id, "is_deleted": {"$ne": True}}).to_list(length=20)
+            if group_id else [booking]
+        )
+        ids = [str(c["_id"]) for c in cars]
+        now = now_ist()
+        created = booking.get("created_at")
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        past_hard_stop = created is not None and created < now - timedelta(minutes=window_minutes) - _EXPIRY_HARD_STOP
+
+        docs = await self._open_payments(ids, group_id)
+        if docs and settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+            if time.monotonic() < _sweeps_paused_until:
+                return False
+            client = _razorpay_client()
+            for doc in docs:
+                try:
+                    outcome = await self._reconcile_one(doc, client, via="expiry")
+                except Exception as exc:  # noqa: BLE001
+                    if _gateway_unreachable(exc):
+                        self._pause_sweeps()
+                        return False
+                    # A record Razorpay doesn't know (e.g. made under other
+                    # keys) has no money behind it.
+                    logger.warning("Expiry check failed for %s: %s", doc.get("razorpay_order_id") or doc.get("razorpay_link_id"), exc)
+                    continue
+                if outcome == "pending" and not past_hard_stop:
+                    return False
+
+        fresh = await self.booking_repo.collection.find({"_id": {"$in": [ObjectId(i) for i in ids]}}).to_list(length=20)
+        live = [c for c in fresh if c.get("status") != "cancelled" and not c.get("is_deleted")]
+        if any(c.get("status") != "awaiting_payment" or c.get("payment_status") == PaymentStatus.PAID.value for c in live):
+            return False  # a payment just confirmed it (or it changed) — nothing to release
+
+        if not past_hard_stop:
+            recent = await self.orders.count_documents({
+                "$or": [{"booking_id": {"$in": ids}}, {"booking_group_id": group_id or "__none__"}],
+                "kind": None, "status": {"$in": _OPEN}, "created_at": {"$gt": now - _CHECKOUT_GRACE},
+            })
+            if recent:
+                return False  # checkout still open on the customer's screen
+        await self.void_open_links(ids, "Payment window expired")
+        return True
+
+    @staticmethod
+    def _pause_sweeps() -> None:
+        global _sweeps_paused_until
+        _sweeps_paused_until = time.monotonic() + _SWEEP_PAUSE_SECONDS
+
+    # -- Failed attempts ----------------------------------------------------
+
+    async def _record_failure(self, doc: dict, error: dict, source: str) -> None:
+        """A failed attempt on an order that stays open — the customer can
+        retry within the window. Recorded (for them and for the admin),
+        never changes what's paid."""
+        clean = {k: (str(v)[:300] if v is not None else None) for k, v in error.items()}
+        update: dict = {"$set": {"last_failure": {**clean, "source_path": source, "at": now_ist()}}}
+        if clean.get("payment_id"):
+            update["$addToSet"] = {"failed_payment_ids": clean["payment_id"]}
+        await self.orders.update_one({"_id": doc["_id"], "status": {"$in": _OPEN}}, update)
+
+    async def record_payment_failure(self, customer_id: str, payload) -> dict:
+        """The checkout's own payment.failed event, reported by the browser —
+        the reason is shown back to this customer (and the admin); nothing
+        here can mark anything paid or unpaid."""
+        key = {"razorpay_order_id": payload.razorpay_order_id} if payload.razorpay_order_id else {"razorpay_subscription_id": payload.razorpay_subscription_id}
+        doc = await self.orders.find_one(key)
+        if not doc or doc.get("customer_id") != customer_id:
+            raise NotFoundException("Payment order not found")
+        await self._record_failure(doc, {
+            "payment_id": payload.razorpay_payment_id, "code": payload.code, "description": payload.description,
+            "reason": payload.reason, "step": payload.step, "source": payload.source,
+        }, "checkout")
+        return {"recorded": True}
+
+    # -- What the customer's screen shows ---------------------------------
+
+    async def payment_status_for_customer(self, customer_id: str, order_id: str | None, subscription_id: str | None) -> dict:
+        """Polled by the checkout while it confirms a payment whose verify
+        didn't get through (and once when the modal closes). An open order
+        is re-checked against Razorpay — at most every few seconds — so this
+        settles it as soon as the money is there."""
+        key = {"razorpay_order_id": order_id} if order_id else {"razorpay_subscription_id": subscription_id}
+        doc = await self.orders.find_one(key) if (order_id or subscription_id) else None
+        if not doc or doc.get("customer_id") != customer_id:
+            raise NotFoundException("Payment order not found")
+        if doc.get("status") in _OPEN and settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET and time.monotonic() >= _sweeps_paused_until:
+            now = now_ist()
+            slot = await self.orders.find_one_and_update(
+                {"_id": doc["_id"], "status": {"$in": _OPEN}, "$or": [{"last_checked_at": None}, {"last_checked_at": {"$lt": now - timedelta(seconds=4)}}]},
+                {"$set": {"last_checked_at": now}},
+            )
+            if slot:
+                client = _razorpay_client()
+                try:
+                    if doc.get("kind") == "autopay":
+                        await self._apply_mandate_state(doc, await _rzp(client.subscription.fetch, doc["razorpay_subscription_id"]))
+                    else:
+                        await self._reconcile_one(doc, client, via="status")
+                except Exception as exc:  # noqa: BLE001 — report what we know; the sweep keeps trying
+                    logger.warning("On-demand payment check failed for %s: %s", order_id or subscription_id, exc)
+            doc = await self._wait_settled(doc["_id"]) or doc
+        status = doc.get("status")
+        result: dict = {
+            "status": "paid" if status == "paid" else "needs_attention" if status == "paid_attention" else "failed" if status == "failed" else "pending",
+            "purpose": doc.get("purpose"),
+            "confirming": bool(doc.get("settling")),
+            "failure_reason": (doc.get("last_failure") or {}).get("description"),
+        }
+        for field in ("booking_id", "booking_group_id", "subscription_id"):
+            if doc.get(field):
+                result[field] = doc[field]
+        if status == "paid" and doc.get("purpose") == "subscription" and doc.get("subscription_id"):
+            result["subscription"] = await self._subscription_view(doc["subscription_id"])
+            result["first_confirmation"] = await self._first_client_confirmation(doc["_id"])
+        if doc.get("kind") == "autopay":
+            result["auto_pay"] = True
+        return result
+
+    async def booking_payment_state(self, customer_id: str, booking_id: str) -> dict:
+        """The honest payment picture for the customer's booking page: the
+        last failed attempt (while it can still be retried), and any money
+        received that couldn't be applied (being fixed/refunded)."""
+        booking = await self.booking_repo.find_by_id(booking_id)
+        if not booking or booking.get("customer_id") != customer_id:
+            raise NotFoundException("Booking not found")
+        group_id = booking.get("booking_group_id")
+        ids = [booking_id]
+        if group_id:
+            ids = [str(c["_id"]) for c in await self.booking_repo.collection.find({"booking_group_id": group_id}, {"_id": 1}).to_list(length=20)]
+        match: list[dict] = [{"booking_id": {"$in": ids}}, {"booking_ids": {"$in": ids}}]
+        if group_id:
+            match.append({"booking_group_id": group_id})
+        docs = await self.orders.find({"$or": match}).sort("created_at", -1).to_list(length=30)
+
+        last_failure = None
+        if booking.get("payment_status") != PaymentStatus.PAID.value and booking.get("status") != "cancelled":
+            # Only the NEWEST attempt counts: an older failure followed by a
+            # fresh checkout is history, not the current state.
+            newest = next((d for d in docs if not d.get("kind") or d.get("kind") == "link"), None)
+            if newest and newest.get("status") in _OPEN and newest.get("last_failure"):
+                failure = newest["last_failure"]
+                last_failure = {
+                    "reason": failure.get("description") or "The payment didn't go through.",
+                    "at": _iso(failure.get("at")),
+                }
+        issues = [d for d in docs if d.get("status") == "paid_attention" and not d.get("resolved_at")]
+        attention = None
+        if issues:
+            attention = {
+                "amount": round(sum((d.get("amount_paise") or 0) for d in issues) / 100, 2),
+                "message": "We received your payment but couldn't apply it automatically. Our team will fix or refund it — no need to pay again.",
+                "at": _iso(issues[0].get("flagged_at")),
+            }
+        return {
+            "booking_id": booking_id,
+            "payment_status": booking.get("payment_status"),
+            "last_failure": last_failure,
+            "attention": attention,
+            "confirming": any(d.get("settling") for d in docs),
+        }
+
+    # -- Razorpay webhooks ---------------------------------------------------
+    #
+    # Razorpay pushes events to POST /payments/webhook, signed with the
+    # webhook secret (HMAC-SHA256 of the RAW body). It's one more path into
+    # the same idempotent claims — usually the first to land — never a
+    # different truth: an event only ever settles an order/link we minted,
+    # through _apply_order_paid / _apply_link_paid.
+
+    async def handle_webhook(self, raw: bytes, signature: str | None, event_id: str | None) -> dict:
+        secret = settings.RAZORPAY_WEBHOOK_SECRET
+        if not secret:
+            raise NotFoundException("Not found")
+        expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not signature or not signature.isascii() or not hmac.compare_digest(expected, signature):
+            raise BadRequestException("Invalid webhook signature")
+        try:
+            event = json.loads(raw)
+        except ValueError as exc:
+            raise BadRequestException("Malformed webhook body") from exc
+        if not isinstance(event, dict):
+            raise BadRequestException("Malformed webhook body")
+        name = str(event.get("event") or "")
+        event_id = event_id or hashlib.sha256(raw).hexdigest()
+        events = self.db.razorpay_webhook_events
+        try:
+            await events.insert_one({"_id": event_id, "event": name, "status": "processing", "received_at": now_ist()})
+        except DuplicateKeyError:
+            return {"status": "duplicate"}
+        try:
+            outcome = await self._dispatch_webhook(name, event.get("payload") or {})
+        except Exception:
+            # Forget it so Razorpay's retry of this delivery is processed.
+            await events.delete_one({"_id": event_id})
+            raise
+        await events.update_one({"_id": event_id}, {"$set": {"status": "processed", "outcome": outcome}})
+        return {"status": "ok", "outcome": outcome}
+
+    async def _dispatch_webhook(self, name: str, payload: dict) -> str:
+        def entity(key: str) -> dict:
+            return (payload.get(key) or {}).get("entity") or {}
+
+        payment = entity("payment")
+        if name in ("payment.captured", "order.paid"):
+            order_id = payment.get("order_id") or entity("order").get("id")
+            if not payment.get("id") or not order_id or payment.get("status") != "captured":
+                return "ignored"
+            doc = await self.orders.find_one({"razorpay_order_id": order_id})
+            if not doc or doc.get("kind"):
+                return "unknown_order"  # e.g. a payment link's own order — payment_link.paid covers it
+            return (await self._apply_order_paid(doc, payment["id"], via="webhook"))["status"]
+        if name == "payment.failed":
+            doc = await self.orders.find_one({"razorpay_order_id": payment.get("order_id")}) if payment.get("order_id") else None
+            if not doc or doc.get("kind"):
+                return "unknown_order"
+            await self._record_failure(doc, {
+                "payment_id": payment.get("id"), "code": payment.get("error_code"), "description": payment.get("error_description"),
+                "reason": payment.get("error_reason"), "step": payment.get("error_step"), "source": payment.get("error_source"),
+            }, "webhook")
+            return "failure_recorded"
+        if name == "payment_link.paid":
+            link_id = entity("payment_link").get("id")
+            doc = await self.orders.find_one({"razorpay_link_id": link_id}) if link_id else None
+            if not doc:
+                return "unknown_link"
+            result = await self._apply_link_paid(link_id, payment.get("id") or "via_webhook")
+            if result.get("settled") and doc.get("purpose") != "subscription":
+                try:
+                    await self.notify_link_paid(doc)
+                except Exception:  # noqa: BLE001 — the money is settled; the ✅ is a courtesy
+                    logger.exception("Could not send the link-paid message for %s", link_id)
+            return result["status"]
+        if name in (
+            "subscription.activated", "subscription.charged",
+            "subscription.pending", "subscription.halted", "subscription.cancelled", "subscription.completed",
+        ):
+            mandate_id = entity("subscription").get("id")
+            if not mandate_id:
+                return "ignored"
+            # The mandate sweeps own the cycle bookkeeping (and the "auto-pay
+            # stopped" notice); this just moves the mandate to the front of
+            # their next pass, where Razorpay's own answer decides.
+            result = await self.orders.update_one(
+                {"razorpay_subscription_id": mandate_id},
+                {"$set": {"next_check_at": now_ist()}, "$unset": {"last_checked_at": ""}},
+            )
+            return "mandate_nudged" if result.matched_count else "unknown_mandate"
+        return "ignored"
 
     # -- Captain doorstep settlement ------------------------------------
     #
@@ -851,6 +1666,8 @@ class PaymentService:
         unpaid = self._unpaid(cars)
         if not unpaid:
             raise BadRequestException("Already paid — nothing to collect.")
+        if any(c.get("prepaid_only") for c in cars):
+            raise BadRequestException("This booking is prepaid — no cash. Show the QR so the customer pays online.")
         if any(c.get("status") != "completed" for c in cars):
             raise BadRequestException(
                 "Finish every vehicle first — cash for the visit is collected once the last wash is done."
@@ -906,10 +1723,10 @@ class PaymentService:
 
     async def captain_check_payment(self, booking_id: str, captain_id: str) -> dict:
         """Polled by the QR modal every few seconds — actively syncs this
-        booking's (or its visit's) pending links against Razorpay, no
-        waiting out the 60s background sweep at the doorstep — and reports
-        the live payment state however it was paid. For a visit, "paid"
-        means every car on it is paid."""
+        booking's (or its visit's) pending links against Razorpay (each at
+        most every _CAPTAIN_LINK_CHECK_EVERY), no waiting out the background
+        sweep at the doorstep — and reports the live payment state however
+        it was paid. For a visit, "paid" means every car on it is paid."""
         booking = await self._captain_booking(booking_id, captain_id)
         cars = await self._visit_cars(booking)
         if self._unpaid(cars) and settings.RAZORPAY_KEY_ID:
@@ -918,10 +1735,26 @@ class PaymentService:
             ).to_list(length=10)
             if pending:
                 client = _razorpay_client()
+                now = now_ist()
                 for order in pending:
+                    # Claimed atomically, so a link one of the captain's
+                    # polls (or the sweep, on any instance) asked about in
+                    # the last few seconds just reports the local state.
+                    fresh_check = await self.orders.find_one_and_update(
+                        {
+                            "_id": order["_id"],
+                            "status": "created",
+                            "$or": [{"last_checked_at": None}, {"last_checked_at": {"$lt": now - _CAPTAIN_LINK_CHECK_EVERY}}],
+                        },
+                        {"$set": {"last_checked_at": now}},
+                    )
+                    if not fresh_check:
+                        continue
                     try:
-                        link = client.payment_link.fetch(order["razorpay_link_id"])
-                    except Exception:
+                        link = await _rzp(client.payment_link.fetch, order["razorpay_link_id"])
+                    except Exception as exc:  # noqa: BLE001
+                        if _gateway_unreachable(exc):
+                            break  # the rest would only time out too — report the local state
                         continue
                     if link.get("status") == "paid":
                         payments = link.get("payments") or []
@@ -1082,15 +1915,34 @@ class PaymentService:
 
         attention = [
             {
+                "id": str(o["_id"]),
                 "reason": o.get("attention_reason"),
-                "booking_number": o.get("booking_number") or o.get("booking_id"),
+                "booking_number": o.get("booking_number") or (o.get("receipt") if o.get("purpose") == "booking" else None) or o.get("booking_id"),
                 "purpose": o.get("purpose"),
+                "kind": o.get("kind") or "order",
                 "amount": round((o.get("amount_paise") or 0) / 100, 2),
-                "flagged_at": o["flagged_at"].isoformat() if o.get("flagged_at") else None,
+                "customer_id": o.get("customer_id"),
+                # What to look up in the Razorpay dashboard to refund/verify.
+                "payment_id": o.get("razorpay_payment_id"),
+                "gateway_ref": o.get("razorpay_order_id") or o.get("razorpay_link_id") or o.get("razorpay_subscription_id") or o.get("parent_order_id"),
+                "flagged_at": _iso(o.get("flagged_at")),
             }
-            for o in await self.orders.find({"status": "paid_attention"}).sort("flagged_at", -1).to_list(length=20)
+            for o in await self.orders.find({"status": "paid_attention", "resolved_at": None}).sort("flagged_at", -1).to_list(length=50)
         ]
         return {"rows": out_rows, "totals": self._round_row(totals), "subscriptions": subscriptions, "attention": attention}
+
+    async def resolve_attention(self, order_id: str, actor_id: str, note: str) -> dict:
+        """An admin has refunded / activated / otherwise handled a parked
+        payment. The status stays paid_attention (money WAS received — the
+        recycle-bin guards key on it); it just leaves the open queue."""
+        key = ObjectId(order_id) if ObjectId.is_valid(order_id) else order_id
+        updated = await self.orders.find_one_and_update(
+            {"_id": key, "status": "paid_attention", "resolved_at": None},
+            {"$set": {"resolved_at": now_ist(), "resolved_by": actor_id, "resolution_note": note}},
+        )
+        if not updated:
+            raise NotFoundException("No open payment issue with that id")
+        return {"id": order_id, "resolved": True}
 
     # -- Payment Links (WhatsApp bookings) ------------------------------
     #
@@ -1131,7 +1983,7 @@ class PaymentService:
             payload["callback_url"] = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/link-callback"
             payload["callback_method"] = "get"
         try:
-            link = client.payment_link.create(payload)
+            link = await _rzp(client.payment_link.create, payload)
         except Exception as exc:
             # Razorpay validates the prefill contact aggressively (e.g.
             # "recurring digits disallowed") — the contact is only a
@@ -1140,7 +1992,7 @@ class PaymentService:
             if "customer" in payload:
                 payload.pop("customer")
                 try:
-                    link = client.payment_link.create(payload)
+                    link = await _rzp(client.payment_link.create, payload)
                 except Exception as exc2:
                     raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc2).__name__})") from exc2
             else:
@@ -1180,17 +2032,23 @@ class PaymentService:
         ).to_list(length=20)
         voided = 0
         for order in open_links:
-            try:
-                if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
-                    _razorpay_client().payment_link.cancel(order["razorpay_link_id"])
-                result = await self.orders.update_one(
-                    {"_id": order["_id"], "status": "created"},
-                    {"$set": {"status": "voided", "voided_at": now_ist(), "voided_reason": reason}},
-                )
-                voided += result.modified_count
-            except Exception:  # noqa: BLE001
-                logger.warning("Could not void payment link %s", order.get("razorpay_link_id"), exc_info=True)
+            voided += await self._void_link(order, reason)
         return voided
+
+    async def _void_link(self, order: dict, reason: str) -> int:
+        try:
+            if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+                await _rzp(_razorpay_client().payment_link.cancel, order["razorpay_link_id"])
+            result = await self.orders.update_one(
+                {"_id": order["_id"], "status": "created"},
+                {"$set": {"status": "voided", "voided_at": now_ist(), "voided_reason": reason}},
+            )
+            return result.modified_count
+        except Exception:  # noqa: BLE001
+            # Razorpay refuses to cancel a link that was JUST paid — it stays
+            # open and the next sweep settles (or parks) that payment.
+            logger.warning("Could not void payment link %s", order.get("razorpay_link_id"), exc_info=True)
+            return 0
 
     async def verify_link_callback(self, params: dict) -> dict:
         """The browser lands here after paying a link. Razorpay signs the
@@ -1212,29 +2070,70 @@ class PaymentService:
             raise BadRequestException("This payment wasn't completed.")
         return await self._apply_link_paid(params["razorpay_payment_link_id"], params["razorpay_payment_id"])
 
-    async def sync_pending_links(self, notify_customer) -> int:
+    async def notify_link_paid(self, order: dict) -> None:
+        """The WhatsApp ✅ for a settled booking link (sweep or webhook)."""
+        from app.services.whatsapp_service import WhatsAppService
+
+        customer_id = str(order.get("customer_id") or "")
+        customer = await self.db.users.find_one({"_id": ObjectId(customer_id)}) if ObjectId.is_valid(customer_id) else None
+        if customer and customer.get("phone"):
+            await WhatsAppService(self.db).send_text(
+                customer["phone"],
+                f"✅ Payment received — booking *{order.get('booking_number')}* is fully paid. Thank you!",
+            )
+
+    async def _link_is_moot(self, order: dict) -> bool:
+        """Every booking this link pays for is cancelled/deleted or already
+        paid some other way — paying it now could only be a refund case."""
+        if order.get("purpose") == "subscription":
+            return False
+        ids = [i for i in (order.get("booking_ids") or [order.get("booking_id")]) if i and ObjectId.is_valid(i)]
+        if not ids:
+            return False
+        still_payable = await self.booking_repo.collection.count_documents({
+            "_id": {"$in": [ObjectId(i) for i in ids]},
+            "is_deleted": {"$ne": True},
+            "status": {"$ne": "cancelled"},
+            "payment_status": {"$ne": PaymentStatus.PAID.value},
+        })
+        return still_payable == 0
+
+    async def sync_pending_links(self, notify_customer=None) -> int:
         """Reminder-loop sweep: ask Razorpay (server-to-server, our key —
-        no signature needed, the API response IS the truth) about every
-        still-pending link from the last 2 days and settle the paid ones.
-        `notify_customer(order_doc)` lets the caller push the WhatsApp
-        'payment received' message without this service importing the bot."""
+        no signature needed, the API response IS the truth) about the
+        still-pending links from the last 2 days — a capped batch per pass,
+        longest-unchecked first — and settle the paid ones.
+        `notify_customer(order_doc)` sends the 'payment received' message
+        (default: notify_link_paid). An unpaid link whose bookings were
+        cancelled or paid another way is cancelled at Razorpay, so it can't
+        take money for nothing later."""
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             return 0
-        from datetime import timedelta
+        notify_customer = notify_customer or self.notify_link_paid
 
-        pending = await self.orders.find(
-            {"kind": "link", "status": "created", "created_at": {"$gte": now_ist() - timedelta(days=2)}}
-        ).to_list(length=50)
+        now = now_ist()
+        pending = await self.orders.find({
+            "kind": "link",
+            "status": "created",
+            "created_at": {"$gte": now - timedelta(days=2)},
+            "$or": [{"next_check_at": None}, {"next_check_at": {"$lte": now}}],
+        }).sort(_SWEEP_ORDER).limit(_SWEEP_MAX_CALLS).to_list(length=_SWEEP_MAX_CALLS)
         if not pending:
             return 0
         client = _razorpay_client()
         settled = 0
-        for order in pending:
-            try:
-                link = client.payment_link.fetch(order["razorpay_link_id"])
-            except Exception:
-                continue  # transient API failure — next pass retries
+        async for order, link in self._gateway_sweep(
+            pending, client.payment_link.fetch, "razorpay_link_id", "payment link", schedule=self._pending_backoff
+        ):
+            if link.get("status") in ("cancelled", "expired"):
+                await self.orders.update_one(
+                    {"_id": order["_id"], "status": "created"},
+                    {"$set": {"status": "voided", "voided_at": now_ist(), "voided_reason": f"link {link.get('status')} at Razorpay"}},
+                )
+                continue
             if link.get("status") != "paid":
+                if await self._link_is_moot(order):
+                    await self._void_link(order, "booking cancelled or paid another way")
                 continue
             payments = link.get("payments") or []
             payment_id = payments[0].get("payment_id") if payments else None
@@ -1252,9 +2151,9 @@ class PaymentService:
         return settled
 
     async def _apply_link_paid(self, link_id: str, payment_id: str) -> dict:
-        """Shared by the callback, the sweep, and the captain's QR poll —
-        the atomic created->paid claim guarantees settlement (and the
-        customer's ✅ message) happens exactly once no matter which path
+        """Shared by the callback, the sweep, the webhook and the captain's
+        QR poll — the atomic created->paid claim guarantees settlement (and
+        the customer's ✅ message) happens exactly once no matter which path
         lands first or how often it's retried, and the shared
         _settle_booking_payment guard re-validates the booking before the
         flip (cancelled meanwhile / total changed → parked for admin)."""
@@ -1262,29 +2161,44 @@ class PaymentService:
         if not order:
             raise NotFoundException("Payment link not found")
         claimed = await self.orders.find_one_and_update(
-            {"razorpay_link_id": link_id, "status": "created"},
-            {"$set": {"status": "paid", "paid_at": now_ist(), "razorpay_payment_id": payment_id}},
+            # A link voided a moment too late (the cancel lost to the
+            # payment) still has real money behind it — settle it too.
+            {"razorpay_link_id": link_id, "status": {"$in": ["created", "voided"]}},
+            {"$set": {"status": "paid", "paid_at": now_ist(), "razorpay_payment_id": payment_id, "settling": True}},
         )
         if not claimed:
-            return {"status": "paid", "booking_number": order.get("booking_number"), "already_processed": True}
-        if claimed.get("purpose") == "subscription":
-            return await self._activate_linked_subscription(claimed)
-        if claimed.get("booking_ids"):
-            # A visit's link: settle each car through the same guarded path,
-            # each checked against ITS own price.
-            failed = []
-            for car_id in claimed["booking_ids"]:
-                car = await self.booking_repo.find_by_id(car_id)
-                per_car = {**claimed, "booking_id": car_id, "amount_paise": int(round(float((car or {}).get("total_amount") or 0) * 100))}
-                if not await self._settle_booking_payment(per_car, None, payment_id, via="link"):
-                    failed.append((car or {}).get("booking_number") or car_id)
-            if failed:
-                await self._flag_order_attention(
-                    {"_id": claimed["_id"]}, f"visit paid but these vehicles could not be marked paid: {', '.join(failed)}"
-                )
-            settled = not failed
-        else:
-            settled = await self._settle_booking_payment(claimed, None, payment_id, via="link")
+            fresh = await self._wait_settled(order["_id"]) or order
+            return {
+                "status": "needs_attention" if fresh.get("status") == "paid_attention" else "paid",
+                "booking_number": order.get("booking_number"),
+                "already_processed": True,
+            }
+        try:
+            if claimed.get("purpose") == "subscription":
+                result = await self._activate_linked_subscription(claimed)
+                await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
+                return result
+            if claimed.get("booking_ids"):
+                # A visit's link: settle each car through the same guarded path,
+                # each checked against ITS own price.
+                failed = []
+                for car_id in claimed["booking_ids"]:
+                    car = await self.booking_repo.find_by_id(car_id)
+                    per_car = {**claimed, "booking_id": car_id, "amount_paise": int(round(float((car or {}).get("total_amount") or 0) * 100))}
+                    if not await self._settle_booking_payment(per_car, None, payment_id, via="link"):
+                        failed.append((car or {}).get("booking_number") or car_id)
+                if failed:
+                    await self._flag_order_attention(
+                        {"_id": claimed["_id"]}, f"visit paid but these vehicles could not be marked paid: {', '.join(failed)}"
+                    )
+                settled = not failed
+            else:
+                settled = await self._settle_booking_payment(claimed, None, payment_id, via="link")
+        except Exception:  # noqa: BLE001 — money is in; a crash must park it, not lose it
+            logger.exception("Settling payment link %s failed", link_id)
+            await self._flag_order_attention({"_id": claimed["_id"]}, "link paid, but applying the payment failed — check it")
+            settled = False
+        await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
         return {
             "status": "paid" if settled else "needs_attention",
             "booking_number": order.get("booking_number"),
@@ -1508,12 +2422,12 @@ class PaymentService:
             link_payload["callback_url"] = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/link-callback"
             link_payload["callback_method"] = "get"
         try:
-            link = client.payment_link.create(link_payload)
+            link = await _rzp(client.payment_link.create, link_payload)
         except Exception as exc:
             if "customer" in link_payload:
                 link_payload.pop("customer")
                 try:
-                    link = client.payment_link.create(link_payload)
+                    link = await _rzp(client.payment_link.create, link_payload)
                 except Exception as exc2:
                     raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc2).__name__})") from exc2
             else:
@@ -1602,7 +2516,7 @@ class PaymentService:
         schedule = _AUTOPAY_SCHEDULE.get(plan.get("billing_cycle") or "monthly", _AUTOPAY_SCHEDULE["monthly"])
         client = _razorpay_client()
         try:
-            mandate = client.subscription.create({
+            mandate = await _rzp(client.subscription.create, {
                 "plan_id": rzp_plan_id,
                 "total_count": schedule["total_count"],
                 "quantity": 1,
@@ -1619,7 +2533,7 @@ class PaymentService:
             # No hosted page to hand the customer — void it at the gateway
             # rather than leave an unreachable mandate lying around.
             try:
-                client.subscription.cancel(mandate["id"], {"cancel_at_cycle_end": 0})
+                await _rzp(client.subscription.cancel, mandate["id"], {"cancel_at_cycle_end": 0})
             except Exception:  # noqa: BLE001
                 pass
             raise BadRequestException("Couldn't create an auto-pay link — please try again, or send a one-time link instead.")
@@ -1681,14 +2595,14 @@ class PaymentService:
             client = _razorpay_client()
             try:
                 if order.get("kind") == "link":
-                    remote = client.payment_link.fetch(order["razorpay_link_id"])
+                    remote = await _rzp(client.payment_link.fetch, order["razorpay_link_id"])
                     if remote.get("status") == "paid":
                         payments = remote.get("payments") or []
                         payment_id = (payments[0].get("payment_id") if payments else None) or "via_void_race"
                         await self._apply_link_paid(order["razorpay_link_id"], payment_id)
                         raise BadRequestException("The customer just paid this — it has been activated instead of cancelled.")
                 elif order.get("kind") == "autopay":
-                    remote = client.subscription.fetch(order["razorpay_subscription_id"])
+                    remote = await _rzp(client.subscription.fetch, order["razorpay_subscription_id"])
                     if int(remote.get("paid_count") or 0) >= 1:
                         raise BadRequestException(
                             "The customer just authorised auto-pay — it will activate on its own shortly instead of being cancelled."
@@ -1699,9 +2613,9 @@ class PaymentService:
                 logger.warning("Could not check live gateway status for manager offer %s — voiding anyway", order_id, exc_info=True)
             try:
                 if order.get("kind") == "link":
-                    client.payment_link.cancel(order["razorpay_link_id"])
+                    await _rzp(client.payment_link.cancel, order["razorpay_link_id"])
                 elif order.get("kind") == "autopay":
-                    client.subscription.cancel(order["razorpay_subscription_id"], {"cancel_at_cycle_end": 0})
+                    await _rzp(client.subscription.cancel, order["razorpay_subscription_id"], {"cancel_at_cycle_end": 0})
             except Exception:  # noqa: BLE001
                 logger.warning("Could not cancel manager subscription offer %s at the gateway", order_id, exc_info=True)
         updated = await self.orders.find_one_and_update(
@@ -1728,60 +2642,70 @@ class PaymentService:
             return 0
         from datetime import timedelta
 
-        pending = await self.orders.find(
-            {"kind": "autopay", "status": "created", "created_at": {"$gte": now_ist() - timedelta(days=7)}}
-        ).to_list(length=200)
+        now = now_ist()
+        pending = await self.orders.find({
+            "kind": "autopay",
+            "status": "created",
+            "created_at": {"$gte": now - timedelta(days=7)},
+            # The subscription.activated webhook resets next_check_at to now.
+            "$or": [{"next_check_at": None}, {"next_check_at": {"$lte": now}}],
+        }).sort(_SWEEP_ORDER).limit(_SWEEP_MAX_CALLS).to_list(length=_SWEEP_MAX_CALLS)
         if not pending:
             return 0
 
+        client = _razorpay_client()
+        activated = 0
+        async for order, remote in self._gateway_sweep(
+            pending, client.subscription.fetch, "razorpay_subscription_id", "auto-pay mandate", schedule=self._pending_backoff
+        ):
+            if await self._apply_mandate_state(order, remote):
+                activated += 1
+        return activated
+
+    async def _apply_mandate_state(self, order: dict, remote: dict) -> bool:
+        """One still-pending mandate against what Razorpay says about it:
+        activates the plan once the first charge has landed. True when this
+        call activated it."""
         from app.schemas.subscription_schema import SubscribeRequest
         from app.services.subscription_service import UserSubscriptionService
 
+        mandate_id = order["razorpay_subscription_id"]
+        if int(remote.get("paid_count") or 0) < 1:
+            if remote.get("status") in ("cancelled", "expired", "halted"):
+                await self.orders.update_one(
+                    {"_id": order["_id"], "status": "created"}, {"$set": {"status": "expired", "auto_pay_active": False}}
+                )
+            return False
+        # Claim FIRST (atomic, guarded on "created") — a concurrent sweep
+        # or a late browser verify can only win this race once.
+        claimed = await self.orders.find_one_and_update(
+            {"_id": order["_id"], "status": "created"},
+            {"$set": {"status": "paid", "paid_at": now_ist(), "cycles_applied": 1, "razorpay_payment_id": "via_mandate_sync"}},
+        )
+        if not claimed:
+            return False
         subs = UserSubscriptionService(self.db)
-        client = _razorpay_client()
-        activated = 0
-        for order in pending:
-            mandate_id = order["razorpay_subscription_id"]
-            try:
-                remote = client.subscription.fetch(mandate_id)
-            except Exception:
-                continue  # transient — the next pass retries
-            if int(remote.get("paid_count") or 0) < 1:
-                if remote.get("status") in ("cancelled", "expired", "halted"):
-                    await self.orders.update_one(
-                        {"_id": order["_id"], "status": "created"}, {"$set": {"status": "expired", "auto_pay_active": False}}
-                    )
-                continue
-            # Claim FIRST (atomic, guarded on "created") — a concurrent sweep
-            # or a late browser verify can only win this race once.
-            claimed = await self.orders.find_one_and_update(
-                {"_id": order["_id"], "status": "created"},
-                {"$set": {"status": "paid", "paid_at": now_ist(), "cycles_applied": 1, "razorpay_payment_id": "via_mandate_sync"}},
+        try:
+            sub = await subs.subscribe(
+                claimed["customer_id"],
+                SubscribeRequest(
+                    plan_id=claimed["plan_id"], vehicle_id=claimed.get("vehicle_id"), service_id=claimed.get("service_id"),
+                    vehicle_type=claimed.get("vehicle_type"), auto_renew=True,
+                ),
+                razorpay_subscription_id=mandate_id,
+                service_center_id=claimed.get("service_center_id"),
             )
-            if not claimed:
-                continue
-            try:
-                sub = await subs.subscribe(
-                    claimed["customer_id"],
-                    SubscribeRequest(
-                        plan_id=claimed["plan_id"], service_id=claimed.get("service_id"),
-                        vehicle_type=claimed.get("vehicle_type"), auto_renew=True,
-                    ),
-                    razorpay_subscription_id=mandate_id,
-                    service_center_id=claimed.get("service_center_id"),
-                )
-            except Exception:
-                await self.cancel_autopay(mandate_id, at_cycle_end=False)
-                await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"auto_pay_active": False}})
-                await self._flag_order_attention(
-                    {"_id": claimed["_id"]}, "auto-pay authorised but subscription could not be activated"
-                )
-                continue
-            money_fields = {"payment_method": "online"}
-            if claimed.get("issued_by"):
-                money_fields["assigned_by"] = claimed["issued_by"]
-            await subs.repo.update_by_id(sub["id"], money_fields)
-            await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"subscription_id": sub["id"]}})
-            await self._announce_subscription(claimed["customer_id"], sub, renewed=False)
-            activated += 1
-        return activated
+        except Exception:
+            await self.cancel_autopay(mandate_id, at_cycle_end=False)
+            await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"auto_pay_active": False}})
+            await self._flag_order_attention(
+                {"_id": claimed["_id"]}, "auto-pay authorised but subscription could not be activated"
+            )
+            return False
+        money_fields = {"payment_method": "online"}
+        if claimed.get("issued_by"):
+            money_fields["assigned_by"] = claimed["issued_by"]
+        await subs.repo.update_by_id(sub["id"], money_fields)
+        await self.orders.update_one({"_id": claimed["_id"]}, {"$set": {"subscription_id": sub["id"]}})
+        await self._announce_subscription(claimed["customer_id"], sub, renewed=False)
+        return True

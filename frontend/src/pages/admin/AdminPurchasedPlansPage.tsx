@@ -1,13 +1,15 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { Badge, DataTable, Input, Panel, StatCard, type Column } from "../../components/ui";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
 
 type PlanFilter = "all" | "active" | "expired";
+const PAGE_SIZE = 25;
 
 /**
  * Every plan ever purchased or granted, platform-wide — who bought what,
@@ -22,25 +24,26 @@ export default function AdminPurchasedPlansPage() {
   const [detailCustomerId, setDetailCustomerId] = useState<string | null>(null);
   const [usageSubscriptionId, setUsageSubscriptionId] = useState<string | null>(null);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["admin-subscriptions-overview"],
-    queryFn: () => subscriptionApi.adminOverview(),
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
+
+  // Filters and search run on the server over every subscription; only
+  // one page of rows is ever loaded.
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["admin-subscriptions-overview", filter, planFilter, debouncedSearch, page],
+    queryFn: () =>
+      subscriptionApi.adminOverview({
+        page,
+        page_size: PAGE_SIZE,
+        status: filter === "all" ? "" : filter,
+        plan_id: planFilter || undefined,
+        search: debouncedSearch || undefined,
+      }),
+    placeholderData: keepPreviousData,
   });
 
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return (data?.rows || [])
-      .filter((r) => filter === "all" || r.status === filter)
-      .filter((r) => !planFilter || r.plan_name === planFilter)
-      .filter(
-        (r) =>
-          !q ||
-          r.customer_name.toLowerCase().includes(q) ||
-          (r.customer_phone || "").includes(q) ||
-          r.plan_name.toLowerCase().includes(q)
-      )
-      .map((r) => ({ ...r, id: r.subscription_id }));
-  }, [data, filter, planFilter, search]);
+  const rows = useMemo(() => (data?.rows || []).map((r) => ({ ...r, id: r.subscription_id })), [data]);
+  const planIdByName = useMemo(() => new Map((data?.plans || []).map((p) => [p.plan_name, p.plan_id])), [data]);
 
   const kpis = data?.kpis;
 
@@ -136,7 +139,10 @@ export default function AdminPurchasedPlansPage() {
             {(["all", "active", "expired"] as PlanFilter[]).map((f) => (
               <button
                 key={f}
-                onClick={() => setFilter(f)}
+                onClick={() => {
+                  setFilter(f);
+                  setPage(1);
+                }}
                 className={`rounded-full border px-3 py-1 text-xs font-medium capitalize ${
                   filter === f ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-gray-500 hover:border-gray-300"
                 }`}
@@ -147,30 +153,50 @@ export default function AdminPurchasedPlansPage() {
           </div>
           <div className="relative ml-auto max-w-xs flex-1">
             <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-            <Input className="pl-10" placeholder="Search name, phone, or plan…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <Input
+              className="pl-10"
+              placeholder="Search name, phone, or plan…"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+            />
           </div>
         </div>
 
         {!!data?.plan_breakdown.length && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">By plan:</span>
-            {data.plan_breakdown.map((p) => (
-              <button
-                key={p.plan_name}
-                onClick={() => setPlanFilter((prev) => (prev === p.plan_name ? null : p.plan_name))}
-                className={`rounded-full border px-3 py-1 text-xs font-medium ${
-                  planFilter === p.plan_name ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-gray-500 hover:border-gray-300"
-                }`}
-              >
-                {p.plan_name} · {p.count}
-              </button>
-            ))}
+            {data.plan_breakdown.map((p) => {
+              const planId = planIdByName.get(p.plan_name);
+              return (
+                <button
+                  key={p.plan_name}
+                  disabled={!planId}
+                  onClick={() => {
+                    setPlanFilter((prev) => (prev === planId ? null : planId || null));
+                    setPage(1);
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium disabled:cursor-default ${
+                    planId && planFilter === planId ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-gray-500 hover:border-gray-300"
+                  }`}
+                >
+                  {p.plan_name} · {p.count}
+                </button>
+              );
+            })}
           </div>
         )}
 
         <div className="mt-4">
           <DataTable columns={columns} data={rows} isLoading={isLoading} emptyTitle="No plans match" />
         </div>
+        {data?.meta && (
+          <div className="mt-4">
+            <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />
+          </div>
+        )}
       </Panel>
 
       <CustomerDetailDrawer customerId={detailCustomerId} onClose={() => setDetailCustomerId(null)} />

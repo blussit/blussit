@@ -5,7 +5,7 @@ period), revenue growth vs an equal-length previous period, unit-economics
 / break-even math from admin-entered cost inputs, and the settings
 round-trip that feeds them.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from bson import ObjectId
@@ -13,7 +13,8 @@ from bson import ObjectId
 from app.services.kpi_service import KpiService, resolve_period, _growth, _pct
 from app.utils.timezone import now_ist
 
-from tests.factories import get_hatchback_type_id, make_customer_with_vehicle, make_service_center
+from app.services.staff_directory_service import StaffDirectoryService
+from tests.factories import get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center
 
 
 def test_resolve_period_prev_window_is_equal_length():
@@ -158,3 +159,58 @@ async def test_settings_roundtrip_ignores_unknown_keys(db):
             await db.business_settings.replace_one({"_id": "singleton"}, original, upsert=True)
         else:
             await db.business_settings.delete_one({"_id": "singleton"})
+
+
+# A window years before any other test data, so exact figures can be asserted.
+_OLD_DAY = "2019-03-12"
+
+
+@pytest.mark.asyncio
+async def test_one_time_revenue_subtracts_what_plan_bookings_charged(rig, db, cleanup):
+    """A plan booking adds only its paid add-ons (total_amount) to revenue;
+    subtracting its pre-discount subtotal instead drove one-time revenue
+    below zero."""
+    (c1, v1), _ = rig["ids"]
+    s, e, ps, pe = resolve_period(None, _OLD_DAY, _OLD_DAY)
+    at = s + timedelta(hours=10)
+    rows = [
+        {"payment_method": "cash", "subtotal": 500.0, "total_amount": 500.0},
+        {"payment_method": "subscription", "subtotal": 800.0, "total_amount": 0.0},
+        {"payment_method": "subscription", "subtotal": 900.0, "total_amount": 150.0},  # plan wash + paid add-on
+    ]
+    res = await db.bookings.insert_many([{
+        "customer_id": c1, "vehicle_id": v1, "service_center_id": rig["center_id"], "service_ids": [],
+        "status": "completed", "scheduled_date": at.replace(tzinfo=None), "scheduled_slot": "09:00-12:00",
+        "created_at": at, "updated_at": at, "closed_at": at, **row,
+    } for row in rows])
+    cleanup.append(("bookings", {"_id": {"$in": res.inserted_ids}}))
+
+    q = (await KpiService(db).business(s, e, ps, pe))["revenue_quality"]
+    assert q["total"] == 650.0
+    assert q["subscription_revenue"] == 1700.0
+    assert q["one_time_revenue"] == 500.0
+
+
+@pytest.mark.asyncio
+async def test_captain_window_excludes_the_day_after_date_to(rig, db, cleanup):
+    """scheduled_date is stored as naive midnight, so `$lte date_to + 1 day`
+    also counted every job booked for the following day."""
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("captain_wallets", {"captain_id": captain_id}))
+    (c1, v1), _ = rig["ids"]
+    day = datetime.strptime(_OLD_DAY, "%Y-%m-%d")
+    res = await db.bookings.insert_many([{
+        "customer_id": c1, "vehicle_id": v1, "service_center_id": rig["center_id"], "service_ids": [],
+        "captain_id": captain_id, "status": "completed", "total_amount": 400.0, "subtotal": 400.0,
+        "captain_earning": 100.0, "scheduled_date": scheduled, "scheduled_slot": "09:00-12:00",
+        "created_at": now_ist(), "updated_at": now_ist(),
+    } for scheduled in (day, day + timedelta(days=1))])
+    cleanup.append(("bookings", {"_id": {"$in": res.inserted_ids}}))
+
+    perf = await StaffDirectoryService(db).captain_performance(captain_id, date_from=_OLD_DAY, date_to=_OLD_DAY)
+    assert perf["total_jobs_completed"] == 1
+
+    s, e, ps, pe = resolve_period(None, _OLD_DAY, _OLD_DAY)
+    row = next(r for r in (await KpiService(db).captains(s, e, ps, pe))["captains"] if r["captain_id"] == captain_id)
+    assert (row["jobs"], row["revenue"]) == (1, 100.0)

@@ -1,5 +1,7 @@
+import asyncio
 from datetime import timedelta
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.repositories.booking_repository import BookingRepository
@@ -19,6 +21,37 @@ _TRAVEL_MINUTES_EXPR = {
     "$cond": [{"$and": ["$heading_at", "$vehicle_verified_at"]}, {"$divide": [{"$subtract": ["$vehicle_verified_at", "$heading_at"]}, 60000]}, None]
 }
 _TOTAL_MINUTES_EXPR = {"$cond": [{"$and": ["$assigned_at", "$closed_at"]}, {"$divide": [{"$subtract": ["$closed_at", "$assigned_at"]}, 60000]}, None]}
+_NOT_DELETED = {"is_deleted": {"$ne": True}}
+_COMPLETED = {"$eq": ["$status", "completed"]}
+
+
+def _count_if(cond) -> dict:
+    return {"$sum": {"$cond": [cond, 1, 0]}}
+
+
+def _sum_if(cond, value) -> dict:
+    return {"$sum": {"$cond": [cond, value, 0]}}
+
+
+def _not_null(expr) -> dict:
+    # A missing field is NOT equal to null inside $expr — normalise first.
+    return {"$ne": [{"$ifNull": [expr, None]}, None]}
+
+
+def _truthy(field: str) -> dict:
+    # Aggregation treats "" as true; the Python `or` these mirror doesn't.
+    return {"$and": [field, {"$ne": [field, ""]}]}
+
+
+# Group key reproducing `booking.vehicle_type or <its vehicle's type>`:
+# quick-booking rows carry the type; legacy saved-vehicle rows are grouped
+# by vehicle_id and resolved through the vehicles collection afterwards.
+def _vehicle_group_key(prefix: str = "$") -> dict:
+    vt, vid = f"{prefix}vehicle_type", f"{prefix}vehicle_id"
+    return {"vt": {"$cond": [_truthy(vt), vt, None]}, "vid": {"$cond": [_truthy(vt), None, vid]}}
+
+
+_JOIN_CHUNK = 2000
 
 
 class AnalyticsService:
@@ -33,68 +66,13 @@ class AnalyticsService:
         self.vehicle_repo = VehicleRepository(db)
 
     async def dashboard_summary(self) -> dict:
+        """All-time headline numbers. Every booking-derived figure comes out
+        of ONE pass over the bookings collection ($facet), and the repeat-
+        customer rate is counted on the server — this used to be ~17
+        queries, two of which shipped one row per customer to Python."""
         now = now_ist()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        total_revenue_pipeline = [
-            {"$match": {"status": "completed", "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": None, "total": {"$sum": "$total_amount"}}},
-        ]
-        total_revenue = await self.booking_repo.aggregate(total_revenue_pipeline)
-        total_revenue_val = total_revenue[0]["total"] if total_revenue else 0
-
-        today_orders = await self.booking_repo.count({"created_at": {"$gte": today_start}})
-        monthly_orders = await self.booking_repo.count({"created_at": {"$gte": month_start}})
-        active_customers = await self.user_repo.count({"role": "customer", "status": "active"})
-        cancelled = await self.booking_repo.count({"status": "cancelled"})
-        completed = await self.booking_repo.count({"status": "completed"})
-        total_bookings = await self.booking_repo.count({})
-
-        subscription_revenue_pipeline = [
-            {"$match": {"payment_method": "subscription", "status": "completed", "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": None, "total": {"$sum": "$subtotal"}}},
-        ]
-        subscription_revenue = await self.booking_repo.aggregate(subscription_revenue_pipeline)
-        subscription_revenue_val = subscription_revenue[0]["total"] if subscription_revenue else 0
-
-        repeat_customers_pipeline = [
-            {"$match": {"is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$customer_id", "count": {"$sum": 1}}},
-            {"$match": {"count": {"$gt": 1}}},
-        ]
-        repeat_customers = await self.booking_repo.aggregate(repeat_customers_pipeline)
-        total_customers_with_bookings_pipeline = [
-            {"$match": {"is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$customer_id"}},
-        ]
-        distinct_customers = await self.booking_repo.aggregate(total_customers_with_bookings_pipeline)
-        repeat_rate = (len(repeat_customers) / len(distinct_customers) * 100) if distinct_customers else 0
-
-        top_services_pipeline = [
-            {"$match": {"is_deleted": {"$ne": True}}},
-            {"$unwind": "$service_ids"},
-            {"$group": {"_id": "$service_ids", "bookings": {"$sum": 1}}},
-            {"$sort": {"bookings": -1}},
-            {"$limit": 5},
-        ]
-        top_services = await self.booking_repo.aggregate(top_services_pipeline)
-
-        best_captains_pipeline = [
-            {"$match": {"status": "completed", "captain_id": {"$ne": None}, "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$captain_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
-            {"$sort": {"jobs_completed": -1}},
-            {"$limit": 5},
-        ]
-        best_captains = await self.booking_repo.aggregate(best_captains_pipeline)
-
-        best_centers_pipeline = [
-            {"$match": {"status": "completed", "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$service_center_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
-            {"$sort": {"revenue": -1}},
-            {"$limit": 5},
-        ]
-        best_centers = await self.booking_repo.aggregate(best_centers_pipeline)
 
         # Section 14's explicitly-requested operational KPIs — computed the
         # same way as everywhere else in this codebase: real stored
@@ -104,78 +82,96 @@ class AnalyticsService:
         # correct without from_stored() converting either side first —
         # see StaffDirectoryService.captain_performance for the identical
         # per-captain formulas this mirrors, kept consistent on purpose).
-        pending_bookings = await self.booking_repo.count({"status": {"$in": ["pending", "rescheduled"]}})
-        delayed_bookings = await self.booking_repo.count({"delay_minutes": {"$gt": 0}})
-
-        duration_pipeline = [
-            {"$match": {"status": "completed", "is_deleted": {"$ne": True}}},
-            {
-                "$project": {
-                    "actual_duration_minutes": 1,
-                    "travel_minutes": {
-                        "$cond": [
-                            {"$and": ["$heading_at", "$vehicle_verified_at"]},
-                            {"$divide": [{"$subtract": ["$vehicle_verified_at", "$heading_at"]}, 60000]},
-                            None,
-                        ]
-                    },
-                    "total_minutes": {
-                        "$cond": [
-                            {"$and": ["$assigned_at", "$closed_at"]},
-                            {"$divide": [{"$subtract": ["$closed_at", "$assigned_at"]}, 60000]},
-                            None,
-                        ]
-                    },
-                }
-            },
-            {
-                "$group": {
+        facet_pipeline = [
+            {"$match": _NOT_DELETED},
+            {"$facet": {
+                "totals": [{"$group": {
                     "_id": None,
-                    "avg_service_minutes": {"$avg": "$actual_duration_minutes"},
-                    "avg_travel_minutes": {"$avg": "$travel_minutes"},
-                    "avg_completion_minutes": {"$avg": "$total_minutes"},
-                }
-            },
+                    "total": {"$sum": 1},
+                    "completed": _count_if(_COMPLETED),
+                    "cancelled": _count_if({"$eq": ["$status", "cancelled"]}),
+                    "revenue": _sum_if(_COMPLETED, "$total_amount"),
+                    "subscription_revenue": _sum_if({"$and": [_COMPLETED, {"$eq": ["$payment_method", "subscription"]}]}, "$subtotal"),
+                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
+                    "avg_service_minutes": {"$avg": {"$cond": [_COMPLETED, "$actual_duration_minutes", None]}},
+                    "avg_travel_minutes": {"$avg": {"$cond": [_COMPLETED, _TRAVEL_MINUTES_EXPR, None]}},
+                    "avg_completion_minutes": {"$avg": {"$cond": [_COMPLETED, _TOTAL_MINUTES_EXPR, None]}},
+                }}],
+                "customers": [
+                    {"$group": {"_id": "$customer_id", "n": {"$sum": 1}}},
+                    {"$group": {"_id": None, "distinct": {"$sum": 1}, "repeat": _count_if({"$gt": ["$n", 1]})}},
+                ],
+                "top_services": [
+                    {"$unwind": "$service_ids"},
+                    {"$group": {"_id": "$service_ids", "bookings": {"$sum": 1}}},
+                    {"$sort": {"bookings": -1}},
+                    {"$limit": 5},
+                ],
+                "best_captains": [
+                    {"$match": {"status": "completed", "captain_id": {"$ne": None}}},
+                    {"$group": {"_id": "$captain_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
+                    {"$sort": {"jobs_completed": -1}},
+                    {"$limit": 5},
+                ],
+                "best_centers": [
+                    {"$match": {"status": "completed"}},
+                    {"$group": {"_id": "$service_center_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
+                    {"$sort": {"revenue": -1}},
+                    {"$limit": 5},
+                ],
+            }},
         ]
-        duration_result = await self.booking_repo.aggregate(duration_pipeline)
-        durations = duration_result[0] if duration_result else {}
-
-        rating_pipeline = [
-            {"$match": {"is_deleted": {"$ne": True}}},
-            {"$group": {"_id": None, "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}}},
-        ]
-        rating_result = await self.db.reviews.aggregate(rating_pipeline).to_list(length=1)
+        facet_rows, today_orders, monthly_orders, active_customers, pending_bookings, rating_result, today_capacity_result = await asyncio.gather(
+            self.db.bookings.aggregate(facet_pipeline, allowDiskUse=True).to_list(length=1),
+            self.booking_repo.count({"created_at": {"$gte": today_start}}),
+            self.booking_repo.count({"created_at": {"$gte": month_start}}),
+            self.user_repo.count({"role": "customer", "status": "active"}),
+            self.booking_repo.count({"status": {"$in": ["pending", "rescheduled"]}}),
+            self.db.reviews.aggregate([
+                {"$match": _NOT_DELETED},
+                {"$group": {"_id": None, "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}}},
+            ]).to_list(length=1),
+            self.db.slot_capacity.aggregate([
+                {"$match": {"date": today_start.strftime("%Y-%m-%d")}},
+                {"$group": {"_id": None, "capacity": {"$sum": "$capacity"}, "booked": {"$sum": "$booked_count"}}},
+            ]).to_list(length=1),
+        )
+        facet = facet_rows[0] if facet_rows else {}
+        totals = (facet.get("totals") or [{}])[0]
+        customers = (facet.get("customers") or [{}])[0]
+        total_bookings = totals.get("total", 0)
+        completed = totals.get("completed", 0)
+        cancelled = totals.get("cancelled", 0)
+        distinct_customers = customers.get("distinct", 0)
+        repeat_rate = (customers.get("repeat", 0) / distinct_customers * 100) if distinct_customers else 0
         avg_rating = round(rating_result[0]["avg"], 2) if rating_result and rating_result[0].get("avg") is not None else None
-
-        today_capacity_pipeline = [
-            {"$match": {"date": today_start.strftime("%Y-%m-%d")}},
-            {"$group": {"_id": None, "capacity": {"$sum": "$capacity"}, "booked": {"$sum": "$booked_count"}}},
-        ]
-        today_capacity_result = await self.db.slot_capacity.aggregate(today_capacity_pipeline).to_list(length=1)
         today_capacity = today_capacity_result[0]["capacity"] if today_capacity_result else 0
         today_booked = today_capacity_result[0]["booked"] if today_capacity_result else 0
         utilization_pct = round((today_booked / today_capacity) * 100, 1) if today_capacity else None
 
+        def _avg(key: str):
+            return round(totals[key], 1) if totals.get(key) is not None else None
+
         return {
-            "total_revenue": round(total_revenue_val, 2),
+            "total_revenue": round(totals.get("revenue") or 0, 2),
             "todays_orders": today_orders,
             "monthly_orders": monthly_orders,
             "active_customers": active_customers,
             "repeat_customer_rate": round(repeat_rate, 2),
-            "subscription_revenue": round(subscription_revenue_val, 2),
-            "top_services": [{"service_id": s["_id"], "bookings": s["bookings"]} for s in top_services],
-            "best_performing_captains": [{"captain_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in best_captains],
-            "best_service_centers": [{"service_center_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in best_centers],
+            "subscription_revenue": round(totals.get("subscription_revenue") or 0, 2),
+            "top_services": [{"service_id": s["_id"], "bookings": s["bookings"]} for s in facet.get("top_services", [])],
+            "best_performing_captains": [{"captain_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in facet.get("best_captains", [])],
+            "best_service_centers": [{"service_center_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in facet.get("best_centers", [])],
             "cancellation_rate": round((cancelled / total_bookings * 100), 2) if total_bookings else 0,
             "completion_rate": round((completed / total_bookings * 100), 2) if total_bookings else 0,
             "total_bookings": total_bookings,
             "completed_bookings": completed,
             "pending_bookings": pending_bookings,
             "cancelled_bookings": cancelled,
-            "delayed_bookings": delayed_bookings,
-            "avg_service_minutes": round(durations["avg_service_minutes"], 1) if durations.get("avg_service_minutes") is not None else None,
-            "avg_travel_minutes": round(durations["avg_travel_minutes"], 1) if durations.get("avg_travel_minutes") is not None else None,
-            "avg_completion_minutes": round(durations["avg_completion_minutes"], 1) if durations.get("avg_completion_minutes") is not None else None,
+            "delayed_bookings": totals.get("delayed", 0),
+            "avg_service_minutes": _avg("avg_service_minutes"),
+            "avg_travel_minutes": _avg("avg_travel_minutes"),
+            "avg_completion_minutes": _avg("avg_completion_minutes"),
             "avg_rating": avg_rating,
             # Only reflects dates already touched (lazily-initialized slot_capacity
             # docs) — a day nobody has booked into or viewed the capacity admin
@@ -207,33 +203,44 @@ class AnalyticsService:
         before drilling into any one center's bookings: one row per
         active service center with bookings/completed/pending/delayed
         counts and average rating, computed live from stored data (never
-        cached/manually entered). One aggregation per center rather than
-        loading every booking platform-wide up front — matches the
-        existing captains_performance_for_center per-item loop style."""
+        cached/manually entered). Two grouped aggregations for all centers
+        at once (bookings, reviews) instead of five queries per center."""
         centers, _ = await self.center_repo.find_many({"is_active": True}, page=1, page_size=200)
+        center_ids = [str(c["_id"]) for c in centers]
+        if not center_ids:
+            return []
+        booking_rows, rating_rows = await asyncio.gather(
+            self.db.bookings.aggregate([
+                {"$match": {"service_center_id": {"$in": center_ids}, **_NOT_DELETED}},
+                {"$group": {
+                    "_id": "$service_center_id",
+                    "bookings": {"$sum": 1},
+                    "completed": _count_if(_COMPLETED),
+                    "pending": _count_if({"$in": ["$status", ["pending", "rescheduled"]]}),
+                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
+                }},
+            ]).to_list(length=None),
+            self.db.reviews.aggregate([
+                {"$match": {"service_center_id": {"$in": center_ids}, **_NOT_DELETED}},
+                {"$group": {"_id": "$service_center_id", "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}, "count": {"$sum": 1}}},
+            ]).to_list(length=None),
+        )
+        bookings = {r["_id"]: r for r in booking_rows}
+        ratings = {r["_id"]: r for r in rating_rows}
         results = []
         for center in centers:
             center_id = str(center["_id"])
-            match: dict = {"service_center_id": center_id, "is_deleted": {"$ne": True}}
-            total = await self.booking_repo.count(match)
-            completed = await self.booking_repo.count({**match, "status": "completed"})
-            pending = await self.booking_repo.count({**match, "status": {"$in": ["pending", "rescheduled"]}})
-            delayed = await self.booking_repo.count({**match, "delay_minutes": {"$gt": 0}})
-            rating_pipeline = [
-                {"$match": {"service_center_id": center_id, "is_deleted": {"$ne": True}}},
-                {"$group": {"_id": None, "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}, "count": {"$sum": 1}}},
-            ]
-            rating_result = await self.db.reviews.aggregate(rating_pipeline).to_list(length=1)
-            avg_rating = round(rating_result[0]["avg"], 1) if rating_result and rating_result[0].get("avg") is not None else None
+            b = bookings.get(center_id, {})
+            r = ratings.get(center_id)
             results.append({
                 "service_center_id": center_id,
                 "name": center.get("name"),
-                "bookings": total,
-                "completed": completed,
-                "pending": pending,
-                "delayed": delayed,
-                "avg_rating": avg_rating,
-                "review_count": rating_result[0]["count"] if rating_result else 0,
+                "bookings": b.get("bookings", 0),
+                "completed": b.get("completed", 0),
+                "pending": b.get("pending", 0),
+                "delayed": b.get("delayed", 0),
+                "avg_rating": round(r["avg"], 1) if r and r.get("avg") is not None else None,
+                "review_count": r["count"] if r else 0,
             })
         return results
 
@@ -294,9 +301,9 @@ class AnalyticsService:
         # proxy given there's no shift/roster system to compute "% of
         # working hours busy" against.
         total_captains = await self.user_repo.count({"role": "captain", "service_center_id": service_center_id, "status": "active"})
-        busy_captains = len(await self.booking_repo.find_all_no_paginate(
+        busy_captains = await self.booking_repo.count(
             {"service_center_id": service_center_id, "status": {"$in": ["assigned", "captain_on_the_way", "service_started"]}}
-        ))
+        )
         # A captain can only ever be on one job at a time (see the
         # existing captain-conflict guards), so counting active bookings
         # is equivalent to counting busy captains — but cap at
@@ -334,136 +341,125 @@ class AnalyticsService:
         on a vehicle type in the admin catalog opens — "which vehicle type
         is actually driving bookings" rather than just its catalog fields.
 
-        A booking stores only vehicle_id, never its vehicle's type directly
-        (vehicle_snapshot is a virtual field BookingService._enrich_bookings
-        computes at read time for specific listing endpoints — it is NOT a
-        real field in the bookings collection, so it can't be $group'd on).
-        The group-by-vehicle-type therefore happens in Python, after a
-        batch vehicle_id -> vehicle_type join, the same pattern this
-        codebase already uses everywhere a cross-collection join is needed
-        (e.g. ReviewService._enrich)."""
-        match: dict = {"is_deleted": {"$ne": True}}
+        Quick-booking bookings carry vehicle_type themselves; older
+        saved-vehicle bookings only carry vehicle_id. The sums are grouped
+        on the server by (type, or vehicle_id when there is no type) — a
+        handful of rows, never one per booking — and the legacy vehicle_id
+        groups are folded into their vehicle's type here."""
+        match: dict = dict(_NOT_DELETED)
         if service_center_id:
             match["service_center_id"] = service_center_id
-        pipeline = [
-            {"$match": match},
-            {
-                "$project": {
-                    "vehicle_id": 1,
-                    "vehicle_type": 1,
-                    "status": 1,
-                    "actual_duration_minutes": 1,
-                    "delay_minutes": 1,
-                    "travel_minutes": _TRAVEL_MINUTES_EXPR,
-                    "total_minutes": _TOTAL_MINUTES_EXPR,
-                }
-            },
-        ]
-        rows = await self.booking_repo.aggregate(pipeline)
-
-        vehicle_ids = {r["vehicle_id"] for r in rows if r.get("vehicle_id")}
-        vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))}
-        types = {str(t["_id"]): t.get("name", "Unknown") for t in await self.vehicle_type_repo.find_all_no_paginate()}
-
-        # Quick-booking model: the type is on the booking itself; the vehicle
-        # join only covers older saved-vehicle bookings.
-        grouped = self._group_rows_by(
-            rows, lambda row: row.get("vehicle_type") or (vehicles.get(row.get("vehicle_id")) or {}).get("vehicle_type")
+        travel = _TRAVEL_MINUTES_EXPR
+        total = _TOTAL_MINUTES_EXPR
+        has_duration = _not_null("$actual_duration_minutes")
+        groups, types, ratings = await asyncio.gather(
+            self.db.bookings.aggregate([
+                {"$match": match},
+                {"$group": {
+                    "_id": _vehicle_group_key(),
+                    "total": {"$sum": 1},
+                    "completed": _count_if(_COMPLETED),
+                    "service_sum": _sum_if(has_duration, "$actual_duration_minutes"),
+                    "service_n": _count_if(has_duration),
+                    "travel_sum": _sum_if(_not_null(travel), travel),
+                    "travel_n": _count_if(_not_null(travel)),
+                    "total_min_sum": _sum_if(_not_null(total), total),
+                    "total_min_n": _count_if(_not_null(total)),
+                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
+                }},
+            ], allowDiskUse=True).to_list(length=None),
+            self.vehicle_type_repo.find_all_no_paginate(),
+            self._ratings_by(
+                "captain_rating", service_center_id, {"vehicle_type": 1, "vehicle_id": 1},
+                lambda b: [("vt", b["vehicle_type"])] if b.get("vehicle_type") else [("vid", b.get("vehicle_id"))],
+            ),
         )
-        ratings_by_type = await self._ratings_grouped_by_vehicle_type(service_center_id)
+        vehicle_ids = {g["_id"].get("vid") for g in groups if g["_id"].get("vid")} | {key for kind, key in ratings if kind == "vid" and key}
+        vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))} if vehicle_ids else {}
+        type_names = {str(t["_id"]): t.get("name", "Unknown") for t in types}
+
+        def type_of(key: dict):
+            return key.get("vt") or (vehicles.get(key.get("vid")) or {}).get("vehicle_type")
+
+        grouped: dict[str, dict] = {}
+        for g in groups:
+            vt = type_of(g["_id"])
+            if not vt:
+                continue
+            acc = grouped.setdefault(vt, {k: 0 for k in ("total", "completed", "service_sum", "service_n", "travel_sum", "travel_n", "total_min_sum", "total_min_n", "delayed")})
+            for k in acc:
+                acc[k] += g.get(k) or 0
+        rating_totals: dict[str, list[float]] = {}
+        for (kind, key), (total, n) in ratings.items():
+            vt = type_of({kind: key})
+            if vt:
+                t = rating_totals.setdefault(vt, [0.0, 0])
+                t[0] += total
+                t[1] += n
 
         results = []
         for vt_id, g in sorted(grouped.items(), key=lambda kv: -kv[1]["total"]):
-            ratings = ratings_by_type.get(vt_id, [])
+            rating_sum, rating_n = rating_totals.get(vt_id, (0.0, 0))
             results.append({
                 "vehicle_type_id": vt_id,
-                "vehicle_type_name": types.get(vt_id, vt_id),
-                **self._finalize_group(g),
-                "avg_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
+                "vehicle_type_name": type_names.get(vt_id, vt_id),
+                "total_bookings": g["total"],
+                "completed_bookings": g["completed"],
+                "avg_service_minutes": round(g["service_sum"] / g["service_n"], 1) if g["service_n"] else None,
+                "avg_actual_minutes": round(g["service_sum"] / g["service_n"], 1) if g["service_n"] else None,
+                # Never populated for vehicle types (the per-booking projection
+                # this replaced didn't carry duration_minutes); kept for shape.
+                "avg_expected_minutes": None,
+                "avg_travel_minutes": round(g["travel_sum"] / g["travel_n"], 1) if g["travel_n"] else None,
+                "avg_total_minutes": round(g["total_min_sum"] / g["total_min_n"], 1) if g["total_min_n"] else None,
+                "delayed_count": g["delayed"],
+                "avg_rating": round(rating_sum / rating_n, 2) if rating_n else None,
             })
         return results
 
-    @staticmethod
-    def _group_rows_by(rows: list[dict], key_fn) -> dict[str, dict]:
-        """Shared grouping/summing helper for the per-booking rows both
-        breakdown methods project — avoids duplicating the same
-        sum/count-then-average bookkeeping twice."""
-        grouped: dict[str, dict] = {}
-        for row in rows:
-            key = key_fn(row)
-            if not key:
-                continue
-            g = grouped.setdefault(key, {
-                "total": 0, "completed": 0, "delayed": 0,
-                "service_sum": 0.0, "service_n": 0, "actual_sum": 0.0, "actual_n": 0, "expected_sum": 0.0, "expected_n": 0,
-                "travel_sum": 0.0, "travel_n": 0, "total_min_sum": 0.0, "total_min_n": 0,
-            })
-            g["total"] += 1
-            if row.get("status") == "completed":
-                g["completed"] += 1
-            if row.get("actual_duration_minutes") is not None:
-                g["service_sum"] += row["actual_duration_minutes"]
-                g["service_n"] += 1
-                g["actual_sum"] += row["actual_duration_minutes"]
-                g["actual_n"] += 1
-            if row.get("duration_minutes") is not None:
-                g["expected_sum"] += row["duration_minutes"]
-                g["expected_n"] += 1
-            if row.get("travel_minutes") is not None:
-                g["travel_sum"] += row["travel_minutes"]
-                g["travel_n"] += 1
-            if row.get("total_minutes") is not None:
-                g["total_min_sum"] += row["total_minutes"]
-                g["total_min_n"] += 1
-            if (row.get("delay_minutes") or 0) > 0:
-                g["delayed"] += 1
-        return grouped
+    async def _ratings_by(self, rating_field: str, service_center_id: str | None, projection: dict, keys_of) -> dict:
+        """{key: (rating sum, rating count)} over every live review whose
+        live booking (optionally at one center) yields `keys_of(booking)`.
+        The rating is `rating_field`, falling back to the legacy flat
+        `rating`. Reviews are streamed and joined to their bookings a chunk
+        at a time (one $in query per chunk) — never all reviews or bookings
+        in memory, and never a per-review $lookup (measured ~0.3 ms per row
+        on the classic engine: minutes at 150k reviews)."""
+        booking_filter: dict = dict(_NOT_DELETED)
+        if service_center_id:
+            booking_filter["service_center_id"] = service_center_id
+        totals: dict = {}
 
-    @staticmethod
-    def _finalize_group(g: dict) -> dict:
-        return {
-            "total_bookings": g["total"],
-            "completed_bookings": g["completed"],
-            "avg_service_minutes": round(g["service_sum"] / g["service_n"], 1) if g["service_n"] else None,
-            "avg_actual_minutes": round(g["actual_sum"] / g["actual_n"], 1) if g["actual_n"] else None,
-            "avg_expected_minutes": round(g["expected_sum"] / g["expected_n"], 1) if g["expected_n"] else None,
-            "avg_travel_minutes": round(g["travel_sum"] / g["travel_n"], 1) if g["travel_n"] else None,
-            "avg_total_minutes": round(g["total_min_sum"] / g["total_min_n"], 1) if g["total_min_n"] else None,
-            "delayed_count": g["delayed"],
-        }
+        async def flush(chunk: list[tuple[str, float]]) -> None:
+            bookings = {
+                str(b["_id"]): b
+                for b in await self.db.bookings.find(
+                    {"_id": {"$in": [ObjectId(bid) for bid, _ in chunk]}, **booking_filter}, projection
+                ).to_list(length=None)
+            }
+            for bid, rating in chunk:
+                booking = bookings.get(bid)
+                if not booking:
+                    continue
+                for key in keys_of(booking):
+                    t = totals.setdefault(key, [0.0, 0])
+                    t[0] += rating
+                    t[1] += 1
 
-    async def _ratings_grouped_by_vehicle_type(self, service_center_id: str | None) -> dict[str, list[float]]:
-        """Reviews don't store vehicle_type directly — joined here in Python
-        against a batch booking lookup, then a second batch vehicle lookup
-        (booking.vehicle_id -> vehicle.vehicle_type), matching how
-        ReviewService._enrich resolves the same relationship. review.
-        booking_id is a string, booking._id is an ObjectId, so a cross-type
-        $lookup isn't the natural fit here either."""
-        # Projected to the four fields this actually needs: review comments
-        # are free text and by far the biggest part of the document, and
-        # pulling them to compute an average is pure waste. NOTE (scale):
-        # this still reads every review; once the reviews collection is
-        # large enough for that to matter, move the join into a $lookup
-        # aggregation so Mongo does it server-side.
-        reviews = await self.db.reviews.find(
-            {"is_deleted": {"$ne": True}}, {"booking_id": 1, "captain_rating": 1, "rating": 1}
-        ).to_list(length=None)
-        booking_ids = [r["booking_id"] for r in reviews if r.get("booking_id")]
-        bookings = {str(b["_id"]): b for b in await self.booking_repo.find_by_ids(booking_ids)}
-        vehicle_ids = {b["vehicle_id"] for b in bookings.values() if b.get("vehicle_id")}
-        vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))}
-        grouped: dict[str, list[float]] = {}
-        for r in reviews:
-            booking = bookings.get(r.get("booking_id"))
-            if not booking:
-                continue
-            if service_center_id and booking.get("service_center_id") != service_center_id:
-                continue
-            vt = booking.get("vehicle_type") or (vehicles.get(booking.get("vehicle_id")) or {}).get("vehicle_type")
-            rating = r.get("captain_rating") if r.get("captain_rating") is not None else r.get("rating")
-            if vt and rating is not None:
-                grouped.setdefault(vt, []).append(rating)
-        return grouped
+        chunk: list[tuple[str, float]] = []
+        async for r in self.db.reviews.aggregate([
+            {"$match": _NOT_DELETED},
+            {"$project": {"_id": 0, "booking_id": 1, "rating": {"$ifNull": [f"${rating_field}", "$rating"]}}},
+            {"$match": {"rating": {"$ne": None}, "booking_id": {"$type": "string"}}},
+        ]):
+            if ObjectId.is_valid(r["booking_id"]):
+                chunk.append((r["booking_id"], r["rating"]))
+            if len(chunk) >= _JOIN_CHUNK:
+                await flush(chunk)
+                chunk = []
+        if chunk:
+            await flush(chunk)
+        return {k: (t[0], t[1]) for k, t in totals.items()}
 
     async def service_breakdown(self, service_center_id: str | None = None) -> list[dict]:
         """Section 17 — per service: how many times it's been booked,
@@ -496,14 +492,17 @@ class AnalyticsService:
             },
             {"$sort": {"total_bookings": -1}},
         ]
-        rows = await self.booking_repo.aggregate(pipeline)
-        ratings_by_service = await self._ratings_grouped_by_service(service_center_id)
+        rows, rating_rows = await asyncio.gather(
+            self.db.bookings.aggregate(pipeline, allowDiskUse=True).to_list(length=None),
+            self._ratings_by("service_rating", service_center_id, {"service_ids": 1}, lambda b: b.get("service_ids") or []),
+        )
+        ratings_by_service = rating_rows
 
         services = {str(s["_id"]): s.get("name", "Unknown") for s in await self.service_repo.find_all_no_paginate()}
         results = []
         for row in rows:
             sid = row["_id"]
-            ratings = ratings_by_service.get(sid, [])
+            rating_sum, rating_n = ratings_by_service.get(sid, (0, 0))
             results.append({
                 "service_id": sid,
                 "service_name": services.get(sid, sid),
@@ -514,32 +513,6 @@ class AnalyticsService:
                 "avg_travel_minutes": round(row["avg_travel_minutes"], 1) if row.get("avg_travel_minutes") is not None else None,
                 "avg_total_minutes": round(row["avg_total_minutes"], 1) if row.get("avg_total_minutes") is not None else None,
                 "delayed_count": row["delayed_count"],
-                "avg_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
+                "avg_rating": round(rating_sum / rating_n, 2) if rating_n else None,
             })
         return results
-
-    async def _ratings_grouped_by_service(self, service_center_id: str | None) -> dict[str, list[float]]:
-        # Projected to the four fields this actually needs: review comments
-        # are free text and by far the biggest part of the document, and
-        # pulling them to compute an average is pure waste. NOTE (scale):
-        # this still reads every review; once the reviews collection is
-        # large enough for that to matter, move the join into a $lookup
-        # aggregation so Mongo does it server-side.
-        reviews = await self.db.reviews.find(
-            {"is_deleted": {"$ne": True}}, {"booking_id": 1, "service_rating": 1, "rating": 1}
-        ).to_list(length=None)
-        booking_ids = [r["booking_id"] for r in reviews if r.get("booking_id")]
-        bookings = {str(b["_id"]): b for b in await self.booking_repo.find_by_ids(booking_ids)}
-        grouped: dict[str, list[float]] = {}
-        for r in reviews:
-            booking = bookings.get(r.get("booking_id"))
-            if not booking:
-                continue
-            if service_center_id and booking.get("service_center_id") != service_center_id:
-                continue
-            rating = r.get("service_rating") if r.get("service_rating") is not None else r.get("rating")
-            if rating is None:
-                continue
-            for sid in booking.get("service_ids") or []:
-                grouped.setdefault(sid, []).append(rating)
-        return grouped

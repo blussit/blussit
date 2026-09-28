@@ -106,11 +106,12 @@ DEFAULT_BOOKING_POLICY = {
     # customer who chose "pay online" and never finished (one per booking).
     "payment_reminder_minutes_before": 10,
     # "Time for a wash?" — sent to a customer this many days after their
-    # last completed wash when nothing is booked and no pass is live. At
-    # most once every 30 days per customer; never to opted-out customers;
-    # WhatsApp only through the approved marketing template.
+    # last completed wash when nothing is booked and no pass is live, and
+    # repeated at most once per the same number of days (default weekly).
+    # Never to opted-out customers; only 10 AM–7 PM IST; WhatsApp only
+    # through the approved marketing template. Admin-editable (min 3).
     "repeat_reminder_enabled": True,
-    "repeat_reminder_days": 21,
+    "repeat_reminder_days": 7,
     "wallet_gating_enabled": False,
 }
 

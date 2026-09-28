@@ -18,12 +18,16 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = True
     RATE_LIMIT_ENABLED: bool = True
-    # Set true ONLY when a trusted reverse proxy (Caddy/nginx) fronts the
-    # app AND is configured to overwrite X-Forwarded-For itself. When
-    # false (default), rate limiting keys off the socket peer address —
-    # honoring the header without a trusted proxy would let any client
-    # spoof a fresh "IP" per request and bypass every limit.
+    # Set true when the app sits behind proxies that APPEND the address they
+    # saw to X-Forwarded-For (Cloud Run's Google front end does). When false
+    # (default), rate limiting keys off the socket peer address — which on
+    # Cloud Run is Google's front end, i.e. ONE bucket for every customer.
     TRUST_PROXY_HEADERS: bool = False
+    # How many trusted proxies append to X-Forwarded-For. The client is the
+    # entry at position -TRUSTED_PROXY_COUNT; everything left of it is
+    # client-supplied and spoofable. 1 = Cloud Run direct; 2 = an external
+    # HTTPS load balancer in front of Cloud Run.
+    TRUSTED_PROXY_COUNT: int = 1
 
     # Mongo
     MONGO_URI: str = "mongodb://localhost:27017"
@@ -83,6 +87,11 @@ class Settings(BaseSettings):
     # scoped to the WABA rather than one phone number.
     WHATSAPP_BUSINESS_ACCOUNT_ID: str = ""
     WHATSAPP_API_VERSION: str = "v21.0"
+    # The business's own WhatsApp number (digits, with or without 91). Meta
+    # cannot deliver a message from a number to itself — it answers "(#100)
+    # Invalid parameter" — so no account may use it as its phone, and any
+    # send addressed to it is skipped. Blank = no check.
+    WHATSAPP_BUSINESS_NUMBER: str = ""
     # Once you've created and gotten Meta's approval for a real
     # "authentication"-category template (its body should have exactly one
     # {{1}} placeholder for the code), set this and OTPs switch from plain
@@ -150,6 +159,11 @@ class Settings(BaseSettings):
     # these — they exist to be moved into the pair above.
     RAZORPAY_LIVE_KEY_ID: str = ""
     RAZORPAY_LIVE_KEY_SECRET: str = ""
+    # The secret typed into Razorpay Dashboard → Webhooks for
+    # POST {PUBLIC_BASE_URL}/api/v1/payments/webhook. It signs every event
+    # (HMAC-SHA256 of the raw body). Blank = the webhook endpoint answers
+    # 404 and the reconciliation sweeps alone catch unverified payments.
+    RAZORPAY_WEBHOOK_SECRET: str = ""
     # Public https base of THIS backend (e.g. "https://api.blussit.com") —
     # used as the payment-link callback target so the customer's browser
     # lands back on our verified "payment received" page. Blank (dev):

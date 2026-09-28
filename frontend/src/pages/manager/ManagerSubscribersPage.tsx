@@ -1,28 +1,24 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gauge, Gift, Phone, Search } from "lucide-react";
 import { subscriptionApi, type CenterSubscriptionRow } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { Badge, Button, Card, EmptyState, Input, PageLoader } from "../../components/ui";
+import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
 
 type Filter = "all" | "active" | "expiring" | "expired";
+const PAGE_SIZE = 24;
 
 const FILTER_EMPTY: Record<Filter, string> = {
-  all: "No customer of this center holds a plan yet — assign one from New booking, or pitch a plan at the door.",
+  all: "No customer of this center holds a plan yet — sell one from \"Sell a plan\", or pitch a plan at the door.",
   active: "No active plans right now.",
   expiring: "Nothing expires in the next 14 days.",
   expired: "No expired plans.",
 };
-
-function rowMatches(r: CenterSubscriptionRow, filter: Filter): boolean {
-  if (filter === "active") return r.status === "active";
-  if (filter === "expiring") return r.status === "active" && r.days_left != null && r.days_left <= 14;
-  if (filter === "expired") return r.status === "expired";
-  return true;
-}
 
 /** What to show for the price — always what was actually CHARGED, never
  *  just the plan's list price (a discounted manager sale showing the full
@@ -47,20 +43,28 @@ export default function ManagerSubscribersPage() {
   const [planFilter, setPlanFilter] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [usageSubscriptionId, setUsageSubscriptionId] = useState<string | null>(null);
+  const [customerId, setCustomerId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["center-subscription-overview", centerId],
-    queryFn: () => subscriptionApi.centerOverview(centerId),
+  // KPI tiles and the plan breakdown cover every plan; the list below is
+  // one server-filtered page.
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["center-subscription-overview", centerId, filter, planFilter, debouncedSearch, page],
+    queryFn: () =>
+      subscriptionApi.centerOverview(centerId, {
+        page,
+        page_size: PAGE_SIZE,
+        status: filter === "all" ? "" : filter,
+        plan_id: planFilter || undefined,
+        search: debouncedSearch || undefined,
+      }),
     enabled: !!centerId,
+    placeholderData: keepPreviousData,
   });
 
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return (data?.rows || [])
-      .filter((r) => rowMatches(r, filter))
-      .filter((r) => !planFilter || r.plan_name === planFilter)
-      .filter((r) => !q || r.customer_name.toLowerCase().includes(q) || (r.customer_phone || "").includes(q) || r.plan_name.toLowerCase().includes(q));
-  }, [data, filter, planFilter, search]);
+  const rows: CenterSubscriptionRow[] = data?.rows || [];
+  const planIdByName = useMemo(() => new Map((data?.plans || []).map((p) => [p.plan_name, p.plan_id])), [data]);
 
   if (!centerId) {
     return (
@@ -99,7 +103,10 @@ export default function ManagerSubscribersPage() {
         {tiles.map((t) => (
           <button
             key={t.key}
-            onClick={() => setFilter(t.key)}
+            onClick={() => {
+              setFilter(t.key);
+              setPage(1);
+            }}
             className={`rounded-2xl border bg-white p-4 text-left transition-colors ${
               filter === t.key ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-100 hover:border-gray-300"
             }`}
@@ -115,23 +122,38 @@ export default function ManagerSubscribersPage() {
       {!!data?.plan_breakdown.length && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Active by plan:</span>
-          {data.plan_breakdown.map((p) => (
-            <button
-              key={p.plan_name}
-              onClick={() => setPlanFilter((prev) => (prev === p.plan_name ? null : p.plan_name))}
-              className={`rounded-full border px-3 py-1 text-xs font-medium ${
-                planFilter === p.plan_name ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
-              }`}
-            >
-              {p.plan_name} · {p.active_count}
-            </button>
-          ))}
+          {data.plan_breakdown.map((p) => {
+            const planId = planIdByName.get(p.plan_name);
+            return (
+              <button
+                key={p.plan_name}
+                disabled={!planId}
+                onClick={() => {
+                  setPlanFilter((prev) => (prev === planId ? null : planId || null));
+                  setPage(1);
+                }}
+                className={`rounded-full border px-3 py-1 text-xs font-medium disabled:cursor-default ${
+                  planId && planFilter === planId ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
+                }`}
+              >
+                {p.plan_name} · {p.active_count}
+              </button>
+            );
+          })}
         </div>
       )}
 
       <div className="relative max-w-sm">
         <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-        <Input className="pl-10" placeholder="Search name, phone, or plan…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <Input
+          className="pl-10"
+          placeholder="Search name, phone, or plan…"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
+        />
       </div>
 
       {isLoading ? (
@@ -156,7 +178,17 @@ export default function ManagerSubscribersPage() {
               >
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate font-semibold text-[var(--color-text-primary)]">{r.customer_name}</p>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCustomerId(r.customer_id);
+                      }}
+                      className="block max-w-full truncate text-left font-semibold text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+                      title="Bookings and plans for this customer"
+                    >
+                      {r.customer_name}
+                    </button>
                     <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
                       {r.plan_name}
                       {r.vehicle_type_name ? ` · ${r.vehicle_type_name} tier` : ""}
@@ -211,7 +243,10 @@ export default function ManagerSubscribersPage() {
         </div>
       )}
 
+      {data?.meta && <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />}
+
       <PlanUsageModal subscriptionId={usageSubscriptionId} onClose={() => setUsageSubscriptionId(null)} />
+      <CustomerDetailDrawer customerId={customerId} onClose={() => setCustomerId(null)} />
     </div>
   );
 }

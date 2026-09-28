@@ -21,6 +21,14 @@ import { VehicleIcon } from "../shared/VehicleIcon";
  * function that will charge for it — this sheet never does its own money
  * arithmetic, so what's shown is always what's charged.
  */
+/** "Buy again": the ended pass's own choices, already picked. */
+export interface PassPrefill {
+  vehicleType?: string | null;
+  serviceId?: string | null;
+  /** Default true — a repeat buyer is offered auto-pay first. */
+  autoPay?: boolean;
+}
+
 export function PassPurchaseSheet({
   plan,
   open,
@@ -28,6 +36,7 @@ export function PassPurchaseSheet({
   onConfirm,
   isPaying,
   error,
+  prefill,
 }: {
   plan: SubscriptionPlan | null;
   open: boolean;
@@ -35,6 +44,7 @@ export function PassPurchaseSheet({
   onConfirm: (args: { vehicleType: string; serviceId: string; autoPay: boolean }) => void;
   isPaying: boolean;
   error?: string;
+  prefill?: PassPrefill | null;
 }) {
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
   const { data: servicesData } = useQuery({
@@ -66,20 +76,29 @@ export function PassPurchaseSheet({
     return baseGroups(onMenu, vehicleType).map((g) => g.primary);
   }, [servicesData, plan, vehicleType]);
 
+  // Only once the catalogue is in — an empty menu while it loads must not
+  // wipe a prefilled service.
   useEffect(() => {
+    if (!servicesData || !vehicleTypes) return;
     if (serviceId && !menu.some((s) => s.id === serviceId)) setServiceId(null);
-  }, [menu, serviceId]);
+  }, [menu, serviceId, servicesData, vehicleTypes]);
 
-  // A clean sheet each time it opens.
+  // Each opening starts from the prefill ("Buy again") or a clean sheet.
+  const prefillType = prefill?.vehicleType ?? null;
+  const prefillService = prefill?.serviceId ?? null;
+  const prefillAutoPay = prefill?.autoPay ?? true;
   useEffect(() => {
     if (!open) return;
-    setServiceId(null);
-    setVehicleType(null); // re-seeded below from THIS plan's types
-    setAutoPay(true);
-  }, [open, plan?.id]);
+    setVehicleType(prefillType); // null = seeded below from THIS plan's types
+    setServiceId(prefillService);
+    setAutoPay(prefillAutoPay);
+  }, [open, plan?.id, prefillType, prefillService, prefillAutoPay]);
   useEffect(() => {
-    if (!open || vehicleType || !types.length) return;
-    setVehicleType(types[0].id);
+    if (!open || !types.length) return;
+    // An updater, so it sees the prefill queued by the reset above in this
+    // same commit; a prefilled type this plan doesn't sell falls back to
+    // the first one, like a fresh sheet.
+    setVehicleType((current) => (current && types.some((t) => t.id === current) ? current : types[0].id));
   }, [open, types, vehicleType]);
 
   // The live price — re-quoted from the server whenever the type or the
@@ -110,7 +129,7 @@ export function PassPurchaseSheet({
                 onClick={() => setVehicleType(t.id)}
                 aria-pressed={vehicleType === t.id}
                 className={`flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors ${
-                  vehicleType === t.id ? "border-black bg-[#FAFAFA] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                  vehicleType === t.id ? "border-black bg-[var(--color-primary-light)] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                 }`}
               >
                 <VehicleIcon vehicleTypeId={t.id} className="h-4 w-4 text-gray-500" />
@@ -134,7 +153,7 @@ export function PassPurchaseSheet({
                 onClick={() => setServiceId(s.id)}
                 aria-pressed={serviceId === s.id}
                 className={`rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors ${
-                  serviceId === s.id ? "border-black bg-[#FAFAFA] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                  serviceId === s.id ? "border-black bg-[var(--color-primary-light)] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                 }`}
               >
                 {s.name}
@@ -192,7 +211,7 @@ export function PassPurchaseSheet({
                 onClick={() => setAutoPay(option.value)}
                 aria-pressed={autoPay === option.value}
                 className={`flex-1 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-colors ${
-                  autoPay === option.value ? "border-black bg-[#FAFAFA] font-semibold text-black" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
+                  autoPay === option.value ? "border-black bg-[var(--color-primary-light)] font-semibold text-black" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
                 }`}
               >
                 {option.label}
@@ -204,7 +223,7 @@ export function PassPurchaseSheet({
 
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
-        <Button className="w-full" disabled={!canPay} isLoading={isPaying} onClick={() => onConfirm({ vehicleType: vehicleType!, serviceId: serviceId!, autoPay })}>
+        <Button variant="info" className="w-full font-semibold" disabled={!canPay} isLoading={isPaying} onClick={() => onConfirm({ vehicleType: vehicleType!, serviceId: serviceId!, autoPay })}>
           {quote ? `Pay ₹${quote.price} & activate` : "Pay & activate"}
         </Button>
         <p className="text-center text-[11px] text-gray-500">

@@ -1,11 +1,10 @@
 import { API_BASE_URL, apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
-import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption } from "../types";
+import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
 
 export const adminPricingApi = {
   get: () => apiClient.get<ApiSuccess<PricingConfig>>("/pricing-config").then((r) => r.data.data),
-  set: (per_km_rate: number, default_captain_service_fee: number) =>
-    apiClient.put<ApiSuccess<PricingConfig>>("/pricing-config", { per_km_rate, default_captain_service_fee }).then((r) => r.data.data),
+  set: (payload: Omit<PricingConfig, "updated_at">) => apiClient.put<ApiSuccess<PricingConfig>>("/pricing-config", payload).then((r) => r.data.data),
 };
 
 export const adminBookingPolicyApi = {
@@ -217,6 +216,9 @@ export const analyticsApi = {
     apiClient.get<ApiSuccess<VehicleTypeKpi[]>>("/analytics/vehicle-types", { params: serviceCenterId ? { service_center_id: serviceCenterId } : undefined }).then((r) => r.data.data),
   serviceBreakdown: (serviceCenterId?: string) =>
     apiClient.get<ApiSuccess<ServiceKpi[]>>("/analytics/services", { params: serviceCenterId ? { service_center_id: serviceCenterId } : undefined }).then((r) => r.data.data),
+  /** Website visitors — one count per device per IST day. Same period params as /analytics/kpis/*. */
+  visitors: (params: { period?: string; start?: string; end?: string }) =>
+    apiClient.get<ApiSuccess<VisitorStats>>("/analytics/visitors", { params }).then((r) => r.data.data),
 };
 
 export interface VehicleTypeKpi {
@@ -360,8 +362,11 @@ export type WaContactProfile = {
 };
 
 export const whatsappCrmApi = {
-  conversations: (filter = "all", search = "") =>
-    apiClient.get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/conversations", { params: { filter, search } }).then((r) => r.data.data),
+  /** Newest first; pass the last row's `last_message_at` as `before` for the next (older) page. */
+  conversations: (filter = "all", search = "", before?: string | null, limit?: number) =>
+    apiClient
+      .get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/conversations", { params: { filter, search, before: before || undefined, limit } })
+      .then((r) => r.data.data),
   thread: (waId: string) =>
     apiClient.get<ApiSuccess<{ conversation: WaConversation; messages: WaMessage[] }>>(`/whatsapp/crm/conversations/${waId}/messages`).then((r) => r.data.data),
   markRead: (waId: string) => apiClient.post(`/whatsapp/crm/conversations/${waId}/read`),
@@ -377,7 +382,10 @@ export const whatsappCrmApi = {
   setTags: (waId: string, tags: string[]) => apiClient.post(`/whatsapp/crm/conversations/${waId}/tags`, { tags }),
   setBotPaused: (waId: string, paused: boolean) => apiClient.post(`/whatsapp/crm/conversations/${waId}/bot`, { paused }),
   contactProfile: (waId: string) => apiClient.get<ApiSuccess<WaContactProfile>>(`/whatsapp/crm/contacts/${waId}`).then((r) => r.data.data),
-  contacts: (search = "") => apiClient.get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/contacts", { params: { search } }).then((r) => r.data.data),
+  contacts: (search = "", before?: string | null, limit?: number) =>
+    apiClient
+      .get<ApiSuccess<WaConversation[]>>("/whatsapp/crm/contacts", { params: { search, before: before || undefined, limit } })
+      .then((r) => r.data.data),
   agents: () => apiClient.get<ApiSuccess<{ id: string; name: string; role: string }[]>>("/whatsapp/crm/agents").then((r) => r.data.data),
   badge: () => apiClient.get<ApiSuccess<{ unread_conversations: number }>>("/whatsapp/crm/badge").then((r) => r.data.data),
   defaultTags: () => apiClient.get<ApiSuccess<{ tags: string[] }>>("/whatsapp/crm/tags").then((r) => r.data.data),

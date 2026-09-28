@@ -10,8 +10,20 @@ import { cn } from "../../lib/cn";
  *  - arrow keys move between boxes; typing over a filled box replaces it;
  *  - only digits, and the native numeric keypad on phones;
  *  - the browser/OS one-time-code autofill still works (autoComplete on
- *    the first box).
+ *    the first box, and no maxLength — iOS truncates an autofilled code to
+ *    maxLength, which with 1 left only the first digit);
+ *  - a pasted SMS ("Your code 482913. Valid 10 min") yields the code, not
+ *    every digit in the message.
  */
+
+/** The code inside pasted/autofilled text: a standalone run of exactly
+ * `length` digits wins over "all the digits in the message". */
+function extractCode(text: string, length: number): string {
+  // No lookbehind: older iOS Safari throws on it.
+  const run = text.match(new RegExp(`(?:^|\\D)(\\d{${length}})(?!\\d)`));
+  return (run ? run[1] : text.replace(/\D/g, "")).slice(0, length);
+}
+
 export function OtpInput({
   value,
   onChange,
@@ -31,9 +43,12 @@ export function OtpInput({
   const refs = useRef<(HTMLInputElement | null)[]>([]);
   const digits = value.padEnd(length, " ").slice(0, length).split("");
 
+  // Also on a cleared value once re-enabled (a rejected code is wiped) —
+  // the disabled boxes lost focus while it was being checked.
+  const cleared = value === "";
   useEffect(() => {
-    if (autoFocus) refs.current[0]?.focus();
-  }, [autoFocus]);
+    if (autoFocus && cleared && !disabled) refs.current[0]?.focus();
+  }, [autoFocus, cleared, disabled]);
 
   const commit = (next: string) => {
     const clean = next.replace(/\D/g, "").slice(0, length);
@@ -43,11 +58,17 @@ export function OtpInput({
   };
 
   const handleChange = (index: number, raw: string) => {
-    const typed = raw.replace(/\D/g, "");
+    let typed = raw.replace(/\D/g, "");
     if (!typed) return;
+    // Typing into a box that already holds a digit (caret after it, not
+    // selected) arrives as two chars — keep only the new one.
+    const prev = digits[index]?.trim();
+    if (typed.length === 2 && prev && (typed.startsWith(prev) || typed.endsWith(prev))) {
+      typed = typed.startsWith(prev) ? typed.slice(1) : typed.slice(0, 1);
+    }
     // Pasting/autofilling the whole code into any box fills the rest.
     if (typed.length > 1) {
-      const clean = commit(typed);
+      const clean = commit(extractCode(raw, length));
       refs.current[Math.min(clean.length, length - 1)]?.focus();
       return;
     }
@@ -89,13 +110,12 @@ export function OtpInput({
           onFocus={(e) => e.target.select()}
           onPaste={(e) => {
             e.preventDefault();
-            const clean = commit(e.clipboardData.getData("text"));
+            const clean = commit(extractCode(e.clipboardData.getData("text"), length));
             refs.current[Math.min(clean.length, length - 1)]?.focus();
           }}
           inputMode="numeric"
           autoComplete={i === 0 ? "one-time-code" : "off"}
           aria-label={`Digit ${i + 1}`}
-          maxLength={1}
           disabled={disabled}
           className={cn(
             "font-mono-num h-12 w-full min-w-0 rounded-xl border text-center text-lg font-bold text-black transition-colors",

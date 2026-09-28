@@ -6,6 +6,7 @@ import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../comp
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
 import type { User, UserRole } from "../../types";
 
 /** A pasted "+91 98765 43210" should still find the stored 10-digit number. */
@@ -35,7 +36,7 @@ export default function AdminUsersPage() {
   // is how a manager account with no center could exist with no way to fix
   // it short of a raw API call — a real incident this closes.
   const [editUser, setEditUser] = useState<User | null>(null);
-  const [editForm, setEditForm] = useState({ full_name: "", role: "captain" as UserRole, service_center_id: "" });
+  const [editForm, setEditForm] = useState({ full_name: "", role: "captain" as UserRole, service_center_id: "", phone: "" });
   const [editError, setEditError] = useState("");
   // A customer's name opens their full purchase history (bookings + plans);
   // get_customer_360 is customer-only, so staff rows don't get this.
@@ -85,7 +86,17 @@ export default function AdminUsersPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: () => adminUserApi.update(editUser!.id, { ...editForm, service_center_id: editForm.service_center_id || null }),
+    mutationFn: () => {
+      const { phone, ...rest } = editForm;
+      // Phone goes only when it actually changed — the backend then marks
+      // it unverified and blocks duplicates / our own WhatsApp number.
+      const phoneChanged = phone !== (editUser!.phone || "");
+      return adminUserApi.update(editUser!.id, {
+        ...rest,
+        service_center_id: editForm.service_center_id || null,
+        ...(phoneChanged ? { phone } : {}),
+      });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       setEditUser(null);
@@ -95,7 +106,7 @@ export default function AdminUsersPage() {
 
   const openEdit = (u: User) => {
     setEditError("");
-    setEditForm({ full_name: u.full_name, role: u.role, service_center_id: u.service_center_id || "" });
+    setEditForm({ full_name: u.full_name, role: u.role, service_center_id: u.service_center_id || "", phone: u.phone || "" });
     setEditUser(u);
   };
 
@@ -231,10 +242,23 @@ export default function AdminUsersPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setEditError("");
+            if (editForm.phone !== (editUser?.phone || "") && !validateIndianMobile(editForm.phone)) {
+              setEditError("Enter a valid 10-digit mobile number.");
+              return;
+            }
             updateMutation.mutate();
           }}
         >
           <Input label="Full name" value={editForm.full_name} onChange={(e) => setEditForm({ ...editForm, full_name: e.target.value })} required />
+          <Input
+            label="Phone"
+            type="tel"
+            inputMode="numeric"
+            value={editForm.phone}
+            onChange={(e) => setEditForm({ ...editForm, phone: cleanMobileInput(e.target.value) })}
+            placeholder="10-digit mobile"
+            hint={editUser?.role === "manager" ? "New-booking alerts go to this number on WhatsApp. Use the manager's own number, not the business WhatsApp number." : undefined}
+          />
           {editUser && editUser.role !== "customer" && (
             <>
               <Select label="Role" value={editForm.role} onChange={(e) => setEditForm({ ...editForm, role: e.target.value as UserRole })}>

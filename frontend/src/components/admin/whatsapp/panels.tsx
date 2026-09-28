@@ -3,12 +3,13 @@
  * (marketing area), Analytics.
  */
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw, Rocket, Search } from "lucide-react";
 import { Badge, Button, Card, CardBody, CardHeader, Input, Modal, Select, Spinner } from "../../ui";
 import { whatsappCrmApi } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
 import { TemplatePreview } from "./modals";
+import { useDebouncedValue } from "../../shared/ListControls";
 
 /* ------------------------------------------------------------------ */
 /* Templates                                                           */
@@ -157,9 +158,18 @@ function CreateTemplateModal({ open, onClose }: { open: boolean; onClose: () => 
 /* ------------------------------------------------------------------ */
 /* Contacts                                                            */
 /* ------------------------------------------------------------------ */
+const CONTACTS_PAGE = 50;
+
 export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => void }) {
   const [search, setSearch] = useState("");
-  const { data, isLoading } = useQuery({ queryKey: ["wa-contacts", search], queryFn: () => whatsappCrmApi.contacts(search) });
+  const debouncedSearch = useDebouncedValue(search.trim(), 350);
+  const { data: pages, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: ["wa-contacts", debouncedSearch],
+    queryFn: ({ pageParam }) => whatsappCrmApi.contacts(debouncedSearch, pageParam, CONTACTS_PAGE),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.length < CONTACTS_PAGE ? undefined : last[last.length - 1]?.last_message_at || undefined),
+  });
+  const data = pages?.pages.flat();
   return (
     <Card>
       <CardHeader>
@@ -200,6 +210,13 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
           </table>
         )}
         {!isLoading && (data || []).length === 0 && <p className="py-8 text-center text-sm text-[var(--color-text-secondary)]">No contacts yet.</p>}
+        {hasNextPage && (
+          <div className="pt-3 text-center">
+            <Button size="sm" variant="outline" isLoading={isFetchingNextPage} onClick={() => fetchNextPage()}>
+              Load more
+            </Button>
+          </div>
+        )}
       </CardBody>
     </Card>
   );

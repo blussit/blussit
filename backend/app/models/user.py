@@ -11,7 +11,8 @@ class UserModel(BusinessRecordBase):
     full_name: str
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
-    password_hash: str
+    # None for OTP/Google-only customers — they never had a usable password.
+    password_hash: Optional[str] = None
     role: UserRole = UserRole.CUSTOMER
     status: UserStatus = UserStatus.ACTIVE
     profile_image: Optional[str] = None
@@ -47,3 +48,12 @@ class UserModel(BusinessRecordBase):
     # Aadhaar/PAN are shown MASKED (last 4) everywhere except the manager's
     # review screen and the captain's own profile — see StaffKycService.
     captain_kyc: Optional[dict] = None
+    # Customers: the "WhatsApp reminders & offers" switch (PUT /users/me).
+    # True = no marketing-template WhatsApps (repeat-booking, pass wash
+    # reminders); service updates and in-app notices are unaffected.
+    marketing_opt_out: bool = False
+    # Customers: when their latest wash was completed — $max-stamped by
+    # every completion path (BookingService._after_visit_completed) so the
+    # repeat-booking nudge reads users, not every completed booking.
+    last_completed_at: Optional[datetime] = None
+    last_repeat_reminder_at: Optional[datetime] = None

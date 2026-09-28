@@ -73,6 +73,8 @@ export default function ThankYouPage() {
   const { user, isLoading: authLoading } = useAuth();
   const [params] = useSearchParams();
   const token = params.get("token");
+  // Asked for auto-pay, but the gateway could only take a one-time payment.
+  const autoPayFellBack = params.get("autopay") === "off";
   const shouldReduceMotion = useReducedMotion();
   const instant = location.state as
     | {
@@ -117,19 +119,18 @@ export default function ThankYouPage() {
   // failed link creation must never read as "confirmed".
   const awaitingPayment = !!(confirmed.payload.awaiting_payment ?? instant?.awaiting_payment);
   const totalAmount = confirmed.payload.total_amount ?? instant?.total_amount;
-  const heading = isSubscription ? "Thank You For Subscribing!" : awaitingPayment ? "One Last Step — Pay To Confirm" : "Thank You For Your Booking!";
+  const heading = isSubscription ? "Your plan is active" : awaitingPayment ? "Pay to confirm" : "Booking confirmed";
+  const when = confirmed.payload.scheduled_date
+    ? `${format(confirmed.payload.scheduled_date)} · ${formatSlot(confirmed.payload.scheduled_slot)}`
+    : "";
   const message = isSubscription
-    ? confirmed.payload.plan_name
-      ? `Your ${confirmed.payload.plan_name} Subscription Is Active. You Can Start Booking Services With It Right Away.`
-      : "Your Subscription Is Active. You Can Start Booking Services With It Right Away."
+    ? `${confirmed.payload.plan_name || "Your plan"} is ready to book with.`
     : awaitingPayment
-      ? `Your slot on ${format(confirmed.payload.scheduled_date!)} · ${formatSlot(confirmed.payload.scheduled_slot)} is held for 30 minutes. Pay online to confirm it — or we'll release it.`
-      : confirmed.payload.booking_number
-        ? `Scheduled For ${format(confirmed.payload.scheduled_date!)} · ${formatSlot(confirmed.payload.scheduled_slot)}.`
-        : "Your Booking Is Confirmed. We'll Notify You As Soon As A Captain Is Assigned.";
+      ? `Slot held for 30 minutes${when ? `: ${when}` : ""}.`
+      : when || "We'll message you when a captain is assigned.";
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg-primary)] p-4">
+    <div className="flex min-h-screen items-center justify-center bg-white p-4">
       <motion.div
         initial={shouldReduceMotion ? false : { opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -144,7 +145,7 @@ export default function ThankYouPage() {
                   never loops, so the page reads calm a beat later. */}
               {!shouldReduceMotion && (
                 <motion.span
-                  className="absolute inset-0 rounded-full bg-[var(--color-accent-light)]"
+                  className="absolute inset-0 rounded-full bg-gray-100"
                   initial={{ scale: 0.6, opacity: 0.9 }}
                   animate={{ scale: 1.9, opacity: 0 }}
                   transition={{ duration: 0.8, ease: "easeOut" }}
@@ -154,7 +155,7 @@ export default function ThankYouPage() {
                 initial={shouldReduceMotion ? false : { scale: 0.4, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={shouldReduceMotion ? undefined : { type: "spring", stiffness: 260, damping: 16, delay: 0.05 }}
-                className="relative flex h-16 w-16 items-center justify-center rounded-full bg-[var(--color-accent-light)] text-[var(--color-success)]"
+                className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 text-black"
               >
                 {isSubscription ? <Gift className="h-9 w-9" /> : <CheckCircle2 className="h-9 w-9" />}
               </motion.span>
@@ -165,7 +166,7 @@ export default function ThankYouPage() {
               variants={contentVariants}
               initial={shouldReduceMotion ? false : "hidden"}
               animate="show"
-              className="mt-5 text-2xl font-bold text-[var(--color-text-primary)]"
+              className="mt-5 text-2xl font-bold text-black"
             >
               {heading}
             </motion.h1>
@@ -178,7 +179,7 @@ export default function ThankYouPage() {
                 variants={contentVariants}
                 initial={shouldReduceMotion ? false : "hidden"}
                 animate="show"
-                className="mt-1.5 text-base font-semibold text-[var(--color-text-primary)]"
+                className="mt-1.5 text-base font-semibold text-black"
               >
                 {serviceLabel}
               </motion.p>
@@ -188,19 +189,30 @@ export default function ThankYouPage() {
               variants={contentVariants}
               initial={shouldReduceMotion ? false : "hidden"}
               animate="show"
-              className="mt-2 text-sm text-[var(--color-text-secondary)]"
+              className="mt-2 text-sm text-gray-600"
             >
               {message}
             </motion.p>
+            {isSubscription && autoPayFellBack && (
+              <motion.p
+                custom={0.32}
+                variants={contentVariants}
+                initial={shouldReduceMotion ? false : "hidden"}
+                animate="show"
+                className="mx-auto mt-3 max-w-xs rounded-xl border border-[#F3E5B5] px-3 py-2 text-xs text-gray-600"
+              >
+                Auto-pay couldn't be set up — you paid once. You can buy again when it ends.
+              </motion.p>
+            )}
             {!isSubscription && confirmed.payload.booking_number && (
               <motion.p
                 custom={0.34}
                 variants={contentVariants}
                 initial={shouldReduceMotion ? false : "hidden"}
                 animate="show"
-                className="mt-1 font-mono-num text-xs text-[var(--color-text-secondary)]"
+                className="mt-1 font-mono-num text-xs text-gray-400"
               >
-                Booking ID: {confirmed.payload.booking_number}
+                {confirmed.payload.booking_number}
               </motion.p>
             )}
             {/* The one number the customer needs on the day: the captain
@@ -212,11 +224,11 @@ export default function ThankYouPage() {
                 variants={contentVariants}
                 initial={shouldReduceMotion ? false : "hidden"}
                 animate="show"
-                className="mt-4 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-4 py-3"
+                className="mt-4 rounded-xl border border-[#F3E5B5] bg-white px-4 py-3"
               >
-                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#B08A00]">Your Service Code</p>
+                <p className="text-sm font-medium text-gray-500">Service code</p>
                 <p className="font-mono-num mt-1 text-3xl font-bold tracking-[0.3em] text-black">{serviceCode}</p>
-                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Share this with the captain when they arrive. It's also in your WhatsApp confirmation.</p>
+                <p className="mt-1 text-xs text-gray-500">Share it with the captain on arrival.</p>
               </motion.div>
             )}
             {awaitingPayment && (
@@ -225,15 +237,16 @@ export default function ThankYouPage() {
                   <>
                     <a
                       href={paymentLink}
-                      className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#E8A900] text-sm font-bold text-white shadow-[0_8px_20px_rgba(232,169,0,0.24)] hover:bg-[#D99A00]"
+                      className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#E8A900] text-sm font-semibold text-white hover:bg-[#D99A00]"
                     >
-                      <CreditCard className="h-4 w-4" /> Pay {totalAmount ? `₹${totalAmount}` : "Now"} Online
+                      <CreditCard className="h-4 w-4" /> Pay {totalAmount ? `₹${totalAmount} ` : ""}now
                     </a>
-                    <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Prefer cash? Open the booking after logging in and choose "pay the captain instead".</p>
+                    {/* This tab doesn't refresh itself after the link's own page takes the payment. */}
+                    <p className="mt-2 text-xs text-gray-500">Already paid? It confirms automatically — no need to pay again.</p>
                   </>
                 ) : (
-                  <p className="rounded-xl border border-[#E8A900] bg-[#FFFCF0] px-4 py-3 text-xs text-[var(--color-text-primary)]">
-                    We couldn't set up the online payment link right now. Log in with your number, open this booking under My bookings, and either retry paying online or choose "pay the captain instead" — your slot is held for 30 minutes.
+                  <p className="rounded-xl border border-[#F3E5B5] px-4 py-3 text-xs text-gray-600">
+                    Payment link unavailable right now. Open this booking under My bookings to pay.
                   </p>
                 )}
               </motion.div>
@@ -257,16 +270,20 @@ export default function ThankYouPage() {
                 </div>
               ) : user ? (
                 <>
-                  <Button className="w-full" onClick={() => navigate(ROLE_HOME[user.role] || "/")}>
-                    <LayoutDashboard className="h-4 w-4" /> Return To Dashboard
+                  <Button
+                    variant={awaitingPayment && paymentLink ? "outline" : "info"}
+                    className="w-full"
+                    onClick={() => navigate(ROLE_HOME[user.role] || "/")}
+                  >
+                    <LayoutDashboard className="h-4 w-4" /> Go to dashboard
                   </Button>
                   {isSubscription ? (
                     <Button variant="outline" className="w-full" onClick={() => navigate("/app/subscriptions")}>
-                      <Gift className="h-4 w-4" /> View My Subscriptions
+                      <Gift className="h-4 w-4" /> View my plans
                     </Button>
                   ) : (
                     <Button variant="outline" className="w-full" disabled={!confirmed.reference_id} onClick={() => navigate(`/app/bookings/${confirmed.reference_id}`)}>
-                      <ReceiptText className="h-4 w-4" /> View Booking Details
+                      <ReceiptText className="h-4 w-4" /> View booking
                     </Button>
                   )}
                 </>
@@ -274,11 +291,11 @@ export default function ThankYouPage() {
                 <>
                   {/* Quick-booking accounts have no password — logging in is
                       a phone OTP, only if they ever want to see history. */}
-                  <Button className="w-full" onClick={() => navigate("/login")}>
-                    <LogIn className="h-4 w-4" /> Log In With OTP To Track It
+                  <Button variant={awaitingPayment && paymentLink ? "outline" : "info"} className="w-full" onClick={() => navigate("/login")}>
+                    <LogIn className="h-4 w-4" /> Log in to track it
                   </Button>
-                  <Button variant="outline" className="w-full" onClick={() => navigate("/")}>
-                    <Home className="h-4 w-4" /> Return To Website
+                  <Button variant="ghost" className="w-full" onClick={() => navigate("/")}>
+                    <Home className="h-4 w-4" /> Back to website
                   </Button>
                 </>
               )}

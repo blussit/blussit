@@ -56,6 +56,9 @@ COMPUTED_INSTANT_KEYS = frozenset({
     "slot_start", "slot_end", "estimated_start_at",
     "assigned_at", "manager_notified_at", "closed_at",
     "last_location_at",
+    # Pass reminder bookkeeping (UserSubscriptionModel) — now_ist() /
+    # datetime.now(utc) at write time, read back naive.
+    "last_used_at", "wash_reminder_sent_at", "used_up_notice_sent_at", "last_renewed_at",
 })
 
 

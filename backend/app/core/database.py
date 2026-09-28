@@ -20,6 +20,29 @@ def _redact_uri(uri: str) -> str:
     return _CREDENTIALS_RE.sub("//\\1:***@", uri)
 
 
+# Driver defaults are a 100-connection pool per process, a 30 s hang when
+# the cluster is unreachable, and NO socket timeout — a stuck read would
+# hold its request (or the reminder loop) forever. Per Cloud Run instance:
+# 30 connections is plenty for its request concurrency and keeps N
+# instances well under Atlas's connection cap; 5 s to find a server fails a
+# request fast instead of letting it pile up; 60 s per socket read is far
+# past any legitimate admin aggregation.
+_CLIENT_DEFAULTS = {
+    "maxPoolSize": 30,
+    "serverSelectionTimeoutMS": 5000,
+    "connectTimeoutMS": 10000,
+    "socketTimeoutMS": 60000,
+}
+
+
+def _client_options(uri: str) -> dict:
+    """The defaults above, minus any option MONGO_URI already sets
+    (`...?maxPoolSize=50`) — the URI stays the override, no code change."""
+    query = uri.split("?", 1)[1] if "?" in uri else ""
+    given = {part.split("=", 1)[0].strip().lower() for part in query.split("&") if part}
+    return {name: value for name, value in _CLIENT_DEFAULTS.items() if name.lower() not in given}
+
+
 class MongoDB:
     client: AsyncIOMotorClient | None = None
     db: AsyncIOMotorDatabase | None = None
@@ -35,7 +58,7 @@ async def connect_to_mongo(build_indexes: bool = True) -> None:
     container mid-index-build was a real deployment failure mode. Tests and
     scripts keep the synchronous default."""
     logger.info("Connecting to MongoDB at %s", _redact_uri(settings.MONGO_URI))
-    mongodb.client = AsyncIOMotorClient(settings.MONGO_URI)
+    mongodb.client = AsyncIOMotorClient(settings.MONGO_URI, **_client_options(settings.MONGO_URI))
     mongodb.db = mongodb.client[settings.MONGO_DB_NAME]
     if build_indexes:
         await create_indexes()
@@ -299,6 +322,10 @@ async def create_indexes() -> None:
     )
     await db.payment_orders.create_index([("customer_id", 1), ("created_at", -1)])
     await db.payment_orders.create_index([("kind", 1), ("status", 1), ("created_at", -1)])
+    # Auto-pay renewal sweep (PaymentService.sync_autopay_renewals): paid
+    # autopay mandates whose next_check_at is due — grows with subscribers
+    # and runs every minute.
+    await db.payment_orders.create_index([("kind", 1), ("status", 1), ("next_check_at", 1)])
     # Plan-revenue reporting: admin dashboard's plan-revenue tile and the
     # manager Sales section (both KPI figure and drill-down list) all match
     # on purpose+status+created_at, which no other index above starts with —
@@ -310,6 +337,12 @@ async def create_indexes() -> None:
     # carry booking_id).
     await db.payment_orders.create_index("booking_id", sparse=True)
     await db.payment_orders.create_index("booking_ids", sparse=True)
+    # PaymentService._flag_stale_settlements, every sweep pass: the rare
+    # claim whose settlement never finished (only those docs carry it).
+    await db.payment_orders.create_index("settling", sparse=True)
+    # Razorpay webhook dedupe (keyed on the event id) — 30 days is far past
+    # Razorpay's retry window.
+    await _ensure_ttl(db.razorpay_webhook_events, "received_at", 30 * 24 * 3600)
     # Auto-pay: one Razorpay plan per (our plan, vehicle tier, price) — the
     # unique key is what keeps _ensure_razorpay_plan from minting a new
     # gateway plan on every purchase.
@@ -355,4 +388,95 @@ async def create_indexes() -> None:
     # created_at index carries the 365d TTL (see _ensure_ttl above).
     await db.whatsapp_templates.create_index("name", unique=True)
     await db.whatsapp_conversations.create_index([("last_message_at", -1)])
+    # Website visitor KPI — the unique pair is what makes
+    # SiteVisitService.record's upsert count a device once per IST day, and
+    # its `date` prefix serves the stats range queries (no scan).
+    await db.site_visits.create_index([("date", 1), ("device_id", 1)], unique=True)
+
+    # Scale pack — each one names the query it serves. Built one by one and
+    # never fatal: an equivalent index someone added by hand under another
+    # name makes create_index raise, and that must not stop the rest.
+    scale_pack = (
+        # KpiService._bookings_between: an $or whose FIRST branch is
+        # created_at alone (no status/center prefix) — without this the
+        # whole $or collection-scans on every dashboard load. Also the
+        # unfiltered admin booking list's default sort.
+        (db.bookings, [("created_at", -1)], {}),
+        # ...and its SECOND branch (status=completed + closed_at range), the
+        # same shape as the "completed in period" drill-down in
+        # booking_routes._apply_period_filters.
+        (db.bookings, [("status", 1), ("closed_at", -1)], {}),
+        # Every _reminder_loop finder (status + a scheduled_date window) —
+        # runs every 60 s, forever.
+        (db.bookings, [("status", 1), ("scheduled_date", 1)], {}),
+        # Manager "today" counts (AnalyticsService.manager_summary) and the
+        # per-center collections ledger (PaymentService.center_collections).
+        (db.bookings, [("service_center_id", 1), ("status", 1), ("scheduled_date", 1)], {}),
+        # Pass lifecycle sweeps: status=active + an end_date window.
+        (db.user_subscriptions, [("status", 1), ("end_date", 1)], {}),
+        # Template usage counts (WhatsAppCrmService.list_local_templates)
+        # and its analytics' "templates sent since" query.
+        (db.whatsapp_outbox, [("template_name", 1), ("created_at", -1)], {}),
+        # Admin's unread-conversations badge, polled on every console page —
+        # only conversations with unread messages are ever in it.
+        (db.whatsapp_conversations, [("unread_count", 1)], {"name": "unread_conversations", "partialFilterExpression": {"unread_count": {"$gt": 0}}}),
+        # Admin user lists (UserService: role filter, newest first).
+        (db.users, [("role", 1), ("created_at", -1)], {}),
+        # KpiService.customers(): the all-time per-customer history $group
+        # reads ONLY these fields, so this index makes it index-only
+        # (explain: PROJECTION_COVERED, 0 documents examined) instead of a
+        # full scan of every booking document.
+        (db.bookings, [("is_deleted", 1), ("customer_id", 1), ("created_at", 1), ("status", 1), ("total_amount", 1)], {"name": "kpi_customer_history"}),
+        # CRM thread (outbox by phone, newest first) and the analytics'
+        # first-reply probe (outbox by phone, oldest after a time).
+        (db.whatsapp_outbox, [("phone", 1), ("created_at", -1)], {}),
+        # CRM search by number (anchored prefix / exact variants).
+        (db.whatsapp_conversations, [("phone", 1)], {}),
+        # KPI rating windows and center review lists / summaries.
+        (db.reviews, [("created_at", -1)], {}),
+        (db.reviews, [("service_center_id", 1), ("created_at", -1)], {}),
+        # Complaint lists (admin newest-first, manager per center) and the
+        # KPI operations window.
+        (db.complaints, [("created_at", -1)], {}),
+        (db.complaints, [("service_center_id", 1), ("created_at", -1)], {}),
+        # Subscription reports: admin list newest-first, and the manager
+        # overview's "sold by this center" branch.
+        (db.user_subscriptions, [("created_at", -1)], {}),
+        (db.user_subscriptions, [("service_center_id", 1), ("created_at", -1)], {}),
+        # KPI marketing: coverage leads captured in the period.
+        (db.coverage_leads, [("created_at", -1)], {}),
+        # Center-scoped "completed in period" branch of KpiService's window
+        # $or (manager Sales KPIs) and the center revenue drill-down: without
+        # it the branch scanned every completed booking of the center.
+        (db.bookings, [("service_center_id", 1), ("status", 1), ("closed_at", -1)], {}),
+        # Manager Subscribers page: distinct customers a center has served
+        # (UserSubscriptionService.center_overview) — a covered DISTINCT_SCAN
+        # instead of fetching every booking the center ever had.
+        (db.bookings, [("service_center_id", 1), ("customer_id", 1), ("is_deleted", 1)], {}),
+        # Manager queue's "late starts" scope (center_queue_filters:
+        # captain_start_stage in late/severely_late), default newest-first —
+        # otherwise it walked every booking the center ever had.
+        (db.bookings, [("service_center_id", 1), ("captain_start_stage", 1), ("created_at", -1)], {}),
+        # Repeat-booking nudge (find_customers_due_repeat_reminder): lapsed
+        # customers, longest-lapsed first — reads users, not every booking.
+        (db.users, [("role", 1), ("last_completed_at", 1)], {}),
+        # "Is a wash already booked on this pass?" — the wash reminder's
+        # $lookup (an $expr equality, which a partial index can't serve) and
+        # the used-all-washes check.
+        (db.bookings, [("subscription_id", 1), ("status", 1)], {}),
+        # Customer-facing lists, each sorted in the DB and capped: my passes
+        # (newest first), my vehicles / addresses (default first, then
+        # newest), my reviews, and the full notification list (no is_read
+        # filter, so the (user_id, is_read, created_at) index can't sort it).
+        (db.user_subscriptions, [("customer_id", 1), ("created_at", -1)], {}),
+        (db.vehicles, [("owner_id", 1), ("is_default", -1), ("created_at", -1)], {}),
+        (db.addresses, [("owner_id", 1), ("is_default", -1), ("created_at", -1)], {}),
+        (db.reviews, [("customer_id", 1), ("created_at", -1)], {}),
+        (db.notifications, [("user_id", 1), ("created_at", -1)], {}),
+    )
+    for collection, keys, options in scale_pack:
+        try:
+            await collection.create_index(keys, **options)
+        except Exception as exc:  # an equivalent index under another name — degrade, don't die
+            logger.warning("Index %s on %s skipped: %s", keys, collection.name, exc)
 

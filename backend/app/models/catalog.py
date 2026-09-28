@@ -52,6 +52,15 @@ class ServiceModel(BusinessRecordBase):
     # variant; the booking simply carries the chosen variant's id.
     variant_group: Optional[str] = None
     variant_label: Optional[str] = None
+    # Offer terms are admin data, never code keyed on a service name (the
+    # ₹149 Jet Wash launch offer is just these three set on one service).
+    # prepaid_only: must be paid online before the booking is confirmed.
+    # charges_travel: the visit pays the customer distance charge
+    # (PricingService.travel_quote). offer_tag: short label on the card; the
+    # landing popup promotes the first active main service carrying one.
+    prepaid_only: bool = False
+    charges_travel: bool = False
+    offer_tag: Optional[str] = None
     captain_fee: Optional[float] = None
     duration_minutes: int = 30
     image: Optional[str] = None

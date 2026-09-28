@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # standard fix.
 _background_tasks: set[asyncio.Task] = set()
 
+# The only notifications a manager receives on WhatsApp; everything else
+# addressed to a manager is written in-app only.
+MANAGER_WHATSAPP_EVENTS = frozenset({"manager_new_booking"})
+
 
 def _fire_and_forget(coro) -> None:
     task = asyncio.create_task(coro)
@@ -81,6 +85,11 @@ class NotificationService:
         phone = (user or {}).get("phone")
         if wa_marketing and (user or {}).get("marketing_opt_out"):
             return
+        if (user or {}).get("role") == "manager" and wa_event not in MANAGER_WHATSAPP_EVENTS:
+            # Founder's rule: a manager's WhatsApp carries new bookings
+            # only — every other alert (reminders, late starts, flags,
+            # complaints) stays in the portal's bell.
+            send_whatsapp = False
         if phone and send_whatsapp:
             coro = self._send_whatsapp(user_id, phone, title, message, wa_event, wa_params, wa_marketing, reference_id)
             if background:

@@ -42,6 +42,10 @@ export function CustomerNamePhoneFields({
 
   const query = picked ? "" : name.trim() || phone.trim();
   const suggestions = useCustomerTypeahead(query);
+  // A full number typed for an existing customer selects them on its own —
+  // their saved addresses and plans load without hunting for the dropdown.
+  const fullPhone = !picked && /^[6-9]\d{9}$/.test(phone) ? phone : "";
+  const phoneMatches = useCustomerTypeahead(fullPhone);
 
   useEffect(() => {
     function onOutsideClick(e: MouseEvent) {
@@ -58,6 +62,13 @@ export function CustomerNamePhoneFields({
     onChangePhone(customer.phone || "");
     onPick?.(customer);
   };
+
+  useEffect(() => {
+    if (!fullPhone) return;
+    const exact = phoneMatches.find((u) => u.phone === fullPhone);
+    if (exact) pick(exact);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullPhone, phoneMatches]);
 
   return (
     <div ref={containerRef} className="relative grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -93,7 +104,7 @@ export function CustomerNamePhoneFields({
       />
       {open && suggestions.length > 0 && (
         <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-xl border border-[#F3E5B5] bg-white shadow-lg">
-          <p className="border-b border-[#F3E5B5] bg-[#FAFAFA] px-4 py-1.5 text-[11px] font-medium uppercase tracking-wide text-gray-500">
+          <p className="border-b border-[#F3E5B5] bg-[#FAFAFA] px-4 py-1.5 text-xs text-gray-500">
             Existing customer{suggestions.length > 1 ? "s" : ""}
           </p>
           {suggestions.map((u) => (

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
@@ -9,7 +9,6 @@ import {
   Clock,
   Droplet,
   IndianRupee,
-  Leaf,
   MapPin,
   PlayCircle,
   ShieldCheck,
@@ -20,6 +19,8 @@ import {
 } from "lucide-react";
 import { catalogApi, homepageConfigApi } from "../../api/catalog";
 import { WhatsAppFloatingButton } from "./WhatsAppFloatingButton";
+import { DiscountBadge, discountPercent } from "../ui";
+import { INR, priceView } from "./landing/shared";
 
 /* ------------------------------------------------------------------ */
 /* Images                                                             */
@@ -130,11 +131,56 @@ export function OfferTicker() {
 const heroPhone = (slug: string) => `/hero/${slug}-m.webp`;
 const heroWide = (slug: string) => `/hero/${slug}-1600.webp`;
 
+/** Art direction for one hero photo, so the slide's main subject sits right
+ *  beside the frosted text panel instead of under it. Each slide carries one
+ *  per tier — focusPhone (< 640px, the -m crop), focusTablet (640–1279px) and
+ *  focusDesktop (≥ 1280px), the last two on the -1600 photo. All optional. */
+type HeroFocus = {
+  /** object-position of the photo in the hero frame, e.g. "50% 40%". A wide
+   *  frame fills the photo's width, so only the y value moves it; a portrait
+   *  tablet fills its height, so there the x value picks the slice shown. */
+  position?: string;
+  /** Zoom (≥ 1). Grown from the left edge (origin "0% …") it slides a
+   *  width-filling photo's subject out from under the panel to the right. */
+  scale?: number;
+  /** The point the zoom grows from. */
+  origin?: string;
+  /** Phone only: raise the photo by this % of the frame height so its subject
+   *  clears the text card; the strip it leaves at the foot fades to dark. */
+  lift?: number;
+};
+
+/** A slide's three focus tiers as CSS variables; the img's classes pick the
+ *  tier per breakpoint, so the same <img> (and its preload) serves every size. */
+function heroFocusStyle(
+  phone?: HeroFocus,
+  tablet?: HeroFocus,
+  desktop?: HeroFocus
+): CSSProperties {
+  const transform = (f?: HeroFocus) =>
+    [f?.lift ? `translateY(-${f.lift}%)` : "", f?.scale && f.scale !== 1 ? `scale(${f.scale})` : ""]
+      .filter(Boolean)
+      .join(" ") || "none";
+  return {
+    "--hero-pos-m": phone?.position ?? "50% 50%",
+    "--hero-t-m": transform(phone),
+    "--hero-o-m": phone?.origin ?? "50% 50%",
+    "--hero-fade-m": phone?.lift ? "linear-gradient(180deg,#000 86%,transparent 100%)" : "none",
+    "--hero-pos-t": tablet?.position ?? "50% 50%",
+    "--hero-t-t": transform(tablet),
+    "--hero-o-t": tablet?.origin ?? "50% 50%",
+    "--hero-pos-d": desktop?.position ?? "50% 50%",
+    "--hero-t-d": transform(desktop),
+    "--hero-o-d": desktop?.origin ?? "50% 50%",
+  } as CSSProperties;
+}
+
 const HERO_SLIDES = [
   {
     id: "home",
     type: "home" as const,
     eyebrow: "Premium Car Care",
+    tag: "Doorstep service",
     title: "CAR WASH",
     titleLine2: "AT YOUR",
     titleAccent: "DOORSTEP",
@@ -142,33 +188,14 @@ const HERO_SLIDES = [
       "We come to you. You relax.\nWe make your car shine like new.",
     image: "home",
     serviceSlug: "",
+    // The foam-covered car fills the right half; keep its wheel in frame.
+    focusPhone: { position: "0% 100%", scale: 1.15, origin: "0% 100%" },
+    focusTablet: { position: "30% 60%" },
+    focusDesktop: { position: "50% 72%" },
   },
 
-  // Offer slides mirror the live catalogue (backend/app/seed.py) — prices
-  // are the hatchback price; the wizard shows the exact per-type amount.
-  {
-    id: "star-wash",
-    type: "offer" as const,
-    eyebrow: "Launch Offer",
-    title: "STAR WASH",
-    titleLine2: "",
-    titleAccent: "",
-    description:
-      "Foam wash outside, vacuum and dashboard polish inside.",
-    price: "₹349",
-    oldPrice: "₹449",
-    discount: "SAVE 22%",
-    tag: "MOST POPULAR",
-    note: "",
-    items: [
-      "Exterior foam wash",
-      "Interior vacuum",
-      "Dashboard polish",
-    ],
-    image: "star-wash",
-    serviceSlug: "star-wash",
-  },
-
+  // Prices here are only the fallback — the hero shows the live catalogue
+  // price (priceView) once the slide's service has loaded.
   {
     id: "deep-cleaning",
     type: "offer" as const,
@@ -178,10 +205,9 @@ const HERO_SLIDES = [
     titleAccent: "",
     description:
       "Everything in Star Wash, plus a full interior clean.",
-    price: "₹699",
-    oldPrice: "₹999",
-    discount: "SAVE 30%",
-    tag: "BEST VALUE",
+    price: 699,
+    oldPrice: 999,
+    tag: "Premium care",
     note: "",
     items: [
       "Everything in Star Wash",
@@ -191,6 +217,36 @@ const HERO_SLIDES = [
     ],
     image: "deep-cleaning",
     serviceSlug: "deep-cleaning",
+    // The steam nozzle on the centre console, with its cloud of steam.
+    focusPhone: { position: "0% 100%", scale: 1.3, origin: "0% 100%" },
+    focusTablet: { position: "0% 50%", scale: 1.15, origin: "0% 50%" },
+    focusDesktop: { position: "50% 45%", scale: 1.2, origin: "0% 50%" },
+  },
+
+  {
+    id: "star-wash",
+    type: "offer" as const,
+    eyebrow: "Launch Offer",
+    title: "STAR WASH",
+    titleLine2: "",
+    titleAccent: "",
+    description:
+      "Foam wash outside, vacuum and dashboard polish inside.",
+    price: 349,
+    oldPrice: 449,
+    tag: "Popular wash",
+    note: "",
+    items: [
+      "Exterior foam wash",
+      "Interior vacuum",
+      "Dashboard polish",
+    ],
+    image: "star-wash",
+    serviceSlug: "star-wash",
+    // The mitt wiping the foamed door, just past the worker's shoulder.
+    focusPhone: { position: "0% 100%", scale: 1.3, origin: "0% 100%", lift: 12 },
+    focusTablet: { position: "23% 45%" },
+    focusDesktop: { position: "50% 40%" },
   },
 
   {
@@ -202,10 +258,9 @@ const HERO_SLIDES = [
     titleAccent: "",
     description:
       "A clean finish without a drop of water wasted.",
-    price: "₹319",
-    oldPrice: "₹399",
-    discount: "SAVE 20%",
-    tag: "ECO FRIENDLY",
+    price: 319,
+    oldPrice: 399,
+    tag: "Eco friendly",
     note: "",
     items: [
       "Waterless exterior clean",
@@ -214,6 +269,10 @@ const HERO_SLIDES = [
     ],
     image: "waterless",
     serviceSlug: "waterless-service",
+    // The gloved hand wiping with the microfibre, the spray bottle beside it.
+    focusPhone: { position: "0% 100%", scale: 1.1, origin: "0% 100%" },
+    focusTablet: { position: "0% 45%", scale: 1.1, origin: "0% 40%" },
+    focusDesktop: { position: "50% 45%" },
   },
 
   {
@@ -225,10 +284,9 @@ const HERO_SLIDES = [
     titleAccent: "",
     description:
       "A quick exterior refresh for your everyday drive.",
-    price: "₹249",
-    oldPrice: "₹299",
-    discount: "SAVE 17%",
-    tag: "QUICK CLEAN",
+    price: 249,
+    oldPrice: 299,
+    tag: "Quick clean",
     note: "",
     items: [
       "Exterior foam wash",
@@ -236,6 +294,10 @@ const HERO_SLIDES = [
     ],
     image: "jet-wash",
     serviceSlug: "jet-wash",
+    // The jet spray hitting the car.
+    focusPhone: { position: "0% 100%", scale: 1.2, origin: "0% 100%", lift: 18 },
+    focusTablet: { position: "0% 55%" },
+    focusDesktop: { position: "50% 60%" },
   },
 
   {
@@ -247,10 +309,10 @@ const HERO_SLIDES = [
     titleAccent: "",
     description:
       "Foam wash for your bike at your doorstep.\nTwo bikes together for ₹159.",
-    price: "₹99",
-    oldPrice: "",
-    discount: "1 BIKE",
-    tag: "BIKE",
+    price: 99,
+    oldPrice: null,
+    unit: "1 bike",
+    tag: "Two-wheeler",
     note: "",
     items: [
       "Bike foam wash",
@@ -259,6 +321,10 @@ const HERO_SLIDES = [
     ],
     image: "bike-wash",
     serviceSlug: "bike-wash",
+    // The pro's gloved hand washing the foamed bike.
+    focusPhone: { position: "0% 100%", scale: 1.15, origin: "0% 100%", lift: 12 },
+    focusTablet: { position: "0% 50%" },
+    focusDesktop: { position: "50% 45%" },
   },
 ];
 
@@ -266,28 +332,62 @@ const HERO_SLIDES = [
 /* HERO FEATURES                                                      */
 /* ------------------------------------------------------------------ */
 
-const HERO_FEATURES = [
-  {
-    icon: Droplet,
-    label: "Water Efficient",
-    sub: "Save Water",
-  },
-  {
-    icon: ShieldCheck,
-    label: "Safe & Secure",
-    sub: "100% Safe Wash",
-  },
-  {
-    icon: UserCheck,
-    label: "Trained Experts",
-    sub: "Verified Staff",
-  },
-  {
-    icon: Leaf,
-    label: "Eco Friendly",
-    sub: "Green Products",
-  },
+const HERO_STATS = [
+  { emoji: "😊", value: 100, suffix: "+", label: "Happy customers" },
+  { emoji: "🚗", value: 140, suffix: "+", label: "Services done" },
+  { emoji: "💧", value: 2000, suffix: "+", label: "Liters of water saved" },
+  { emoji: "⭐", value: 4.9, decimals: 1, suffix: "/5", label: "Customer rating" },
 ];
+
+/** Hairlines between the hero panel's cells for each of its shapes:
+ * one row (sm, xl), one column (md) and 2×2 (lg). */
+const HERO_STAT_DIVIDERS = [
+  "",
+  "border-l md:border-l-0 md:border-t lg:border-t-0 lg:border-l",
+  "border-l md:border-l-0 md:border-t lg:border-l-0 xl:border-t-0 xl:border-l",
+  "border-l md:border-l-0 md:border-t lg:border-l xl:border-t-0",
+];
+
+/** Counts 0 → `to` once, the first time it scrolls into view. */
+function CountUp({ to, decimals = 0, duration = 1400 }: { to: number; decimals?: number; duration?: number }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [value, setValue] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || !("IntersectionObserver" in window)) {
+      setValue(to);
+      return;
+    }
+    let frame = 0;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        const start = performance.now();
+        const tick = (now: number) => {
+          const t = Math.min(1, (now - start) / duration);
+          setValue(to * (1 - Math.pow(1 - t, 3)));
+          if (t < 1) frame = requestAnimationFrame(tick);
+        };
+        frame = requestAnimationFrame(tick);
+      },
+      { threshold: 0.4 },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [to, duration]);
+
+  return (
+    <span ref={ref}>
+      {value.toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}
+    </span>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* FIGMA OFFERS                                                       */
@@ -506,8 +606,8 @@ const SHOW_LIMITED_TIME_OFFERS = false;
 export function LandingHero({
   onBook,
 }: {
-  /** Called with the slide's live service id when it exists, so the wizard preselects it. */
-  onBook: (serviceId?: string) => void;
+  /** Called with the slide's live service slug when it exists, so the booking page preselects it. */
+  onBook: (serviceSlug?: string) => void;
 }) {
   const { data: config } = useQuery({
     queryKey: ["homepage-config"],
@@ -553,19 +653,14 @@ export function LandingHero({
   }, []);
 
   const slide = HERO_SLIDES[activeSlide];
-  const slideServiceId = slide.serviceSlug
-    ? (servicesData?.data ?? []).find((svc) => svc.slug === slide.serviceSlug)?.id
+  const slideService = slide.serviceSlug
+    ? (servicesData?.data ?? []).find((svc) => svc.slug === slide.serviceSlug)
     : undefined;
+  const livePrice = slideService ? priceView(slideService) : null;
+  const slidePrice = livePrice?.final ?? slide.price;
+  const slideOldPrice = livePrice ? livePrice.original : slide.oldPrice;
 
   const isHome = slide.type === "home";
-  const heroImagePosition: Record<string, string> = {
-    home: "68% 38%",
-    "star-wash": "68% 48%",
-    "deep-cleaning": "64% 42%",
-    waterless: "62% 42%",
-    "jet-wash": "62% 45%",
-    "bike-wash": "66% 45%",
-  };
 
   return (
     <section className="bg-white">
@@ -575,8 +670,8 @@ export function LandingHero({
       {/* ============================================================ */}
 
       <WhatsAppFloatingButton />
-      <div 
-        className="relative isolate h-[540px] min-h-0 overflow-hidden bg-[#111] sm:h-[clamp(620px,78vh,760px)]"
+      <div
+        className="relative isolate h-[540px] min-h-0 overflow-hidden bg-[#111] [--hero-h:clamp(620px,78vh,760px)] sm:h-[var(--hero-h)]"
         {...heroHandlers}
       >
         {/* A single, full-bleed image plane keeps the artwork and copy in one composition. */}
@@ -594,21 +689,30 @@ export function LandingHero({
             <img
               src={heroWide(slide.image)}
               alt={isHome ? "BLUSSIT doorstep car wash" : slide.title}
-              className="absolute inset-0 h-full w-full object-cover"
-              style={{ objectPosition: heroImagePosition[slide.id] ?? "center center" }}
+              // Per-slide art direction (HERO_SLIDES focus*): phone / tablet / desktop tiers.
+              className="absolute inset-0 h-full w-full object-cover [mask-image:var(--hero-fade-m)] [object-position:var(--hero-pos-m)] [transform-origin:var(--hero-o-m)] [transform:var(--hero-t-m)] [-webkit-mask-image:var(--hero-fade-m)] sm:[mask-image:none] sm:[object-position:var(--hero-pos-t)] sm:[transform-origin:var(--hero-o-t)] sm:[transform:var(--hero-t-t)] sm:[-webkit-mask-image:none] xl:[object-position:var(--hero-pos-d)] xl:[transform-origin:var(--hero-o-d)] xl:[transform:var(--hero-t-d)]"
+              style={heroFocusStyle(slide.focusPhone, slide.focusTablet, slide.focusDesktop)}
               decoding="async"
               {...(activeSlide === 0 && !advanced.current ? { fetchPriority: "high" as const } : {})}
             />
           </motion.picture>
 
-          {/* Subtle left-side shading gives the copy contrast without hiding the car. */}
-          <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,0.48)_0%,rgba(0,0,0,0.35)_22%,rgba(0,0,0,0.18)_42%,rgba(0,0,0,0.06)_65%,rgba(0,0,0,0)_100%)]" />
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_0%,transparent_25%,transparent_75%,rgba(0,0,0,0.12)_100%)]" />
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_0%,rgba(0,0,0,0.15)_35%,rgba(0,0,0,0.55)_100%)] sm:hidden" />
+          {/* The frosted panel carries the copy's contrast now, so the photo
+              keeps its own light — only a faint floor for the slide dots. */}
+          <div className="absolute inset-0 hidden bg-[linear-gradient(180deg,transparent_72%,rgba(0,0,0,0.16)_100%)] sm:block" />
+          {/* Phones: one dark floor under the dots on every slide, so the lifted photos' end blends in */}
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,transparent_62%,#111_88%)] sm:hidden" />
         </div>
 
-        {/* Hero Content */}
-        <div className="container-page relative z-10 flex h-full flex-col justify-center px-5 pb-16 pt-12 sm:px-8 sm:pb-56 sm:pt-14 lg:px-0 lg:pb-24">
+        {/* Hero Content — a frosted card on the left with the subject beside
+            it. Phones get a compact card (title, price, CTAs) low in the frame,
+            kept left of the fixed call/WhatsApp buttons, with the subject above. */}
+        {/* Tablet up, the card sits on a fixed baseline instead of being
+            centred: the slides differ in height by ~130px, and the stats
+            panel shares that baseline. The bottom gap stays small enough on
+            short heroes that the tallest slide still clears the top. */}
+        <div className="container-page relative z-10 flex h-full flex-col justify-center px-5 py-8 sm:px-8 sm:pb-56 sm:pt-14 md:justify-end md:pb-[max(64px,min(calc(var(--hero-h)_-_556px),calc((var(--hero-h)_-_460px)_/_2)))] lg:px-0">
+          <div className="md:flex md:items-end md:justify-between md:gap-4 lg:gap-6">
 
           <motion.div
             key={slide.id}
@@ -624,17 +728,17 @@ export function LandingHero({
               duration: 0.55,
               ease: [0.22, 1, 0.36, 1],
             }}
-            className="relative z-30 max-w-[540px] pt-2"
+            className="relative z-30 -ml-1 mr-[52px] box-content max-w-[296px] rounded-[20px] border border-white/15 bg-black/50 p-3.5 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.7)] backdrop-blur-md sm:mx-0 sm:w-fit sm:max-w-[420px] sm:rounded-[24px] sm:border sm:bg-black/55 sm:p-7 sm:shadow-[0_24px_60px_-30px_rgba(0,0,0,0.7)] sm:backdrop-blur-[20px] xl:max-w-[540px] xl:p-8"
           >
 
             {isHome && config?.banner_active && config?.banner_text && (
-              <p className="mb-3 w-fit rounded-full bg-[#E8A900] px-3.5 py-1.5 text-[11px] font-black uppercase tracking-[0.06em] text-white shadow-[0_5px_14px_rgba(232,169,0,0.3)]">
+              <p className="mb-3 hidden w-fit rounded-full bg-[#E8A900] px-3.5 py-1.5 text-[11px] font-black uppercase tracking-[0.06em] text-white shadow-[0_5px_14px_rgba(232,169,0,0.3)] sm:block">
                 {config.banner_text}
               </p>
             )}
 
-            {/* Eyebrow */}
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Eyebrow — tablet up; phones keep the card to title, price and CTAs */}
+            <div className="hidden flex-wrap items-center gap-2 sm:flex">
 
               <p className="w-fit border-b border-[#E8A900]/75 pb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-[#E8A900] sm:text-xs">
                 {isHome
@@ -643,7 +747,7 @@ export function LandingHero({
                   : slide.eyebrow}
               </p>
 
-              {!isHome && (
+              {slide.tag && (
                 <span className="rounded-full border border-[#E8A900]/45 bg-[#E8A900]/20 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.09em] text-[#F5C542] shadow-[0_4px_12px_rgba(0,0,0,0.20)]">
                   {slide.tag}
                 </span>
@@ -651,9 +755,16 @@ export function LandingHero({
 
             </div>
 
+            {/* Phones: the slide's tag above the title */}
+            {slide.tag && (
+              <span className="mb-2.5 inline-flex rounded-full border border-[#E8A900]/45 bg-[#E8A900]/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.09em] text-[#F5C542] sm:hidden">
+                {slide.tag}
+              </span>
+            )}
+
             {/* Heading */}
             {isHome ? (
-              <h1 className="mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
+              <h1 className="mt-0 sm:mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
                 {/* Admin Homepage Settings drives the home headline — the
                     hardcoded slide copy is only the fallback. */}
                 {config?.hero_headline ? (
@@ -681,7 +792,7 @@ export function LandingHero({
                 )}
               </h1>
             ) : (
-              <h1 className="mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
+              <h1 className="mt-0 sm:mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
                 {slide.title}
 
                 {slide.titleLine2 && (
@@ -697,33 +808,47 @@ export function LandingHero({
 
             {/* Offer Price */}
             {!isHome && (
-              <div className="mt-5 flex flex-wrap items-center gap-3">
+              <div className="mt-2.5 sm:mt-5 flex flex-wrap items-center gap-3">
 
-                {slide.oldPrice && (
+                {slideOldPrice != null && (
                   <span className="text-[15px] font-semibold text-white/55 line-through sm:text-[17px]">
-                    {slide.oldPrice}
+                    {INR(slideOldPrice)}
                   </span>
                 )}
 
-                <span className="text-[38px] font-black leading-none tracking-[-0.04em] text-[#E8A900] sm:text-[46px]">
-                  {slide.price}
-                </span>
+                {slidePrice != null && (
+                  <span className="text-[38px] font-black leading-none tracking-[-0.04em] text-[#E8A900] sm:text-[46px]">
+                    {INR(slidePrice)}
+                  </span>
+                )}
 
-                <span className="rounded-full bg-[#E8A900] px-3 py-1.5 text-[10px] font-black tracking-[0.04em] text-white shadow-[0_5px_14px_rgba(232,169,0,0.24)]">
-                  {slide.discount}
-                </span>
+                {slide.unit && <span className="text-[13px] font-semibold text-white/75">{slide.unit}</span>}
+
+                {slidePrice != null && <DiscountBadge percent={discountPercent(slidePrice, slideOldPrice)} />}
 
               </div>
             )}
 
+            {/* Phones: what's included, short and spaced */}
+            {!isHome && slide.items.length > 0 && (
+              <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2 sm:hidden">
+                {slide.items.map((item) => (
+                  <li key={item} className="flex items-center gap-1.5 text-[12px] font-medium leading-tight text-white/85">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#E8A900]" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            )}
+
             {/* Description */}
-            <p className="mt-5 max-w-[500px] whitespace-pre-line text-[14px] font-medium leading-relaxed text-white/80 sm:text-[16px]">
+            <p className="mt-5 hidden max-w-[500px] whitespace-pre-line text-[14px] font-medium leading-relaxed text-white/80 sm:block sm:text-[16px]">
               {isHome && config?.hero_subtext ? config.hero_subtext : slide.description}
             </p>
 
             {/* Items */}
             {!isHome && (
-              <div className="mt-5 grid max-w-[440px] grid-cols-1 gap-x-5 gap-y-2 sm:grid-cols-2">
+              <div className="mt-5 hidden max-w-[440px] grid-cols-2 gap-x-5 gap-y-2 sm:grid">
 
                 {slide.items.map((item) => (
                   <div
@@ -742,15 +867,15 @@ export function LandingHero({
             )}
 
             {/* Buttons */}
-            <div className="mt-8 flex flex-row gap-2.5 sm:gap-3 w-full sm:w-auto">
+            <div className="mt-4 flex w-full flex-col gap-2 sm:mt-8 sm:w-auto sm:flex-row sm:flex-nowrap sm:gap-3">
 
               <PrimaryButton
-                onClick={() => onBook(slideServiceId)}
-                className="!rounded-[10px] flex-1 sm:flex-none px-2 py-3 text-[11px] sm:px-6 sm:py-3.5 sm:text-[12px]"
+                onClick={() => onBook(slideService?.slug)}
+                className="!rounded-[10px] min-h-[44px] w-full whitespace-nowrap !px-2.5 py-3 text-[13px] sm:w-auto sm:min-h-0 sm:flex-none sm:whitespace-normal sm:!px-6 sm:py-3.5 sm:text-[12px]"
               >
                 {isHome
-                  ? "Book Your Wash"
-                  : "Book This Offer"}
+                  ? "Book your wash"
+                  : "Book this offer"}
 
                 <ArrowRight className="h-3 w-3 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5 sm:h-3.5 sm:w-3.5" />
               </PrimaryButton>
@@ -763,49 +888,45 @@ export function LandingHero({
                       behavior: "smooth",
                     })
                 }
-                className="rounded-[10px] flex-1 sm:flex-none !border-white/55 !bg-[#141414]/35 px-2 py-3 text-[11px] sm:px-5 sm:py-3.5 sm:text-[12px] !text-white shadow-none backdrop-blur-sm hover:!border-[#E8A900] hover:!bg-[#E8A900]/15 hover:!text-white"
+                className="rounded-[10px] min-h-[44px] w-full whitespace-nowrap sm:w-auto sm:min-h-0 sm:flex-none sm:whitespace-normal !border-white/55 !bg-[#141414]/35 !px-2.5 py-3 text-[13px] sm:!px-5 sm:py-3.5 sm:text-[12px] !text-white shadow-none backdrop-blur-sm hover:!border-[#E8A900] hover:!bg-[#E8A900]/15 hover:!text-white"
               >
-                Explore Services
+                Explore services
               </OutlineButton>
 
             </div>
 
           </motion.div>
 
-          {/* Shared benefit strip: identical and static on every slide (no per-slide animation). */}
+          {/* Shared stats panel: identical and static on every slide. Smoked
+              glass like the card; right edge on the container edge. Below the
+              card on small tablets (no room beside it), then a column (md),
+              2×2 (lg) and one row (xl) beside it on the card's baseline. */}
           <div
-              className="absolute bottom-[52px] left-5 right-5 z-40 hidden sm:grid sm:grid-cols-4 grid-cols-2 gap-y-3 rounded-[18px] border border-[#E5E5E5] bg-white px-3 py-3 shadow-[0_12px_32px_rgba(0,0,0,0.06)] sm:left-8 sm:right-8 sm:px-5 lg:bottom-[42px] lg:left-auto lg:right-[3%] lg:w-[min(46vw,760px)] lg:px-5 lg:py-4"
-            >
-
-              {HERO_FEATURES.map((f) => (
-                <div
-                  key={f.sub}
-                  className="flex min-w-0 flex-col items-center justify-center gap-1.5 border-l border-[#E5E5E5] px-2 odd:border-l-0 sm:odd:border-l sm:first:border-l-0"
-                >
-
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full border border-[#E8A900]/40 bg-[#E8A900]/10 text-[var(--color-gold)]">
-                    <f.icon className="h-4 w-4" />
+            data-hero-stats
+            className="absolute bottom-[52px] left-4 right-4 z-20 hidden grid-cols-4 rounded-[22px] border border-white/15 bg-black/50 p-1.5 shadow-[0_24px_60px_-30px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-[20px] sm:grid md:static md:ml-auto md:w-[224px] md:shrink-0 md:grid-cols-1 lg:w-[452px] lg:grid-cols-2 xl:w-[600px] xl:grid-cols-4 2xl:w-[640px]"
+          >
+            {HERO_STATS.map((stat, i) => (
+              <div
+                key={stat.label}
+                className={`flex min-w-0 flex-col items-center gap-2 border-white/10 px-2 py-3 text-center md:flex-row md:gap-3 md:px-3.5 md:py-3 md:text-left xl:flex-col xl:gap-2 xl:px-2 xl:py-3.5 xl:text-center ${HERO_STAT_DIVIDERS[i]}`}
+              >
+                <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/10 text-[17px] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] xl:h-10 xl:w-10 xl:text-[19px]">
+                  {stat.emoji}
+                </span>
+                <span className="min-w-0">
+                  <span className="block whitespace-nowrap font-display text-[22px] font-extrabold leading-none tracking-[-0.02em] text-white tabular-nums lg:text-[24px] xl:text-[26px] 2xl:text-[28px]">
+                    <CountUp to={stat.value} decimals={stat.decimals} />
+                    <span className="text-[#E8A900]">{stat.suffix}</span>
                   </span>
+                  <span className="mt-1.5 block text-[11px] font-medium leading-tight text-white/70 lg:whitespace-nowrap lg:text-[12px]">{stat.label}</span>
+                </span>
+              </div>
+            ))}
+          </div>
 
-                  <div className="text-center">
-
-                    <span className="block text-[9px] font-bold leading-tight text-[#312D26]">
-                      {f.label}
-                    </span>
-
-                    <span className="mt-1 block text-[8px] font-medium leading-tight text-gray-500">
-                      {f.sub}
-                    </span>
-
-                  </div>
-
-                </div>
-              ))}
-
-            </div>
-
+          </div>
         </div>
-        <div className="absolute bottom-7 left-5 z-50 flex items-center gap-2 sm:left-8 lg:left-1/2 lg:-translate-x-1/2">
+        <div className="absolute bottom-3 left-5 z-50 flex items-center gap-2 sm:bottom-7 sm:left-8 lg:left-1/2 lg:-translate-x-1/2">
   {HERO_SLIDES.map((heroSlide, index) => (
     <button
       key={heroSlide.id}
@@ -1059,33 +1180,26 @@ export function LandingHero({
       {/* overlay, shown below the hero; static, identical on every slide */}
       {/* ============================================================ */}
 
-      <div className="grid grid-cols-2 gap-3 border-t border-cream-line-soft bg-white px-5 py-4 sm:hidden">
-
-        {HERO_FEATURES.map((f) => (
-          <div
-            key={f.label}
-            className="flex items-center gap-2.5"
-          >
-
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#FFF4CD] text-black">
-              <f.icon className="h-4 w-4" />
-            </span>
-
-            <div className="leading-tight">
-
-              <span className="block text-[10px] font-bold text-black">
-                {f.label}
+      <div className="bg-white px-5 py-5 sm:hidden">
+        <div className="grid grid-cols-2 rounded-[22px] bg-[#141414] p-1.5 shadow-[0_18px_40px_-22px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.08)]">
+          {HERO_STATS.map((stat, i) => (
+            <div
+              key={stat.label}
+              className={`flex min-w-0 flex-col items-center gap-2 border-white/10 px-2 py-3.5 text-center ${i % 2 ? "border-l" : ""} ${i > 1 ? "border-t" : ""}`}
+            >
+              <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/10 text-[17px] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
+                {stat.emoji}
               </span>
-
-              <span className="block text-[9px] font-medium text-neutral-500">
-                {f.sub}
+              <span className="min-w-0">
+                <span className="block whitespace-nowrap font-display text-[22px] font-extrabold leading-none tracking-[-0.02em] text-white tabular-nums">
+                  <CountUp to={stat.value} decimals={stat.decimals} />
+                  <span className="text-[#E8A900]">{stat.suffix}</span>
+                </span>
+                <span className="mt-1.5 block whitespace-nowrap text-[11px] font-medium leading-tight text-white/70">{stat.label}</span>
               </span>
-
             </div>
-
-          </div>
-        ))}
-
+          ))}
+        </div>
       </div>
 
     </section>

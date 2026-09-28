@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
@@ -18,8 +18,9 @@ import { useToast } from "../../context/ToastContext";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { ISSUE_LABELS, isOpenIssue, needsCaptain } from "../../lib/constants";
-import { useBookingFilters } from "../../lib/useBookingFilters";
+import type { SortOrder } from "../../lib/useBookingFilters";
 import { useLiveChannel } from "../../lib/socket";
+import type { ApiPaginated } from "../../lib/api-client";
 import type { Booking } from "../../types";
 
 type View = "attention" | "late_starts" | "all";
@@ -77,6 +78,12 @@ function byPriorityThenScheduled(a: Booking, b: Booking) {
 }
 
 const PRIORITY_OPTIONS: ("high" | "medium" | "low")[] = ["high", "medium", "low"];
+
+// Every list here is filtered and paged by the server, so however many
+// bookings a center has, each one is reachable — none silently falls off
+// the end of "the newest 100".
+const PAGE_SIZE = 100;
+const nextPage = (last: ApiPaginated<Booking>) => (last.meta.page < last.meta.total_pages ? last.meta.page + 1 : undefined);
 
 function bookingLabel(b: Booking): string {
   if (b.combo_name) return b.combo_name;
@@ -163,25 +170,65 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const { data: center } = useQuery({ queryKey: ["center-detail-for-queue", centerId], queryFn: () => adminServiceCenterApi.get(centerId), enabled: !!centerId });
 
-  // One query, fetched unfiltered — everything else (new/flagged/status
-  // filter/sort) is derived from it client-side. Simpler than juggling two
-  // separate server-filtered queries, and center booking volumes here don't
-  // need more than a single page to stay complete.
-  const centerBookingsQueryKey = ["center-bookings", centerId];
-  const { data, isLoading } = useQuery({
-    queryKey: centerBookingsQueryKey,
-    queryFn: () => bookingApi.forCenter(centerId, { page: 1, page_size: 100 }),
+  // "Needs attention" = every booking still waiting for a captain plus every
+  // open flag, soonest first, however old — fetched by that exact filter.
+  const attentionQuery = useInfiniteQuery({
+    queryKey: ["center-bookings", centerId, "attention"],
+    queryFn: ({ pageParam }) => bookingApi.forCenter(centerId, { scope: "attention", sort: "scheduled_asc", page: pageParam, page_size: PAGE_SIZE }),
+    initialPageParam: 1,
+    getNextPageParam: nextPage,
     enabled: !!centerId,
     // Live-pushed over "center-bookings:{centerId}" (see below) — this
-    // interval is now just the reconnect-window fallback, not the primary
-    // update path.
+    // interval is just the reconnect-window fallback.
     refetchInterval: 60000,
     refetchIntervalInBackground: true,
   });
-  const items = useMemo(() => data?.data || [], [data]);
+  const attentionItems = useMemo(() => attentionQuery.data?.pages.flatMap((p) => p.data) ?? [], [attentionQuery.data]);
+  const attentionTotal = attentionQuery.data?.pages[0]?.meta.total ?? 0;
+  const isLoading = attentionQuery.isLoading;
+
+  const lateQuery = useInfiniteQuery({
+    queryKey: ["center-bookings", centerId, "late-starts"],
+    queryFn: ({ pageParam }) => bookingApi.forCenter(centerId, { scope: "late_starts", sort: "scheduled_desc", page: pageParam, page_size: PAGE_SIZE }),
+    initialPageParam: 1,
+    getNextPageParam: nextPage,
+    enabled: !!centerId,
+  });
+  const lateItems = useMemo(() => lateQuery.data?.pages.flatMap((p) => p.data) ?? [], [lateQuery.data]);
+
+  // "All bookings": status / search / date window / sort run on the server,
+  // one page at a time.
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 350);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [statusFilter, query, sortOrder, dateFrom, dateTo, centerId]);
+  const allQuery = useQuery({
+    queryKey: ["center-bookings", centerId, "all", statusFilter, query, sortOrder, dateFrom, dateTo, page],
+    queryFn: () =>
+      bookingApi.forCenter(centerId, {
+        status: statusFilter || undefined,
+        q: query || undefined,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+        sort: sortOrder === "newest" ? "scheduled_desc" : "scheduled_asc",
+        page,
+        page_size: PAGE_SIZE,
+      }),
+    enabled: !!centerId && view === "all",
+    placeholderData: keepPreviousData,
+  });
+  const allItems = useMemo(() => allQuery.data?.data ?? [], [allQuery.data]);
+  const allPages = allQuery.data?.meta.total_pages ?? 0;
 
   useLiveChannel(centerId ? `center-bookings:${centerId}` : null, () => {
-    queryClient.invalidateQueries({ queryKey: centerBookingsQueryKey });
+    queryClient.invalidateQueries({ queryKey: ["center-bookings", centerId] });
   });
 
   const { data: captains } = useQuery({
@@ -208,11 +255,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   // messages — "Starting now — assign immediately" right next to "window
   // expired — needs action" for the same booking, which is exactly the
   // confusing double-listing this line exists to prevent.
-  const newBookings = useMemo(() => items.filter((b) => needsCaptain(b) && !isOpenIssue(b)).sort(byPriorityThenScheduled), [items]);
-  const openIssues = useMemo(() => items.filter(isOpenIssue).sort(byPriorityThenScheduled), [items]);
+  const newBookings = useMemo(() => attentionItems.filter((b) => needsCaptain(b) && !isOpenIssue(b)).sort(byPriorityThenScheduled), [attentionItems]);
+  const openIssues = useMemo(() => attentionItems.filter(isOpenIssue).sort(byPriorityThenScheduled), [attentionItems]);
   const lateStartBookings = useMemo(
-    () => items.filter(startedLate).sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime()),
-    [items]
+    () => lateItems.filter(startedLate).sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime()),
+    [lateItems]
   );
   // heading_at is set the moment a captain starts heading out — the exact
   // instant captain_start_stage gets decided — so it's what "new" means
@@ -236,19 +283,6 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       ),
     [lateStartBookings, lateStartMonth, lateStartCaptainId]
   );
-  const statusFiltered = useMemo(() => (statusFilter ? items.filter((b) => b.status === statusFilter) : items), [items, statusFilter]);
-  const {
-    filtered: filteredAll,
-    search,
-    setSearch,
-    sortOrder,
-    setSortOrder,
-    dateFrom,
-    setDateFrom,
-    dateTo,
-    setDateTo,
-  } = useBookingFilters(statusFiltered);
-
   // Supports "jump straight to this one booking" links from elsewhere in
   // the app (e.g. a booking row in a captain's profile) — ?highlight=<id>
   // switches to the "All bookings" view and searches for that booking's
@@ -257,19 +291,43 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const [searchParams, setSearchParams] = useSearchParams();
   useEffect(() => {
     const highlightId = searchParams.get("highlight");
-    if (!highlightId || !items.length) return;
-    const target = items.find((b) => b.id === highlightId);
-    if (!target) return;
-    setView("all");
-    setStatusFilter("");
-    setSearch(target.booking_number);
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev);
-      next.delete("highlight");
-      return next;
-    }, { replace: true });
+    if (!highlightId) return;
+    let cancelled = false;
+    // Looked up by id, not searched for in whatever page is loaded — the
+    // booking may be months old.
+    bookingApi
+      .get(highlightId)
+      .then((target) => {
+        if (cancelled) return;
+        setView("all");
+        setStatusFilter("");
+        setDateFrom("");
+        setDateTo("");
+        setSearch(target.booking_number);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (cancelled) return;
+        setSearchParams((prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("highlight");
+          return next;
+        }, { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, searchParams]);
+  }, [searchParams]);
+
+  // The captain picker's "jobs that day" count needs every live job on the
+  // booking's day, not just the ones on screen.
+  const assignDay = assigningBooking?.scheduled_date?.slice(0, 10) || "";
+  const { data: dayBookings } = useQuery({
+    queryKey: ["center-bookings", centerId, "day", assignDay],
+    queryFn: () => bookingApi.forCenter(centerId, { scope: "active", date_from: assignDay, date_to: assignDay, page_size: PAGE_SIZE }),
+    enabled: !!centerId && !!assignDay,
+  });
 
   const assignMutation = useMutation({
     mutationFn: () =>
@@ -436,9 +494,14 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     setError("");
   };
   // The whole visit closes together, so the popup speaks for every car on it.
+  const { data: doneGroup } = useQuery({
+    queryKey: ["center-bookings", centerId, "group", doneBooking?.booking_group_id],
+    queryFn: () => bookingApi.getGroup(doneBooking!.booking_group_id!),
+    enabled: !!doneBooking?.booking_group_id,
+  });
   const doneVisit = doneBooking
     ? doneBooking.booking_group_id
-      ? items.filter((x) => x.booking_group_id === doneBooking.booking_group_id && x.status !== "cancelled")
+      ? (doneGroup || [doneBooking]).filter((x) => x.status !== "cancelled")
       : [doneBooking]
     : [];
   const doneUnpaid = doneVisit.some((x) => x.status !== "completed" && x.payment_status !== "paid");
@@ -525,9 +588,9 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           }`}
         >
           Needs attention
-          {newBookings.length + openIssues.length > 0 && (
+          {attentionTotal > 0 && (
             <span className={`ml-2 rounded-full px-2 py-0.5 text-xs ${view === "attention" ? "bg-white/20" : "bg-gray-300"}`}>
-              {newBookings.length + openIssues.length}
+              {attentionTotal}
             </span>
           )}
         </button>
@@ -667,6 +730,12 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               </div>
             )}
           </section>
+
+          {attentionQuery.hasNextPage && (
+            <Button variant="outline" className="w-full" isLoading={attentionQuery.isFetchingNextPage} onClick={() => void attentionQuery.fetchNextPage()}>
+              Show more ({attentionTotal - attentionItems.length} not shown)
+            </Button>
+          )}
         </div>
       ) : view === "late_starts" ? (
         <div className="space-y-3">
@@ -694,7 +763,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               </div>
             </div>
           )}
-          {!isLoading && visibleLateStarts.length === 0 ? (
+          {!lateQuery.isLoading && visibleLateStarts.length === 0 ? (
             <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">
               {lateStartBookings.length === 0 ? "No late starts recorded." : "No late starts match these filters."}
             </p>
@@ -732,6 +801,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               ))}
             </div>
           )}
+          {lateQuery.hasNextPage && (
+            <Button variant="outline" className="w-full" isLoading={lateQuery.isFetchingNextPage} onClick={() => void lateQuery.fetchNextPage()}>
+              Show older late starts
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-4">
@@ -750,6 +824,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           </div>
 
           <BookingFilterBar
+            searchPlaceholder="Booking #, phone or customer name"
             search={search}
             onSearchChange={setSearch}
             sortOrder={sortOrder}
@@ -770,8 +845,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               one visit, which is what let a manager assign two different
               cars of the same trip to two different captains. */}
           <DataTable<BookingSlab & { id: string }>
-            isLoading={isLoading}
-            data={toSlabs(filteredAll).map((slab) => ({ ...slab, id: slab.key }))}
+            isLoading={allQuery.isLoading}
+            data={toSlabs(allItems).map((slab) => ({ ...slab, id: slab.key }))}
             emptyTitle="No bookings"
             onRowClick={(slab) => setSelectedBooking(slab.primary)}
             columns={[
@@ -816,6 +891,21 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               { header: "", accessor: (slab) => bookingActions(actionTarget(slab)) },
             ]}
           />
+          {allPages > 1 && (
+            <div className="flex items-center justify-between gap-3 text-sm text-[var(--color-text-secondary)]">
+              <span>
+                Page {page} of {allPages} · {allQuery.data?.meta.total ?? 0} bookings
+              </span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" disabled={page <= 1 || allQuery.isFetching} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                  Previous
+                </Button>
+                <Button size="sm" variant="outline" disabled={page >= allPages || allQuery.isFetching} onClick={() => setPage((p) => p + 1)}>
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -835,7 +925,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             <CaptainPicker
               bookingId={assigningBooking.id}
               captains={captains?.data || []}
-              centerBookings={items}
+              centerBookings={dayBookings?.data || []}
               scheduledDate={assigningBooking.scheduled_date}
               selectedId={captainId}
               onSelect={setCaptainId}

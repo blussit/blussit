@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.profile_controller import AddressController, VehicleController
-from app.core.dependencies import CurrentUser, get_current_user, get_db
+from app.core.dependencies import CurrentUser, get_current_user, get_db, require_manager_or_admin
 from app.schemas.profile_schema import (
     AddressCreateRequest,
     AddressUpdateRequest,
@@ -63,6 +63,13 @@ async def delete_vehicle(
 @address_router.get("")
 async def list_addresses(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await AddressController(db).list(current_user)
+
+
+@address_router.get("/customer/{customer_id}", dependencies=[Depends(require_manager_or_admin)])
+async def list_customer_addresses(customer_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Staff: an existing customer's saved addresses (same shape as GET
+    /addresses), so a staff booking reuses one instead of adding a copy."""
+    return await AddressController(db).list_for_customer(customer_id)
 
 
 @address_router.post("")

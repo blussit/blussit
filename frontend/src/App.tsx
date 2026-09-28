@@ -13,6 +13,7 @@ import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { ProtectedRoute, GuestOnlyRoute } from "./routes/ProtectedRoute";
 import { StaffBookingRedirect } from "./routes/StaffBookingRedirect";
 import { ScrollRestoration } from "./components/shared/ScrollRestoration";
+import { VisitBeacon } from "./components/shared/VisitBeacon";
 
 import LandingPage from "./pages/public/LandingPage";
 import { loadBookPage, loadLoginPage } from "./routes/prefetch";
@@ -116,6 +117,7 @@ export default function App() {
         <ToastProvider>
         <ConfirmProvider>
           <ScrollRestoration />
+          <VisitBeacon />
           <ToastContainer />
           <ConfirmDialog />
           <RoutedErrorBoundary>

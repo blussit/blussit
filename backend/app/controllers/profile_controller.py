@@ -54,6 +54,9 @@ class AddressController:
     async def list(self, current_user: CurrentUser):
         return success(await self.service.list_my_addresses(current_user.id))
 
+    async def list_for_customer(self, customer_id: str):
+        return success(await self.service.list_for_customer(customer_id))
+
     async def create(self, current_user: CurrentUser, payload: AddressCreateRequest):
         result = await self.service.create(current_user.id, payload)
         await self.audit.log_action(current_user.id, current_user.role, "CREATE_ADDRESS", "addresses", result["id"])

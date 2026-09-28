@@ -4,6 +4,58 @@ import { Button } from "../ui";
 import { uploadApi } from "../../api/upload";
 import { getErrorMessage } from "../../lib/api-client";
 
+const MAX_EDGE_PX = 1600;
+const JPEG_QUALITY = 0.8;
+
+async function decodeImage(file: File): Promise<{ source: CanvasImageSource; width: number; height: number; close: () => void }> {
+  if (typeof createImageBitmap === "function") {
+    try {
+      // Applies the EXIF rotation, so a portrait phone shot isn't drawn sideways.
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+    } catch {
+      // Older Safari rejects the options bag — the <img> path below also
+      // honours EXIF orientation in every browser that lacks it.
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return { source: img, width: img.naturalWidth, height: img.naturalHeight, close: () => {} };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Camera originals run to 8 MB; ~1600 px JPEG is plenty as proof of work
+ * and uploads in a fraction of the time on a field connection. Falls back
+ * to the original file if the browser can't decode it (e.g. HEIC). */
+async function shrinkPhoto(file: File): Promise<File> {
+  try {
+    const img = await decodeImage(file);
+    try {
+      const scale = Math.min(1, MAX_EDGE_PX / Math.max(img.width, img.height));
+      const width = Math.round(img.width * scale);
+      const height = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return file;
+      ctx.drawImage(img.source, 0, 0, width, height);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+      if (!blob || (blob.size >= file.size && file.type === "image/jpeg")) return file;
+      return new File([blob], file.name.replace(/\.[^.]*$/, "") + ".jpg", { type: "image/jpeg" });
+    } finally {
+      img.close();
+    }
+  } catch {
+    return file;
+  }
+}
+
 export interface CapturedPhoto {
   image_url: string;
   latitude: number;
@@ -66,24 +118,20 @@ export function PhotoCapture({
       );
     });
 
+  // The preview is an object URL onto the (already shrunk) file — never a
+  // multi-MB base64 string held in React state.
+  useEffect(() => {
+    if (!preview) return;
+    return () => URL.revokeObjectURL(preview);
+  }, [preview]);
+
   const handleFile = async (selected: File) => {
     setError(null);
     setStatus("locating");
     try {
-      // The data-URL here is only ever used for the on-screen preview —
-      // it's never sent anywhere. The actual upload (on confirm) sends the
-      // File itself as multipart/form-data.
-      const [dataUrl, geo] = await Promise.all([
-        new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(new Error("Couldn't read the photo"));
-          reader.readAsDataURL(selected);
-        }),
-        locate(),
-      ]);
-      setFile(selected);
-      setPreview(dataUrl);
+      const [photo, geo] = await Promise.all([shrinkPhoto(selected), locate()]);
+      setFile(photo);
+      setPreview(URL.createObjectURL(photo));
       setLocation(geo);
       setUploadedUrl(null);
       setStatus("ready");

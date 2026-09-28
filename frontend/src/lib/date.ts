@@ -16,6 +16,31 @@ export function formatDateTime(dateStr: string): string {
   }
 }
 
+/**
+ * A booking's day as a person says it: "Today", "Tomorrow", else
+ * "Tue, 30 Sep". Reads the first 10 characters (scheduled_date is an
+ * IST-digit string), anchored at IST noon so no browser timezone can shift it.
+ */
+export function formatDay(dateStr?: string | null): string {
+  const key = String(dateStr ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return String(dateStr ?? "");
+  const today = todayIST();
+  if (key === today) return "Today";
+  const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: IST_TZ }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  if (key === tomorrow) return "Tomorrow";
+  const d = new Date(`${key}T12:00:00+05:30`);
+  const sameYear = key.slice(0, 4) === today.slice(0, 4);
+  return d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }), timeZone: IST_TZ });
+}
+
+/** "26 Sept" (the year only when it isn't this one) — for compact rows. */
+export function formatShortDate(dateStr?: string | null): string {
+  const key = String(dateStr ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return String(dateStr ?? "");
+  const sameYear = key.slice(0, 4) === todayIST().slice(0, 4);
+  return new Date(`${key}T12:00:00+05:30`).toLocaleDateString("en-IN", { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }), timeZone: IST_TZ });
+}
+
 /** "14:30" -> "2:30 PM" — the 12-hour clock every person-facing time uses. */
 export function formatTime12(hhmm?: string | null, compact = false): string {
   const [h, m] = String(hhmm ?? "").split(":").map(Number);

@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, IndianRupee } from "lucide-react";
-import { type CollectionsReport as Report } from "../../api/payment";
+import { paymentApi, type CollectionsReport as Report } from "../../api/payment";
 import { Card, CardBody, CardHeader, Input } from "../ui";
 import { formatDateTime } from "../../lib/date";
 
@@ -196,17 +196,62 @@ export function CollectionsReportCard({
             </p>
             <div className="space-y-1.5">
               {data.attention.map((a, i) => (
-                <p key={i} className="text-xs text-amber-900">
-                  <span className="font-mono-num font-bold">₹{a.amount}</span>
-                  {a.booking_number ? ` · ${a.booking_number}` : a.purpose === "subscription" ? " · subscription" : ""} — {a.reason}
-                  {a.flagged_at ? ` (${formatDateTime(a.flagged_at)})` : ""}
-                </p>
+                <AttentionRow key={a.id || i} item={a} queryKey={queryKey} />
               ))}
             </div>
-            <p className="mt-2 text-[11px] text-amber-700">Money was received but couldn't be applied automatically — settle these manually (refund or fix), then they clear from Razorpay's dashboard.</p>
+            <p className="mt-2 text-[11px] text-amber-700">Money was received but couldn't be applied automatically — refund or fix it in Razorpay (search the payment id), then mark it resolved here.</p>
           </div>
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/** One parked payment, with the Razorpay payment id to look up and a
+ *  "resolved" action that records what was done (refund, activation…). */
+function AttentionRow({ item, queryKey }: { item: NonNullable<Report["attention"]>[number]; queryKey: string }) {
+  const queryClient = useQueryClient();
+  const [note, setNote] = useState("");
+  const [open, setOpen] = useState(false);
+  const resolve = useMutation({
+    mutationFn: () => paymentApi.resolveAttention(item.id!, note.trim()),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [queryKey] }),
+  });
+  return (
+    <div className="text-xs text-amber-900">
+      <p>
+        <span className="font-mono-num font-bold">₹{item.amount}</span>
+        {item.booking_number ? ` · ${item.booking_number}` : item.purpose === "subscription" ? " · subscription" : ""} — {item.reason}
+        {item.flagged_at ? ` (${formatDateTime(item.flagged_at)})` : ""}
+        {item.payment_id ? <span className="font-mono-num"> · {item.payment_id}</span> : null}
+        {item.id && !open && (
+          <button type="button" className="ml-2 font-semibold underline" onClick={() => setOpen(true)}>
+            Mark resolved
+          </button>
+        )}
+      </p>
+      {open && (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <input
+            className="min-w-0 flex-1 rounded-md border border-amber-300 bg-white px-2 py-1 text-xs"
+            placeholder="What was done (e.g. refunded in Razorpay)"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button
+            type="button"
+            className="rounded-md bg-black px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+            disabled={note.trim().length < 3 || resolve.isPending}
+            onClick={() => resolve.mutate()}
+          >
+            {resolve.isPending ? "Saving…" : "Save"}
+          </button>
+          <button type="button" className="text-xs underline" onClick={() => setOpen(false)}>
+            Cancel
+          </button>
+          {resolve.isError && <span className="w-full text-[var(--color-error)]">Couldn't save — try again.</span>}
+        </div>
+      )}
+    </div>
   );
 }

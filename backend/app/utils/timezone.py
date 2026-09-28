@@ -43,3 +43,14 @@ def from_stored(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc).astimezone(IST)
     return dt.astimezone(IST)
+
+
+# Customer reminders (pass notices, "time for a wash?") only go out in the
+# day — 10:00 AM to 7:00 PM IST. Outside it a sweep simply waits for the
+# next pass that lands inside it.
+CUSTOMER_MESSAGE_HOURS = (10, 19)
+
+
+def in_customer_message_hours(now: datetime | None = None) -> bool:
+    start, end = CUSTOMER_MESSAGE_HOURS
+    return start <= to_ist(now or now_ist()).hour < end

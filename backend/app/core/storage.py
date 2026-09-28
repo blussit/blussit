@@ -35,6 +35,7 @@ from fastapi import UploadFile
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestException
+from app.core.http_client import shared_client
 
 # Where locally-stored uploads are reachable when PUBLIC_BASE_URL isn't
 # configured — i.e. a developer running this backend on its default port.
@@ -53,6 +54,10 @@ ALLOWED_DOCUMENT_TYPES = {
     "application/pdf": "pdf",
 }
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8MB — generous for a phone-camera photo, not for abuse
+
+
+def _r2_http() -> httpx.AsyncClient:
+    return shared_client("r2_storage", 60)
 
 
 def upload_root() -> Path:
@@ -247,17 +252,16 @@ async def _r2_upload(
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.put(
-            url,
-            content=data,
-            headers={
-                "Authorization": authorization,
-                "Content-Type": content_type,
-                "X-Amz-Content-SHA256": payload_hash,
-                "X-Amz-Date": amz_date,
-            },
-        )
+    response = await _r2_http().put(
+        url,
+        content=data,
+        headers={
+            "Authorization": authorization,
+            "Content-Type": content_type,
+            "X-Amz-Content-SHA256": payload_hash,
+            "X-Amz-Date": amz_date,
+        },
+    )
     if response.status_code >= 300:
         raise BadRequestException("Photo upload to storage failed - please try again")
     if private:
@@ -292,12 +296,11 @@ async def download_private_document(key: str) -> tuple[bytes, str]:
         f"Credential={access_key}/{credential_scope}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.get(url, headers={
-            "Authorization": authorization,
-            "X-Amz-Content-Sha256": payload_hash,
-            "X-Amz-Date": amz_date,
-        })
+    response = await _r2_http().get(url, headers={
+        "Authorization": authorization,
+        "X-Amz-Content-Sha256": payload_hash,
+        "X-Amz-Date": amz_date,
+    })
     if response.status_code == 404:
         raise BadRequestException("Document not found")
     if response.status_code >= 300:

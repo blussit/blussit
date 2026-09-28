@@ -47,6 +47,20 @@ class CategoryService:
             raise NotFoundException("Category not found")
 
 
+# Services saved before these fields existed read back with the defaults.
+_SERVICE_DEFAULTS = {"prepaid_only": False, "charges_travel": False, "offer_tag": None}
+# Fields where "no value" is a real setting: sent explicitly as null (or a
+# blank offer tag) on edit, they are cleared rather than skipped — a stale
+# first-time price would otherwise keep undercutting an offer price.
+_CLEARABLE_SERVICE_FIELDS = ("offer_tag", "discounted_price", "original_price", "variant_group", "variant_label", "captain_fee")
+
+
+def serialize_service(doc: dict | None) -> dict | None:
+    if doc is None:
+        return None
+    return serialize_doc({**_SERVICE_DEFAULTS, **doc})
+
+
 class ServiceCatalogService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = ServiceRepository(db)
@@ -54,13 +68,13 @@ class ServiceCatalogService:
 
     async def list_services(self, page: int, page_size: int, search: str | None, category_id: str | None, vehicle_type: str | None, active_only: bool = True):
         items, total = await self.repo.search_services(search, category_id, vehicle_type, page, page_size, active_only)
-        return serialize_list(items), total
+        return [serialize_service(i) for i in items], total
 
     async def get(self, service_id: str) -> dict:
         service = await self.repo.find_by_id(service_id)
         if not service:
             raise NotFoundException("Service not found")
-        return serialize_doc(service)
+        return serialize_service(service)
 
     async def create(self, payload: ServiceCreateRequest) -> dict:
         category = await self.category_repo.find_by_id(payload.category_id)
@@ -70,16 +84,17 @@ class ServiceCatalogService:
         doc = payload.model_dump()
         doc["slug"] = slug
         created = await self.repo.create(doc)
-        return serialize_doc(created)
+        return serialize_service(created)
 
     async def update(self, service_id: str, payload: ServiceUpdateRequest) -> dict:
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        sent = payload.model_dump(exclude_unset=True)
+        data = {k: v for k, v in sent.items() if v is not None or k in _CLEARABLE_SERVICE_FIELDS}
         if "name" in data:
             data["slug"] = slugify(data["name"])
         updated = await self.repo.update_by_id(service_id, data)
         if not updated:
             raise NotFoundException("Service not found")
-        return serialize_doc(updated)
+        return serialize_service(updated)
 
     async def delete(self, service_id: str) -> None:
         deleted = await self.repo.soft_delete(service_id)

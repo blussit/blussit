@@ -25,6 +25,8 @@ import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.core.http_client import shared_client
+from app.utils.phone import is_business_whatsapp_number
 
 logger = logging.getLogger(__name__)
 
@@ -332,13 +334,13 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
     async def upload_media(self, content: bytes, mime_type: str, filename: str = "upload") -> str | None:
         url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/media"
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {self.access_token}"},
-                    data={"messaging_product": "whatsapp"},
-                    files={"file": (filename, content, mime_type)},
-                )
+            r = await _meta_http().post(
+                url,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                data={"messaging_product": "whatsapp"},
+                files={"file": (filename, content, mime_type)},
+                timeout=60,
+            )
             if r.status_code < 300:
                 return r.json().get("id")
             logger.error("WhatsApp media upload failed (%s): %s", r.status_code, r.text[:300])
@@ -352,15 +354,15 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         never handed to the frontend — this proxy is the only exposure."""
         headers = {"Authorization": f"Bearer {self.access_token}"}
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                meta = await client.get(f"https://graph.facebook.com/{self.api_version}/{media_id}", headers=headers)
-                if meta.status_code >= 300:
-                    return None
-                info = meta.json()
-                blob = await client.get(info.get("url", ""), headers=headers)
-                if blob.status_code >= 300:
-                    return None
-                return blob.content, info.get("mime_type", "application/octet-stream")
+            client = _meta_http()
+            meta = await client.get(f"https://graph.facebook.com/{self.api_version}/{media_id}", headers=headers, timeout=30)
+            if meta.status_code >= 300:
+                return None
+            info = meta.json()
+            blob = await client.get(info.get("url", ""), headers=headers, timeout=30)
+            if blob.status_code >= 300:
+                return None
+            return blob.content, info.get("mime_type", "application/octet-stream")
         except httpx.HTTPError as exc:
             logger.error("WhatsApp media fetch raised %s for %s", exc, media_id)
             return None
@@ -370,9 +372,9 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             return None
         url = f"https://graph.facebook.com/{self.api_version}/{settings.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.get(url, headers={"Authorization": f"Bearer {self.access_token}"},
-                                     params={"fields": "name,status,category,language,components,rejected_reason,quality_score", "limit": 100})
+            r = await _meta_http().get(url, headers={"Authorization": f"Bearer {self.access_token}"},
+                                       params={"fields": "name,status,category,language,components,rejected_reason,quality_score", "limit": 100},
+                                       timeout=30)
             if r.status_code < 300:
                 return r.json().get("data", [])
             logger.error("WhatsApp template list failed (%s): %s", r.status_code, r.text[:300])
@@ -385,8 +387,7 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             return {"error": "WHATSAPP_BUSINESS_ACCOUNT_ID not configured"}
         url = f"https://graph.facebook.com/{self.api_version}/{settings.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(url, headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}, json=payload)
+            r = await _meta_http().post(url, headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}, json=payload, timeout=30)
             body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text[:300]}
             if r.status_code < 300:
                 return body
@@ -407,9 +408,15 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             outbox_doc["template_name"] = template_name
         if extra:
             outbox_doc.update(extra)
+        if is_business_whatsapp_number(phone):
+            # Meta always refuses a send to our own number ("(#100) Invalid
+            # parameter") — skip the call, keep the row so it's visible.
+            logger.error("WhatsApp send skipped: %s is the business's own WhatsApp number", phone)
+            outbox_doc.update({"ok": False, "error": "recipient is the business's own WhatsApp number"})
+            await self.db.whatsapp_outbox.insert_one(outbox_doc)
+            return False
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(url, json=body, headers=headers)
+            response = await _meta_http().post(url, json=body, headers=headers)
             ok = response.status_code < 300
             outbox_doc.update({"status_code": response.status_code, "ok": ok, "response_body": response.text[:2000]})
             # Meta's message id (wamid) — the join key for the delivery
@@ -436,6 +443,10 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             outbox_doc.update({"ok": False, "error": str(exc)})
             await self.db.whatsapp_outbox.insert_one(outbox_doc)
             return False
+
+
+def _meta_http() -> httpx.AsyncClient:
+    return shared_client("meta_whatsapp", 10)
 
 
 def _flatten_param(text: str) -> str:

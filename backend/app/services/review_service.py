@@ -89,8 +89,8 @@ class ReviewService:
             raise NotFoundException("Review not found")
         await self.repo.soft_delete(review_id, deleted_by=customer_id)
 
-    async def list_my_reviews(self, customer_id: str) -> list[dict]:
-        reviews = await self.repo.list_for_customer(customer_id)
+    async def list_my_reviews(self, customer_id: str, booking_ids: list[str] | None = None) -> list[dict]:
+        reviews = await self.repo.list_for_customer(customer_id, booking_ids)
         return serialize_list(reviews)
 
     async def list_public(self, page: int, page_size: int):

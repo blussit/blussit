@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import { AlertTriangle, BarChart3, CalendarPlus, CheckCircle2, CreditCard, Gift, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
+import { CustomerLookup } from "../../components/shared/CustomerLookup";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/manager", icon: LayoutDashboard, end: true },
@@ -19,7 +20,7 @@ const navItems: NavItem[] = [
 
 export default function ManagerLayout() {
   return (
-    <DashboardShell navItems={navItems} portalLabel="Manager" brand>
+    <DashboardShell navItems={navItems} portalLabel="Manager" brand headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

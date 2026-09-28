@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clock, IndianRupee, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, IndianRupee, MapPin, XCircle } from "lucide-react";
 import { adminBookingPolicyApi, adminPricingApi } from "../../api/admin";
 import { paymentApi } from "../../api/payment";
 import { CollectionsReportCard } from "../../components/shared/CollectionsReport";
@@ -9,7 +9,7 @@ import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
 import { Badge, Button, Card, CardBody, DataTable, Input, PageLoader } from "../../components/ui";
 import { format } from "../../lib/date";
-import type { BookingPolicy, WithdrawalRequest } from "../../types";
+import type { BookingPolicy, PricingConfig, WithdrawalRequest } from "../../types";
 
 /**
  * One page for every number an admin can turn. Three rules keep it
@@ -92,6 +92,11 @@ export default function AdminPricingPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [freeKm, setFreeKm] = useState("");
+  const [customerRate, setCustomerRate] = useState("");
+  const [distanceSaved, setDistanceSaved] = useState(false);
+  const [distanceError, setDistanceError] = useState<string | null>(null);
+
   const [policyForm, setPolicyForm] = useState<Partial<Record<NumericPolicyKey, string>>>({});
   const [policySaved, setPolicySaved] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
@@ -108,11 +113,29 @@ export default function AdminPricingPage() {
     queryClient.invalidateQueries({ queryKey: ["settings-history", "booking_policy"] });
   };
 
+  // The endpoint takes the whole config, so each section sends the saved
+  // values for every field it doesn't own.
+  const savePricing = (patch: Partial<Omit<PricingConfig, "updated_at">>) =>
+    adminPricingApi.set({
+      per_km_rate: Number(config?.per_km_rate ?? 0),
+      default_captain_service_fee: Number(config?.default_captain_service_fee ?? 0),
+      customer_free_km: Number(config?.customer_free_km ?? 5),
+      customer_per_km_rate: Number(config?.customer_per_km_rate ?? 2),
+      ...patch,
+    });
+  const invalidatePricing = () => {
+    queryClient.invalidateQueries({ queryKey: ["pricing-config"] });
+    queryClient.invalidateQueries({ queryKey: ["settings-history", "pricing_config"] });
+  };
+
   const saveMutation = useMutation({
-    mutationFn: () => adminPricingApi.set(Number(perKm || config?.per_km_rate), Number(captainFee || config?.default_captain_service_fee)),
+    mutationFn: () =>
+      savePricing({
+        ...(perKm !== "" ? { per_km_rate: Number(perKm) } : {}),
+        ...(captainFee !== "" ? { default_captain_service_fee: Number(captainFee) } : {}),
+      }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pricing-config"] });
-      queryClient.invalidateQueries({ queryKey: ["settings-history", "pricing_config"] });
+      invalidatePricing();
       setPerKm("");
       setCaptainFee("");
       setSaved(true);
@@ -120,6 +143,23 @@ export default function AdminPricingPage() {
       setTimeout(() => setSaved(false), 2500);
     },
     onError: (e) => setError(getErrorMessage(e)),
+  });
+
+  const saveDistanceMutation = useMutation({
+    mutationFn: () =>
+      savePricing({
+        ...(freeKm !== "" ? { customer_free_km: Number(freeKm) } : {}),
+        ...(customerRate !== "" ? { customer_per_km_rate: Number(customerRate) } : {}),
+      }),
+    onSuccess: () => {
+      invalidatePricing();
+      setFreeKm("");
+      setCustomerRate("");
+      setDistanceSaved(true);
+      setDistanceError(null);
+      setTimeout(() => setDistanceSaved(false), 2500);
+    },
+    onError: (e) => setDistanceError(getErrorMessage(e)),
   });
 
   const savePolicyMutation = useMutation({
@@ -202,7 +242,52 @@ export default function AdminPricingPage() {
           <Button className="mt-4" isLoading={saveMutation.isPending} disabled={!perKm && !captainFee} onClick={() => saveMutation.mutate()}>
             <IndianRupee className="h-4 w-4" /> Save captain pay
           </Button>
-          <SettingsHistory settingKey="pricing_config" labels={{ per_km_rate: "Travel pay ₹/km", default_captain_service_fee: "Service fee ₹" }} />
+          <SettingsHistory
+            settingKey="pricing_config"
+            labels={{
+              per_km_rate: "Travel pay ₹/km",
+              default_captain_service_fee: "Service fee ₹",
+              customer_free_km: "Customer free km",
+              customer_per_km_rate: "Customer ₹/km",
+            }}
+          />
+        </CardBody>
+      </Card>
+
+      {/* ------------------------------------------------ Customer distance charge */}
+      <Card>
+        <CardBody>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Customer distance charge</h2>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            Applies only to services marked "Charge distance" in the Services page — once per visit, for the distance past the free km.
+          </p>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Input
+              label="Free km"
+              type="number"
+              min={0}
+              step="any"
+              placeholder={String(config?.customer_free_km ?? "")}
+              value={freeKm}
+              onChange={(e) => setFreeKm(e.target.value)}
+              hint={`Now ${config?.customer_free_km ?? "—"} km from the center at no charge`}
+            />
+            <Input
+              label="₹ per km after that"
+              type="number"
+              min={0}
+              step="any"
+              placeholder={String(config?.customer_per_km_rate ?? "")}
+              value={customerRate}
+              onChange={(e) => setCustomerRate(e.target.value)}
+              hint={`Now ₹${config?.customer_per_km_rate ?? "—"}/km beyond the free km`}
+            />
+          </div>
+          {distanceError && <p className="mt-2 text-sm text-[var(--color-error)]">{distanceError}</p>}
+          {distanceSaved && <p className="mt-2 text-sm text-[var(--color-success)]">Distance charge updated.</p>}
+          <Button className="mt-4" isLoading={saveDistanceMutation.isPending} disabled={!freeKm && !customerRate} onClick={() => saveDistanceMutation.mutate()}>
+            <MapPin className="h-4 w-4" /> Save distance charge
+          </Button>
         </CardBody>
       </Card>
 

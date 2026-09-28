@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -8,6 +7,7 @@ from app.repositories.coupon_repository import CouponRepository, CouponUsageRepo
 from app.schemas.coupon_schema import CouponCreateRequest, CouponUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.timezone import from_stored, now_ist
+from app.utils.money import round_rupees
 
 
 class CouponService:
@@ -21,31 +21,11 @@ class CouponService:
         return serialize_list(items), total
 
     async def ensure_default_launch_offer(self) -> None:
-        # Only create the launch row if it has never existed. If an admin has
-        # turned it off, edited it, or even soft-deleted it, leave that choice
-        # alone.
-        if await self.repo.collection.find_one({"code": "FREEBIKE"}):
-            return
-        ist = timezone(timedelta(hours=5, minutes=30))
-        await self.repo.create(
-            {
-                "code": "FREEBIKE",
-                "description": "Launch offer: free bike wash with Star Wash or Deep Cleaning.",
-                "coupon_type": "flat",
-                "value": 0.0,
-                "min_order_value": 0.0,
-                "max_discount_amount": None,
-                "usage_limit_per_user": 1,
-                "total_usage_limit": None,
-                "total_used": 0,
-                "valid_from": datetime(2026, 9, 1, 0, 0, 0, tzinfo=ist),
-                "valid_until": datetime(2026, 9, 24, 23, 59, 59, tzinfo=ist),
-                "is_active": True,
-                "offer_kind": "free_addon_with_service",
-                "eligible_service_keywords": ["star", "deep cleaning"],
-                "free_addon_keywords": ["extra bike wash"],
-            }
-        )
+        """Kept only because app startup still calls it. The FREEBIKE launch
+        offer has ended (founder, 2026-09-27) — startup must never create it
+        again on a fresh database. Offers are admin data now (Service
+        offer_tag / prices, or a coupon an admin creates)."""
+        return None
 
     async def create(self, payload: CouponCreateRequest) -> dict:
         if await self.repo.find_by_code(payload.code):
@@ -119,15 +99,15 @@ class CouponService:
         else:
             discount = coupon["value"]
 
-        discount = min(discount, order_value)
-        return round(discount, 2)
+        # Whole rupees only — 10% of ₹349 is ₹35 off, never ₹34.90.
+        return float(min(round_rupees(discount), round_rupees(order_value)))
 
     async def validate_and_compute_discount(self, code: str, order_value: float, user_id: str) -> tuple[dict, float]:
         coupon = await self._valid_coupon(code, order_value, user_id)
         if coupon.get("offer_kind", "standard") != "standard":
             raise BadRequestException("This offer is applied automatically during booking.")
         discount = self._standard_discount(coupon, order_value)
-        return coupon, round(discount, 2)
+        return coupon, discount
 
     async def validate_public_offer(self, code: str) -> dict:
         coupon = await self._valid_coupon(code, 0, None)
@@ -177,7 +157,7 @@ class CouponService:
             discount += price_resolver(svc, vehicle_type, first_time_eligible) * qty
         if discount <= 0:
             raise BadRequestException("Add the free offer item to claim this offer.")
-        return coupon, round(min(discount, order_value), 2)
+        return coupon, float(min(round_rupees(discount), round_rupees(order_value)))
 
     async def record_usage(self, coupon_id: str, user_id: str, booking_id: str) -> None:
         """The counter bump is guarded by an atomic $expr condition on the

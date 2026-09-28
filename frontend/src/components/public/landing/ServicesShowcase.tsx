@@ -5,6 +5,7 @@ import { ArrowRight, Check, Clock, Droplet, Wind, Sparkles, Armchair, Waves, Lin
 import { useAuth } from "../../../context/AuthContext";
 import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
 import type { Service, VehicleTypeOption } from "../../../types";
+import { DiscountBadge, OfferTag, discountPercent } from "../../ui";
 import {
   INR,
   SectionHeader,
@@ -26,8 +27,8 @@ const LAST_SERVICE_KEY = "blussit:lastServiceCard";
 
 /**
  * Landing-page services: image, what's included, final price, one button.
- * Black text only — the section is deliberately monochrome so the price
- * and the "Book" action are the only things that pull the eye. Variant
+ * Black text only — the section is deliberately monochrome so the price,
+ * the red discount mark and the "Book" action are what pull the eye. Variant
  * siblings (Bike Wash 1–5 bikes) collapse into one card; add-ons are not
  * shown here — the booking wizard offers them.
  */
@@ -35,7 +36,7 @@ export function ServicesShowcase({
   id = "services",
   limit,
   title = "Our services",
-  subtitle = "Pick A Service. We Come To Your Doorstep And Do The Rest While You Relax.",
+  subtitle = "Pick a service. We come to your doorstep.",
 }: {
   id?: string;
   limit?: number;
@@ -82,7 +83,7 @@ export function ServicesShowcase({
         action={
           hasMore ? (
             <Link to="/services" className="hidden items-center gap-1.5 text-[14px] font-semibold text-black underline-offset-4 hover:underline sm:inline-flex">
-              All Services
+              All services
               <ArrowRight className="h-4 w-4" />
             </Link>
           ) : undefined
@@ -105,9 +106,9 @@ export function ServicesShowcase({
         <div className="mt-6 sm:hidden">
           <Link
             to="/services"
-            className="flex w-full items-center justify-center gap-2 rounded-full border border-cream-line bg-white py-3 text-[14px] font-semibold text-black"
+            className="flex w-full items-center justify-center gap-2 rounded-full border border-card-border bg-white py-3 text-[14px] font-semibold text-black"
           >
-            See All {groups.length} Services
+            See all {groups.length} services
             <ArrowRight className="h-4 w-4" />
           </Link>
         </div>
@@ -127,6 +128,7 @@ function ServiceCard({
 }) {
   const s = group.primary;
   const pv = priceView(s);
+  const percent = discountPercent(pv.final, pv.original);
   const { items } = parseIncludes(s.description);
   const vehicle = vehicleLabel(s.vehicle_types, vehicleTypes);
   const hasVariants = group.variants.length > 1;
@@ -134,7 +136,7 @@ function ServiceCard({
   const { user } = useAuth();
   // A logged-in customer already has an account — send them to the
   // after-login booking page instead of the guest-only wizard.
-  const bookHref = user?.role === "customer" ? `/app/book?service=${s.id}` : `/book?serviceId=${s.id}`;
+  const bookHref = `${user?.role === "customer" ? "/app/book" : "/book"}?service=${encodeURIComponent(s.slug)}`;
 
   return (
     <Link
@@ -148,7 +150,7 @@ function ServiceCard({
           // ignore
         }
       }}
-      className="group flex h-full w-[80vw] max-w-[340px] shrink-0 snap-center flex-col overflow-hidden rounded-2xl border border-cream-line bg-white text-left transition-all duration-300 hover:-translate-y-0.5 hover:border-[#DACFB9] hover:shadow-[0_18px_40px_-18px_rgba(60,40,0,0.25)] sm:w-auto sm:max-w-none"
+      className="group flex h-full w-[80vw] max-w-[340px] shrink-0 snap-center flex-col overflow-hidden rounded-2xl border border-card-border bg-white text-left transition-all duration-300 hover:-translate-y-0.5 hover:border-[#E8D9A6] hover:shadow-[0_18px_40px_-18px_rgba(60,40,0,0.25)] sm:w-auto sm:max-w-none"
     >
       <div className="relative aspect-[16/11] w-full bg-neutral-100">
         <img
@@ -158,7 +160,13 @@ function ServiceCard({
           decoding="async"
           className="absolute inset-0 h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.03]"
         />
-        <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-gold px-2.5 py-1 text-[11px] font-bold text-black shadow-sm">
+        {(s.offer_tag?.trim() || percent != null) && (
+          <div className="absolute left-3 right-[5.5rem] top-3 flex flex-wrap items-center gap-1.5">
+            <OfferTag label={s.offer_tag} />
+            <DiscountBadge percent={percent} />
+          </div>
+        )}
+        <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-white/95 px-2.5 py-1 text-[11px] font-bold text-black shadow-sm">
           <Clock className="h-3 w-3" />
           {s.duration_minutes} min
         </span>
@@ -244,7 +252,7 @@ function ServiceCard({
           </div>
 
           <span className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-gold px-7 py-2.5 text-[13px] font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 group-hover:-translate-y-0.5 group-hover:bg-gold-dark group-hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)]">
-            Book Now
+            Book now
             <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
           </span>
         </div>
@@ -257,7 +265,7 @@ function SkeletonGrid() {
   return (
     <AutoRail className="mt-8 sm:mt-10" gridClassName="sm:grid-cols-2 sm:gap-5 lg:grid-cols-3 lg:gap-6" intervalMs={600000}>
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="flex h-full w-[80vw] max-w-[340px] shrink-0 snap-center animate-pulse flex-col overflow-hidden rounded-2xl border border-cream-line bg-white sm:w-auto sm:max-w-none" aria-hidden="true">
+        <div key={i} className="flex h-full w-[80vw] max-w-[340px] shrink-0 snap-center animate-pulse flex-col overflow-hidden rounded-2xl border border-card-border bg-white sm:w-auto sm:max-w-none" aria-hidden="true">
           <div className="aspect-[16/11] w-full bg-neutral-100" />
           <div className="flex-1 space-y-3 p-4 sm:p-5">
             <div className="h-4 w-2/3 rounded bg-neutral-100" />
@@ -279,11 +287,11 @@ function EmptyNotice() {
   const { user } = useAuth();
   const bookHref = user?.role === "customer" ? "/app/book" : "/book";
   return (
-    <div className="mt-8 rounded-2xl border border-dashed border-cream-line bg-white p-8 text-center">
+    <div className="mt-8 rounded-2xl border border-dashed border-card-border bg-white p-8 text-center">
       <p className="text-[15px] font-semibold text-black">Our service list is being updated.</p>
       <p className="mt-1 text-[14px] text-neutral-600">You can still book — tell us what your vehicle needs.</p>
       <Link to={bookHref} className="mt-5 inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[14px] bg-gold font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-gold-dark">
-        Book Now
+        Book now
         <ArrowRight className="h-4 w-4" />
       </Link>
     </div>

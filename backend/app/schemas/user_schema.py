@@ -154,6 +154,10 @@ class ManagerCreateCustomerRequest(BaseModel):
 class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = None
     profile_image: Optional[str] = None
+    # The "WhatsApp reminders & offers" switch (true = opted out). Stops the
+    # marketing-template WhatsApps — "time for a wash?", "N washes left on
+    # your pass" — never booking/payment updates or in-app notices.
+    marketing_opt_out: Optional[bool] = None
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -161,6 +165,21 @@ class AdminUserUpdateRequest(BaseModel):
     status: Optional[UserStatus] = None
     service_center_id: Optional[str] = None
     role: Optional[UserRole] = None
+    # Contact number an admin can correct (staff are created with one and
+    # had no way to change it). Blank/None leaves the current number as is.
+    phone: Optional[str] = None
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v):
+        if v is None or not str(v).strip():
+            return None
+        from app.utils.phone import validate_indian_mobile
+
+        phone = validate_indian_mobile(v)
+        if not phone:
+            raise ValueError("Enter a valid 10-digit Indian mobile number (starts with 6-9)")
+        return phone
 
 
 def _verification_stale(doc: dict) -> bool:
@@ -195,6 +214,8 @@ class UserPublic(BaseModel):
     # True when phone_verified is absent OR older than the 90-day window —
     # the frontend re-runs the OTP gate on this.
     phone_verification_stale: bool = True
+    # See UserUpdateRequest.marketing_opt_out.
+    marketing_opt_out: bool = False
     created_at: datetime
 
     @classmethod
@@ -212,6 +233,7 @@ class UserPublic(BaseModel):
             must_change_password=doc.get("must_change_password", False),
             phone_verified=doc.get("phone_verified", False),
             phone_verification_stale=_verification_stale(doc),
+            marketing_opt_out=bool(doc.get("marketing_opt_out", False)),
             # created_at is a computed timestamp (aware at write time) — Mongo
             # hands it back naive-holding-UTC-digits, so it must go through
             # from_stored() here too. This bypasses serialize_doc entirely

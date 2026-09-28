@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Address, Booking, EquipmentUsed, Vehicle } from "../types";
+import type { Address, Booking, EquipmentUsed, TravelQuote, Vehicle } from "../types";
 
 /** What POST /bookings/group returns: the visit, and every car on it as a
  *  real booking of its own. */
@@ -97,6 +97,57 @@ export interface QuickBookingResult {
   customer_id: string;
   confirmation_token?: string;
 }
+
+/** What POST /bookings/quote asks — the same lines a booking sends. */
+export interface BookingQuotePayload {
+  /** Staff / anonymous: whose first-wash status (and, staff only, plans) to use. */
+  customer_phone?: string;
+  lines: QuickBookingLine[];
+  address_id?: string;
+  address?: { latitude?: number | null; longitude?: number | null; pincode?: string };
+  coupon_code?: string;
+  /** "log" = a manager-logged done job (no distance charge / prepaid rule / coupon). */
+  mode?: "book" | "log";
+  scheduled_date?: string;
+  service_time?: string;
+}
+
+/** The bill the booking WILL get — computed by the same code that prices it. */
+export interface BookingQuote {
+  vehicle_count: number;
+  first_time_eligible: boolean;
+  lines: {
+    line_index: number;
+    vehicle_type: string;
+    quantity: number;
+    /** After any first-wash price, before plan/coupon. */
+    subtotal: number;
+    regular_subtotal: number;
+    plan_discount: number;
+    coupon_discount: number;
+    /** Cars on this line a plan pays for. */
+    plan_covered: number;
+    total: number;
+  }[];
+  subtotal: number;
+  regular_subtotal: number;
+  first_time_savings: number;
+  plan_discount: number;
+  coupon_code: string | null;
+  coupon_discount: number;
+  coupon_error: string | null;
+  travel: TravelQuote | null;
+  travel_charge: number;
+  /** The visit charges travel but no address was given yet. */
+  travel_pending: boolean;
+  total_amount: number;
+  prepaid_service: string | null;
+  online_only: boolean;
+}
+
+/** Server-side manager-queue filters for GET /bookings/center/{id}. */
+export type CenterQueueScope = "needs_captain" | "open_issues" | "attention" | "active" | "late_starts";
+export type CenterQueueSort = "scheduled_asc" | "scheduled_desc" | "created_desc";
 
 export interface CreateBookingPayload {
   vehicle_id?: string;
@@ -198,13 +249,20 @@ export const bookingApi = {
   myBookings: (params?: { status?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Booking>>("/bookings/my", { params }).then((r) => r.data),
 
-  myJobs: (params?: { status?: string; page?: number; page_size?: number }) =>
+  /** scope "active": jobs still to do, soonest first. "history": completed/cancelled, newest first. */
+  myJobs: (params?: { status?: string; scope?: "active" | "history" | "all"; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Booking>>("/bookings/my-jobs", { params }).then((r) => r.data),
 
   forCenter: (
     serviceCenterId: string,
-    params?: { status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string; date_field?: "created" | "completed" },
+    params?: {
+      status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string; date_field?: "created" | "completed";
+      scope?: CenterQueueScope; date_from?: string; date_to?: string; q?: string; sort?: CenterQueueSort;
+    },
   ) => apiClient.get<ApiPaginated<Booking>>(`/bookings/center/${serviceCenterId}`, { params }).then((r) => r.data),
+
+  /** The bill before booking — same code that prices the booking. */
+  quote: (payload: BookingQuotePayload) => apiClient.post<ApiSuccess<BookingQuote>>("/bookings/quote", payload).then((r) => r.data.data),
 
   subscribersForCenter: (serviceCenterId: string) =>
     apiClient

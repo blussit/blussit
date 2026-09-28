@@ -12,16 +12,47 @@ class BookingRepository(BaseRepository):
     collection_name = "bookings"
 
     async def list_for_customer(self, customer_id: str, status: str | None, page: int, page_size: int):
-        filters: dict = {"customer_id": customer_id}
+        filters: dict = {"customer_id": customer_id, "is_deleted": {"$ne": True}}
         if status:
             filters["status"] = status
-        return await self.find_many(filters, page=page, page_size=page_size)
+        # _id breaks created_at ties (a multi-car visit's cars share a
+        # timestamp) so "Load more" pages never repeat or skip a car. A
+        # customer's own set is small; the sort stays cheap.
+        total = await self.collection.count_documents(filters)
+        skip = max(page - 1, 0) * page_size
+        cursor = self.collection.find(filters).sort([("created_at", -1), ("_id", -1)]).skip(skip).limit(page_size)
+        return await cursor.to_list(length=page_size), total
 
-    async def list_for_captain(self, captain_id: str, status: str | None, page: int, page_size: int):
+    CAPTAIN_ACTIVE_STATUSES = ("assigned", "captain_on_the_way", "service_started")
+    CAPTAIN_HISTORY_STATUSES = ("completed", "cancelled")
+
+    async def list_for_captain(
+        self, captain_id: str, status: str | None, page: int, page_size: int, scope: str | None = None
+    ):
+        """A captain's jobs, filtered and ordered on the server.
+
+        "active" is the work still to do, soonest first; "history" is
+        finished work, newest first; "all" is everything, newest first.
+        Without a scope, no status means "active": the old client fetched
+        page 1 of EVERY status oldest-first and kept the active ones itself,
+        so once a captain had 100 finished jobs that page held none and his
+        job list (and the GPS pings gated on it) went blank."""
+        if scope is None:
+            if status in self.CAPTAIN_HISTORY_STATUSES:
+                scope = "history"
+            elif status is None or status in self.CAPTAIN_ACTIVE_STATUSES:
+                scope = "active"
+            else:
+                scope = "all"
+        allowed = {"active": self.CAPTAIN_ACTIVE_STATUSES, "history": self.CAPTAIN_HISTORY_STATUSES}.get(scope)
         filters: dict = {"captain_id": captain_id}
         if status:
+            if allowed is not None and status not in allowed:
+                return [], 0
             filters["status"] = status
-        return await self.find_many(filters, page=page, page_size=page_size, sort_by="scheduled_date", sort_order=1)
+        elif allowed is not None:
+            filters["status"] = {"$in": list(allowed)}
+        return await self.list_queue(filters, page, page_size, sort="scheduled_asc" if scope == "active" else "scheduled_desc")
 
     async def list_for_center(self, service_center_id: str, status: str | None, page: int, page_size: int):
         filters: dict = {"service_center_id": service_center_id}
@@ -31,6 +62,25 @@ class BookingRepository(BaseRepository):
 
     async def list_all(self, filters: dict, page: int, page_size: int):
         return await self.find_many(filters, page=page, page_size=page_size)
+
+    # A queue page must be a stable slice: scheduled_date alone is a day
+    # (dozens of ties), and skip/limit over ties can repeat or drop rows
+    # between pages — _id is the final tiebreak.
+    _QUEUE_SORTS = {
+        "scheduled_asc": [("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)],
+        "scheduled_desc": [("scheduled_date", -1), ("scheduled_slot", -1), ("_id", -1)],
+        "created_desc": [("created_at", -1), ("_id", -1)],
+    }
+
+    async def list_queue(self, filters: dict, page: int, page_size: int, sort: str | None = None) -> tuple[list[dict], int]:
+        spec = self._QUEUE_SORTS.get(sort or "created_desc")
+        if spec is None:
+            raise ValueError("Unknown sort")
+        query = {**filters, "is_deleted": {"$ne": True}}
+        total = await self.collection.count_documents(query)
+        skip = max(page - 1, 0) * page_size
+        items = await self.collection.find(query).sort(spec).skip(skip).limit(page_size).to_list(length=page_size)
+        return items, total
 
     async def exists_for_registration(self, registration_number: str, exclude_statuses: list[str]) -> bool:
         """Has this exact vehicle (by plate) ever had a non-cancelled booking on the platform,

@@ -8,11 +8,12 @@ class SubscriptionPlanRepository(BaseRepository):
 class UserSubscriptionRepository(BaseRepository):
     collection_name = "user_subscriptions"
 
-    async def list_for_customer(self, customer_id: str, status: str | None = None) -> list[dict]:
+    async def list_for_customer(self, customer_id: str, status: str | None = None, limit: int | None = None) -> list[dict]:
+        """Newest first (customer_id + created_at index)."""
         filters: dict = {"customer_id": customer_id}
         if status:
             filters["status"] = status
-        return await self.find_all_no_paginate(filters)
+        return await self.find_all_no_paginate(filters, limit=limit)
 
     async def find_active_for_customer(self, customer_id: str) -> list[dict]:
         return await self.find_all_no_paginate({"customer_id": customer_id, "status": "active"})

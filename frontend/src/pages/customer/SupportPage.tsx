@@ -18,26 +18,33 @@ import type { Complaint } from "../../types";
 
 export default function SupportPage() {
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ["my-complaints"], queryFn: () => complaintApi.mine({ page: 1, page_size: 50 }) });
+  const [selected, setSelected] = useState<Complaint | null>(null);
+  // While a ticket is open, check for the team's replies every 20 s.
+  const { data, isLoading } = useQuery({
+    queryKey: ["my-complaints"],
+    queryFn: () => complaintApi.mine({ page: 1, page_size: 50 }),
+    refetchInterval: selected ? 20000 : false,
+  });
   // The picker is built from the customer's own bookings — the ticket
   // inherits its service center (and therefore its manager) from the
   // booking, so there's no "pick the right branch" step to get wrong.
   const { data: bookings } = useQuery({ queryKey: ["my-bookings-for-complaint"], queryFn: () => bookingApi.myBookings({ page: 1, page_size: 100 }) });
   const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState<Complaint | null>(null);
   const [bookingId, setBookingId] = useState("");
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState("");
   const [replyText, setReplyText] = useState("");
+  const [replyError, setReplyError] = useState("");
 
   const replyMutation = useMutation({
     mutationFn: () => complaintApi.reply(selected!.id, { message: replyText.trim() }),
     onSuccess: () => {
       setReplyText("");
+      setReplyError("");
       queryClient.invalidateQueries({ queryKey: ["my-complaints"] });
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => setReplyError(getErrorMessage(err)),
   });
 
   // Arriving from a booking's "Need help?" button: open the form with
@@ -73,13 +80,16 @@ export default function SupportPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Support</p>
-          <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">We're here to help</h1>
-        </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> New support request
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-bold text-black">Support</h1>
+        <Button
+          variant="info"
+          onClick={() => {
+            setError("");
+            setOpen(true);
+          }}
+        >
+          <Plus className="h-4 w-4" /> New request
         </Button>
       </div>
 
@@ -89,8 +99,12 @@ export default function SupportPage() {
         <EmptyState
           icon={LifeBuoy}
           title="No support requests"
-          description="Something not right with a service? Raise it here and the branch that served you will pick it up."
-          action={<Button onClick={() => setOpen(true)}>Raise an issue</Button>}
+          description="Something not right with a service? Raise it here."
+          action={
+            <Button variant="info" onClick={() => setOpen(true)}>
+              Raise an issue
+            </Button>
+          }
         />
       ) : (
         <div className="space-y-3">
@@ -98,7 +112,7 @@ export default function SupportPage() {
             <button
               key={t.id}
               onClick={() => setSelected(t)}
-              className="flex w-full items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 text-left transition-all hover:border-[#E8A900]/50 hover:shadow-[0_10px_24px_rgba(60,40,0,0.07)] sm:p-5"
+              className="flex w-full items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 text-left transition-all hover:shadow-[0_8px_24px_rgba(17,24,39,0.08)] sm:p-5"
             >
               <span className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black sm:flex">
                 <MessageSquare className="h-5 w-5" />
@@ -109,7 +123,7 @@ export default function SupportPage() {
                 </div>
                 <p className="mt-0.5 truncate text-xs text-gray-400">
                   <span className="font-mono-num">{t.booking_number || "—"}</span> · raised {format(t.created_at)}
-                  {t.replies?.length ? ` · ${t.replies.length} update${t.replies.length > 1 ? "s" : ""} from our team` : ""}
+                  {t.replies?.length ? ` · ${t.replies.length} repl${t.replies.length > 1 ? "ies" : "y"}` : ""}
                 </p>
               </div>
               <StatusBadge status={t.status} />
@@ -120,7 +134,14 @@ export default function SupportPage() {
       )}
 
       {/* Ticket detail + the manager's comment thread */}
-      <Modal open={!!selectedFresh} onClose={() => setSelected(null)} title={selectedFresh?.subject || "Support request"}>
+      <Modal
+        open={!!selectedFresh}
+        onClose={() => {
+          setSelected(null);
+          setReplyError("");
+        }}
+        title={selectedFresh?.subject || "Support request"}
+      >
         {selectedFresh && (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -131,12 +152,12 @@ export default function SupportPage() {
             </div>
 
             <div className="rounded-xl bg-[#FAFAFA] p-3.5">
-              <p className="text-xs font-semibold uppercase tracking-wide text-black">Your message</p>
+              <p className="text-xs text-gray-500">Your message</p>
               <p className="mt-1 text-sm text-[var(--color-text-primary)]">{selectedFresh.description}</p>
             </div>
 
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-black">Conversation</p>
+              <p className="text-xs text-gray-500">Conversation</p>
               {selectedFresh.replies?.length ? (
                 <div className="mt-2 space-y-2.5">
                   {selectedFresh.replies.map((r, i) => (
@@ -160,9 +181,10 @@ export default function SupportPage() {
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
                     placeholder="Write a reply…"
-                    className="flex-1 rounded-xl border border-[#F3E5B5] px-3.5 py-2.5 text-sm outline-none focus:border-[#E8A900]"
+                    className="flex-1 rounded-xl border border-[#F3E5B5] px-3.5 py-2.5 text-sm outline-none focus:border-black"
                   />
                   <Button
+                    variant="info"
                     size="sm"
                     disabled={!replyText.trim()}
                     isLoading={replyMutation.isPending}
@@ -172,11 +194,12 @@ export default function SupportPage() {
                   </Button>
                 </div>
               )}
+              {replyError && <p className="mt-2 text-sm text-[var(--color-error)]">{replyError}</p>}
             </div>
 
             {selectedFresh.resolution_note && (
               <div className="rounded-xl bg-green-50 p-3.5">
-                <p className="text-xs font-semibold uppercase tracking-wide text-green-700">Resolution</p>
+                <p className="text-xs text-green-700">Resolution</p>
                 <p className="mt-1 text-sm text-green-900">{selectedFresh.resolution_note}</p>
               </div>
             )}
@@ -194,11 +217,10 @@ export default function SupportPage() {
             createMutation.mutate();
           }}
         >
-          <p className="rounded-xl bg-[#FAFAFA] p-3 text-xs text-gray-600">
-            Every request is linked to a booking so it reaches the exact team that served you — pick the booking this is about.
-          </p>
           <Select label="Which booking is this about?" value={bookingId} onChange={(e) => setBookingId(e.target.value)} required>
             <option value="">Select a booking…</option>
+            {/* Arrived from an older booking's "Need help?" that isn't in the recent list. */}
+            {bookingId && !(bookings?.data || []).some((b) => b.id === bookingId) && <option value={bookingId}>The booking you came from</option>}
             {(bookings?.data || []).map((b) => (
               <option key={b.id} value={b.id}>
                 {b.booking_number} — {format(b.scheduled_date)} · {b.combo_name || b.service_names?.join(", ") || "Service"}
@@ -222,6 +244,7 @@ export default function SupportPage() {
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
             type="submit"
+            variant="info"
             className="w-full"
             disabled={!bookingId || subject.trim().length < 3 || description.trim().length < 5}
             isLoading={createMutation.isPending}

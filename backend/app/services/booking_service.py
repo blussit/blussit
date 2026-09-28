@@ -56,6 +56,7 @@ from app.utils.timezone import from_stored, now_ist, to_ist
 
 logger = logging.getLogger(__name__)
 from app.utils.serializers import serialize_doc, serialize_list
+from app.utils.money import round_rupees, split_whole_rupees
 
 START_WINDOW_MINUTES = 30
 ACTIVE_CAPTAIN_STATUSES = {BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value}
@@ -68,6 +69,8 @@ FRAUD_CHECK_EXCLUDED_STATUSES = [BookingStatus.CANCELLED.value]
 # tiers (₹50 / ₹80 / ₹100, prepaid-only for repeat offenders) are
 # documented on the public cancellation-policy page but NOT charged yet.
 CUSTOMER_CANCEL_LOCK_HOURS = 4
+# A prepaid visit (see BookingService._car_terms) is never settled in cash.
+PREPAID_CASH_REFUSAL = "This booking is prepaid — it can only be paid online."
 # Per-unit add-on quantity ceiling — nobody books 50 bike washes at a door.
 MAX_ADDON_QTY = 10
 # A manager can log a job he already did — but not one from months ago.
@@ -83,7 +86,9 @@ SEVERE_LATE_START_PENALTY_PCT = 50.0
 STUCK_ON_THE_WAY_MINUTES = 90  # captain heading out but no before-photo yet — worth a manager nudge
 SERVICE_OVERRUN_MINUTES = 20  # actual wash running this many minutes past its planned duration — worth a manager nudge
 UNASSIGNED_REMINDER_MINUTES = 15  # nudge the manager this often for as long as a booking stays without a captain
+UNASSIGNED_REMINDER_HORIZON_HOURS = 24  # ...but only once its slot starts within this long
 LATE_START_NUDGE_MINUTES = 5  # nudge both captain and manager this often once the slot's start time has passed with no heading-out
+LATE_START_MANAGER_REPEAT_MINUTES = 15  # ...but the manager's (in-app) repeat of that alert at most this often
 
 # Flags whose own resolution IS the captain continuing to work the job —
 # blocking on them (the way _ensure_no_open_issue does by default) would
@@ -272,6 +277,19 @@ def _slot_cutoff_passed(slot_end: datetime, policy: dict) -> bool:
     return now_ist() > slot_end - timedelta(minutes=policy["slot_booking_cutoff_minutes"])
 
 
+def _within_working_hours(center: dict | None, now: datetime) -> bool:
+    """Is `now` (IST) inside the center's opening hours?"""
+
+    def minutes(hhmm: str) -> int:
+        hour, minute = [int(p) for p in hhmm.split(":")]
+        return hour * 60 + minute
+
+    opens = minutes((center or {}).get("working_hours_start") or "08:00")
+    closes = minutes((center or {}).get("working_hours_end") or "20:00")
+    at = now.hour * 60 + now.minute
+    return opens <= at < closes if opens <= closes else (at >= opens or at < closes)
+
+
 def _effective_start_anchor(booking: dict, slot_start: datetime, policy: dict) -> datetime:
     """The moment a captain's lateness is measured from. Normally the
     booking's own anchor (estimated_start_at / slot start) — but when the
@@ -375,6 +393,68 @@ def _ensure_schedulable(booking: dict, policy: dict) -> None:
             "This booking's scheduled time has already passed — reschedule it to a new time before assigning a "
             "captain, or cancel it instead."
         )
+
+
+_NEEDS_CAPTAIN = [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]
+# Not finished yet — what a manager can still act on.
+_ACTIVE_STATUSES = _NEEDS_CAPTAIN + [BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value]
+_OPEN_ISSUE = {
+    "status": {"$in": [BookingStatus.AWAITING_PAYMENT.value, *_ACTIVE_STATUSES]},
+    "issue_flag": {"$nin": [None, ""]},
+    "issue_resolved": {"$ne": True},
+}
+_QUEUE_SCOPES = {
+    "needs_captain": {"status": {"$in": _NEEDS_CAPTAIN}},
+    "open_issues": _OPEN_ISSUE,
+    "attention": {"$or": [{"status": {"$in": _NEEDS_CAPTAIN}}, _OPEN_ISSUE]},
+    "active": {"status": {"$in": _ACTIVE_STATUSES}},
+    "late_starts": {"captain_start_stage": {"$in": ["late", "severely_late"]}},
+}
+
+
+async def center_queue_filters(
+    db: AsyncIOMotorDatabase, *, scope: str | None = None, date_from: str | None = None, date_to: str | None = None, search: str | None = None
+) -> list[dict]:
+    """Server-side manager-queue filters (GET /bookings/center/{id}) as
+    clauses to AND together. Mirrors the queue page's own definitions
+    (lib/constants.ts needsCaptain / isOpenIssue). Raises ValueError on bad
+    input."""
+    clauses: list[dict] = []
+    if scope:
+        if scope not in _QUEUE_SCOPES:
+            raise ValueError("Unknown scope")
+        clauses.append(_QUEUE_SCOPES[scope])
+    # scheduled_date holds the IST calendar day as naive midnight digits.
+    window: dict = {}
+    try:
+        if date_from:
+            window["$gte"] = datetime.strptime(date_from, "%Y-%m-%d")
+        if date_to:
+            window["$lt"] = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+    except ValueError:
+        raise ValueError("Dates must be YYYY-MM-DD")
+    if window:
+        clauses.append({"scheduled_date": window})
+    q = (search or "").strip()
+    if q:
+        digits = re.sub(r"\D", "", q)
+        ors: list[dict] = []
+        number = q.upper().replace(" ", "")
+        ors.append({"booking_number": {"$regex": "^" + re.escape(number if number.startswith("BK") else f"BK{number}")}})
+        if digits and len(digits) == len(q.replace(" ", "").lstrip("+")):
+            # "12" finds BK0012 — numbers are zero-padded.
+            ors.append({"booking_number": {"$regex": f"^BK0*{digits}$"}})
+            if len(digits) >= 4:
+                phone = digits[2:] if len(digits) == 12 and digits.startswith("91") else digits
+                ors.append({"customer_phone": {"$regex": "^" + re.escape(phone)}})
+        if len(q) >= 2 and not digits:
+            ids = await db.users.find(
+                {"role": "customer", "full_name": {"$regex": re.escape(q), "$options": "i"}, "is_deleted": {"$ne": True}}, {"_id": 1}
+            ).limit(50).to_list(length=50)
+            if ids:
+                ors.append({"customer_id": {"$in": [str(u["_id"]) for u in ids]}})
+        clauses.append({"$or": ors})
+    return clauses
 
 
 def _redact_financials(booking: dict, actor_role: str) -> dict:
@@ -522,6 +602,48 @@ class BookingService:
 
         return quantities
 
+    # -- offer terms (admin data on the Service: prepaid_only, charges_travel)
+
+    _NO_TERMS = {"charges_travel": False, "prepaid_service": None}
+
+    @classmethod
+    def _car_terms(cls, services: list[dict], plan_covered: bool) -> dict:
+        """What one car's services impose on its visit. A plan-covered car
+        imposes nothing — the plan already paid for the trip."""
+        if plan_covered:
+            return dict(cls._NO_TERMS)
+        return {
+            "charges_travel": any(s.get("charges_travel") for s in services),
+            "prepaid_service": next((s.get("name") or "This service" for s in services if s.get("prepaid_only")), None),
+        }
+
+    async def _visit_terms(self, cars) -> dict:
+        """Merged terms for every car of a visit (GroupVehicleRequest-like
+        objects), read before any car is created."""
+        terms = dict(self._NO_TERMS)
+        for car in cars:
+            ids = list(car.service_ids or [])
+            if car.combo_id:
+                combo = await self.combo_repo.find_by_id(car.combo_id)
+                ids = list((combo or {}).get("service_ids") or [])
+            services = [s for s in [await self.service_repo.find_by_id(sid) for sid in ids] if s]
+            car_terms = self._car_terms(services, bool(car.subscription_id))
+            terms["charges_travel"] = terms["charges_travel"] or car_terms["charges_travel"]
+            terms["prepaid_service"] = terms["prepaid_service"] or car_terms["prepaid_service"]
+        return terms
+
+    @staticmethod
+    def _ensure_prepaid_method(terms: dict, source: str, payment_method) -> None:
+        """Web and staff bookings must choose online for a prepaid visit; the
+        WhatsApp bot has no payment question, so create_booking just makes
+        its prepaid visits online."""
+        method = payment_method.value if hasattr(payment_method, "value") else payment_method
+        if terms["prepaid_service"] and source != "whatsapp" and method in (None, PaymentMethod.CASH.value):
+            raise BadRequestException(f"{terms['prepaid_service']} is prepaid — choose Pay online.")
+
+    async def visit_is_prepaid(self, booking: dict) -> bool:
+        return any(c.get("prepaid_only") for c in await self._visit_cars(booking))
+
     async def create_booking(
         self,
         customer_id: str,
@@ -604,6 +726,16 @@ class BookingService:
         else:
             quantities = await self._validate_service_mix(services, vehicle_type, payload.service_quantities or {})
 
+        # Offer terms are decided for the whole VISIT (one trip, one
+        # payment): a group passes them in, a single car is its own visit.
+        # A manager-logged job is exempt from both.
+        visit_terms = (_group or {}).get("terms") or self._car_terms(services, bool(payload.subscription_id))
+        if _completed_by:
+            visit_terms = self._NO_TERMS
+        elif _group is None:
+            self._ensure_prepaid_method(visit_terms, source, payload.payment_method)
+        prepaid = bool(visit_terms["prepaid_service"])
+
         duration_minutes = sum(s.get("duration_minutes", 30) * quantities[str(s["_id"])] for s in services) or 30
 
         policy = await self.policy_service.get_policy()
@@ -634,61 +766,46 @@ class BookingService:
                 "pick a different time or manage that booking first."
             )
 
-        # First-time-offer eligibility is checked against the WHOLE platform, not
-        # just this customer's account — the same car plate or phone number
-        # having any prior non-cancelled booking (under any account) disqualifies
-        # it. This is what stops "new phone number, same car" discount abuse.
         registration_number = normalize_plate(vehicle["registration_number"]) if vehicle and vehicle.get("registration_number") else None
         phone = customer.get("phone")
-        vehicle_seen_before = bool(registration_number) and await self.repo.exists_for_registration(registration_number, FRAUD_CHECK_EXCLUDED_STATUSES)
-        phone_seen_before = bool(phone) and await self.repo.exists_for_phone(phone, FRAUD_CHECK_EXCLUDED_STATUSES)
-        first_time_eligible = not vehicle_seen_before and not phone_seen_before
+        first_time_eligible = await self._first_time_eligible(phone, registration_number)
 
-        if combo:
-            subtotal = self._resolve_price(combo, vehicle_type, first_time_eligible)
-        else:
-            subtotal = sum(self._resolve_price(s, vehicle_type, first_time_eligible) * quantities[str(s["_id"])] for s in services)
+        # Validate-only for a plan — the actual deduction (commit_consumption)
+        # happens after the booking below is durably created, so a failure in
+        # between can never leave a subscription silently decremented for a
+        # booking that doesn't exist.
+        priced = await self._price_services(
+            customer_id=customer_id,
+            services=services,
+            quantities=quantities,
+            combo=combo,
+            vehicle_type=vehicle_type,
+            vehicle_id=payload.vehicle_id,
+            first_time_eligible=first_time_eligible,
+            subscription_id=payload.subscription_id,
+            coupon_code=payload.coupon_code,
+            as_of=_completed_by["service_at"] if _completed_by else None,
+        )
+        subtotal = priced["subtotal"]
+        discount_amount = priced["discount_amount"]
+        coupon = priced["coupon"]
+        subscription_consumption = priced["subscription_consumption"]
+        payment_method = PaymentMethod.SUBSCRIPTION if payload.subscription_id else payload.payment_method
 
-        discount_amount = 0.0
-        payment_method = payload.payment_method
+        # The WhatsApp bot has no payment question: a prepaid visit it books
+        # is simply an online one (app/staff cash was refused above).
+        if prepaid and payment_method == PaymentMethod.CASH:
+            payment_method = PaymentMethod.ONLINE
 
-        coupon: dict | None = None
-        subscription_consumption: dict | None = None
-        if payload.subscription_id:
-            # Validate-only here — no write yet. The actual deduction
-            # (commit_consumption) happens after the booking below is
-            # durably created, so a failure in between (pricing split,
-            # the insert itself, anything) can never leave a subscription
-            # silently decremented for a booking that doesn't exist.
-            # customer_id here is the BOOKING's customer (also the target
-            # customer when a manager books on someone's behalf) — the
-            # subscription must belong to exactly that person.
-            subscription_consumption = await self.subscription_service.plan_consumption(
-                payload.subscription_id, payload.vehicle_id, services, customer_id, vehicle_type=vehicle_type,
-                as_of=_completed_by["service_at"] if _completed_by else None,
-            )
-            payment_method = PaymentMethod.SUBSCRIPTION
-            discount_amount = await self._subscription_discount(payload.subscription_id, services, vehicle_type, first_time_eligible)
-        elif payload.coupon_code:
-            coupon, discount_amount = await self.coupon_service.validate_and_compute_booking_discount(
-                payload.coupon_code,
-                subtotal,
-                customer_id,
-                services=services,
-                quantities=quantities,
-                vehicle_type=vehicle_type,
-                first_time_eligible=first_time_eligible,
-                price_resolver=self._resolve_price,
-            )
+        # Customer distance charge: once per visit, on the car that carries
+        # the trip (the first), added AFTER any discount so no coupon or plan
+        # ever reduces it.
+        carries_trip = not _group or bool(_group.get("charge_travel"))
+        travel = await self.pricing_service.travel_quote(distance_km) if visit_terms["charges_travel"] and carries_trip else None
+        travel_charge = float(travel["charge"]) if travel else 0.0
 
         tax_amount = 0.0
-        # A discount can legitimately be computed above the subtotal (e.g. a
-        # combo priced below the sum of its parts under a full-waive legacy
-        # plan) — clamp it, or the booking books a NEGATIVE total and the
-        # `total <= 0 → PAID` rule below marks it paid while poisoning every
-        # revenue aggregate downstream.
-        discount_amount = min(discount_amount, subtotal)
-        total_amount = round(max(0.0, subtotal - discount_amount) + tax_amount, 2)
+        total_amount = round(max(0.0, subtotal - discount_amount) + tax_amount + travel_charge, 2)
 
         # Founder rule: choosing "pay online" makes the payment a PRE-condition
         # of the booking, not an afterthought. Such a booking is created
@@ -705,11 +822,13 @@ class BookingService:
         # on delivery option available" for what a pass booking adds) — the
         # visit itself is already paid for by the pass, so the only money
         # left is the extras, and those are settled before we come out.
+        # A PREPAID visit (prepaid_only service, not plan-covered) is parked
+        # on every channel: staff and the bot get a payment link sent to the
+        # customer instead of a confirmed cash-or-link booking.
         method_value = payment_method.value if hasattr(payment_method, "value") else payment_method
-        awaiting_payment = (
-            source == "app"
-            and total_amount > 0
-            and method_value in {PaymentMethod.ONLINE.value, PaymentMethod.SUBSCRIPTION.value}
+        awaiting_payment = total_amount > 0 and (
+            prepaid
+            or (source == "app" and method_value in {PaymentMethod.ONLINE.value, PaymentMethod.SUBSCRIPTION.value})
         )
         initial_status = BookingStatus.COMPLETED if _completed_by else (BookingStatus.AWAITING_PAYMENT if awaiting_payment else BookingStatus.PENDING)
 
@@ -725,6 +844,9 @@ class BookingService:
             split = await self.pricing_service.calculate_split(
                 subtotal, distance_km if (not _group or _group.get("charge_travel")) else 0.0, primary_service
             )
+            # The customer's distance charge is platform revenue — on a cash
+            # job the captain holds it and owes it back with the rest.
+            split["platform_earning"] = round(split["platform_earning"] + travel_charge, 2)
 
         manager_id = service_center.get("manager_id")
         from app.services.route_service import road_distance_eta
@@ -782,6 +904,9 @@ class BookingService:
             "subtotal": round(subtotal, 2),
             "discount_amount": round(discount_amount, 2),
             "tax_amount": tax_amount,
+            "travel_charge": travel_charge,
+            "travel_charge_km": travel["distance_km"] if travel else None,
+            "prepaid_only": prepaid,
             "total_amount": total_amount,
             "coupon_code": payload.coupon_code if not payload.subscription_id else None,
             "subscription_consumption": subscription_consumption,
@@ -909,6 +1034,19 @@ class BookingService:
         if not _completed_by:
             await self._broadcast_slots_changed(str(service_center["_id"]), date_str)
         return serialize_doc(created)
+
+    async def _void_payment_links(self, booking_ids: list[str], reason: str) -> None:
+        """Cancel any still-unpaid payment link for these bookings, so nobody
+        can pay for a job that isn't happening. Never blocks the caller: a
+        gateway failure leaves the link to the reminder sweep's voiding."""
+        if not booking_ids:
+            return
+        try:
+            from app.services.payment_service import PaymentService
+
+            await PaymentService(self.db).void_open_links(booking_ids, reason)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not void open payment links for %s", booking_ids)
 
     async def _rollback_uncommitted_booking(self, created: dict, date_str: str) -> None:
         """Undo a booking that was inserted but couldn't be completed —
@@ -1096,6 +1234,8 @@ class BookingService:
             raise NotFoundException("Booking not found")
         if booking.get("payment_status") == PaymentStatus.PAID.value:
             raise BadRequestException("This booking is already paid — there's nothing left to collect.")
+        if await self.visit_is_prepaid(booking):
+            raise BadRequestException(PREPAID_CASH_REFUSAL)
         if booking.get("status") != BookingStatus.AWAITING_PAYMENT.value:
             raise BadRequestException("This booking is already confirmed.")
         result = await self.confirm_awaiting_payment_booking(
@@ -1133,45 +1273,70 @@ class BookingService:
     async def mark_payment_reminder_sent(self, booking_id: str) -> None:
         await self._mark_visit(booking_id, {"payment_reminder_sent_at": now_ist()})
 
-    async def find_customers_due_repeat_reminder(self, days: int, cooldown_days: int = 30, limit: int = 200) -> list[dict]:
+    async def find_customers_due_repeat_reminder(self, days: int, cooldown_days: int | None = None, limit: int = 200) -> list[dict]:
         """Customers whose last completed wash was `days` ago or more, with
-        nothing booked and no live pass — the ones a "time for a wash?"
-        nudge is actually for. Each customer is nudged at most once per
-        `cooldown_days`, and never if they've opted out of marketing."""
-        cutoff = (now_ist() - timedelta(days=days)).replace(tzinfo=None)
-        pipeline = [
-            {"$match": {"status": BookingStatus.COMPLETED.value, "is_deleted": {"$ne": True}, "completed_at": {"$ne": None}}},
-            {"$group": {"_id": "$customer_id", "last_completed": {"$max": "$completed_at"}}},
-            {"$match": {"last_completed": {"$lte": cutoff}}},
-            {"$sort": {"last_completed": 1}},
-            {"$limit": limit * 3},
-        ]
-        rows = await self.repo.collection.aggregate(pipeline).to_list(length=limit * 3)
+        nothing booked and no live pass (a pass holder gets the pass wash
+        reminder instead) — the ones a "time for a wash?" nudge is for.
+        Each customer is nudged at most once per `cooldown_days` — by
+        default the same `days`, so the weekly setting means a weekly
+        nudge — and never if they've opted out of marketing.
+
+        Reads users.last_completed_at (stamped by every completion path,
+        see _after_visit_completed, and backfilled once at boot by
+        backfill_last_completed_at) through the (role, last_completed_at)
+        index, longest-lapsed first — no scan of the bookings collection.
+        Every exclusion runs IN the pipeline, before the batch is cut:
+        filtering after a fixed "longest-lapsed first" cut meant that once
+        those customers sat in their cooldown, nobody behind them was ever
+        reached. Each $lookup is an indexed equality match
+        (bookings.customer_id, user_subscriptions.customer_id), and the
+        stream stops as soon as `limit` customers pass."""
+        now = now_ist()
+        # last_completed_at / last_repeat_reminder_at are computed instants
+        # (stored UTC) — compare against aware instants, not IST digits.
+        cutoff = now - timedelta(days=days)
+        reminded_floor = now - timedelta(days=cooldown_days if cooldown_days is not None else days)
         live_statuses = [
             BookingStatus.AWAITING_PAYMENT.value, BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value,
             BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value,
         ]
-        reminded_floor = (now_ist() - timedelta(days=cooldown_days)).replace(tzinfo=None)
-        due: list[dict] = []
-        for row in rows:
-            customer_id = row["_id"]
-            if not customer_id or not ObjectId.is_valid(customer_id):
-                continue
-            user = await self.user_repo.find_by_id(customer_id)
-            if not user or user.get("role") != "customer" or user.get("marketing_opt_out") or not user.get("is_active", True):
-                continue
-            last = user.get("last_repeat_reminder_at")
-            if last is not None and from_stored(last).replace(tzinfo=None) > reminded_floor:
-                continue
-            if await self.repo.collection.count_documents({"customer_id": customer_id, "status": {"$in": live_statuses}, "is_deleted": {"$ne": True}}, limit=1):
-                continue
-            if await self.db.user_subscriptions.count_documents({"customer_id": customer_id, "status": "active", "is_deleted": {"$ne": True}}, limit=1):
-                continue
-            user["_last_completed"] = row["last_completed"]
-            due.append(user)
-            if len(due) >= limit:
-                break
-        return due
+
+        def _none_for(collection: str, match: dict, alias: str) -> list[dict]:
+            """Keep only customers with NO row in `collection` matching `match`."""
+            return [
+                {"$lookup": {
+                    "from": collection,
+                    # bookings/passes carry customer_id as a string; users are keyed by ObjectId.
+                    "let": {"cid": {"$toString": "$_id"}},
+                    "pipeline": [
+                        {"$match": {"$expr": {"$eq": ["$customer_id", "$$cid"]}, **match}},
+                        {"$limit": 1},
+                        {"$project": {"_id": 1}},
+                    ],
+                    "as": alias,
+                }},
+                {"$match": {alias: {"$size": 0}}},
+            ]
+
+        pipeline = [
+            {"$match": {
+                "role": "customer",
+                "last_completed_at": {"$lte": cutoff},
+                "is_deleted": {"$ne": True},
+                "is_active": {"$ne": False},
+                "status": {"$ne": UserStatus.SUSPENDED.value},
+                "marketing_opt_out": {"$ne": True},
+                # Never reminded, or last reminded before the cooldown began.
+                "last_repeat_reminder_at": {"$not": {"$gt": reminded_floor}},
+            }},
+            {"$sort": {"last_completed_at": 1}},
+            *_none_for("bookings", {"status": {"$in": live_statuses}, "is_deleted": {"$ne": True}}, "_live_booking"),
+            *_none_for("user_subscriptions", {"status": "active", "is_deleted": {"$ne": True}}, "_live_pass"),
+            {"$limit": limit},
+            {"$project": {"_live_booking": 0, "_live_pass": 0}},
+        ]
+        rows = await self.user_repo.collection.aggregate(pipeline).to_list(length=limit)
+        return [{**row, "_last_completed": row.get("last_completed_at")} for row in rows]
 
     async def mark_repeat_reminder_sent(self, customer_id: str) -> None:
         await self.user_repo.update_by_id(customer_id, {"last_repeat_reminder_at": now_ist()})
@@ -1223,6 +1388,11 @@ class BookingService:
         if len(set(vehicle_ids)) != len(vehicle_ids):
             raise BadRequestException("Each vehicle can only be added once to a visit.")
 
+        # One trip, one payment: the distance charge and the prepaid rule
+        # are decided for the whole visit before any car exists.
+        terms = await self._visit_terms(cars)
+        self._ensure_prepaid_method(terms, source, payload.payment_method)
+
         group_id = str(ObjectId())
         service_code = self.new_service_code()
         service_center = None
@@ -1265,6 +1435,7 @@ class BookingService:
                         "reserve_seat": index == 0,
                         "line_index": index,
                         "service_code": service_code,
+                        "terms": terms,
                     },
                 )
                 if index == 0:
@@ -1431,56 +1602,121 @@ class BookingService:
 
         raw_cars = [c for c in raw_cars if c]
         bookings = await self._enrich_bookings(raw_cars)
-        total = round(sum(float(b.get("total_amount") or 0) for b in bookings), 2)
-        awaiting = any(b.get("status") == BookingStatus.AWAITING_PAYMENT.value for b in bookings)
-
-        payment_link: str | None = None
-        if awaiting and total >= 1:
-            from app.services.payment_service import PaymentService
-
-            # The link's booking must be one that actually owes money — a
-            # pass-covered car on the same visit is already PAID (₹0), and
-            # binding the link to it would fail settlement on amount.
-            unpaid = [c for c in raw_cars if c.get("payment_status") != PaymentStatus.PAID.value]
-            first = unpaid[0] if unpaid else raw_cars[0]
-            try:
-                link = await PaymentService(self.db).create_payment_link(
-                    first, contact_phone=customer.get("phone"), name=customer.get("full_name"), cars=unpaid
-                )
-                payment_link = link["short_url"]
-            except Exception:  # noqa: BLE001
-                # The booking exists and is parked awaiting payment; the
-                # Thank You page and My bookings still offer paying/cash.
-                logger.exception("Could not create a payment link for quick booking %s", first.get("booking_number"))
-            if payment_link:
-                policy = await self.policy_service.get_policy()
-                window = int(policy.get("payment_window_minutes", 30))
-                reference = " + ".join(str(c.get("booking_number") or "") for c in raw_cars)
-                wa_services, wa_reference, _wa_date, _wa_slot, _wa_vehicle, _wa_code = await self._wa_details(first, raw_cars)
-                await self.notifications.notify(
-                    customer_id,
-                    "Finish paying to confirm your booking",
-                    f"Your booking {reference} is waiting for payment. Pay within {window} minutes to keep your slot: {payment_link}",
-                    NotificationType.BOOKING,
-                    str(first["_id"]),
-                    wa_event="payment_pending",
-                    wa_params=[wa_services, wa_reference, str(window)],
-                    background=True,
-                )
+        # Staff and bot bookings park only for a prepaid visit; the link is
+        # how that customer pays (settlement confirms it, the payment-window
+        # sweep releases it otherwise).
+        extra = await self._park_or_confirm_result(raw_cars, customer, source)
 
         return {
             "booking_group_id": group_id,
             "bookings": bookings,
             "vehicle_count": len(bookings),
-            "total_amount": total,
+            "total_amount": extra["visit_total"],
             "service_code": service_code,
             "booking_numbers": [b.get("booking_number") for b in bookings],
             "scheduled_date": payload.scheduled_date,
             "scheduled_slot": payload.scheduled_slot,
-            "awaiting_payment": awaiting,
-            "payment_link": payment_link,
+            "awaiting_payment": extra["awaiting_payment"],
+            "payment_link": extra["payment_link"],
             "customer_id": customer_id,
+            "travel_charge": extra["travel_charge"],
+            "prepaid_only": extra["prepaid_only"],
         }
+
+    async def precheck_quick_booking(self, payload: QuickBookingRequest, *, source: str = "app", allow_pinless: bool = False) -> None:
+        """The refusals a quick booking can hit that don't depend on WHO is
+        booking — what, where, when and how it's paid. Run before an
+        anonymous caller's one-time code is checked, because checking a code
+        spends it: a booking refused for being out of area, past its slot,
+        prepaid-but-cash or on a retired service must leave the code usable
+        for the corrected retry. create_quick_booking repeats every check;
+        this only moves the cheap ones ahead of the code. Deliberately
+        identity-free (no passes, no account lookups), so an unproven caller
+        learns nothing about the phone's owner from a refusal."""
+        cars = [
+            GroupVehicleRequest(
+                vehicle_type=line.vehicle_type, quantity=1, service_ids=list(line.service_ids),
+                service_quantities=dict(line.service_quantities or {}),
+            )
+            for line in payload.lines
+            for _ in range(line.quantity)
+        ]
+        policy = await self.policy_service.get_policy()
+        limit = int(policy.get("max_vehicles_per_booking", 5))
+        if len(cars) > limit:
+            raise BadRequestException(f"You can book up to {limit} vehicles on one visit.")
+        for car in cars:
+            vt_doc = await self.vehicle_type_repo.find_by_id(car.vehicle_type) if car.vehicle_type else None
+            if not vt_doc or not vt_doc.get("is_active", True):
+                raise BadRequestException("Pick a valid vehicle type.")
+            await self._car_services(car)
+        self._ensure_prepaid_method(await self._visit_terms(cars), source, payload.payment_method)
+
+        if payload.address is not None:
+            addr = payload.address
+            probe = {"latitude": addr.latitude, "longitude": addr.longitude, "pincode": (addr.pincode or "").strip()}
+            center, _ = await self._resolve_service_center(probe, allow_pinless=allow_pinless)
+        else:
+            saved = await self.address_repo.find_by_id(payload.address_id) if payload.address_id else None
+            if not saved:
+                return  # create_quick_booking reports it, with the owner check
+            center, _ = await self._resolve_service_center(saved, allow_pinless=allow_pinless)
+        try:
+            scheduled_date = datetime.strptime(payload.scheduled_date, "%Y-%m-%d")
+        except ValueError:
+            raise BadRequestException("Pick a valid date.")
+        _ensure_within_advance_window(scheduled_date, policy)
+        _, slot_end = _resolve_slot_window(center, scheduled_date, payload.scheduled_slot, policy)
+        if _slot_cutoff_passed(slot_end, policy):
+            raise BadRequestException("This slot is no longer available to book — please pick another slot.")
+        # Read-only mirror of _reserve_slot_capacity's guard: the booker's own
+        # hold (by hold_key) is theirs to convert; anyone else's counts.
+        slot_filter = {"service_center_id": str(center["_id"]), "date": to_ist(scheduled_date).strftime("%Y-%m-%d"), "slot_key": payload.scheduled_slot}
+        seat = await self.slot_capacity_repo.find_one(slot_filter)
+        if seat:
+            if seat.get("is_closed"):
+                raise BadRequestException("This slot has been closed for booking — please pick another.")
+            mine = bool(payload.hold_key) and await self.db.slot_holds.find_one({**slot_filter, "holder_id": payload.hold_key}) is not None
+            occupied = int(seat.get("booked_count") or 0) + (0 if mine else int(seat.get("held_count") or 0))
+            if occupied >= int(seat.get("capacity") or 0):
+                raise BadRequestException("This slot just became fully booked — please pick another.")
+
+    async def _send_visit_payment_link(self, raw_cars: list[dict], customer: dict, source: str) -> str | None:
+        """Mint one Razorpay link for a parked visit's unpaid cars and tell
+        the customer (payment_pending). Best effort: None when the link
+        can't be made — the booking stays parked and payable from the app."""
+        from app.services.payment_service import PaymentService
+
+        # The link's booking must be one that actually owes money — a
+        # pass-covered car on the same visit is already PAID (₹0), and
+        # binding the link to it would fail settlement on amount.
+        unpaid = [c for c in raw_cars if c.get("payment_status") != PaymentStatus.PAID.value]
+        first = unpaid[0] if unpaid else raw_cars[0]
+        try:
+            link = await PaymentService(self.db).create_payment_link(
+                first, contact_phone=customer.get("phone"), name=customer.get("full_name"), cars=unpaid
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not create a payment link for booking %s", first.get("booking_number"))
+            return None
+        payment_link = link["short_url"]
+        policy = await self.policy_service.get_policy()
+        window = int(policy.get("payment_window_minutes", 30))
+        reference = " + ".join(str(c.get("booking_number") or "") for c in raw_cars)
+        wa_services, wa_reference, _wa_date, _wa_slot, _wa_vehicle, _wa_code = await self._wa_details(first, raw_cars)
+        await self.notifications.notify(
+            str(customer["_id"]),
+            "Finish paying to confirm your booking",
+            f"Your booking {reference} is waiting for payment. Pay within {window} minutes to keep your slot: {payment_link}",
+            NotificationType.BOOKING,
+            str(first["_id"]),
+            wa_event="payment_pending",
+            wa_params=[wa_services, wa_reference, str(window)],
+            background=True,
+            # The bot posts the link in its own chat reply.
+            send_whatsapp=source != "whatsapp",
+        )
+        return payment_link
 
     # ------------------------------------------------------------------
     # Jobs the MANAGER did himself (phone-in / walk-in). Two entry points:
@@ -1601,6 +1837,7 @@ class BookingService:
 
         raw_cars = [c for c in [await self.repo.find_by_id(b["id"]) for b in created] if c]
         await self._notify_service_done(raw_cars, customer_id, payload.send_whatsapp)
+        await self._after_visit_completed(customer_id, raw_cars, service_at, payload.send_whatsapp)
         bookings = await self._enrich_bookings(raw_cars)
         return {
             "booking_group_id": group_id,
@@ -1615,26 +1852,23 @@ class BookingService:
 
     async def _apply_logged_discount(self, created: list[dict], discount: float) -> list[dict]:
         """The manager gave the customer `discount` rupees off this visit.
-        Split across the cars in proportion to what each costs (the last car
-        absorbs the rounding), and recorded as the booking's own discount so
-        total, platform earning and the cash ledger all show what was really
-        paid. Runs before anything is announced; a refusal here unwinds the
-        whole visit like any other failure."""
+        Split across the cars in proportion to what each costs, in WHOLE
+        rupees that add up to exactly the discount (₹50 on ₹349 + ₹499 is
+        ₹21 + ₹29, never ₹20.58 + ₹29.42), and recorded as the booking's own
+        discount so total, platform earning and the cash ledger all show
+        what was really paid. Runs before anything is announced; a refusal
+        here unwinds the whole visit like any other failure."""
         totals = [round(float(b.get("total_amount") or 0), 2) for b in created]
         bill = round(sum(totals), 2)
+        discount = round_rupees(discount)
         if discount > bill:
             raise BadRequestException(
                 f"The discount can't be more than the bill (₹{bill:g})." if bill > 0 else "There is nothing to discount on this job."
             )
-        remaining = round(discount, 2)
+        shares = split_whole_rupees(discount, totals, caps=totals)
         updated: list[dict] = []
         for index, booking in enumerate(created):
-            if index == len(created) - 1:
-                share = remaining
-            else:
-                share = round(discount * totals[index] / bill, 2)
-            share = round(max(0.0, min(share, totals[index], remaining)), 2)
-            remaining = round(remaining - share, 2)
+            share = float(shares[index])
             new_total = round(totals[index] - share, 2)
             fields = {
                 "total_amount": new_total,
@@ -1685,6 +1919,55 @@ class BookingService:
         except Exception:  # noqa: BLE001
             logger.exception("Could not build a plan-usage note for subscription %s", subscription_id)
             return ""
+
+    async def _after_visit_completed(self, customer_id: str | None, cars: list[dict], at: datetime, send_whatsapp: bool = True) -> None:
+        """Bookkeeping every completion path shares (captain after-photo,
+        manager mark-done, manager-logged job): moves the customer's
+        last_completed_at forward — what the repeat-booking nudge reads —
+        and, when the wash just done was a pass's last one, sends the
+        one-time "used all washes" note. Best effort: the job is saved."""
+        try:
+            if customer_id and ObjectId.is_valid(customer_id):
+                # $max: a backdated logged job never moves it backwards.
+                await self.user_repo.collection.update_one({"_id": ObjectId(customer_id)}, {"$max": {"last_completed_at": at}})
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not stamp last_completed_at for customer %s", customer_id)
+        for subscription_id in {c.get("subscription_id") for c in cars if c.get("subscription_id")}:
+            try:
+                await self._notify_pass_used_up(subscription_id, send_whatsapp)
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not send the used-all-washes note for pass %s", subscription_id)
+
+    async def _notify_pass_used_up(self, subscription_id: str, send_whatsapp: bool = True) -> None:
+        """"You've used all washes" — once per pass, and only once its last
+        wash is actually DONE (another booked wash still to come means it
+        isn't used up yet; a cancelled one hands the wash back). An auto-pay
+        pass never gets it: it stays active at 0 until its refill."""
+        from app.services.subscription_service import claim_used_up_notice
+
+        live = [
+            BookingStatus.AWAITING_PAYMENT.value, BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value,
+            BookingStatus.ASSIGNED.value, BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value,
+        ]
+        if await self.repo.collection.find_one(
+            {"subscription_id": subscription_id, "status": {"$in": live}, "is_deleted": {"$ne": True}}, {"_id": 1}
+        ):
+            return
+        sub = await claim_used_up_notice(self.db, subscription_id)
+        if not sub or not sub.get("customer_id"):
+            return
+        plan_id = str(sub.get("plan_id") or "")
+        plan = await self.db.subscription_plans.find_one({"_id": ObjectId(plan_id)}, {"name": 1}) if ObjectId.is_valid(plan_id) else None
+        plan_name = (plan or {}).get("name") or "Monthly"
+        await self.notifications.notify(
+            sub["customer_id"],
+            "All washes used",
+            f"You've used all washes on your {plan_name} pass. Buy it again from your dashboard.",
+            NotificationType.SYSTEM,
+            subscription_id,
+            background=True,
+            send_whatsapp=send_whatsapp,
+        )
 
     async def _notify_service_done(self, cars: list[dict], customer_id: str, send_whatsapp: bool) -> None:
         """The ONLY customer message for a manager-done job: "service done",
@@ -1816,13 +2099,10 @@ class BookingService:
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("Could not tell captain %s that %s was closed", released, car.get("booking_number"))
-        try:
-            from app.services.payment_service import PaymentService
-
-            await PaymentService(self.db).void_open_links([str(d["_id"]) for d in done], "Marked done by the manager")
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not void open payment links for %s", booking.get("booking_number"))
+        await self._void_payment_links([str(d["_id"]) for d in done], "Marked done by the manager")
         await self._notify_service_done(done, booking["customer_id"], send_whatsapp)
+        if done:
+            await self._after_visit_completed(booking["customer_id"], done, now, send_whatsapp)
         return {"completed": len(done), "booking_numbers": [d.get("booking_number") for d in done]}
 
     async def _cars_for_lines(self, customer_id: str, lines, as_of: datetime | None = None) -> list[GroupVehicleRequest]:
@@ -1839,24 +2119,8 @@ class BookingService:
         passes = await self._usable_passes(customer_id)
         cars: list[GroupVehicleRequest] = []
         for line in lines:
-            main_ids = [sid for sid in line.service_ids]
             for _ in range(line.quantity):
-                sub_id = None
-                if line.use_subscription:
-                    for sub in passes:
-                        if sub.get("_used"):
-                            continue
-                        if sub.get("service_id") not in main_ids or sub.get("vehicle_type") != line.vehicle_type:
-                            continue
-                        if as_of is not None:
-                            start = sub.get("start_date")
-                            # Calendar-DATE comparison, not exact-instant —
-                            # see plan_consumption's identical check for why.
-                            if start is not None and from_stored(start).date() > to_ist(as_of).date():
-                                continue  # didn't exist yet, calendar-date-wise, at this logged time
-                        sub["_used"] = True
-                        sub_id = str(sub["_id"])
-                        break
+                sub_id = self._take_pass(passes, line.vehicle_type, list(line.service_ids), as_of) if line.use_subscription else None
                 cars.append(
                     GroupVehicleRequest(
                         vehicle_type=line.vehicle_type,
@@ -1867,6 +2131,94 @@ class BookingService:
                     )
                 )
         return cars
+
+    @staticmethod
+    def _take_pass(passes: list[dict], vehicle_type: str | None, service_ids: list[str], as_of: datetime | None = None) -> str | None:
+        """Claim the first unused pass for this vehicle type whose service is
+        on the car (marks it used so the next car can't take it too)."""
+        for sub in passes:
+            if sub.get("_used"):
+                continue
+            if sub.get("service_id") not in service_ids or sub.get("vehicle_type") != vehicle_type:
+                continue
+            if as_of is not None:
+                start = sub.get("start_date")
+                # Calendar-DATE comparison, not exact-instant — see
+                # plan_consumption's identical check for why.
+                if start is not None and from_stored(start).date() > to_ist(as_of).date():
+                    continue  # didn't exist yet, calendar-date-wise, at this logged time
+            sub["_used"] = True
+            return str(sub["_id"])
+        return None
+
+    async def _with_passes(self, customer_id: str, cars: list[GroupVehicleRequest]) -> list[GroupVehicleRequest]:
+        """The older entry points (POST /bookings, /bookings/group,
+        /bookings/manager-create) name their cars directly. A vehicle-TYPE
+        car that names no plan gets the customer's matching pass exactly as
+        a quick-booking line does, so no door books the same wash at a
+        different price. Saved-vehicle / combo cars keep what they asked for."""
+        passes = await self._usable_passes(customer_id)
+        taken = {c.subscription_id for c in cars if c.subscription_id}
+        for sub in passes:
+            if str(sub["_id"]) in taken:
+                sub["_used"] = True
+        out: list[GroupVehicleRequest] = []
+        for car in cars:
+            if car.vehicle_type and not car.vehicle_id and not car.combo_id and not car.subscription_id:
+                sub_id = self._take_pass(passes, car.vehicle_type, list(car.service_ids or []))
+                if sub_id:
+                    car = car.model_copy(update={"subscription_id": sub_id})
+            out.append(car)
+        return out
+
+    async def _park_or_confirm_result(self, raw_cars: list[dict], customer: dict, source: str) -> dict:
+        """What every create path reports after its cars exist: the payment
+        link for a visit parked awaiting payment (sent to the customer on
+        WhatsApp too), and the visit totals."""
+        raw_cars = [c for c in raw_cars if c]
+        total = round(sum(float(c.get("total_amount") or 0) for c in raw_cars), 2)
+        awaiting = any(c.get("status") == BookingStatus.AWAITING_PAYMENT.value for c in raw_cars)
+        link = await self._send_visit_payment_link(raw_cars, customer, source) if awaiting and total >= 1 else None
+        return {
+            "awaiting_payment": awaiting,
+            "payment_link": link,
+            "visit_total": total,
+            "service_code": (raw_cars[0].get("service_code") if raw_cars else None),
+            "travel_charge": round(sum(float(c.get("travel_charge") or 0) for c in raw_cars), 2),
+            "prepaid_only": any(c.get("prepaid_only") for c in raw_cars),
+        }
+
+    async def create_self_service_booking(self, customer_id: str, payload: BookingCreateRequest) -> dict:
+        """POST /bookings — one car, the older request shape. Same pass
+        auto-apply, same payment-link rule and the same result fields as
+        create_quick_booking."""
+        customer = await self.user_repo.find_by_id(customer_id)
+        if not customer:
+            raise NotFoundException("Customer not found")
+        if payload.vehicle_type and not payload.subscription_id and not payload.combo_id:
+            car = GroupVehicleRequest(vehicle_type=payload.vehicle_type, service_ids=list(payload.service_ids))
+            matched = (await self._with_passes(customer_id, [car]))[0].subscription_id
+            if matched:
+                payload = payload.model_copy(update={"subscription_id": matched})
+        result = await self.create_booking(customer_id, payload)
+        extra = await self._park_or_confirm_result([await self.repo.find_by_id(result["id"])], customer, "app")
+        return {**result, **{k: v for k, v in extra.items() if k != "visit_total"}}
+
+    async def create_self_service_group(self, customer_id: str, payload: BookingGroupCreateRequest) -> dict:
+        """POST /bookings/group — several cars, the older request shape.
+        Type lines are expanded here so each car can take its own pass."""
+        customer = await self.user_repo.find_by_id(customer_id)
+        if not customer:
+            raise NotFoundException("Customer not found")
+        cars: list[GroupVehicleRequest] = []
+        for line in payload.vehicles:
+            copies = line.quantity if line.vehicle_type else 1
+            cars.extend(line.model_copy(update={"quantity": 1}) for _ in range(copies))
+        payload = payload.model_copy(update={"vehicles": await self._with_passes(customer_id, cars)})
+        result = await self.create_booking_group(customer_id, payload)
+        raw = [await self.repo.find_by_id(b["id"]) for b in result["bookings"]]
+        extra = await self._park_or_confirm_result(raw, customer, "app")
+        return {**result, **{k: v for k, v in extra.items() if k not in ("visit_total", "service_code")}}
 
     async def _usable_passes(self, customer_id: str) -> list[dict]:
         """This customer's live passes (type + service scoped) with washes
@@ -1907,9 +2259,15 @@ class BookingService:
             created_address = await AddressService(self.db).create(payload.customer_id, payload.new_address)
             address_id = created_address["id"]
 
+        subscription_id = payload.subscription_id
+        vehicle_type = payload.vehicle_type if not vehicle_id else None
+        if vehicle_type and not subscription_id and not payload.combo_id:
+            car = GroupVehicleRequest(vehicle_type=vehicle_type, service_ids=list(payload.service_ids))
+            subscription_id = (await self._with_passes(payload.customer_id, [car]))[0].subscription_id
+
         booking_request = BookingCreateRequest(
             vehicle_id=vehicle_id,
-            vehicle_type=payload.vehicle_type if not vehicle_id else None,
+            vehicle_type=vehicle_type,
             address_id=address_id,
             service_ids=payload.service_ids,
             service_quantities=payload.service_quantities or {},
@@ -1918,7 +2276,7 @@ class BookingService:
             scheduled_slot=payload.scheduled_slot,
             payment_method=payload.payment_method,
             coupon_code=payload.coupon_code,
-            subscription_id=payload.subscription_id,
+            subscription_id=subscription_id,
             customer_notes=payload.customer_notes,
             alternate_contact_name=payload.alternate_contact_name,
             alternate_contact_phone=payload.alternate_contact_phone,
@@ -1927,9 +2285,11 @@ class BookingService:
         # verification (see create_booking's _skip_verification_gate).
         result = await self.create_booking(payload.customer_id, booking_request, _skip_verification_gate=True, source="staff", _allow_pinless=True)
         await self._record_history(
-            result["id"], BookingStatus.PENDING, actor_id, f"Booking created by staff on behalf of customer {payload.customer_id}"
+            result["id"], BookingStatus(result["status"]), actor_id, f"Booking created by staff on behalf of customer {payload.customer_id}"
         )
-        return result
+        # A prepaid booking is parked until paid — send the customer the link.
+        extra = await self._park_or_confirm_result([await self.repo.find_by_id(result["id"])], customer, "staff")
+        return {**result, **{k: v for k, v in extra.items() if k != "visit_total"}}
 
     async def report_risk(self, booking_id: str, captain_id: str, note: str | None) -> dict:
         """Captain self-reports they're at risk of running late for an
@@ -1967,6 +2327,234 @@ class BookingService:
         if first_time_eligible and first_time_price is not None:
             return first_time_price
         return base_price
+
+    @classmethod
+    def price_view(cls, item: dict, vehicle_type: str, first_time_eligible: bool) -> dict:
+        """What one service shows on a card or chat row: the price this
+        customer pays, and what to strike through — the regular price when a
+        first-wash price applies, else the display-only MRP (original_price),
+        which is never charged. Mirrors the website's priceForType."""
+        regular = float(cls._resolve_price(item, vehicle_type, False))
+        price = float(cls._resolve_price(item, vehicle_type, first_time_eligible))
+        mrp = (item.get("vehicle_type_original_prices") or {}).get(vehicle_type, item.get("original_price"))
+        struck = regular if price < regular else (float(mrp) if mrp is not None and float(mrp) > price else None)
+        return {"price": price, "regular": regular, "struck": struck, "first_time": price < regular}
+
+    async def _first_time_eligible(self, phone: str | None, registration_number: str | None = None) -> bool:
+        """First-time-offer eligibility is checked against the WHOLE platform,
+        not one account — the same plate or phone having any earlier
+        non-cancelled booking (under any account) disqualifies it, which is
+        what stops "new phone number, same car" discount abuse."""
+        if registration_number and await self.repo.exists_for_registration(registration_number, FRAUD_CHECK_EXCLUDED_STATUSES):
+            return False
+        if phone and await self.repo.exists_for_phone(phone, FRAUD_CHECK_EXCLUDED_STATUSES):
+            return False
+        return True
+
+    async def _price_services(
+        self,
+        *,
+        customer_id: str | None,
+        services: list[dict],
+        quantities: dict[str, int],
+        combo: dict | None,
+        vehicle_type: str,
+        vehicle_id: str | None,
+        first_time_eligible: bool,
+        subscription_id: str | None,
+        coupon_code: str | None,
+        as_of: datetime | None = None,
+    ) -> dict:
+        """THE price of one car: per-vehicle-type price (or the first-time
+        price), then EITHER its plan's waiver OR a coupon. create_booking
+        charges it and quote_visit shows it — one function, so no screen or
+        chat can quote a price the booking won't honour."""
+        def subtotal_at(first_time: bool) -> float:
+            if combo:
+                return float(self._resolve_price(combo, vehicle_type, first_time))
+            return float(sum(self._resolve_price(s, vehicle_type, first_time) * quantities[str(s["_id"])] for s in services))
+
+        subtotal = subtotal_at(first_time_eligible)
+        discount = 0.0
+        coupon: dict | None = None
+        consumption: dict | None = None
+        if subscription_id:
+            # The subscription must belong to exactly this booking's customer
+            # (also the target customer when staff book on someone's behalf).
+            consumption = await self.subscription_service.plan_consumption(
+                subscription_id, vehicle_id, services, customer_id, vehicle_type=vehicle_type, as_of=as_of,
+            )
+            discount = await self._subscription_discount(subscription_id, services, vehicle_type, first_time_eligible)
+        elif coupon_code:
+            coupon, discount = await self.coupon_service.validate_and_compute_booking_discount(
+                coupon_code,
+                subtotal,
+                customer_id,
+                services=services,
+                quantities=quantities,
+                vehicle_type=vehicle_type,
+                first_time_eligible=first_time_eligible,
+                price_resolver=self._resolve_price,
+            )
+        # A discount can legitimately be computed above the subtotal (a combo
+        # priced below the sum of its parts under a full-waive legacy plan) —
+        # clamp it, or the booking books a NEGATIVE total and the `total <= 0
+        # → PAID` rule marks it paid while poisoning revenue aggregates.
+        return {
+            "subtotal": subtotal,
+            "regular_subtotal": subtotal_at(False),
+            "discount_amount": min(discount, subtotal),
+            "coupon": coupon,
+            "subscription_consumption": consumption,
+        }
+
+    async def _car_services(self, car) -> tuple[list[dict], dict | None, dict[str, int]]:
+        """A GroupVehicleRequest-like car's services, combo and validated
+        quantities — the same checks create_booking makes before pricing."""
+        combo = None
+        if car.combo_id:
+            combo = await self.combo_repo.find_by_id(car.combo_id)
+            if not combo or not combo.get("is_active"):
+                raise NotFoundException("Combo offer not found or inactive")
+            service_ids = combo["service_ids"]
+        else:
+            service_ids = list(car.service_ids or [])
+        if not service_ids:
+            raise BadRequestException("Select at least one service or combo offer")
+        services = []
+        for service_id in service_ids:
+            service = await self.service_repo.find_by_id(service_id)
+            if not service or not service.get("is_active"):
+                raise NotFoundException(f"Service not found or inactive: {service_id}")
+            services.append(service)
+        if combo:
+            return services, combo, {str(s["_id"]): 1 for s in services}
+        return services, None, await self._validate_service_mix(services, car.vehicle_type, dict(car.service_quantities or {}))
+
+    async def quote_visit(
+        self,
+        *,
+        customer_id: str | None,
+        phone: str | None,
+        lines,
+        address: dict | None = None,
+        coupon_code: str | None = None,
+        source: str = "app",
+        log_mode: bool = False,
+        as_of: datetime | None = None,
+    ) -> dict:
+        """The bill a visit WILL get, before it is booked — every screen and
+        the WhatsApp bot show this instead of doing their own maths. Mirrors
+        create_quick_booking step for step: lines expand to cars in order,
+        each car takes the customer's matching pass (_cars_for_lines), cars
+        are priced in order so only the FIRST can get the first-time price
+        (the second already sees the first's booking under this phone), the
+        coupon rides on the first car only, the distance charge is charged
+        once, and a prepaid service makes the visit online-only.
+
+        `customer_id` None (an anonymous visitor): no passes are looked up —
+        a stranger's quote must never reveal someone's plan. `phone` None:
+        the visitor hasn't typed it yet, so they are quoted as new.
+        `log_mode`: a manager-logged job — no distance charge, no prepaid
+        rule, no coupon (create_booking's _completed_by exemptions)."""
+        policy = await self.policy_service.get_policy()
+        units: list[tuple[int, GroupVehicleRequest]] = []
+        if customer_id:
+            cars = await self._cars_for_lines(customer_id, lines, as_of=as_of)
+        else:
+            cars = [
+                GroupVehicleRequest(
+                    vehicle_type=line.vehicle_type, quantity=1, service_ids=list(line.service_ids),
+                    service_quantities=dict(line.service_quantities or {}),
+                )
+                for line in lines
+                for _ in range(line.quantity)
+            ]
+        position = 0
+        for line_index, line in enumerate(lines):
+            for _ in range(line.quantity):
+                units.append((line_index, cars[position]))
+                position += 1
+        limit = int(policy.get("max_vehicles_per_booking", 5))
+        if len(units) > limit:
+            raise BadRequestException(f"You can book up to {limit} vehicles on one visit.")
+
+        first_time = await self._first_time_eligible(phone) if phone else True
+        terms = dict(self._NO_TERMS) if log_mode else await self._visit_terms(cars)
+        coupon_error: str | None = None
+        coupon_applied: str | None = None
+        line_rows = [
+            {"line_index": i, "vehicle_type": line.vehicle_type, "quantity": line.quantity, "subtotal": 0.0,
+             "regular_subtotal": 0.0, "plan_discount": 0.0, "coupon_discount": 0.0, "plan_covered": 0, "total": 0.0}
+            for i, line in enumerate(lines)
+        ]
+        for index, (line_index, car) in enumerate(units):
+            vt_doc = await self.vehicle_type_repo.find_by_id(car.vehicle_type) if car.vehicle_type else None
+            if not vt_doc or not vt_doc.get("is_active", True):
+                raise BadRequestException("Pick a valid vehicle type.")
+            services, combo, quantities = await self._car_services(car)
+            code = coupon_code if index == 0 and not log_mode and not car.subscription_id else None
+            common = dict(
+                customer_id=customer_id, services=services, quantities=quantities, combo=combo,
+                vehicle_type=car.vehicle_type, vehicle_id=car.vehicle_id, first_time_eligible=first_time and index == 0,
+                subscription_id=car.subscription_id, as_of=as_of,
+            )
+            try:
+                priced = await self._price_services(**common, coupon_code=code)
+            except BadRequestException as exc:
+                if not code:
+                    raise
+                # A refused coupon is shown next to the field, not as a
+                # failed quote — the rest of the bill is still true.
+                coupon_error = exc.message
+                priced = await self._price_services(**common, coupon_code=None)
+            if priced["coupon"] is not None:
+                coupon_applied = priced["coupon"]["code"]
+            row = line_rows[line_index]
+            row["subtotal"] += priced["subtotal"]
+            row["regular_subtotal"] += priced["regular_subtotal"]
+            if car.subscription_id:
+                row["plan_covered"] += 1
+                row["plan_discount"] += priced["discount_amount"]
+            else:
+                row["coupon_discount"] += priced["discount_amount"]
+            row["total"] += max(0.0, priced["subtotal"] - priced["discount_amount"])
+
+        travel = None
+        if terms["charges_travel"] and address:
+            _, distance_km = await self._resolve_service_center(address, allow_pinless=True)
+            travel = await self.pricing_service.travel_quote(distance_km)
+        travel_charge = float(travel["charge"]) if travel else 0.0
+
+        for row in line_rows:
+            for key in ("subtotal", "regular_subtotal", "plan_discount", "coupon_discount", "total"):
+                row[key] = round(row[key], 2)
+        subtotal = round(sum(r["subtotal"] for r in line_rows), 2)
+        regular = round(sum(r["regular_subtotal"] for r in line_rows), 2)
+        total = round(sum(r["total"] for r in line_rows) + travel_charge, 2)
+        # Mirrors create_booking's AWAITING_PAYMENT rule: a prepaid service
+        # on any channel, or (self-service) a plan wash that still costs
+        # something — its extras are paid before we come out.
+        plan_extras = source == "app" and any(r["plan_covered"] and r["total"] > 0 for r in line_rows)
+        return {
+            "vehicle_count": len(units),
+            "first_time_eligible": first_time,
+            "lines": line_rows,
+            "subtotal": subtotal,
+            "regular_subtotal": regular,
+            "first_time_savings": round(regular - subtotal, 2),
+            "plan_discount": round(sum(r["plan_discount"] for r in line_rows), 2),
+            "coupon_code": coupon_applied,
+            "coupon_discount": round(sum(r["coupon_discount"] for r in line_rows), 2),
+            "coupon_error": coupon_error,
+            "travel": travel,
+            "travel_charge": travel_charge,
+            # The visit charges travel but no address was given to measure it.
+            "travel_pending": bool(terms["charges_travel"]) and not address,
+            "total_amount": total,
+            "prepaid_service": terms["prepaid_service"],
+            "online_only": total > 0 and bool(terms["prepaid_service"] or plan_extras),
+        }
 
     async def _subscription_discount(self, subscription_id: str, services: list[dict], vehicle_type: str, first_time_eligible: bool) -> float:
         """How much of this booking's subtotal a subscription actually waives.
@@ -2124,6 +2712,7 @@ class BookingService:
                 f"{what} {distance_m}m from the customer's address — worth a quick review.",
                 NotificationType.BOOKING,
                 str(booking["_id"]),
+                background=True,  # raised mid-request on the captain's phone
             )
 
     async def available_slots(self, service_center_id: str, date_str: str) -> list[dict]:
@@ -2520,6 +3109,11 @@ class BookingService:
 
         centers = await self.center_repo.find_by_pincode(address["pincode"])
         if centers:
+            # A pin matched only by pincode (outside the center's radius) still
+            # has a real distance — the distance charge and captain travel pay need it.
+            c_lat, c_lng = self._center_coords(centers[0])
+            if lat is not None and lng is not None and c_lat is not None:
+                return centers[0], round(haversine_km(lat, lng, c_lat, c_lng), 2)
             return centers[0], 0.0
 
         raise BadRequestException("Doorstep service is not yet available in your area")
@@ -2551,8 +3145,8 @@ class BookingService:
         enriched = await self._enrich_bookings(items)
         return [_redact_financials(b, "customer") for b in enriched], total
 
-    async def list_for_captain(self, captain_id: str, status: str | None, page: int, page_size: int):
-        items, total = await self.repo.list_for_captain(captain_id, status, page, page_size)
+    async def list_for_captain(self, captain_id: str, status: str | None, page: int, page_size: int, scope: str | None = None):
+        items, total = await self.repo.list_for_captain(captain_id, status, page, page_size, scope=scope)
         enriched = await self._enrich_bookings(items)
         return [_redact_financials(b, "captain") for b in enriched], total
 
@@ -2661,16 +3255,31 @@ class BookingService:
         return results
 
     async def list_for_center(
-        self, service_center_id: str, extra_filters: dict, page: int, page_size: int, actor_role: str, actor_center_id: str | None
+        self,
+        service_center_id: str,
+        extra_filters: dict,
+        page: int,
+        page_size: int,
+        actor_role: str,
+        actor_center_id: str | None,
+        queue: list[dict] | None = None,
+        sort: str | None = None,
     ):
         """extra_filters carries status and/or the period-window filter the
         route builds (see booking_routes.py's _apply_period_filters) —
         same shape list_all (the admin GET /bookings) uses, so a manager's
         own KPI drill-down can reuse the exact same RevenueDrillModal
-        component, just scoped to their center."""
+        component, just scoped to their center. `queue` = extra clauses from
+        center_queue_filters (ANDed, so their own $or never collides with
+        the period filter's)."""
         ensure_own_center(actor_role, actor_center_id, service_center_id)
         filters: dict = {"service_center_id": service_center_id, **extra_filters}
-        items, total = await self.repo.list_all(filters, page, page_size)
+        if queue:
+            filters["$and"] = list(queue)
+        try:
+            items, total = await self.repo.list_queue(filters, page, page_size, sort)
+        except ValueError as exc:
+            raise BadRequestException(str(exc))
         enriched = await self._enrich_bookings(items)
         return enriched, total
 
@@ -2770,6 +3379,8 @@ class BookingService:
         ).to_list(length=20)
         if not bookings or any(b.get("customer_id") != customer_id for b in bookings):
             raise NotFoundException("Booking not found")
+        if any(b.get("prepaid_only") and b.get("status") != BookingStatus.CANCELLED.value for b in bookings):
+            raise BadRequestException(PREPAID_CASH_REFUSAL)
         switched = 0
         for booking in bookings:
             if booking.get("status") != BookingStatus.AWAITING_PAYMENT.value:
@@ -2807,10 +3418,12 @@ class BookingService:
             lead["customer_id"], f"{label} cancelled",
             f"Your visit ({numbers}) has been cancelled.", NotificationType.BOOKING, str(lead["_id"]),
             wa_event="booking_cancelled", wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
+            background=True,
         )
         for captain_id in {b.get("captain_id") for b in live if b.get("captain_id")}:
             await self.notifications.notify(
                 captain_id, f"{label} cancelled", f"Visit {numbers} was cancelled.", NotificationType.BOOKING, str(lead["_id"]),
+                background=True,
             )
         return {"booking_group_id": booking_group_id, "cancelled_count": len(live)}
 
@@ -3758,7 +4371,9 @@ class BookingService:
                 booking_id,
                 wa_event="service_completed",
                 wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
+                background=True,  # the captain's app must not wait on Meta
             )
+        await self._after_visit_completed(booking["customer_id"], [updated], now)
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
@@ -3853,6 +4468,7 @@ class BookingService:
         if booking.get("subscription_id") and booking.get("subscription_consumption"):
             await self.subscription_service.restore_consumption(booking["subscription_id"], booking["subscription_consumption"])
 
+        await self._void_payment_links([booking_id], "Booking cancelled")
         await self._record_history(booking_id, BookingStatus.CANCELLED, actor_id, payload.reason)
         if not _quiet:
             cancelled_label = await self._service_label(booking)
@@ -3865,6 +4481,7 @@ class BookingService:
                 booking_id,
                 wa_event="booking_cancelled",
                 wa_params=[wa_services, wa_reference, wa_date, wa_slot, wa_vehicle],
+                background=True,
             )
             if booking.get("captain_id"):
                 await self.notifications.notify(
@@ -3873,6 +4490,7 @@ class BookingService:
                     f"{booking['booking_number']} was cancelled.",
                     NotificationType.BOOKING,
                     booking_id,
+                    background=True,
                 )
         await self._broadcast_booking_changed(updated)
         await self._broadcast_slots_changed(booking["service_center_id"], date_str)
@@ -4175,6 +4793,7 @@ class BookingService:
             await self._broadcast_booking_changed(car)
         cars = claimed_cars
         car_ids = [str(c["_id"]) for c in cars]
+        await self._void_payment_links(car_ids, "Booking deleted")
 
         # Same courtesy cancel_booking already extends to the customer and
         # any assigned captain — from their side, "deleted" and
@@ -4310,8 +4929,37 @@ class BookingService:
             await self.repo.hard_delete(car_id)
         return {"deleted_count": len(car_ids), "booking_ids": car_ids}
 
+    # Every finder main.py's _reminder_loop calls bounds scheduled_date IN
+    # THE QUERY (served by the {status, scheduled_date} index): the loop
+    # runs them every 60s, forever, and a booking whose day is long gone is
+    # a zombie, not a nudge target — unbounded, each one was re-read (and
+    # some re-alerted the manager) every pass indefinitely. They also sort
+    # on scheduled_date (order means nothing to a sweep) so that one index
+    # serves both the filter and the sort. SWEEP_MAX_ROWS is the hard cap on
+    # what one finder loads per pass — oldest slot first; a bad day's
+    # overflow is simply picked up by the next pass.
+    SWEEP_IN_FLIGHT_DAYS = 7  # on-the-way / in-service sweeps, same floor as captain_not_reached
+    SWEEP_MAX_ROWS = 500
+
+    @staticmethod
+    def _sweep_day(offset_days: int) -> datetime:
+        """Today's IST midnight shifted by `offset_days`, naive — the same
+        wall-clock form scheduled_date is stored in."""
+        return now_ist().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None) + timedelta(days=offset_days)
+
     async def find_bookings_needing_reminder(self) -> list[dict]:
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value, "reminder_sent": {"$ne": True}})
+        # Yesterday..tomorrow: nothing outside that can start within 30
+        # minutes, and a stale one from last week must not be pinged at all.
+        candidates = await self.repo.find_all_no_paginate(
+            {
+                "status": BookingStatus.ASSIGNED.value,
+                "reminder_sent": {"$ne": True},
+                "scheduled_date": {"$gte": self._sweep_day(-1), "$lt": self._sweep_day(2)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
+        )
         now = now_ist()
         due = []
         for booking in candidates:
@@ -4347,7 +4995,10 @@ class BookingService:
                 "status": {"$in": [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]},
                 "issue_flag": None,
                 "scheduled_date": {"$gte": now_naive - timedelta(days=7), "$lte": now_naive + timedelta(days=1)},
-            }
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
         )
         now = now_ist()
         overdue = []
@@ -4368,14 +5019,28 @@ class BookingService:
         notified immediately (not the much longer slot_end + grace wait
         find_bookings_captain_not_reached uses for a booking that never got
         a captain at all), then re-nudged every LATE_START_NUDGE_MINUTES for
-        as long as it stays unstarted. Deliberately does NOT filter on
+        as long as it stays unstarted (in-app only after the first alert —
+        see flag_late_to_start). Deliberately does NOT filter on
         issue_flag being unset — this needs to keep firing on its own
         throttle even while flagged, which find_bookings_captain_not_reached
         doesn't need since it only ever fires once. Excludes self_assigned
         bookings entirely — a manager delivering it personally never goes
         through the heading-out flow this nudge is about (see self_assign's
         own comment)."""
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.ASSIGNED.value, "self_assigned": {"$ne": True}})
+        # Yesterday..tomorrow, like its siblings: a booking whose day has
+        # gone drops out instead of re-alerting the manager every
+        # LATE_START_NUDGE_MINUTES forever, and next week's assigned jobs
+        # (which can't be late yet) aren't re-read every minute.
+        candidates = await self.repo.find_all_no_paginate(
+            {
+                "status": BookingStatus.ASSIGNED.value,
+                "self_assigned": {"$ne": True},
+                "scheduled_date": {"$gte": self._sweep_day(-1), "$lt": self._sweep_day(2)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
+        )
         now = now_ist()
         policy = await self.policy_service.get_policy()
         threshold = timedelta(minutes=LATE_START_NUDGE_MINUTES)
@@ -4418,6 +5083,15 @@ class BookingService:
         is_locked_out = now_ist() > lockout_at
 
         if is_locked_out:
+            # Escalate ONCE. The open flag already sits in the manager's
+            # queue, and a Resolve must stick (same reason as the
+            # captain_not_started check below) — re-flagging on every nudge
+            # sent an urgent WhatsApp every 5 minutes until the booking aged
+            # out of the sweep, ~400 of them.
+            if existing_flag == "captain_missed_window" or (
+                existing_flag is None and booking.get("resolved_issue_flag") == "captain_missed_window"
+            ):
+                return
             note = (
                 f"Booking {booking['booking_number']} was due to start at {scheduled_time} and the captain never headed "
                 f"out — the window expired too long ago for them to start it now. Reschedule it to a new time, then "
@@ -4450,8 +5124,24 @@ class BookingService:
         # flag value resolve_issue last cleared) is the only reliable
         # signal (see the model field's own comment).
         already_acknowledged = existing_flag is None and booking.get("resolved_issue_flag") == "captain_not_started"
-        if not is_different_open_flag and not already_acknowledged:
-            await self.flag_issue(str(booking["_id"]), "captain_not_started", note)
+        if already_acknowledged:
+            return  # the manager handled it — the captain isn't nagged on either
+        # Only the first alert of this assignment is a (billed) WhatsApp, to
+        # the captain and the manager; repeats are in-app only — the
+        # founder's "continuous notifications" complaint. A reassignment
+        # (new assigned_at) starts over.
+        last_alert = booking.get("late_start_reminder_sent_at")
+        assigned_at = booking.get("assigned_at")
+        first_alert = not last_alert or (assigned_at is not None and from_stored(last_alert) < from_stored(assigned_at))
+        flagged_at = booking.get("issue_flagged_at")
+        manager_alerted_recently = (
+            existing_flag == "captain_not_started"
+            and not booking.get("issue_resolved")
+            and flagged_at is not None
+            and now_ist() - from_stored(flagged_at) < timedelta(minutes=LATE_START_MANAGER_REPEAT_MINUTES)
+        )
+        if not is_different_open_flag and not manager_alerted_recently:
+            await self.flag_issue(str(booking["_id"]), "captain_not_started", note, send_whatsapp=first_alert)
         if booking.get("captain_id"):
             await self.notifications.notify(
                 booking["captain_id"],
@@ -4459,44 +5149,69 @@ class BookingService:
                 f"Booking {booking['booking_number']} was due to start at {scheduled_time}. Please start heading out now.",
                 NotificationType.BOOKING,
                 str(booking["_id"]),
+                send_whatsapp=first_alert,
             )
 
     async def mark_late_start_reminder_sent(self, booking_id: str) -> None:
         await self._mark_visit(booking_id, {"late_start_reminder_sent_at": now_ist()})
 
     async def find_bookings_unassigned_too_long(self) -> list[dict]:
-        """A booking that's simply been sitting without a captain for too
-        long — independent of how far off its scheduled slot still is (that
-        proximity-based case is find_bookings_captain_not_reached above,
-        which only fires once the whole scheduled window has expired). This
-        one is a repeating nudge: as long as a booking stays unassigned, the
-        manager gets reminded every UNASSIGNED_REMINDER_MINUTES, not just
-        once — a booking scheduled for tomorrow evening still shouldn't sit
-        untouched in the queue all day."""
+        """A booking that's been sitting without a captain for too long and
+        whose slot starts within UNASSIGNED_REMINDER_HORIZON_HOURS (the
+        "window has fully expired" case is find_bookings_captain_not_reached
+        above). A repeating nudge, every UNASSIGNED_REMINDER_MINUTES while it
+        stays unassigned — but only the FIRST reminder of each wait goes to
+        WhatsApp (each one is a billed message; ~96 a day per booking when
+        they all did); repeats are in-app only and are held outside the
+        center's working hours, so the first pass after opening catches up.
+
+        Each returned booking carries `_first_unassigned_reminder`, which
+        the reminder loop turns into send_whatsapp."""
         # Time-bounded IN THE QUERY: an abandoned booking whose slot is days
         # in the past is a zombie, not a nudge target — without this bound
         # every such booking was re-fetched and re-parsed every 60s forever.
-        # Flagged bookings are excluded too (the manager already has a
-        # louder signal for those). scheduled_date is naive IST wall-clock.
+        # Nothing past tomorrow can start within the horizon. Flagged
+        # bookings are excluded too (the manager already has a louder signal
+        # for those). scheduled_date is naive IST wall-clock.
         floor = now_ist().replace(tzinfo=None) - timedelta(days=2)
         candidates = await self.repo.find_all_no_paginate(
             {
                 "status": {"$in": [BookingStatus.PENDING.value, BookingStatus.RESCHEDULED.value]},
                 "awaiting_assignment_since": {"$ne": None},
                 "issue_flag": None,
-                "scheduled_date": {"$gte": floor},
-            }
+                "scheduled_date": {"$gte": floor, "$lt": self._sweep_day(2)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
         )
+        if not candidates:
+            return []
+        centers = {
+            str(c["_id"]): c
+            for c in await self.center_repo.find_by_ids([b.get("service_center_id") for b in candidates])
+        }
         now = now_ist()
         threshold = timedelta(minutes=UNASSIGNED_REMINDER_MINUTES)
+        horizon = timedelta(hours=UNASSIGNED_REMINDER_HORIZON_HOURS)
         due = []
         for booking in candidates:
             since = booking.get("awaiting_assignment_since")
             if not since or now - from_stored(since) < threshold:
                 continue
-            last_reminder = booking.get("unassigned_reminder_sent_at")
-            if last_reminder and now - from_stored(last_reminder) < threshold:
+            slot_start, _ = _booking_window(booking)
+            if slot_start - now > horizon:
                 continue
+            last_reminder = booking.get("unassigned_reminder_sent_at")
+            # A reminder from an earlier wait (before a reschedule or a
+            # captain releasing it) doesn't make this wait's first one a repeat.
+            first = not last_reminder or from_stored(last_reminder) < from_stored(since)
+            if not first:
+                if now - from_stored(last_reminder) < threshold:
+                    continue
+                if not _within_working_hours(centers.get(booking.get("service_center_id") or ""), now):
+                    continue
+            booking["_first_unassigned_reminder"] = first
             due.append(booking)
         return self._one_per_visit(due)
 
@@ -4507,7 +5222,16 @@ class BookingService:
         """Captain started heading out but hasn't reached/started the service in
         a long time — worth nudging the manager even though nothing's broken
         yet ('notify him if he takes unnecessary time')."""
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.CAPTAIN_ON_THE_WAY.value, "issue_flag": None})
+        candidates = await self.repo.find_all_no_paginate(
+            {
+                "status": BookingStatus.CAPTAIN_ON_THE_WAY.value,
+                "issue_flag": None,
+                "scheduled_date": {"$gte": self._sweep_day(-self.SWEEP_IN_FLIGHT_DAYS)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
+        )
         now = now_ist()
         stuck = []
         for booking in candidates:
@@ -4533,7 +5257,16 @@ class BookingService:
         the drive over."""
         policy = await self.policy_service.get_policy()
         tolerance = policy.get("delay_tolerance_minutes", SERVICE_OVERRUN_MINUTES)
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.SERVICE_STARTED.value, "issue_flag": None})
+        candidates = await self.repo.find_all_no_paginate(
+            {
+                "status": BookingStatus.SERVICE_STARTED.value,
+                "issue_flag": None,
+                "scheduled_date": {"$gte": self._sweep_day(-self.SWEEP_IN_FLIGHT_DAYS)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
+        )
         now = now_ist()
         overrunning = []
         for booking in candidates:
@@ -4555,7 +5288,15 @@ class BookingService:
         policy = await self.policy_service.get_policy()
         tolerance = policy.get("arrival_to_start_tolerance_minutes", 15)
         candidates = await self.repo.find_all_no_paginate(
-            {"status": BookingStatus.CAPTAIN_ON_THE_WAY.value, "vehicle_verified": True, "issue_flag": None}
+            {
+                "status": BookingStatus.CAPTAIN_ON_THE_WAY.value,
+                "vehicle_verified": True,
+                "issue_flag": None,
+                "scheduled_date": {"$gte": self._sweep_day(-self.SWEEP_IN_FLIGHT_DAYS)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
         )
         now = now_ist()
         idle = []
@@ -4576,7 +5317,16 @@ class BookingService:
         fires."""
         policy = await self.policy_service.get_policy()
         radius_m = policy.get("photo_geofence_radius_m", 300) * 2
-        candidates = await self.repo.find_all_no_paginate({"status": BookingStatus.SERVICE_STARTED.value, "issue_flag": None})
+        candidates = await self.repo.find_all_no_paginate(
+            {
+                "status": BookingStatus.SERVICE_STARTED.value,
+                "issue_flag": None,
+                "scheduled_date": {"$gte": self._sweep_day(-self.SWEEP_IN_FLIGHT_DAYS)},
+            },
+            sort_by="scheduled_date",
+            sort_order=1,
+            limit=self.SWEEP_MAX_ROWS,
+        )
         if not candidates:
             return []
         # Batched lookups — this sweep runs every 60s; two find_by_id calls
@@ -4611,7 +5361,7 @@ class BookingService:
                 away.append(booking)
         return away
 
-    async def flag_issue(self, booking_id: str, issue_flag: str, note: str) -> None:
+    async def flag_issue(self, booking_id: str, issue_flag: str, note: str, send_whatsapp: bool = True) -> None:
         fields = {"issue_flag": issue_flag, "issue_notes": note, "issue_flagged_at": now_ist(), "issue_resolved": False}
         await self.repo.update_by_id(booking_id, fields)
         booking = await self.repo.find_by_id(booking_id)
@@ -4634,6 +5384,7 @@ class BookingService:
                     note,
                     NotificationType.BOOKING,
                     booking_id,
+                    send_whatsapp=send_whatsapp,
                 )
             # The single hook every automated sweep in main.py's
             # _reminder_loop goes through (captain_not_started,
@@ -4643,14 +5394,16 @@ class BookingService:
             # once, not just the manager-initiated actions above.
             await self._broadcast_booking_changed(booking)
 
-    async def notify_center_manager_for_booking(self, booking: dict, title: str, message: str) -> None:
+    async def notify_center_manager_for_booking(self, booking: dict, title: str, message: str, send_whatsapp: bool = True) -> None:
         """Notifies the booking's service center manager without touching
         issue_flag — for reminders that are just "please act on this soon"
         (e.g. still-unassigned nudges) rather than a state change that needs
         an explicit resolve/reschedule, which is what flag_issue is for."""
         center = await self.center_repo.find_by_id(booking["service_center_id"])
         if center and center.get("manager_id"):
-            await self.notifications.notify(center["manager_id"], title, message, NotificationType.BOOKING, str(booking["_id"]))
+            await self.notifications.notify(
+                center["manager_id"], title, message, NotificationType.BOOKING, str(booking["_id"]), send_whatsapp=send_whatsapp
+            )
 
     async def update_priority(self, booking_id: str, priority: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> tuple[dict, str]:
         """Manager/admin can set priority on any booking in their own
@@ -5021,3 +5774,48 @@ class BookingService:
                 "note": note,
             }
         )
+
+
+# -- One-time data migrations (run from main's deferred startup) -------------
+
+_LAST_COMPLETED_MIGRATION = "users_last_completed_at_v1"
+
+
+async def backfill_last_completed_at(db: AsyncIOMotorDatabase, batch_size: int = 500) -> int:
+    """users.last_completed_at for the completed bookings that existed
+    before completion started stamping it (see _after_visit_completed).
+    Idempotent: $max only ever moves it forward, and the done-marker in
+    `migrations` turns every later boot into a single find_one. Two
+    instances booting at once both running it is harmless for the same
+    reason. Returns how many customers it matched."""
+    from pymongo import UpdateOne
+
+    if await db.migrations.find_one({"_id": _LAST_COMPLETED_MIGRATION}):
+        return 0
+    cursor = db.bookings.aggregate(
+        [
+            {"$match": {"status": BookingStatus.COMPLETED.value, "is_deleted": {"$ne": True}, "completed_at": {"$ne": None}}},
+            {"$group": {"_id": "$customer_id", "last": {"$max": "$completed_at"}}},
+        ],
+        allowDiskUse=True,
+        batchSize=batch_size,
+    )
+    ops: list = []
+    matched = 0
+    async for row in cursor:
+        customer_id, last = row.get("_id"), row.get("last")
+        if not isinstance(customer_id, str) or not ObjectId.is_valid(customer_id) or last is None:
+            continue
+        ops.append(UpdateOne({"_id": ObjectId(customer_id)}, {"$max": {"last_completed_at": last}}))
+        if len(ops) >= batch_size:
+            matched += (await db.users.bulk_write(ops, ordered=False)).matched_count
+            ops = []
+    if ops:
+        matched += (await db.users.bulk_write(ops, ordered=False)).matched_count
+    await db.migrations.update_one(
+        {"_id": _LAST_COMPLETED_MIGRATION},
+        {"$set": {"done_at": datetime.now(timezone.utc), "customers": matched}},
+        upsert=True,
+    )
+    logger.info("Backfilled last_completed_at for %s customers", matched)
+    return matched

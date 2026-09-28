@@ -36,7 +36,7 @@ export function FaqSection({ id = "faq" }: { id?: string }) {
         <script type="application/ld+json">{JSON.stringify(jsonLd)}</script>
       </Helmet>
       <SectionHeader title="Frequently asked questions" subtitle="Everything customers usually ask before their first doorstep wash." />
-      <div className="mt-8 divide-y divide-cream-line-soft rounded-2xl border border-cream-line bg-white sm:mt-10">
+      <div className="mt-8 divide-y divide-cream-line-soft rounded-2xl border border-card-border bg-white sm:mt-10">
         {faqs.map((f) => (
           <details key={f.id} className="group px-5 py-4 open:bg-[#FFFCF0] sm:px-6">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-[15px] font-semibold text-black marker:content-none">

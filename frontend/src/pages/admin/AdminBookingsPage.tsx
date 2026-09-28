@@ -1,12 +1,14 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, RotateCcw, Star, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, Pencil, RotateCcw, Star, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { analyticsApi } from "../../api/admin";
 import { reviewApi } from "../../api/engagement";
 import { Badge, Button, Card, DataTable, Select, StatusBadge } from "../../components/ui";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { EditBookingModal } from "../../components/shared/EditBookingModal";
+import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import BookingQueuePage from "../manager/BookingQueuePage";
 import { useBookingFilters } from "../../lib/useBookingFilters";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -28,9 +30,10 @@ export default function AdminBookingsPage() {
   const [selectedCenterId, setSelectedCenterId] = useState<string | null>(null);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
 
-  if (showRecycleBin) return <RecycleBinView onBack={() => setShowRecycleBin(false)} />;
+  if (showRecycleBin)
+    return <RecycleBinView backLabel={selectedCenterId ? "Back to bookings" : "All service centers"} onBack={() => setShowRecycleBin(false)} />;
   return selectedCenterId ? (
-    <CenterBookings centerId={selectedCenterId} onBack={() => setSelectedCenterId(null)} />
+    <CenterBookings centerId={selectedCenterId} onBack={() => setSelectedCenterId(null)} onShowRecycleBin={() => setShowRecycleBin(true)} />
   ) : (
     <ServiceCenterOverview onSelect={setSelectedCenterId} onShowRecycleBin={() => setShowRecycleBin(true)} />
   );
@@ -95,9 +98,15 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: "su
   );
 }
 
-function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => void }) {
+const isClosed = (b: Booking) => b.status === "completed" || b.status === "cancelled";
+
+function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: string; onBack: () => void; onShowRecycleBin: () => void }) {
+  const queryClient = useQueryClient();
+  const confirm = useConfirm();
+  const { push: pushToast } = useToast();
   const [status, setStatus] = useState("");
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
   // Read-only browse (reviews, ratings, every status at a glance) is the
   // default; "Manage" swaps in the SAME queue a manager works from —
   // reassign/self-assign a captain, mark done, cancel, resolve an issue —
@@ -105,11 +114,33 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
   // their own for that page to default to.
   const [manageMode, setManageMode] = useState(false);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["admin-center-bookings", centerId, status],
-    queryFn: () => bookingApi.forCenter(centerId, { page: 1, page_size: 100, status: status || undefined }),
+  // Filters are UI state only — search, dates, sort and paging all run on
+  // the server (a busy center's history never fits one fetched page).
+  const { search, setSearch, sortOrder, setSortOrder, dateFrom, setDateFrom, dateTo, setDateTo } = useBookingFilters([]);
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
+  const filterKey = `${status}|${debouncedSearch}|${dateFrom}|${dateTo}|${sortOrder}`;
+  useEffect(() => setPage(1), [filterKey]);
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["admin-center-bookings", centerId, status, debouncedSearch, dateFrom, dateTo, sortOrder, page],
+    queryFn: () =>
+      bookingApi.forCenter(centerId, {
+        page,
+        page_size: 50,
+        status: status || undefined,
+        q: debouncedSearch || undefined,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+        sort: sortOrder === "oldest" ? "scheduled_asc" : "scheduled_desc",
+      }),
     enabled: !manageMode,
+    placeholderData: keepPreviousData,
   });
+
+  // Same key as the overview, so the name comes from cache.
+  const { data: centers } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
+  const centerName = centers?.find((c) => c.service_center_id === centerId)?.name;
 
   const { data: reviews } = useQuery({
     queryKey: ["admin-center-bookings-reviews", centerId],
@@ -118,13 +149,61 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
   });
   const reviewByBooking = new Map((reviews?.data || []).map((r) => [r.booking_id, r]));
 
-  const { filtered, search, setSearch, sortOrder, setSortOrder, dateFrom, setDateFrom, dateTo, setDateTo } = useBookingFilters(data?.data || []);
+  const slabs = toSlabs(data?.data || []).map((slab) => ({ ...slab, id: slab.key }));
+
+  const refreshLists = () => {
+    queryClient.invalidateQueries({ queryKey: ["admin-center-bookings", centerId] });
+    queryClient.invalidateQueries({ queryKey: ["admin-center-summaries"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-recycle-bin"] });
+  };
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.softDelete(id),
+    onSuccess: (res) => {
+      refreshLists();
+      pushToast({
+        tone: "success",
+        title: res.deleted_count > 1 ? `${res.deleted_count} bookings moved to the recycle bin` : "Moved to the recycle bin",
+      });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
+  });
+
+  const requestDelete = async (b: Booking) => {
+    // The shared confirm dialog renders beneath an open drawer, so close it first.
+    setSelectedBooking(null);
+    const count = slabs.find((s) => s.bookings.some((x) => x.id === b.id))?.vehicleCount ?? 1;
+    const visitNote =
+      count > 1
+        ? `All ${count} vehicles on this visit are deleted together. `
+        : b.booking_group_id
+          ? "Any other vehicle on the same visit is deleted with it. "
+          : "";
+    const ok = await confirm({
+      title: `Delete ${b.booking_number}?`,
+      message: `${visitNote}It moves to the recycle bin — restorable for 30 days, or permanently removable from there.`,
+      tone: "danger",
+    });
+    if (ok) deleteMutation.mutate(b.id);
+  };
+
+  const openEdit = (b: Booking) => {
+    setSelectedBooking(null);
+    setEditingBooking(b);
+  };
 
   if (manageMode) {
     return (
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <button onClick={() => setManageMode(false)} className="flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
+          <button
+            onClick={() => {
+              // The queue's own edits/deletes don't touch these keys.
+              refreshLists();
+              setManageMode(false);
+            }}
+            className="flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+          >
             <ChevronLeft className="h-4 w-4" /> Back to browse
           </button>
         </div>
@@ -140,11 +219,17 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
           <button onClick={onBack} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
             <ChevronLeft className="h-4 w-4" /> All service centers
           </button>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Bookings</h1>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{centerName ? `Bookings · ${centerName}` : "Bookings"}</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Tap a row for full details. To assign a captain or cancel, open the center's queue.</p>
         </div>
-        <Button variant="outline" onClick={() => setManageMode(true)}>
-          <ClipboardEdit className="h-4 w-4" /> Manage this center's queue
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={onShowRecycleBin}>
+            <Trash2 className="h-4 w-4" /> Recycle bin
+          </Button>
+          <Button variant="outline" onClick={() => setManageMode(true)}>
+            <ClipboardEdit className="h-4 w-4" /> Manage this center's queue
+          </Button>
+        </div>
       </div>
 
       <div className="space-y-3">
@@ -168,8 +253,8 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
           The drawer that opens from it shows each car's own work. */}
       <DataTable<BookingSlab & { id: string }>
         isLoading={isLoading}
-        data={toSlabs(filtered).map((slab) => ({ ...slab, id: slab.key }))}
-        emptyTitle="No bookings"
+        data={slabs}
+        emptyTitle={debouncedSearch || dateFrom || dateTo || status ? "No bookings match" : "No bookings"}
         onRowClick={(slab) => setSelectedBooking(slab.primary)}
         columns={[
           {
@@ -232,10 +317,56 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
               );
             },
           },
+          {
+            header: "",
+            accessor: (slab) => {
+              // Edit is refused server-side once a car is closed; any open car edits the whole visit.
+              const editable = slab.bookings.find((b) => !isClosed(b));
+              return (
+                <div className="flex gap-1.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!editable}
+                    title={editable ? "Edit notes and alternate contact" : "A completed or cancelled booking can't be edited"}
+                    onClick={() => editable && openEdit(editable)}
+                  >
+                    <Pencil className="h-3.5 w-3.5" /> Edit
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="Move to the recycle bin"
+                    isLoading={deleteMutation.isPending && deleteMutation.variables === slab.primary.id}
+                    onClick={() => requestDelete(slab.primary)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" /> Delete
+                  </Button>
+                </div>
+              );
+            },
+          },
         ]}
       />
 
-      <BookingDetailDrawer booking={selectedBooking} onClose={() => setSelectedBooking(null)} />
+      {data?.meta && <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />}
+
+      <BookingDetailDrawer
+        booking={selectedBooking}
+        onClose={() => setSelectedBooking(null)}
+        centerName={centerName}
+        onEdit={openEdit}
+        onDelete={requestDelete}
+      />
+      <EditBookingModal
+        booking={editingBooking}
+        onClose={() => setEditingBooking(null)}
+        onSaved={() => {
+          queryClient.invalidateQueries({ queryKey: ["admin-center-bookings", centerId] });
+          if (editingBooking?.booking_group_id) queryClient.invalidateQueries({ queryKey: ["booking-group", editingBooking.booking_group_id] });
+          pushToast({ tone: "success", title: "Booking updated" });
+        }}
+      />
     </div>
   );
 }
@@ -245,15 +376,21 @@ function CenterBookings({ centerId, onBack }: { centerId: string; onBack: () => 
  *  main.py's purge sweep) via Restore; "Force delete permanently" is the
  *  one irreversible action here, gated by its own confirmation plus the
  *  money-attached warning chips already visible inline on the row. */
-function RecycleBinView({ onBack }: { onBack: () => void }) {
+function RecycleBinView({ onBack, backLabel }: { onBack: () => void; backLabel: string }) {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
   const { push: pushToast } = useToast();
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin-recycle-bin"] });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["admin-recycle-bin"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-center-bookings"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-center-summaries"] });
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-recycle-bin"],
     queryFn: () => bookingApi.recycleBin({ page: 1, page_size: 100 }),
+    // Deletes from the manager queue (admin "Manage" mode) don't invalidate this key.
+    refetchOnMount: "always",
   });
 
   const restoreMutation = useMutation({
@@ -342,7 +479,7 @@ function RecycleBinView({ onBack }: { onBack: () => void }) {
     <div className="space-y-6">
       <div>
         <button onClick={onBack} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-          <ChevronLeft className="h-4 w-4" /> All service centers
+          <ChevronLeft className="h-4 w-4" /> {backLabel}
         </button>
         <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Recycle bin</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
@@ -382,7 +519,12 @@ function RecycleBinView({ onBack }: { onBack: () => void }) {
             header: "",
             accessor: (slab) => (
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" isLoading={restoreMutation.isPending} onClick={() => restoreMutation.mutate(slab.primary.id)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  isLoading={restoreMutation.isPending && restoreMutation.variables === slab.primary.id}
+                  onClick={() => restoreMutation.mutate(slab.primary.id)}
+                >
                   <RotateCcw className="h-3.5 w-3.5" /> Restore
                 </Button>
                 <Button

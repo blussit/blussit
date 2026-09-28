@@ -157,6 +157,13 @@ class ManagerSubscriptionOfferRequest(BaseModel):
     # Rupees off the plan's price — one-time purchases only. Mutually
     # exclusive with coupon_code (pick one way to discount, not both).
     discount_amount: float = Field(default=0, ge=0, le=100000)
+
+    @field_validator("discount_amount")
+    @classmethod
+    def _whole_rupees(cls, v: float) -> float:
+        from app.utils.money import round_rupees
+
+        return float(round_rupees(v))
     coupon_code: Optional[str] = Field(default=None, max_length=40)
     # True = the customer hears about the link/mandate on WhatsApp. Off
     # still creates it — the manager can read/copy the link over a call.
@@ -208,6 +215,13 @@ class ManagerSubscriptionPreviewRequest(BaseModel):
     customer_phone: Optional[str] = None
     recurring: bool = False
     discount_amount: float = Field(default=0, ge=0, le=100000)
+
+    @field_validator("discount_amount")
+    @classmethod
+    def _whole_rupees(cls, v: float) -> float:
+        from app.utils.money import round_rupees
+
+        return float(round_rupees(v))
     coupon_code: Optional[str] = Field(default=None, max_length=40)
 
     @field_validator("coupon_code")

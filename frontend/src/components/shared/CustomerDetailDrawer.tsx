@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Calendar, Car, IndianRupee, MapPin, Phone } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertTriangle, Calendar, Car, CreditCard, IndianRupee, MapPin, Phone } from "lucide-react";
 import { crmApi, type Customer360Booking } from "../../api/crm";
 import { Badge, PageLoader, StatusBadge } from "../ui";
 import { BookingDetailDrawer } from "./BookingDetailDrawer";
+import { useAuth } from "../../context/AuthContext";
+import { getErrorMessage } from "../../lib/api-client";
 import { format, formatSlot } from "../../lib/date";
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -23,7 +26,8 @@ function Stat({ label, value }: { label: string; value: string }) {
  */
 export function CustomerDetailDrawer({ customerId, onClose }: { customerId: string | null; onClose: () => void }) {
   const [openBooking, setOpenBooking] = useState<Customer360Booking | null>(null);
-  const { data, isLoading } = useQuery({
+  const { user } = useAuth();
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["customer-360", customerId],
     queryFn: () => crmApi.customer360(customerId as string),
     enabled: !!customerId,
@@ -35,7 +39,14 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-[2px]" onClick={onClose} />
       <div className="relative z-10 max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[#F3E5B5] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)]">
-        {isLoading || !data ? (
+        {isError ? (
+          <div className="space-y-3 py-6 text-center">
+            <p className="text-sm text-gray-600">{getErrorMessage(error)}</p>
+            <button onClick={onClose} className="text-sm font-medium text-black underline">
+              Close
+            </button>
+          </div>
+        ) : isLoading || !data ? (
           <PageLoader />
         ) : (
           <>
@@ -55,9 +66,20 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                   )}
                 </p>
               </div>
-              <button onClick={onClose} className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-black" aria-label="Close">
-                ✕
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                {user?.role === "manager" && (
+                  <Link
+                    to={`/manager/sell-plan?${new URLSearchParams({ name: data.profile.full_name || "", phone: data.profile.phone || "" })}`}
+                    onClick={onClose}
+                    className="flex items-center gap-1.5 rounded-full bg-[#E8A900] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#D99A00]"
+                  >
+                    <CreditCard className="h-3.5 w-3.5" /> Sell a plan
+                  </Link>
+                )}
+                <button onClick={onClose} className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-black" aria-label="Close">
+                  ✕
+                </button>
+              </div>
             </div>
 
             {data.same_day_repeat_dates.length > 0 && (

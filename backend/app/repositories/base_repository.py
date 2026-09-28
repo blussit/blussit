@@ -82,11 +82,16 @@ class BaseRepository:
         sort_by: str = "created_at",
         sort_order: int = -1,
         session: Optional[AsyncIOMotorClientSession] = None,
+        limit: Optional[int] = None,
     ) -> list[dict]:
+        """`limit` caps the list for callers that must never load an
+        unbounded set (sweeps, customer-facing lists)."""
         query = dict(filters) if filters else {}
         query.setdefault("is_deleted", {"$ne": True})
         cursor = self.collection.find(query, session=session).sort(sort_by, sort_order)
-        return await cursor.to_list(length=None)
+        if limit:
+            cursor = cursor.limit(limit)
+        return await cursor.to_list(length=limit)
 
     async def update_by_id(self, id: str, data: dict, session: Optional[AsyncIOMotorClientSession] = None) -> Optional[dict]:
         if not ObjectId.is_valid(id):

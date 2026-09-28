@@ -5,6 +5,7 @@ import { bookingApi } from "../../api/booking";
 import { complaintApi } from "../../api/engagement";
 import { Badge, Button, Modal, Select, StatusBadge } from "../../components/ui";
 import { BookingDetailDrawer } from "./BookingDetailDrawer";
+import { CustomerDetailDrawer } from "./CustomerDetailDrawer";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
 import type { Complaint } from "../../types";
@@ -24,12 +25,28 @@ const PRIORITY_TONE: Record<string, "error" | "warning" | "neutral"> = {
  * found / here's what I did / this is resolved" stays visible as a running
  * history rather than a single note that gets overwritten every update.
  */
-export function ComplaintDetailDrawer({ complaint, onClose }: { complaint: Complaint | null; onClose: () => void }) {
+export function ComplaintDetailDrawer({
+  complaint,
+  onClose,
+  onUpdated,
+}: {
+  complaint: Complaint | null;
+  onClose: () => void;
+  /** The complaint as saved — lets the page keep showing it even when the
+   *  change moves it out of the list's current filter/page. */
+  onUpdated?: (complaint: Complaint) => void;
+}) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [bookingOpen, setBookingOpen] = useState(false);
+  const [customerOpen, setCustomerOpen] = useState(false);
+
+  const refreshLists = () => {
+    queryClient.invalidateQueries({ queryKey: ["center-complaints-page"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-complaints"] });
+  };
 
   const { data: booking } = useQuery({
     queryKey: ["complaint-booking", complaint?.booking_id],
@@ -39,11 +56,21 @@ export function ComplaintDetailDrawer({ complaint, onClose }: { complaint: Compl
 
   const replyMutation = useMutation({
     mutationFn: () => complaintApi.reply(complaint!.id, { message, status: status || undefined }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["center-complaints-page"] });
-      queryClient.invalidateQueries({ queryKey: ["admin-complaints"] });
+    onSuccess: (saved) => {
+      refreshLists();
+      if (saved && complaint) onUpdated?.({ ...complaint, ...saved });
       setMessage("");
       setStatus("");
+      setError("");
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
+  const priorityMutation = useMutation({
+    mutationFn: (priority: string) => complaintApi.update(complaint!.id, { priority }),
+    onSuccess: (saved) => {
+      refreshLists();
+      if (saved && complaint) onUpdated?.({ ...complaint, ...saved });
       setError("");
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -59,11 +86,30 @@ export function ComplaintDetailDrawer({ complaint, onClose }: { complaint: Compl
             <StatusBadge status={complaint.status} />
             <Badge tone={PRIORITY_TONE[complaint.priority] || "neutral"}>{complaint.priority}</Badge>
             <span className="text-xs text-[var(--color-text-secondary)]">Raised {format(complaint.created_at)}</span>
+            <select
+              aria-label="Change priority"
+              value={complaint.priority}
+              disabled={priorityMutation.isPending}
+              onChange={(e) => priorityMutation.mutate(e.target.value)}
+              className="ml-auto rounded-full border border-[#F3E5B5] bg-white px-2.5 py-1 text-xs text-black focus:border-black focus:outline-none"
+            >
+              <option value="low">Low priority</option>
+              <option value="medium">Medium priority</option>
+              <option value="high">High priority</option>
+              <option value="urgent">Urgent</option>
+            </select>
           </div>
 
-          <div className="rounded-xl bg-gray-50 p-3.5">
-            <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Customer</p>
-            <p className="mt-0.5 text-sm text-[var(--color-text-primary)]">{complaint.customer_name || "—"}</p>
+          <div className="flex items-center justify-between gap-3 rounded-xl bg-gray-50 p-3.5">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Customer</p>
+              <p className="mt-0.5 truncate text-sm text-[var(--color-text-primary)]">{complaint.customer_name || "—"}</p>
+            </div>
+            {complaint.customer_id && (
+              <button type="button" onClick={() => setCustomerOpen(true)} className="shrink-0 text-xs font-medium text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black">
+                Bookings &amp; plans
+              </button>
+            )}
           </div>
 
           <div>
@@ -132,6 +178,7 @@ export function ComplaintDetailDrawer({ complaint, onClose }: { complaint: Compl
       </Modal>
 
       {bookingOpen && booking && <BookingDetailDrawer booking={booking} onClose={() => setBookingOpen(false)} />}
+      <CustomerDetailDrawer customerId={customerOpen ? complaint.customer_id : null} onClose={() => setCustomerOpen(false)} />
     </>
   );
 }

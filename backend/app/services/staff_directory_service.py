@@ -12,6 +12,15 @@ from app.services.booking_service import BookingService, _resolve_estimated_star
 from app.utils.geo import haversine_km
 from app.utils.timezone import from_stored
 
+_PERFORMANCE_FIELDS = {
+    field: 1
+    for field in (
+        "status", "captain_earning", "total_amount", "previous_captain_ids", "captain_start_stage", "delay_minutes",
+        "heading_at", "vehicle_verified_at", "service_started_at", "actual_duration_minutes", "assigned_at", "closed_at",
+        "scheduled_date", "scheduled_slot", "issue_flag", "arrival_flagged", "before_photo_flagged", "after_photo_flagged",
+    )
+}
+
 
 class StaffDirectoryService:
     def __init__(self, db: AsyncIOMotorDatabase):
@@ -88,7 +97,7 @@ class StaffDirectoryService:
             if date_from:
                 date_match["$gte"] = datetime.strptime(date_from, "%Y-%m-%d")
             if date_to:
-                date_match["$lte"] = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+                date_match["$lt"] = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
             match["scheduled_date"] = date_match
         if service_center_id:
             match["service_center_id"] = service_center_id
@@ -98,7 +107,9 @@ class StaffDirectoryService:
         counts = {row["_id"]: row["count"] for row in status_counts}
         rating_summary = await self.review_repo.average_rating_for_captain(captain_id)
 
-        bookings = await self.booking_repo.find_all_no_paginate(match)
+        # Only the fields read below — a captain's full booking docs (photos,
+        # history, snapshots) over a year would otherwise sit in memory per call.
+        bookings = await self.booking_repo.collection.find(match, _PERFORMANCE_FIELDS).to_list(length=None)
         completed = [b for b in bookings if b.get("status") == "completed"]
         total_jobs = len(completed)
         # The CAPTAIN's earnings, not the customer-paid gross — summing

@@ -107,3 +107,13 @@ class UserSubscriptionModel(BusinessRecordBase):
     # original cycle the customer paid for at checkout).
     renewal_count: int = 0
     last_renewed_at: Optional[datetime] = None
+    # "pending" while Razorpay retries a failed renewal charge (the ended-
+    # pass sweep waits longer then), else None.
+    autopay_state: Optional[str] = None
+    # Reminder bookkeeping: when a wash was last booked on it, the weekly
+    # "N washes left" nudge, the one-time "used all washes" note and the
+    # "ends soon" heads-up (all reset by a renewal).
+    last_used_at: Optional[datetime] = None
+    wash_reminder_sent_at: Optional[datetime] = None
+    used_up_notice_sent_at: Optional[datetime] = None
+    expiry_reminder_sent: bool = False

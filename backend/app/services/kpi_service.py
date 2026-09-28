@@ -10,16 +10,20 @@ Design notes, deliberately stated:
   document; every figure derived from them (contribution, break-even,
   CAC, ROAS...) is only as good as those inputs and the frontend labels
   them accordingly.
-- At BLUSSIT's current scale (a handful of captains, hundreds of
-  bookings) fetching a period's bookings once and computing in Python is
-  both faster to get right and plenty fast to run; revisit with
-  aggregation pipelines only if volume ever makes it slow.
+- Scale: every section is a MongoDB aggregation that $matches on an
+  indexed field first and returns only aggregated rows. No section ever
+  pulls a period's (let alone all-time) bookings into the 512 MiB
+  container. The definitions are the original load-everything-in-Python
+  ones, pinned number-for-number by tests/test_scale_parity.py against a
+  frozen copy of that code (tests/scale_legacy_reference.py).
 - Period comparison: every section computes the same numbers for the
   previous period of EQUAL length ending where the current one starts,
   so "vs previous" is always apples to apples.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException
@@ -43,6 +47,8 @@ _DEFAULT_SETTINGS = {
     #   "campaign": str, "spend": float, "leads": int, "customers": int, "revenue": float}]
     "marketing_entries": [],
 }
+
+_DAY_MS = 86_400_000
 
 
 def _aware(dt: datetime) -> datetime:
@@ -100,51 +106,161 @@ def resolve_period(period: str | None, start: str | None, end: str | None):
     return s, e, s - length, s
 
 
+# ---------------------------------------------------------------- pipeline pieces
+# Expression builders shared by every section. Each mirrors one Python rule
+# of the original engine exactly (field truthiness included).
+
+
+def _truthy(field: str) -> dict:
+    # Aggregation treats "" as true; Python (the original definition) doesn't.
+    return {"$and": [field, {"$ne": [field, ""]}]}
+
+
+def _between(expr, s, e) -> dict:
+    return {"$and": [{"$gte": [expr, s]}, {"$lt": [expr, e]}]}
+
+
+def _created_in(s, e) -> dict:
+    return _between("$created_at", s, e)
+
+
+def _completed_in(s, e) -> dict:
+    """Revenue is recognized on the COMPLETION date (AUDIT.md M3); a
+    completed booking without closed_at falls back to created_at."""
+    return {"$and": [{"$eq": ["$status", "completed"]}, _between({"$ifNull": ["$closed_at", "$created_at"]}, s, e)]}
+
+
+def _count_if(cond) -> dict:
+    return {"$sum": {"$cond": [cond, 1, 0]}}
+
+
+def _sum_if(cond, value) -> dict:
+    return {"$sum": {"$cond": [cond, value, 0]}}
+
+
+def _not_null(field: str) -> dict:
+    # {$ne: ["$f", null]} is TRUE for a missing field inside $expr — route it
+    # through $ifNull so "missing" and "null" both read as absent.
+    return {"$ne": [{"$ifNull": [field, None]}, None]}
+
+
+def _minutes_between(start: str, end: str) -> dict:
+    return {"$divide": [{"$subtract": [end, start]}, 60000]}
+
+
+def _window_match(s, e, extra: dict | None = None) -> dict:
+    """Bookings CREATED in the window, plus bookings COMPLETED in the window
+    (so revenue lands on the completion date even when the booking was
+    created earlier).
+
+    The shared predicates are repeated inside each branch on purpose: a
+    ROOTED $or is planned branch by branch (SUBPLAN), each on its best index
+    (created_at_-1 / status_1_closed_at_-1, or their service_center_id
+    twins). With the predicates outside, the planner enumerated a capped set
+    of whole-query plans and, measured at 100k bookings, scanned every
+    completed booking of a center for the second branch."""
+    common: dict = {"is_deleted": {"$ne": True}, **(extra or {})}
+    return {
+        "$or": [
+            {"created_at": {"$gte": s, "$lt": e}, **common},
+            {"status": "completed", "closed_at": {"$gte": s, "$lt": e}, **common},
+        ]
+    }
+
+
+_CHUNK = 2000
+
+
+def _tz(dt: datetime) -> str:
+    offset = dt.utcoffset() or timedelta(0)
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
 class KpiService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
 
     # ---------------------------------------------------------------- helpers
 
-    async def _bookings_between(self, s, e, extra: dict | None = None) -> list[dict]:
-        """Bookings CREATED in the window, plus bookings COMPLETED in the
-        window (so revenue can be recognized on the completion date — the
-        canonical attribution, see AUDIT.md M3 — even when the booking was
-        created earlier). Callers count bookings by created_at and revenue
-        by _revenue(), which filters on completion."""
-        q = {
-            "$or": [
-                {"created_at": {"$gte": s, "$lt": e}},
-                {"status": "completed", "closed_at": {"$gte": s, "$lt": e}},
-            ],
-            "is_deleted": {"$ne": True},
-        }
-        if extra:
-            q.update(extra)
-        return await self.db.bookings.find(q).to_list(length=None)
+    async def _agg_one(self, collection, pipeline: list[dict]) -> dict:
+        rows = await collection.aggregate(pipeline, allowDiskUse=True).to_list(length=1)
+        return rows[0] if rows else {}
 
-    @staticmethod
-    def _created_in(b: dict, s, e) -> bool:
-        dt = b.get("created_at")
-        return dt is not None and s <= _aware(dt) < e
+    async def _window_totals(self, s, e, extra: dict | None = None) -> dict:
+        """Every per-window booking count/sum the sections use, in one pass
+        over the window's bookings. `bookings` counts by created_at,
+        revenue/completed by completion date."""
+        created, completed = _created_in(s, e), _completed_in(s, e)
+        has_travel = {"$and": [completed, "$heading_at", "$vehicle_verified_at"]}
+        has_service = {"$and": [completed, "$actual_duration_minutes"]}
+        row = await self._agg_one(self.db.bookings, [
+            {"$match": _window_match(s, e, extra)},
+            {"$group": {
+                "_id": None,
+                "bookings": _count_if(created),
+                "completed": _count_if(completed),
+                "revenue": _sum_if(completed, "$total_amount"),
+                "cancelled": _count_if({"$and": [created, {"$eq": ["$status", "cancelled"]}]}),
+                "captain_cancelled": _count_if({"$and": [created, {"$eq": ["$cancelled_by_role", "captain"]}]}),
+                "started": _count_if({"$and": [created, _truthy("$captain_start_stage")]}),
+                "on_time": _count_if({"$and": [created, {"$in": ["$captain_start_stage", ["early", "on_time"]]}]}),
+                "subscription_revenue": _sum_if({"$and": [completed, {"$eq": ["$payment_method", "subscription"]}]}, "$subtotal"),
+                "subscription_charged": _sum_if({"$and": [completed, {"$eq": ["$payment_method", "subscription"]}]}, "$total_amount"),
+                "travel_sum": _sum_if(has_travel, _minutes_between("$heading_at", "$vehicle_verified_at")),
+                "travel_n": _count_if(has_travel),
+                "service_sum": _sum_if(has_service, "$actual_duration_minutes"),
+                "service_n": _count_if(has_service),
+            }},
+        ])
+        keys = ("bookings", "completed", "revenue", "cancelled", "captain_cancelled", "started", "on_time",
+                "subscription_revenue", "subscription_charged", "travel_sum", "travel_n", "service_sum", "service_n")
+        return {k: row.get(k) or 0 for k in keys}
 
-    @staticmethod
-    def _completed_in(b: dict, s, e) -> bool:
-        if b.get("status") != "completed":
-            return False
-        dt = b.get("closed_at") or b.get("created_at")
-        return dt is not None and s <= _aware(dt) < e
+    async def _customers_seen_before(self, customer_ids, before: datetime) -> set:
+        """Which of these customers have ANY live booking created before
+        `before` — i.e. their first booking predates it. Checked in chunks
+        with one $in query each on customer_id_1_created_at_-1 (a $lookup per
+        customer measured ~0.8 ms each at 100k bookings)."""
+        ids = [c for c in customer_ids if c is not None]
+        found: set = set()
+        for i in range(0, len(ids), _CHUNK):
+            rows = await self.db.bookings.aggregate([
+                {"$match": {"customer_id": {"$in": ids[i:i + _CHUNK]}, "created_at": {"$lt": before}, "is_deleted": {"$ne": True}}},
+                {"$group": {"_id": "$customer_id"}},
+            ]).to_list(length=None)
+            found.update(r["_id"] for r in rows)
+        return found
 
-    async def _first_booking_at_by_customer(self) -> dict[str, datetime]:
+    async def _customer_split(self, s, e) -> dict:
+        """customers: distinct customers with a booking CREATED in [s, e);
+        repeat: those of them with a live booking created before s;
+        new_revenue: completed-in-window revenue from customers with none.
+        One row per customer active in the window (not per booking)."""
+        created, completed = _created_in(s, e), _completed_in(s, e)
         rows = await self.db.bookings.aggregate([
-            {"$match": {"is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$customer_id", "first_at": {"$min": "$created_at"}}},
-        ]).to_list(length=None)
-        return {r["_id"]: _aware(r["first_at"]) for r in rows}
+            {"$match": _window_match(s, e)},
+            {"$group": {"_id": "$customer_id", "created": _count_if(created), "revenue": _sum_if(completed, "$total_amount")}},
+        ], allowDiskUse=True).to_list(length=None)
+        prior = await self._customers_seen_before([r["_id"] for r in rows], s)
+        created_rows = [r for r in rows if r["created"]]
+        return {
+            "customers": len(created_rows),
+            "repeat": sum(1 for r in created_rows if r["_id"] in prior),
+            "new_revenue": sum(r["revenue"] or 0 for r in rows if r["_id"] not in prior),
+        }
 
-    def _revenue(self, bookings: list[dict], s, e) -> float:
-        """Revenue recognized on the COMPLETION date (M3 canon)."""
-        return _rupees(sum(b.get("total_amount", 0) for b in bookings if self._completed_in(b, s, e)))
+    async def _ratings(self, s, e) -> tuple[int, dict]:
+        """(reviews in window, {rating value: count}) — ratings are the
+        captain rating, falling back to the legacy flat one; a 0/absent
+        rating counts as a review but not as a rating."""
+        rows = await self.db.reviews.aggregate([
+            {"$match": {"created_at": {"$gte": s, "$lt": e}, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": {"$cond": ["$captain_rating", "$captain_rating", "$rating"]}, "n": {"$sum": 1}}},
+        ]).to_list(length=None)
+        total = sum(r["n"] for r in rows)
+        return total, {r["_id"]: r["n"] for r in rows if r["_id"]}
 
     async def _plan_revenue(self, s, e) -> float:
         """Money actually paid for a SUBSCRIPTION/PLAN in the window —
@@ -186,28 +302,26 @@ class KpiService:
 
     # ---------------------------------------------------------------- sections
 
+    async def _overview_block(self, s, e) -> dict:
+        totals, split = await asyncio.gather(self._window_totals(s, e), self._customer_split(s, e))
+        return {
+            "bookings": totals["bookings"],
+            "completed": totals["completed"],
+            "revenue": _rupees(totals["revenue"]),
+            "completion_rate": _pct(totals["completed"], totals["bookings"]),
+            "repeat_customer_rate": _pct(split["repeat"], split["customers"]),
+        }
+
     async def overview(self, s, e, ps, pe) -> dict:
-        cur, prev = await self._bookings_between(s, e), await self._bookings_between(ps, pe)
-        first_at = await self._first_booking_at_by_customer()
-
-        def block(bookings, bs, be):
-            created = [b for b in bookings if self._created_in(b, bs, be)]
-            completed = [b for b in bookings if self._completed_in(b, bs, be)]
-            customers = {b["customer_id"] for b in created}
-            repeat = {c for c in customers if first_at.get(c) and first_at[c] < _aware(bs)}
-            return {
-                "bookings": len(created),
-                "completed": len(completed),
-                "revenue": self._revenue(bookings, bs, be),
-                "completion_rate": _pct(len(completed), len(created)),
-                "repeat_customer_rate": _pct(len(repeat), len(customers)),
-            }
-
-        cur_b, prev_b = block(cur, s, e), block(prev, ps, pe)
-        new_cur = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}})
-        new_prev = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}})
-        plan_rev_cur, plan_rev_prev = await self._plan_revenue(s, e), await self._plan_revenue(ps, pe)
-        settings = await self.get_settings()
+        cur_b, prev_b, new_cur, new_prev, plan_rev_cur, plan_rev_prev, settings = await asyncio.gather(
+            self._overview_block(s, e),
+            self._overview_block(ps, pe),
+            self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}}),
+            self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}}),
+            self._plan_revenue(s, e),
+            self._plan_revenue(ps, pe),
+            self.get_settings(),
+        )
         return {
             "current": {**cur_b, "new_customers": new_cur, "plan_revenue": plan_rev_cur, "combined_revenue": _rupees(cur_b["revenue"] + plan_rev_cur)},
             "previous": {**prev_b, "new_customers": new_prev, "plan_revenue": plan_rev_prev, "combined_revenue": _rupees(prev_b["revenue"] + plan_rev_prev)},
@@ -226,17 +340,18 @@ class KpiService:
         from app.services.subscription_service import UserSubscriptionService
 
         extra = {"service_center_id": service_center_id}
-        cur, prev = await self._bookings_between(s, e, extra), await self._bookings_between(ps, pe, extra)
-
-        def block(bookings, bs, be):
-            created = [b for b in bookings if self._created_in(b, bs, be)]
-            completed = [b for b in bookings if self._completed_in(b, bs, be)]
-            return {"bookings": len(created), "completed": len(completed), "revenue": self._revenue(bookings, bs, be)}
-
-        cur_b, prev_b = block(cur, s, e), block(prev, ps, pe)
         subs = UserSubscriptionService(self.db)
-        cur_plan_rev, cur_plans_sold = await subs.center_plan_revenue(service_center_id, s, e)
-        prev_plan_rev, prev_plans_sold = await subs.center_plan_revenue(service_center_id, ps, pe)
+        cur, prev, (cur_plan_rev, cur_plans_sold), (prev_plan_rev, prev_plans_sold) = await asyncio.gather(
+            self._window_totals(s, e, extra),
+            self._window_totals(ps, pe, extra),
+            subs.center_plan_revenue(service_center_id, s, e),
+            subs.center_plan_revenue(service_center_id, ps, pe),
+        )
+
+        def block(t):
+            return {"bookings": t["bookings"], "completed": t["completed"], "revenue": _rupees(t["revenue"])}
+
+        cur_b, prev_b = block(cur), block(prev)
         return {
             "current": {**cur_b, "plans_sold": cur_plans_sold, "plan_revenue": cur_plan_rev, "combined_revenue": _rupees(cur_b["revenue"] + cur_plan_rev)},
             "previous": {**prev_b, "plans_sold": prev_plans_sold, "plan_revenue": prev_plan_rev, "combined_revenue": _rupees(prev_b["revenue"] + prev_plan_rev)},
@@ -248,33 +363,92 @@ class KpiService:
         cr, pr = cur_b.get("repeat_customer_rate"), prev_b.get("repeat_customer_rate")
         if cr is not None and pr is not None and pr - cr >= 5:
             alerts.append({"severity": "warn", "text": f"Repeat customer rate dropped {round(pr - cr, 1)} points vs previous period"})
-        unresolved = await self.db.complaints.count_documents(
-            {"status": {"$in": ["open", "in_progress"]}, "is_deleted": {"$ne": True}}
+        tomorrow = (now_ist() + timedelta(days=1)).date().isoformat()
+        unresolved, capacity, (_reviews, ratings) = await asyncio.gather(
+            self.db.complaints.count_documents({"status": {"$in": ["open", "in_progress"]}, "is_deleted": {"$ne": True}}),
+            self._agg_one(self.db.slot_capacity, [
+                {"$match": {"date": tomorrow}},
+                {"$group": {"_id": None, "cap": {"$sum": "$capacity"}, "booked": {"$sum": "$booked_count"}}},
+            ]),
+            self._ratings(s, e),
         )
         if unresolved:
             alerts.append({"severity": "warn", "text": f"{unresolved} customer complaint(s) unresolved"})
         # Tomorrow's booked share of capacity — early demand warning.
-        tomorrow = (now_ist() + timedelta(days=1)).date().isoformat()
-        slots = await self.db.slot_capacity.find({"date": tomorrow}).to_list(length=None)
-        cap = sum(x.get("capacity", 0) for x in slots)
-        booked = sum(x.get("booked_count", 0) for x in slots)
+        cap, booked = capacity.get("cap") or 0, capacity.get("booked") or 0
         if cap and booked / cap < 0.4:
             alerts.append({"severity": "info", "text": f"Tomorrow only {_pct(booked, cap)}% of capacity is booked"})
         if cur_b.get("completion_rate") is not None and cur_b["completion_rate"] < 85 and cur_b["bookings"] >= 5:
             alerts.append({"severity": "warn", "text": f"Completion rate at {cur_b['completion_rate']}% this period"})
-        ratings = [r.get("captain_rating") or r.get("rating") for r in await self.db.reviews.find(
-            {"created_at": {"$gte": s, "$lt": e}, "is_deleted": {"$ne": True}}).to_list(length=None)]
-        ratings = [r for r in ratings if r]
-        if ratings and sum(ratings) / len(ratings) < 4.0:
-            alerts.append({"severity": "warn", "text": f"Average rating this period is {round(sum(ratings) / len(ratings), 1)}★"})
+        n = sum(ratings.values())
+        if n:
+            avg = sum(v * c for v, c in ratings.items()) / n
+            if avg < 4.0:
+                alerts.append({"severity": "warn", "text": f"Average rating this period is {round(avg, 1)}★"})
         return alerts
 
     async def business(self, s, e, ps, pe) -> dict:
-        cur, prev = await self._bookings_between(s, e), await self._bookings_between(ps, pe)
-        created = [b for b in cur if self._created_in(b, s, e)]
-        completed = [b for b in cur if self._completed_in(b, s, e)]
-        cancelled = [b for b in created if b.get("status") == "cancelled"]
-        revenue, prev_revenue = self._revenue(cur, s, e), self._revenue(prev, ps, pe)
+        window = _window_match(s, e)
+        created, completed = _created_in(s, e), _completed_in(s, e)
+        tz = _tz(s)
+        cur, prev, split, trend, mix_rows, vt_rows, services, vehicle_types = await asyncio.gather(
+            self._window_totals(s, e),
+            self._window_totals(ps, pe),
+            self._customer_split(s, e),
+            self._agg_one(self.db.bookings, [
+                {"$match": window},
+                {"$facet": {
+                    "created": [
+                        {"$match": {"$expr": created}},
+                        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at", "timezone": tz}}, "n": {"$sum": 1}}},
+                    ],
+                    "revenue": [
+                        {"$match": {"$expr": completed}},
+                        {"$group": {
+                            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": {"$ifNull": ["$closed_at", "$created_at"]}, "timezone": tz}},
+                            "amount": {"$sum": "$total_amount"},
+                        }},
+                    ],
+                }},
+            ]),
+            # Service mix — a multi-service booking's amount is split evenly
+            # across its services (never double-counted).
+            self.db.bookings.aggregate([
+                {"$match": _window_match(s, e, {"service_ids.0": {"$exists": True}})},
+                {"$project": {
+                    "service_ids": 1,
+                    "c": created,
+                    "d": completed,
+                    "x": {"$eq": ["$status", "cancelled"]},
+                    "share": {"$divide": ["$total_amount", {"$size": "$service_ids"}]},
+                }},
+                {"$unwind": "$service_ids"},
+                {"$group": {
+                    "_id": "$service_ids",
+                    "bookings": _count_if("$c"),
+                    "cancelled": _count_if({"$and": ["$c", "$x"]}),
+                    "revenue": _sum_if("$d", "$share"),
+                }},
+            ], allowDiskUse=True).to_list(length=None),
+            # Vehicle-type mix. Quick-booking bookings carry the type
+            # themselves; older saved-vehicle ones are grouped by vehicle_id
+            # and resolved through the vehicles collection below.
+            self.db.bookings.aggregate([
+                {"$match": window},
+                {"$group": {
+                    "_id": {
+                        "vt": {"$cond": [_truthy("$vehicle_type"), "$vehicle_type", None]},
+                        "vid": {"$cond": [_truthy("$vehicle_type"), None, "$vehicle_id"]},
+                        "label": "$vehicle_label",
+                    },
+                    "bookings": _count_if(created),
+                    "revenue": _sum_if(completed, "$total_amount"),
+                }},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.services.find({}, {"name": 1}).to_list(length=None),
+            self.db.vehicle_types.find({}, {"name": 1}).to_list(length=None),
+        )
+        revenue, prev_revenue = _rupees(cur["revenue"]), _rupees(prev["revenue"])
 
         # Daily trend series across the period (booking counts + revenue).
         series: dict[str, dict] = {}
@@ -282,73 +456,63 @@ class KpiService:
         while day < e:
             series[day.date().isoformat()] = {"date": day.date().isoformat(), "bookings": 0, "revenue": 0.0}
             day += timedelta(days=1)
-        for b in cur:
-            if self._created_in(b, s, e):
-                key = _aware(b["created_at"]).astimezone(s.tzinfo).date().isoformat()
-                if key in series:
-                    series[key]["bookings"] += 1
-            if self._completed_in(b, s, e):
-                rkey = _aware(b.get("closed_at") or b["created_at"]).astimezone(s.tzinfo).date().isoformat()
-                if rkey in series:
-                    series[rkey]["revenue"] = _rupees(series[rkey]["revenue"] + b.get("total_amount", 0))
+        for r in trend.get("created", []):
+            if r["_id"] in series:
+                series[r["_id"]]["bookings"] = r["n"]
+        for r in trend.get("revenue", []):
+            if r["_id"] in series:
+                series[r["_id"]]["revenue"] = _rupees(r["amount"])
 
-        # Service mix — a multi-service booking's amount is split evenly
-        # across its services (never double-counted).
-        svc_names = {str(x["_id"]): x.get("name", "?") for x in await self.db.services.find({}).to_list(length=None)}
-        mix: dict[str, dict] = {}
-        for b in cur:
-            ids = b.get("service_ids") or []
-            for sid in ids:
-                row = mix.setdefault(sid, {"name": svc_names.get(sid, "Unknown"), "bookings": 0, "revenue": 0.0, "cancelled": 0})
-                if self._created_in(b, s, e):
-                    row["bookings"] += 1
-                    if b.get("status") == "cancelled":
-                        row["cancelled"] += 1
-                if self._completed_in(b, s, e):
-                    row["revenue"] = _rupees(row["revenue"] + b.get("total_amount", 0) / len(ids))
-        service_mix = sorted(mix.values(), key=lambda r: -r["revenue"])
+        svc_names = {str(x["_id"]): x.get("name", "?") for x in services}
+        service_mix = [
+            {
+                "name": svc_names.get(r["_id"], "Unknown"),
+                "bookings": r["bookings"],
+                "revenue": _rupees(r["revenue"]),
+                "cancelled": r["cancelled"],
+            }
+            for r in mix_rows
+        ]
+        service_mix.sort(key=lambda r: (-r["revenue"], r["name"]))
         for row in service_mix:
             row["aov"] = _rupees(row["revenue"] / row["bookings"]) if row["bookings"] else 0
             row["cancellation_rate"] = _pct(row["cancelled"], row["bookings"])
 
-        # Vehicle-type mix — joined through vehicles in Python (vehicle
-        # info is never denormalized onto bookings; see BookingService).
-        from bson import ObjectId
-        v_ids = [ObjectId(b["vehicle_id"]) for b in cur if b.get("vehicle_id") and ObjectId.is_valid(b["vehicle_id"])]
-        vehicles = {str(v["_id"]): v for v in await self.db.vehicles.find({"_id": {"$in": v_ids}}).to_list(length=None)} if v_ids else {}
-        vt_names = {str(x["_id"]): x.get("name", "?") for x in await self.db.vehicle_types.find({}).to_list(length=None)}
+        v_ids = {g["_id"]["vid"] for g in vt_rows if isinstance(g["_id"].get("vid"), str) and ObjectId.is_valid(g["_id"]["vid"])}
+        vehicles = (
+            {str(v["_id"]): v for v in await self.db.vehicles.find({"_id": {"$in": [ObjectId(i) for i in v_ids]}}, {"vehicle_type": 1}).to_list(length=None)}
+            if v_ids else {}
+        )
+        vt_names = {str(x["_id"]): x.get("name", "?") for x in vehicle_types}
         vt_mix: dict[str, dict] = {}
-        for b in cur:
-            # Quick-booking model: the type is on the booking itself; the
-            # vehicle join only covers older saved-vehicle bookings.
-            v = vehicles.get(b.get("vehicle_id") or "")
-            vt_id = b.get("vehicle_type") or (v.get("vehicle_type") if v else None)
-            vt = vt_names.get(str(vt_id or ""), b.get("vehicle_label") or "Unknown")
+        for g in vt_rows:
+            key = g["_id"]
+            v = vehicles.get(key.get("vid") or "")
+            vt_id = key.get("vt") or (v.get("vehicle_type") if v else None)
+            vt = vt_names.get(str(vt_id or ""), key.get("label") or "Unknown")
             row = vt_mix.setdefault(vt, {"name": vt, "bookings": 0, "revenue": 0.0})
-            if self._created_in(b, s, e):
-                row["bookings"] += 1
-            if self._completed_in(b, s, e):
-                row["revenue"] = _rupees(row["revenue"] + b.get("total_amount", 0))
-        vehicle_mix = sorted(vt_mix.values(), key=lambda r: -r["bookings"])
+            row["bookings"] += g["bookings"]
+            row["revenue"] += g["revenue"] or 0
+        vehicle_mix = sorted(vt_mix.values(), key=lambda r: (-r["bookings"], r["name"]))
         for row in vehicle_mix:
+            row["revenue"] = _rupees(row["revenue"])
             row["aov"] = _rupees(row["revenue"] / row["bookings"]) if row["bookings"] else 0
 
         # Revenue quality: new-customer vs repeat vs subscription-covered.
-        first_at = await self._first_booking_at_by_customer()
-        new_rev = _rupees(sum(b.get("total_amount", 0) for b in completed if first_at.get(b["customer_id"], s) >= s))
+        new_rev = _rupees(split["new_revenue"])
         repeat_rev = _rupees(revenue - new_rev)
-        sub_rev = _rupees(sum(b.get("subtotal", 0) for b in completed if b.get("payment_method") == "subscription"))
+        sub_rev = _rupees(cur["subscription_revenue"])
 
         return {
             "totals": {
-                "bookings": len(created),
-                "completed": len(completed),
-                "cancelled": len(cancelled),
-                "completion_rate": _pct(len(completed), len(created)),
-                "aov": _rupees(revenue / len(completed)) if completed else 0,
+                "bookings": cur["bookings"],
+                "completed": cur["completed"],
+                "cancelled": cur["cancelled"],
+                "completion_rate": _pct(cur["completed"], cur["bookings"]),
+                "aov": _rupees(revenue / cur["completed"]) if cur["completed"] else 0,
                 "revenue": revenue,
                 "revenue_growth": _growth(revenue, prev_revenue),
-                "booking_growth": _growth(len(created), len([b for b in prev if self._created_in(b, ps, pe)])),
+                "booking_growth": _growth(cur["bookings"], prev["bookings"]),
             },
             "trend": list(series.values()),
             "service_mix": service_mix,
@@ -359,74 +523,98 @@ class KpiService:
                 "repeat_customer_revenue": repeat_rev,
                 "repeat_revenue_pct": _pct(repeat_rev, revenue),
                 "subscription_revenue": sub_rev,
-                "one_time_revenue": _rupees(revenue - sub_rev),
+                # Plan bookings add only what they charged (paid add-ons) to
+                # revenue, so that — not their pre-discount subtotal — is what
+                # comes back out.
+                "one_time_revenue": _rupees(max(0.0, revenue - cur["subscription_charged"])),
             },
         }
 
+    async def _lifetime_customer_stats(self, now: datetime) -> dict:
+        """All-time per-customer booking history reduced to one row on the
+        server: $group per customer (count, first, second, last booking),
+        then one more $group into the retention/churn/CLV counters.
+
+        The original Python definitions these reproduce:
+          eligible(N)  = (now - first).days >= N      <=> first <= now - N days
+          again(N)     = some later booking with (b - first).days <= N
+                         <=> second - first < (N + 1) days
+          churned      = (now - last).days > 60       <=> last <= now - 61 days
+          avg gap      = sum of consecutive gaps / count = sum(last - first) / sum(n - 1)
+        """
+        has_second = {"$gte": ["$n", 2]}
+
+        def eligible(days: int) -> dict:
+            return {"$lte": ["$first", now - timedelta(days=days)]}
+
+        def again(days: int) -> dict:
+            return {"$and": [eligible(days), has_second, {"$lt": ["$second_gap", (days + 1) * _DAY_MS]}]}
+
+        counters: dict = {}
+        for d in (30, 60, 90):
+            counters[f"eligible_{d}"] = _count_if(eligible(d))
+            counters[f"again_{d}"] = _count_if(again(d))
+        row = await self._agg_one(self.db.bookings, [
+            {"$match": {"is_deleted": {"$ne": True}}},
+            {"$group": {
+                "_id": "$customer_id",
+                "n": {"$sum": 1},
+                "first": {"$min": "$created_at"},
+                "last": {"$max": "$created_at"},
+                "first_two": {"$minN": {"input": "$created_at", "n": 2}},
+                "revenue": _sum_if({"$eq": ["$status", "completed"]}, "$total_amount"),
+            }},
+            {"$project": {
+                "n": 1, "first": 1, "last": 1, "revenue": 1,
+                "second_gap": {"$subtract": [{"$max": "$first_two"}, "$first"]},
+            }},
+            {"$group": {
+                "_id": None,
+                "customers": {"$sum": 1},
+                "bookings": {"$sum": "$n"},
+                "repeat": _count_if({"$gt": ["$n", 1]}),
+                "gap_ms": {"$sum": {"$subtract": ["$last", "$first"]}},
+                "gap_n": {"$sum": {"$subtract": ["$n", 1]}},
+                "revenue": {"$sum": "$revenue"},
+                "matured_repeat": _count_if({"$and": [eligible(30), {"$gt": ["$n", 1]}]}),
+                "churned": _count_if({"$lte": ["$last", now - timedelta(days=61)]}),
+                **counters,
+            }},
+        ])
+        return row
+
     async def customers(self, s, e, ps, pe) -> dict:
-        all_rows = await self.db.bookings.find(
-            {"is_deleted": {"$ne": True}},
-            {"customer_id": 1, "created_at": 1, "status": 1, "total_amount": 1},
-        ).to_list(length=None)
-        by_customer: dict[str, list] = {}
-        for b in sorted(all_rows, key=lambda x: x["created_at"]):
-            by_customer.setdefault(b["customer_id"], []).append(b)
-
         now = now_ist()
-
-        def tz(dt):
-            return _aware(dt)
-
-        total_customers = await self.db.users.count_documents({"role": "customer"})
-        new_customers = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}})
-        prev_new = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}})
-
-        washes_counts = [len(v) for v in by_customer.values()]
-        repeat_customers = sum(1 for c in washes_counts if c > 1)
-        gaps: list[float] = []
-        for rows in by_customer.values():
-            for a, b in zip(rows, rows[1:]):
-                gaps.append((tz(b["created_at"]) - tz(a["created_at"])).total_seconds() / 86400)
-
-        # N-day repeat: of customers whose FIRST booking is at least N days
-        # old, how many booked again within N days of that first booking.
-        def n_day_repeat(days: int):
-            eligible = again = 0
-            for rows in by_customer.values():
-                first = tz(rows[0]["created_at"])
-                if (now - first).days < days:
-                    continue
-                eligible += 1
-                if any((tz(b["created_at"]) - first).days <= days for b in rows[1:]):
-                    again += 1
-            return _pct(again, eligible)
-
-        # Second-wash rate over a matured cohort (first booking 30+ days
-        # ago) — an un-matured cohort would understate it misleadingly.
-        matured = [rows for rows in by_customer.values() if (now - tz(rows[0]["created_at"])).days >= 30]
-        second_wash_rate = _pct(sum(1 for rows in matured if len(rows) > 1), len(matured))
-
-        churned = sum(1 for rows in by_customer.values() if (now - tz(rows[-1]["created_at"])).days > 60)
-        lifetime_revenue = sum(b.get("total_amount", 0) for b in all_rows if b.get("status") == "completed")
-
-        cur = await self._bookings_between(s, e)
-        completed = [b for b in cur if self._completed_in(b, s, e)]
-        first_at = {c: _aware(rows[0]["created_at"]) for c, rows in by_customer.items()}
-        new_rev = _rupees(sum(b.get("total_amount", 0) for b in completed if tz(first_at.get(b["customer_id"], s)) >= s))
-        total_rev = self._revenue(cur, s, e)
+        stats, split, cur, total_customers, new_customers, prev_new = await asyncio.gather(
+            self._lifetime_customer_stats(now),
+            self._customer_split(s, e),
+            self._window_totals(s, e),
+            self.db.users.count_documents({"role": "customer"}),
+            self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}}),
+            self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}}),
+        )
+        n_customers = stats.get("customers", 0)
+        repeat_customers = stats.get("repeat", 0)
+        gap_n = stats.get("gap_n", 0)
+        new_rev = _rupees(split["new_revenue"])
+        total_rev = _rupees(cur["revenue"])
 
         return {
             "total_customers": total_customers,
             "new_customers": new_customers,
             "new_customers_growth": _growth(new_customers, prev_new),
             "repeat_customers": repeat_customers,
-            "repeat_rate": _pct(repeat_customers, len(by_customer)),
-            "second_wash_rate": second_wash_rate,
-            "retention": {"d30": n_day_repeat(30), "d60": n_day_repeat(60), "d90": n_day_repeat(90)},
-            "avg_washes_per_customer": round(sum(washes_counts) / len(washes_counts), 1) if washes_counts else 0,
-            "avg_days_between_washes": round(sum(gaps) / len(gaps), 1) if gaps else None,
-            "churn_rate": _pct(churned, len(by_customer)),
-            "clv": _rupees(lifetime_revenue / len(by_customer)) if by_customer else 0,
+            "repeat_rate": _pct(repeat_customers, n_customers),
+            # Second-wash rate over a matured cohort (first booking 30+ days
+            # ago) — an un-matured cohort would understate it misleadingly.
+            "second_wash_rate": _pct(stats.get("matured_repeat", 0), stats.get("eligible_30", 0)),
+            # N-day repeat: of customers whose FIRST booking is at least N days
+            # old, how many booked again within N days of that first booking.
+            "retention": {f"d{d}": _pct(stats.get(f"again_{d}", 0), stats.get(f"eligible_{d}", 0)) for d in (30, 60, 90)},
+            "avg_washes_per_customer": round(stats.get("bookings", 0) / n_customers, 1) if n_customers else 0,
+            "avg_days_between_washes": round(stats["gap_ms"] / _DAY_MS / gap_n, 1) if gap_n else None,
+            "churn_rate": _pct(stats.get("churned", 0), n_customers),
+            "clv": _rupees((stats.get("revenue") or 0) / n_customers) if n_customers else 0,
             "new_vs_repeat_revenue": {
                 "new": new_rev,
                 "repeat": _rupees(total_rev - new_rev),
@@ -434,20 +622,104 @@ class KpiService:
             },
         }
 
-    async def captains(self, s, e, ps, pe) -> dict:
-        from app.services.staff_directory_service import StaffDirectoryService
+    async def _captain_performance(self, captain_ids: list[str], date_from: str, date_to: str) -> dict[str, dict]:
+        """The subset of StaffDirectoryService.captain_performance the
+        captains tab shows, for every captain in three grouped queries
+        instead of that method's ~5 queries per captain. Same window:
+        scheduled_date (naive IST wall-clock digits), date_to inclusive,
+        exactly as that method bounds it."""
+        if not captain_ids:
+            return {}
+        match = {
+            "captain_id": {"$in": captain_ids},
+            "is_deleted": {"$ne": True},
+            "scheduled_date": {
+                "$gte": datetime.strptime(date_from, "%Y-%m-%d"),
+                "$lt": datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1),
+            },
+        }
+        completed = {"$eq": ["$status", "completed"]}
+        has_travel = {"$and": [completed, "$heading_at", "$vehicle_verified_at"]}
+        has_service = {"$and": [completed, _not_null("$actual_duration_minutes")]}
+        booking_rows, rating_rows, complaint_rows = await asyncio.gather(
+            self.db.bookings.aggregate([
+                {"$match": match},
+                {"$group": {
+                    "_id": "$captain_id",
+                    "jobs": _count_if(completed),
+                    "cancelled": _count_if({"$eq": ["$status", "cancelled"]}),
+                    # The captain's own earnings, not the customer-paid gross.
+                    "earnings": _sum_if(completed, {"$ifNull": ["$captain_earning", 0]}),
+                    "started": _count_if(_truthy("$captain_start_stage")),
+                    "on_time": _count_if({"$in": ["$captain_start_stage", ["early", "on_time"]]}),
+                    "service_sum": _sum_if(has_service, "$actual_duration_minutes"),
+                    "service_n": _count_if(has_service),
+                    "travel_sum": _sum_if(has_travel, {"$max": [0, _minutes_between("$heading_at", "$vehicle_verified_at")]}),
+                    "travel_n": _count_if(has_travel),
+                }},
+            ]).to_list(length=None),
+            # All-time average, exactly as ReviewRepository.average_rating_for_captain.
+            self.db.reviews.aggregate([
+                {"$match": {"captain_id": {"$in": captain_ids}, "is_deleted": {"$ne": True}}},
+                {"$group": {"_id": "$captain_id", "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}}},
+            ]).to_list(length=None),
+            self._complaints_per_captain(match),
+        )
+        out: dict[str, dict] = {cid: {} for cid in captain_ids}
+        for r in booking_rows:
+            out[r["_id"]] = {
+                "total_jobs_completed": r["jobs"],
+                "cancelled_bookings": r["cancelled"],
+                "total_earnings": round(r["earnings"] or 0, 2),
+                "on_time_start_pct": round(r["on_time"] / r["started"] * 100, 1) if r["started"] else None,
+                "avg_service_minutes": round(r["service_sum"] / r["service_n"], 1) if r["service_n"] else None,
+                "avg_travel_minutes": round(r["travel_sum"] / r["travel_n"], 1) if r["travel_n"] else None,
+            }
+        for r in rating_rows:
+            out.setdefault(r["_id"], {})["average_rating"] = round(r["avg"] or 0, 2)
+        for captain_id, n in complaint_rows.items():
+            out.setdefault(captain_id, {})["repeat_complaints"] = n
+        return out
 
-        staff = StaffDirectoryService(self.db)
+    async def _complaints_per_captain(self, booking_match: dict) -> dict[str, int]:
+        """Complaints about any booking matching `booking_match`, counted
+        per that booking's captain. Driven from complaints (far fewer rows
+        than bookings), joined to their bookings a chunk at a time."""
+        counts: dict[str, int] = {}
+
+        async def flush(chunk: list[str]) -> None:
+            oids = [ObjectId(b) for b in chunk]
+            captain_of = {
+                str(b["_id"]): b.get("captain_id")
+                for b in await self.db.bookings.find({"_id": {"$in": oids}, **booking_match}, {"captain_id": 1}).to_list(length=None)
+            }
+            for b in chunk:
+                if b in captain_of:
+                    counts[captain_of[b]] = counts.get(captain_of[b], 0) + 1
+
+        chunk: list[str] = []
+        async for c in self.db.complaints.find({"is_deleted": {"$ne": True}, "booking_id": {"$type": "string"}}, {"booking_id": 1, "_id": 0}):
+            if ObjectId.is_valid(c["booking_id"]):
+                chunk.append(c["booking_id"])
+            if len(chunk) >= _CHUNK:
+                await flush(chunk)
+                chunk = []
+        if chunk:
+            await flush(chunk)
+        return counts
+
+    async def captains(self, s, e, ps, pe) -> dict:
         settings = await self.get_settings()
         target_per_day = settings["targets"].get("washes_per_captain_per_day") or 5.0
         days = max((e - s).days, 1)
         date_from, date_to = s.date().isoformat(), (e - timedelta(days=1)).date().isoformat()
 
-        captains = await self.db.users.find({"role": "captain", "is_deleted": {"$ne": True}}).to_list(length=None)
+        captains = await self.db.users.find({"role": "captain", "is_deleted": {"$ne": True}}, {"full_name": 1}).to_list(length=None)
+        perf_by_captain = await self._captain_performance([str(c["_id"]) for c in captains], date_from, date_to)
         rows = []
         for c in captains:
             cid = str(c["_id"])
-            perf = await staff.captain_performance(cid, date_from=date_from, date_to=date_to)
+            perf = perf_by_captain.get(cid, {})
             jobs = perf.get("total_jobs_completed", 0)
             per_day = round(jobs / days, 2)
             rows.append({
@@ -459,7 +731,7 @@ class KpiService:
                 "avg_job_minutes": perf.get("avg_service_minutes"),
                 "avg_travel_minutes": perf.get("avg_travel_minutes"),
                 "on_time_pct": perf.get("on_time_start_pct"),
-                "rating": perf.get("average_rating"),
+                "rating": perf.get("average_rating", 0),
                 "complaints": perf.get("repeat_complaints", 0),
                 "cancellations": perf.get("cancelled_bookings", 0),
                 "utilisation_pct": _pct(per_day, target_per_day),
@@ -474,11 +746,13 @@ class KpiService:
         }
 
     async def financial(self, s, e, ps, pe) -> dict:
-        settings = await self.get_settings()
-        cur = await self._bookings_between(s, e)
-        completed = [b for b in cur if self._completed_in(b, s, e)]
-        washes = len(completed)
-        revenue = self._revenue(cur, s, e)
+        settings, cur, captains_count = await asyncio.gather(
+            self.get_settings(),
+            self._window_totals(s, e),
+            self.db.users.count_documents({"role": "captain", "is_deleted": {"$ne": True}}),
+        )
+        washes = cur["completed"]
+        revenue = _rupees(cur["revenue"])
         days = max((e - s).days, 1)
 
         vc = settings["variable_cost_per_wash"]
@@ -492,7 +766,6 @@ class KpiService:
         cpw = _rupees(aov - vc)  # contribution per wash at current AOV
         daily_fixed = settings["fixed_cost_monthly"] / 30
         break_even_washes_per_day = round(daily_fixed / cpw, 1) if cpw > 0 else None
-        captains_count = await self.db.users.count_documents({"role": "captain", "is_deleted": {"$ne": True}})
 
         monthly_contribution_per_kit = (contribution / days * 30 / settings["kits_count"]) if settings["kits_count"] else 0
         kit_payback_months = round(settings["kit_cost"] / monthly_contribution_per_kit, 1) if monthly_contribution_per_kit > 0 and settings["kit_cost"] else None
@@ -515,7 +788,7 @@ class KpiService:
             "break_even_revenue_per_day": _rupees(break_even_washes_per_day * aov) if break_even_washes_per_day and aov else None,
             "revenue_per_captain": _rupees(revenue / captains_count) if captains_count else 0,
             "kit_payback_months": kit_payback_months,
-            "cost_per_booking": _rupees((variable_cost + fixed_prorated + marketing_spend) / len([b for b in cur if self._created_in(b, s, e)])) if any(self._created_in(b, s, e) for b in cur) else 0,
+            "cost_per_booking": _rupees((variable_cost + fixed_prorated + marketing_spend) / cur["bookings"]) if cur["bookings"] else 0,
         }
 
     async def marketing(self, s, e, ps, pe) -> dict:
@@ -526,18 +799,16 @@ class KpiService:
         attributed_customers = sum(int(x.get("customers", 0) or 0) for x in entries)
         attributed_revenue = _rupees(sum(x.get("revenue", 0) for x in entries))
 
-        coverage_leads = await self.db.coverage_leads.count_documents({"created_at": {"$gte": s, "$lt": e}})
+        coverage_leads, new_customers, referral_customers, cur, split = await asyncio.gather(
+            self.db.coverage_leads.count_documents({"created_at": {"$gte": s, "$lt": e}}),
+            self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}}),
+            self.db.users.count_documents(
+                {"role": "customer", "referred_by": {"$nin": [None, ""]}, "created_at": {"$gte": s, "$lt": e}}),
+            self._window_totals(s, e),
+            self._customer_split(s, e),
+        )
         leads = manual_leads + coverage_leads
-        new_customers = await self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}})
-        referral_customers = await self.db.users.count_documents(
-            {"role": "customer", "referred_by": {"$nin": [None, ""]}, "created_at": {"$gte": s, "$lt": e}})
         organic = max(new_customers - attributed_customers - referral_customers, 0)
-
-        cur = await self._bookings_between(s, e)
-        created = [b for b in cur if self._created_in(b, s, e)]
-        completed = [b for b in cur if self._completed_in(b, s, e)]
-        first_at = await self._first_booking_at_by_customer()
-        repeat_customers = len({b["customer_id"] for b in created if first_at.get(b["customer_id"], s) < s})
 
         by_source: dict[str, dict] = {}
         campaigns = []
@@ -569,16 +840,16 @@ class KpiService:
             "cac": _rupees(spend / attributed_customers) if attributed_customers else (_rupees(spend / new_customers) if new_customers and spend else None),
             "ad_attributed_revenue": attributed_revenue,
             "roas": round(attributed_revenue / spend, 2) if spend else None,
-            "booking_conversion_pct": _pct(len(created), leads),
+            "booking_conversion_pct": _pct(cur["bookings"], leads),
             "funnel": {
                 "leads": leads,
-                "bookings": len(created),
-                "completed": len(completed),
-                "repeat_customers": repeat_customers,
+                "bookings": cur["bookings"],
+                "completed": cur["completed"],
+                "repeat_customers": split["repeat"],
             },
             "by_source": sorted(by_source.values(), key=lambda r: -r["spend"]),
             "campaigns": campaigns,
-            "target_cac": (await self.get_settings())["targets"].get("cac"),
+            "target_cac": settings["targets"].get("cac"),
         }
 
     async def operations(self, s, e, ps, pe) -> dict:
@@ -588,38 +859,33 @@ class KpiService:
             dates.append(day.date().isoformat())
             day += timedelta(days=1)
 
-        slots = await self.db.slot_capacity.find({"date": {"$in": dates}}).to_list(length=None)
-        capacity = sum(x.get("capacity", 0) for x in slots)
-        booked = sum(x.get("booked_count", 0) for x in slots)
-        by_slot: dict[str, int] = {}
-        for x in slots:
-            by_slot[x.get("slot_key", "?")] = by_slot.get(x.get("slot_key", "?"), 0) + x.get("booked_count", 0)
+        slot_rows, cur, (review_count, ratings), complaints = await asyncio.gather(
+            self.db.slot_capacity.aggregate([
+                {"$match": {"date": {"$in": dates}}},
+                {"$group": {"_id": {"$ifNull": ["$slot_key", "?"]}, "capacity": {"$sum": "$capacity"}, "booked": {"$sum": "$booked_count"}}},
+            ]).to_list(length=None),
+            self._window_totals(s, e),
+            self._ratings(s, e),
+            # Complaints per period are a small set; only the four fields
+            # the section reads are fetched.
+            self.db.complaints.find(
+                {"created_at": {"$gte": s, "$lt": e}, "is_deleted": {"$ne": True}},
+                {"status": 1, "category": 1, "created_at": 1, "updated_at": 1},
+            ).to_list(length=None),
+        )
+        capacity = sum(x["capacity"] for x in slot_rows)
+        booked = sum(x["booked"] for x in slot_rows)
+        by_slot = {x["_id"]: x["booked"] for x in sorted(slot_rows, key=lambda x: x["_id"])}
         peak = max(by_slot.items(), key=lambda kv: kv[1])[0] if by_slot else None
         lowest = min(by_slot.items(), key=lambda kv: kv[1])[0] if by_slot else None
 
-        cur = await self._bookings_between(s, e)
-        created = [b for b in cur if self._created_in(b, s, e)]
-        completed = [b for b in cur if self._completed_in(b, s, e)]
-        cancelled = [b for b in created if b.get("status") == "cancelled"]
-        captain_cancel = sum(1 for b in created if b.get("cancelled_by_role") == "captain")
-        started = [b for b in created if b.get("captain_start_stage")]
-        on_time = sum(1 for b in started if b["captain_start_stage"] in ("early", "on_time"))
+        completed = cur["completed"]
+        avg_travel = round(cur["travel_sum"] / cur["travel_n"], 1) if cur["travel_n"] else None
+        avg_service = round(cur["service_sum"] / max(cur["service_n"], 1), 1) if completed else None
 
-        def avg_minutes(pairs):
-            vals = [((_aware(b[k2]) - _aware(b[k1])).total_seconds() / 60) for b, k1, k2 in pairs if b.get(k1) and b.get(k2)]
-            return round(sum(vals) / len(vals), 1) if vals else None
+        n_ratings = sum(ratings.values())
+        distribution = {str(star): sum(c for v, c in ratings.items() if round(v) == star) for star in range(5, 0, -1)}
 
-        avg_travel = avg_minutes([(b, "heading_at", "vehicle_verified_at") for b in completed])
-        avg_service = round(
-            sum(b.get("actual_duration_minutes", 0) for b in completed if b.get("actual_duration_minutes")) /
-            max(sum(1 for b in completed if b.get("actual_duration_minutes")), 1), 1) if completed else None
-
-        reviews = await self.db.reviews.find({"created_at": {"$gte": s, "$lt": e}, "is_deleted": {"$ne": True}}).to_list(length=None)
-        ratings = [r.get("captain_rating") or r.get("rating") for r in reviews]
-        ratings = [r for r in ratings if r]
-        distribution = {str(star): sum(1 for r in ratings if round(r) == star) for star in range(5, 0, -1)}
-
-        complaints = await self.db.complaints.find({"created_at": {"$gte": s, "$lt": e}, "is_deleted": {"$ne": True}}).to_list(length=None)
         resolved = [c for c in complaints if c.get("status") in ("resolved", "closed") and c.get("updated_at")]
         avg_resolution_hours = round(
             sum((_aware(c["updated_at"]) - _aware(c["created_at"])).total_seconds() / 3600 for c in resolved) / len(resolved), 1
@@ -638,18 +904,18 @@ class KpiService:
                 "peak_slot": peak,
                 "lowest_slot": lowest,
             },
-            "on_time_arrival_pct": _pct(on_time, len(started)),
+            "on_time_arrival_pct": _pct(cur["on_time"], cur["started"]),
             "avg_travel_minutes": avg_travel,
             "avg_service_minutes": avg_service,
-            "cancellation_rate": _pct(len(cancelled), len(created)),
-            "captain_cancellations": captain_cancel,
+            "cancellation_rate": _pct(cur["cancelled"], cur["bookings"]),
+            "captain_cancellations": cur["captain_cancelled"],
             "experience": {
-                "avg_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
-                "five_star_pct": _pct(distribution.get("5", 0), len(ratings)),
+                "avg_rating": round(sum(v * c for v, c in ratings.items()) / n_ratings, 2) if n_ratings else None,
+                "five_star_pct": _pct(distribution.get("5", 0), n_ratings),
                 "rating_distribution": distribution,
-                "review_collection_pct": _pct(len(reviews), len(completed)),
+                "review_collection_pct": _pct(review_count, completed),
                 "complaints": len(complaints),
-                "complaint_rate_pct": _pct(len(complaints), len(completed)),
+                "complaint_rate_pct": _pct(len(complaints), completed),
                 "unresolved_complaints": sum(1 for c in complaints if c.get("status") in ("open", "in_progress")),
                 "avg_resolution_hours": avg_resolution_hours,
                 "complaint_categories": sorted(
@@ -659,33 +925,47 @@ class KpiService:
 
     async def areas(self, s, e, ps, pe) -> dict:
         """Bookings grouped by the delivery address's pincode+city — the
-        closest thing to 'area' the data actually records."""
-        from bson import ObjectId
+        closest thing to 'area' the data actually records. Grouped on the
+        server by (address, customer) — one row per customer-address in the
+        window, never per booking — then addresses are resolved in batches."""
+        created, completed = _created_in(s, e), _completed_in(s, e)
+        rows = await self.db.bookings.aggregate([
+            {"$match": _window_match(s, e)},
+            {"$group": {
+                "_id": {"a": "$address_id", "c": "$customer_id"},
+                "bookings": _count_if(created),
+                "revenue": _sum_if(completed, "$total_amount"),
+            }},
+        ], allowDiskUse=True).to_list(length=None)
+        addr_ids = sorted({r["_id"].get("a") for r in rows if isinstance(r["_id"].get("a"), str) and ObjectId.is_valid(r["_id"]["a"])})
+        addresses: dict[str, dict] = {}
+        for i in range(0, len(addr_ids), _CHUNK):
+            for a in await self.db.addresses.find(
+                {"_id": {"$in": [ObjectId(x) for x in addr_ids[i:i + _CHUNK]]}}, {"city": 1, "pincode": 1}
+            ).to_list(length=None):
+                addresses[str(a["_id"])] = a
+        prior = await self._customers_seen_before({r["_id"].get("c") for r in rows if r["bookings"]}, s)
 
-        cur = await self._bookings_between(s, e)
-        addr_ids = [ObjectId(b["address_id"]) for b in cur if b.get("address_id") and ObjectId.is_valid(b["address_id"])]
-        addresses = {str(a["_id"]): a for a in await self.db.addresses.find({"_id": {"$in": addr_ids}}).to_list(length=None)} if addr_ids else {}
-        first_at = await self._first_booking_at_by_customer()
-
-        rows: dict[str, dict] = {}
-        for b in cur:
-            a = addresses.get(b.get("address_id", ""))
+        by_area: dict[str, dict] = {}
+        for r in rows:
+            a = addresses.get(r["_id"].get("a") or "")
             label = f"{a.get('city', '?')} · {a.get('pincode', '?')}" if a else "Unknown"
-            row = rows.setdefault(label, {"area": label, "bookings": 0, "revenue": 0.0, "customers": set(), "repeat_customers": set()})
-            if self._created_in(b, s, e):
-                row["bookings"] += 1
-                row["customers"].add(b["customer_id"])
-                if first_at.get(b["customer_id"], s) < s:
-                    row["repeat_customers"].add(b["customer_id"])
-            if self._completed_in(b, s, e):
-                row["revenue"] = _rupees(row["revenue"] + b.get("total_amount", 0))
-        out = []
-        for row in rows.values():
-            out.append({
+            row = by_area.setdefault(label, {"area": label, "bookings": 0, "revenue": 0.0, "customers": set(), "repeat_customers": set()})
+            row["bookings"] += r["bookings"]
+            row["revenue"] += r["revenue"] or 0
+            if r["bookings"]:
+                customer = r["_id"].get("c")
+                row["customers"].add(customer)
+                if customer in prior:
+                    row["repeat_customers"].add(customer)
+        out = [
+            {
                 "area": row["area"],
                 "bookings": row["bookings"],
-                "revenue": row["revenue"],
+                "revenue": _rupees(row["revenue"]),
                 "customers": len(row["customers"]),
                 "repeat_rate": _pct(len(row["repeat_customers"]), len(row["customers"])),
-            })
-        return {"areas": sorted(out, key=lambda r: -r["bookings"])}
+            }
+            for row in by_area.values()
+        ]
+        return {"areas": sorted(out, key=lambda r: (-r["bookings"], r["area"]))}

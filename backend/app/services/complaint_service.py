@@ -66,15 +66,40 @@ class ComplaintService:
         return await self._enrich(items), total
 
     async def list_for_center(
-        self, service_center_id: str, status: str | None, page: int, page_size: int, actor_role: str, actor_center_id: str | None
+        self, service_center_id: str, status: str | None, page: int, page_size: int, actor_role: str, actor_center_id: str | None,
+        search: str | None = None,
     ):
         ensure_own_center(actor_role, actor_center_id, service_center_id)
-        items, total = await self.repo.list_for_center(service_center_id, status, page, page_size)
+        items, total = await self.repo.list_for_center(service_center_id, status, page, page_size, await self.search_filter(search))
         return await self._enrich(items), total
 
-    async def list_all(self, filters: dict, page: int, page_size: int):
-        items, total = await self.repo.list_all(filters, page, page_size)
+    async def list_all(self, filters: dict, page: int, page_size: int, search: str | None = None):
+        items, total = await self.repo.list_all({**filters, **await self.search_filter(search)}, page, page_size)
         return await self._enrich(items), total
+
+    async def search_filter(self, search: str | None) -> dict:
+        """Subject text, a booking number (BK...), or the customer's name /
+        phone — the three things staff actually know when chasing a
+        complaint. Customers are resolved through users first; complaints
+        store only ids."""
+        from app.repositories.base_repository import build_search_filter
+
+        text = (search or "").strip()
+        if not text:
+            return {}
+        ors: list[dict] = list(build_search_filter(text, ["subject"])["$or"])
+        if text.upper().startswith("BK"):
+            booking = await self.booking_repo.collection.find_one({"booking_number": text.upper()}, {"_id": 1})
+            if booking:
+                ors.append({"booking_id": str(booking["_id"])})
+        digits = "".join(ch for ch in text if ch.isdigit())
+        who = digits[2:] if len(digits) == 12 and digits.startswith("91") else text
+        customers = await self.user_repo.collection.find(
+            {"role": "customer", **build_search_filter(who, ["full_name", "phone"])}, {"_id": 1}
+        ).limit(200).to_list(length=200)
+        if customers:
+            ors.append({"customer_id": {"$in": [str(u["_id"]) for u in customers]}})
+        return {"$or": ors}
 
     async def _enrich(self, complaints: list[dict]) -> list[dict]:
         """Denormalizes the fields the admin/manager complaint list actually
@@ -117,13 +142,16 @@ class ComplaintService:
             data["resolved_by"] = resolved_by
 
         updated = await self.repo.update_by_id(complaint_id, data)
-        await self.notifications.notify(
-            complaint["customer_id"],
-            "Complaint update",
-            f"Your complaint '{complaint['subject']}' has been updated.",
-            NotificationType.COMPLAINT,
-            complaint_id,
-        )
+        # Re-prioritising is internal triage — only a change the customer
+        # can see (status, resolution note) is worth a message to them.
+        if set(data) - {"priority"}:
+            await self.notifications.notify(
+                complaint["customer_id"],
+                "Complaint update",
+                f"Your complaint '{complaint['subject']}' has been updated.",
+                NotificationType.COMPLAINT,
+                complaint_id,
+            )
         return serialize_doc(updated)
 
     async def add_reply(

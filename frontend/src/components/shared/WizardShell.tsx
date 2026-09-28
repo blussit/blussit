@@ -14,7 +14,6 @@ import { cn } from "../../lib/cn";
  * logged-in one — so before and after login look like the same product.
  */
 export function WizardShell({
-  eyebrow,
   title,
   steps,
   current,
@@ -23,7 +22,6 @@ export function WizardShell({
   footer,
   children,
 }: {
-  eyebrow?: string;
   title: string;
   steps: string[];
   current: number;
@@ -40,8 +38,7 @@ export function WizardShell({
         {/* Rail — a real list on desktop, a compact tick strip on phones. */}
         <div className="lg:sticky lg:top-24 lg:self-start">
           <div className="hidden lg:block">
-            {eyebrow && <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-gray-400">{eyebrow}</p>}
-            <h1 className="mt-1 font-display text-xl font-bold leading-tight text-black">{title}</h1>
+            <h1 className="font-display text-xl font-bold leading-tight text-black">{title}</h1>
             <ol className="mt-6 space-y-1">
               {steps.map((label, i) => {
                 const done = i < current;
@@ -79,22 +76,18 @@ export function WizardShell({
             {aside && <div className="mt-6">{aside}</div>}
           </div>
 
-          {/* Mobile: title + a tick strip, nothing else. */}
+          {/* Mobile: title + a progress strip, nothing else. */}
           <div className="lg:hidden">
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-gray-400">
-              Step {current + 1} of {steps.length} · {steps[current]}
-            </p>
-            <h1 className="mt-1 font-display text-2xl font-bold text-black">{title}</h1>
-            <div className="mt-3 flex items-center gap-1.5">
-              {steps.map((label, i) => (
-                <span
-                  key={label}
-                  className={cn(
-                    "h-1 flex-1 rounded-full transition-colors",
-                    i < current ? "bg-[#E8A900]" : i === current ? "bg-black" : "bg-[#F3E5B5]"
-                  )}
-                />
-              ))}
+            <h1 className="font-display text-2xl font-bold text-black">{title}</h1>
+            <div className="mt-3 flex items-center gap-3">
+              <div className="flex flex-1 items-center gap-1.5">
+                {steps.map((label, i) => (
+                  <span key={label} className={cn("h-1 flex-1 rounded-full transition-colors", i <= current ? "bg-[#E8A900]" : "bg-[#F3E5B5]")} />
+                ))}
+              </div>
+              <span className="shrink-0 text-xs text-gray-500">
+                Step {current + 1} of {steps.length}
+              </span>
             </div>
           </div>
         </div>

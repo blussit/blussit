@@ -128,7 +128,7 @@ export function VideoReviews({ id = "video-reviews" }: { id?: string }) {
         <div
           ref={scrollerRef}
           onScroll={onScroll}
-          className="relative flex snap-x snap-mandatory items-start gap-3 overflow-x-auto overscroll-x-contain px-[calc(50%_-_min(32vw,135px))] pb-2 [scrollbar-width:none] md:justify-center-safe md:gap-6 md:px-4 [&::-webkit-scrollbar]:hidden"
+          className="relative flex snap-x snap-mandatory items-start gap-3 overflow-x-auto overscroll-x-contain px-[calc(50%_-_min(32vw,135px))] pb-2 [scrollbar-width:none] md:justify-center-safe md:gap-6 md:px-[calc(50%_-_140px)] [&::-webkit-scrollbar]:hidden"
         >
           {videos.map((video, index) => (
             <VideoCard
@@ -187,7 +187,7 @@ function VideoCard({
         main ? "scale-100 opacity-100" : "scale-[0.92] opacity-60 hover:opacity-90"
       }`}
     >
-      <div className={`relative overflow-hidden rounded-2xl border border-cream-line bg-black ${video.isShort ? "aspect-[9/16]" : "aspect-video"}`}>
+      <div className={`relative overflow-hidden rounded-2xl border border-card-border bg-black ${video.isShort ? "aspect-[9/16]" : "aspect-video"}`}>
         {playing ? (
           <iframe
             key={withSound ? "sound" : "muted"}

@@ -40,8 +40,8 @@ export default function AdminWhatsAppPage() {
         </div>
       </div>
 
-      {tab === "inbox" && <InboxView />}
-      {tab === "contacts" && <ContactsView onOpenChat={() => setParams({})} />}
+      {tab === "inbox" && <InboxView key={params.get("chat") || "inbox"} initialActive={params.get("chat")} />}
+      {tab === "contacts" && <ContactsView onOpenChat={(waId) => setParams({ chat: waId })} />}
       {tab === "templates" && <TemplatesView />}
       {tab === "campaigns" && <CampaignsView />}
       {tab === "analytics" && <AnalyticsView />}

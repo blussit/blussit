@@ -1,9 +1,12 @@
 """
-Authentication business logic. OTP delivery is real — every OTP and
-password-reset temp password goes out over WhatsApp (see WhatsAppService),
-with a safe log-only fallback when no WhatsApp credentials are configured
-(see get_whatsapp_provider) so this all still works end-to-end in dev/test.
+Authentication business logic. Backend OTPs go out over WhatsApp (approved
+template, or free text inside an open 24h chat) or SMS (SMS_PROVIDER);
+when neither can reach a number the request is refused and the browser
+sends the code through the MSG91 widget instead (see Msg91WidgetService).
+Dev/test use the log-only providers.
 """
+import logging
+import math
 import random
 import secrets
 import string
@@ -14,13 +17,16 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, PhoneNotVerifiedException, UnauthorizedException
-from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
+from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password_async, verify_password_async
 from app.models.enums import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest, StaffCreateRequest, UserPublic
 from app.services.sms_service import SmsService
 from app.services.whatsapp_service import WhatsAppService
+from app.utils.phone import BUSINESS_NUMBER_MESSAGE, is_business_whatsapp_number, validate_indian_mobile
 from pymongo import ReturnDocument
+
+logger = logging.getLogger(__name__)
 
 
 async def next_captain_employee_id(db: AsyncIOMotorDatabase) -> str:
@@ -68,38 +74,49 @@ class AuthService:
         the caller fall back to SMS immediately instead of after a code
         that never arrives."""
         from app.core.config import settings
+        from app.services.whatsapp_service import LogWhatsAppProvider
 
+        if isinstance(self.whatsapp.provider, LogWhatsAppProvider):
+            # "log" on purpose (tests / local) "delivers" everything; meta_cloud
+            # with a missing token/phone id silently falls back to the log
+            # provider, and an OTP "sent" there never reaches anyone.
+            return settings.WHATSAPP_PROVIDER == "log"
         if await self.whatsapp.otp_template_name():
             return True
-        if settings.WHATSAPP_PROVIDER == "log":
-            return True  # tests / local: the log provider "delivers" everything
         since = datetime.now(timezone.utc) - timedelta(hours=23, minutes=30)
         convo = await self.db.whatsapp_conversations.find_one(
             {"$or": [{"phone": phone}, {"wa_id": f"91{phone}"}, {"wa_id": phone}], "last_inbound_at": {"$gte": since}}
         )
         return convo is not None
 
-    async def _deliver_otp(self, phone: str, otp: str, purpose: str) -> bool:
-        """OTP delivery: WhatsApp first, SMS as the fallback (settings.
-        OTP_CHANNEL="sms" flips the order). WhatsApp is skipped outright
-        when it can't reach the number (see _whatsapp_can_reach), so the
-        fallback happens NOW rather than after a code that never lands.
-        Returns False when nothing could be sent — the caller surfaces
-        that as an error and the login page then tries the MSG91 widget
-        (SMS) on its own."""
+    async def _otp_channels(self, phone: str) -> list[str]:
+        """The channels that can plausibly deliver a code to this phone right
+        now, in try-order: WhatsApp first, SMS second (settings.OTP_CHANNEL=
+        "sms" flips it). Empty = the backend can't send at all — the caller
+        refuses before touching the cooldown or the hourly cap, and the
+        client falls back to the MSG91 widget (SMS)."""
         from app.core.config import settings
 
         order = ["sms", "whatsapp"] if settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
+        channels = []
         for channel in order:
-            if channel == "whatsapp":
-                if not await self._whatsapp_can_reach(phone):
-                    continue
-                if await self.whatsapp.send_otp(phone, otp, purpose):
-                    return True
+            if channel == "whatsapp" and await self._whatsapp_can_reach(phone):
+                channels.append(channel)
             elif channel == "sms" and self.sms.enabled:
-                if await self.sms.send_otp(phone, otp):
-                    return True
-        return False
+                channels.append(channel)
+        return channels
+
+    async def _deliver_otp(self, phone: str, otp: str, purpose: str, channels: list[str]) -> str | None:
+        """Tries each channel in order; returns the one that accepted the code."""
+        for channel in channels:
+            try:
+                if channel == "whatsapp" and await self.whatsapp.send_otp(phone, otp, purpose):
+                    return channel
+                if channel == "sms" and await self.sms.send_otp(phone, otp):
+                    return channel
+            except Exception:  # noqa: BLE001 — one broken channel must not stop the fallback
+                logger.exception("OTP delivery via %s raised for …%s", channel, phone[-4:])
+        return None
 
     async def register_customer(self, payload: RegisterRequest) -> dict:
         if payload.email and await self.users.find_by_email(payload.email):
@@ -112,7 +129,7 @@ class AuthService:
             "full_name": payload.full_name,
             "email": payload.email,
             "phone": payload.phone,
-            "password_hash": hash_password(payload.password),
+            "password_hash": await hash_password_async(payload.password),
             "role": UserRole.CUSTOMER.value,
             "status": UserStatus.ACTIVE.value,
             "referral_code": referral_code,
@@ -142,6 +159,8 @@ class AuthService:
             raise BadRequestException("Managers can only create captain accounts")
         if payload.email and await self.users.find_by_email(payload.email):
             raise ConflictException("An account with this email already exists")
+        if payload.phone and is_business_whatsapp_number(payload.phone):
+            raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
         if payload.phone and await self.users.find_by_phone(payload.phone):
             raise ConflictException("An account with this phone number already exists")
 
@@ -149,7 +168,7 @@ class AuthService:
             "full_name": payload.full_name,
             "email": payload.email,
             "phone": payload.phone,
-            "password_hash": hash_password(payload.password),
+            "password_hash": await hash_password_async(payload.password),
             "role": payload.role.value,
             "status": UserStatus.ACTIVE.value,
             "service_center_id": payload.service_center_id,
@@ -175,6 +194,8 @@ class AuthService:
         this account is not passwordless."""
         if payload.email and await self.users.find_by_email(payload.email):
             raise ConflictException("An account with this email already exists")
+        if is_business_whatsapp_number(payload.phone):
+            raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
         if await self.users.find_by_phone(payload.phone):
             raise ConflictException("An account with this phone number already exists")
 
@@ -183,7 +204,7 @@ class AuthService:
             "full_name": payload.full_name,
             "email": payload.email,
             "phone": payload.phone,
-            "password_hash": hash_password(payload.temp_password),
+            "password_hash": await hash_password_async(payload.temp_password),
             "role": UserRole.CUSTOMER.value,
             "status": UserStatus.ACTIVE.value,
             "referral_code": referral_code,
@@ -227,8 +248,8 @@ class AuthService:
         user_doc = self._strip_absent_contact_fields({
             "full_name": name or "Customer",
             "phone": normalized,
-            # Never a usable password: customers sign in with a phone OTP.
-            "password_hash": hash_password(secrets.token_urlsafe(24)),
+            # No password at all: customers sign in with a phone OTP.
+            "password_hash": None,
             "role": UserRole.CUSTOMER.value,
             "status": UserStatus.ACTIVE.value,
             "referral_code": self._generate_referral_code(name or "USER"),
@@ -270,7 +291,7 @@ class AuthService:
                 locked_until = locked_until.replace(tzinfo=timezone.utc)
             if locked_until > datetime.now(timezone.utc):
                 raise UnauthorizedException("Too many failed attempts. Try again in a few minutes.")
-        if not user or not verify_password(password, user["password_hash"]):
+        if not user or not await verify_password_async(password, user.get("password_hash")):
             if user:
                 failures = user.get("failed_login_attempts", 0) + 1
                 update = {"failed_login_attempts": failures}
@@ -323,121 +344,232 @@ class AuthService:
 
     async def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
         user = await self.users.find_by_id(user_id)
-        if not user or not verify_password(current_password, user["password_hash"]):
+        if user and not user.get("password_hash"):
+            raise BadRequestException("This account doesn't have a password yet — use 'Forgot password' to set one.")
+        if not user or not await verify_password_async(current_password, user["password_hash"]):
             raise BadRequestException("Current password is incorrect")
-        await self.users.update_by_id(user_id, {"password_hash": hash_password(new_password), "must_change_password": False})
+        await self.users.update_by_id(user_id, {"password_hash": await hash_password_async(new_password), "must_change_password": False})
         # Invalidate every refresh token issued before this change.
         await self.users.collection.update_one({"_id": ObjectId(user_id)}, {"$inc": {"token_version": 1}})
 
     _OTP_RESEND_COOLDOWN_SECONDS = 30
+    _OTP_TTL_MINUTES = 10
     _OTP_MAX_ATTEMPTS = 5
+    # Per-phone ceiling whatever the caller's IP — the per-IP limiter alone
+    # can't stop SMS pumping spread across many addresses.
+    _OTP_MAX_SENDS_PER_WINDOW = 5
+    _OTP_SEND_WINDOW_SECONDS = 3600
+    _OTP_SEND_FAILED = "Couldn't send the verification code — please try again in a moment."
+    _OTP_INVALID = "Invalid or expired code."
 
-    async def request_otp(self, identifier: str, purpose: str = "verification") -> None:
-        """Generates an OTP and sends it via WhatsApp to the phone on file
-        for this identifier (email or phone both resolve to the same
-        account's real phone number — WhatsApp is the only delivery
-        channel this app has, so that's where every OTP goes regardless of
-        which identifier the caller typed). Raises if the account has no
-        phone number at all, or if a code was just sent (cooldown) — never
-        returns the code itself; callers must not echo it back to the
-        client (that was Phase 1's placeholder and is exactly the security
-        hole real delivery closes)."""
-        user = await self.users.find_by_identifier(identifier)
+    async def _find_user_by_identifier(self, identifier: str) -> dict | None:
+        """Email or phone in whatever format was typed: "+91 98765-43210",
+        "09876543210" and "9876543210" find the same account, and an email
+        matches case-insensitively (customer emails are stored lower-cased,
+        staff emails may not be)."""
+        raw = (identifier or "").strip()
+        if not raw:
+            return None
+        if "@" in raw:
+            return await self.users.find_one({"email": {"$in": list({raw, raw.lower()})}})
+        phone = validate_indian_mobile(raw)
+        return await self.users.find_by_phone(phone) if phone else await self.users.find_by_identifier(raw)
+
+    async def _otp_phone(self, identifier: str) -> str | None:
+        """The canonical phone a code for this identifier lives under. Codes
+        are always keyed by the phone they were SENT to, so one asked for by
+        email verifies by phone and vice versa, whatever the formatting."""
+        raw = (identifier or "").strip()
+        if "@" in raw:
+            user = await self._find_user_by_identifier(raw)
+            return user.get("phone") if user else None
+        return validate_indian_mobile(raw) or raw or None
+
+    async def request_otp(self, identifier: str, purpose: str = "verification", customer_only: bool = False) -> str:
+        """Sends a code to the phone on file for this account (email or phone
+        both resolve to the account's real number). Never returns the code —
+        callers must not echo it back to the client. customer_only is the
+        OTP-login entry: staff can't log in by OTP, so no code is spent on
+        them."""
+        user = await self._find_user_by_identifier(identifier)
         if not user:
-            raise NotFoundException("No account found for this identifier")
+            raise NotFoundException("No account found with this phone number or email.")
+        if customer_only:
+            if user.get("role") != UserRole.CUSTOMER.value:
+                raise BadRequestException("This number belongs to a staff account — use Staff login.")
+            if user.get("status") == UserStatus.SUSPENDED.value:
+                raise UnauthorizedException("Your account has been suspended. Contact support.")
         phone = user.get("phone")
         if not phone:
-            raise BadRequestException("This account has no phone number on file to send a verification code to.")
-        await self._issue_otp(identifier, phone, purpose)
+            raise BadRequestException("This account has no phone number on file to send a code to.")
+        return await self._issue_otp(phone, purpose)
 
-    async def _issue_otp(self, identifier: str, phone: str, purpose: str) -> None:
-        existing = await self.otp_store.find_one({"identifier": identifier})
+    def _raise_if_cooling_down(self, record: dict | None, now: datetime) -> None:
+        last_sent = (record or {}).get("last_sent_at")
+        if not last_sent:
+            return
+        if last_sent.tzinfo is None:
+            last_sent = last_sent.replace(tzinfo=timezone.utc)
+        remaining = self._OTP_RESEND_COOLDOWN_SECONDS - (now - last_sent).total_seconds()
+        if remaining > 0:
+            raise BadRequestException(f"Please wait {math.ceil(remaining)}s before requesting another code.")
+
+    async def _issue_otp(self, phone: str, purpose: str) -> str:
+        """One live code per phone; returns the channel that delivered it.
+        Refused when no backend channel can reach the number, inside the
+        resend cooldown, or over the hourly cap — and a code that then fails
+        to send is rolled back (no cooldown, not counted), so the client can
+        fall back to the MSG91 widget at once."""
+        phone = validate_indian_mobile(phone) or phone
+        channels = await self._otp_channels(phone)
+        if not channels:
+            raise BadRequestException(self._OTP_SEND_FAILED)
         now = datetime.now(timezone.utc)
-        if existing and existing.get("last_sent_at"):
-            last_sent = existing["last_sent_at"]
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=timezone.utc)
-            elapsed = (now - last_sent).total_seconds()
-            if elapsed < self._OTP_RESEND_COOLDOWN_SECONDS:
-                raise BadRequestException(f"Please wait {int(self._OTP_RESEND_COOLDOWN_SECONDS - elapsed)}s before requesting another code.")
+        key = f"otp:{phone}"
+        self._raise_if_cooling_down(await self.otp_store.find_one({"identifier": phone}, sort=[("last_sent_at", -1)]), now)
+        await self._claim_otp_send(phone)
 
-        otp = "".join(random.choices(string.digits, k=6))
-        await self.otp_store.update_one(
-            {"identifier": identifier},
-            {
-                "$set": {
-                    "identifier": identifier,
-                    "otp": otp,
-                    "purpose": purpose,
-                    "expires_at": now + timedelta(minutes=10),
-                    "last_sent_at": now,
-                    "attempts": 0,
-                    "verified": False,
-                }
-            },
-            upsert=True,
-        )
-        sent = await self._deliver_otp(phone, otp, purpose)
-        if not sent:
-            raise BadRequestException("Couldn't send the verification code — please try again in a moment.")
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        cutoff = now - timedelta(seconds=self._OTP_RESEND_COOLDOWN_SECONDS)
+        try:
+            # Fixed _id: a code sent inside the cooldown turns this upsert
+            # into a duplicate-key insert, so two racing sends can't both win.
+            await self.otp_store.update_one(
+                {"_id": key, "$or": [{"last_sent_at": {"$lte": cutoff}}, {"last_sent_at": None}]},
+                {
+                    "$set": {
+                        "identifier": phone,
+                        "otp": otp,
+                        "purpose": purpose,
+                        "expires_at": now + timedelta(minutes=self._OTP_TTL_MINUTES),
+                        "last_sent_at": now,
+                        "attempts": 0,
+                        "verified": False,
+                    }
+                },
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            await self._release_otp_send(phone)
+            self._raise_if_cooling_down(await self.otp_store.find_one({"_id": key}), datetime.now(timezone.utc))
+            raise BadRequestException(self._OTP_SEND_FAILED)
+        # Codes stored before the fixed _id would otherwise shadow this one.
+        await self.otp_store.delete_many({"identifier": phone, "_id": {"$ne": key}})
 
-    async def request_phone_otp(self, phone: str) -> None:
-        """Backend OTP for a bare phone number — the same code, cooldown and
-        WhatsApp/SMS delivery as login, minus the account lookup (a first-time
-        booker has no account yet). Keyed by the phone, like login's."""
-        await self._issue_otp(phone, phone, "booking_confirmation")
+        channel = await self._deliver_otp(phone, otp, purpose, channels)
+        if not channel:
+            await self.otp_store.delete_one({"_id": key, "otp": otp})
+            await self._release_otp_send(phone)
+            raise BadRequestException(self._OTP_SEND_FAILED)
+        return channel
+
+    async def _claim_otp_send(self, phone: str) -> None:
+        """Counts one code toward this phone's hourly allowance, or refuses.
+        The counter is its own otp_requests doc keyed by the PHONE (fixed
+        _id, so concurrent claims can't both slip under the cap), apart from
+        the code doc: consuming a code on verify, or asking by email instead
+        of phone, must not reset it. The collection's TTL on expires_at
+        clears it when the window ends."""
+        key = f"otp-send-cap:{phone}"
+        now = datetime.now(timezone.utc)
+        for _ in range(3):
+            claimed = await self.otp_store.update_one(
+                {"_id": key, "expires_at": {"$gt": now}, "sent": {"$lt": self._OTP_MAX_SENDS_PER_WINDOW}},
+                {"$inc": {"sent": 1}},
+            )
+            if claimed.modified_count:
+                return
+            live = await self.otp_store.find_one({"_id": key, "expires_at": {"$gt": now}})
+            if live:
+                if live.get("sent", 0) < self._OTP_MAX_SENDS_PER_WINDOW:
+                    continue
+                window_end = live["expires_at"]
+                if window_end.tzinfo is None:
+                    window_end = window_end.replace(tzinfo=timezone.utc)
+                minutes = max(1, math.ceil((window_end - now).total_seconds() / 60))
+                raise BadRequestException(f"Too many codes requested for this number — try again in {minutes} minute{'s' if minutes != 1 else ''}.")
+            try:
+                # Upsert over a stale (not yet TTL-swept) window or none at
+                # all; a live one makes the insert collide instead.
+                await self.otp_store.update_one(
+                    {"_id": key, "expires_at": {"$lte": now}},
+                    {"$set": {"sent": 1, "expires_at": now + timedelta(seconds=self._OTP_SEND_WINDOW_SECONDS)}},
+                    upsert=True,
+                )
+                return
+            except DuplicateKeyError:
+                continue
+        raise BadRequestException(self._OTP_SEND_FAILED)
+
+    async def _release_otp_send(self, phone: str) -> None:
+        """Hands back a claim whose code never went out."""
+        await self.otp_store.update_one({"_id": f"otp-send-cap:{phone}", "sent": {"$gt": 0}}, {"$inc": {"sent": -1}})
+
+    async def request_phone_otp(self, phone: str) -> str:
+        """Backend OTP for a bare phone number (the confirm-booking popup) —
+        the same code, cooldown, cap and delivery as login, minus the account
+        lookup (a first-time booker has no account yet)."""
+        normalized = validate_indian_mobile(phone)
+        if not normalized:
+            raise BadRequestException("Enter a valid 10-digit mobile number")
+        return await self._issue_otp(normalized, "booking_confirmation")
 
     async def verify_phone_proof(self, phone: str, otp: str | None, widget_access_token: str | None) -> bool:
         """Proof of phone ownership, exactly as login checks it: the MSG91
         widget's access token (verified server-side, bound to this phone)
-        or our own classic OTP."""
+        or our own classic OTP. Raises Msg91Unavailable (503) only when
+        MSG91 can't be reached — a retry may then succeed."""
+        normalized = validate_indian_mobile(phone or "")
+        if not normalized:
+            return False
         if widget_access_token:
             from app.services.msg91_widget_service import Msg91WidgetService
 
-            return await Msg91WidgetService().verify_access_token(widget_access_token, phone)
+            return await Msg91WidgetService().verify_access_token(widget_access_token, normalized)
         if otp:
-            return await self.verify_otp(phone, otp)
+            return await self.verify_otp(normalized, otp)
         return False
 
     async def require_phone_proof(self, phone: str, otp: str | None, widget_access_token: str | None) -> None:
         if not (otp or widget_access_token):
             raise BadRequestException("Please verify your mobile number with the code we send to confirm your booking.")
         if not await self.verify_phone_proof(phone, otp, widget_access_token):
-            raise BadRequestException("Invalid or expired code.")
+            raise BadRequestException(self._OTP_INVALID)
 
     async def verify_otp(self, identifier: str, otp: str) -> bool:
-        record = await self.otp_store.find_one({"identifier": identifier})
+        """Single-use: a match deletes the code, so it can never be replayed
+        (it used to stay valid for its full 10 minutes: one observed code
+        could reset the password, then log in, then re-verify the phone).
+        Every guess, right or wrong, atomically spends one of the attempts,
+        so parallel guesses can't exceed the limit and two parallel submits
+        of the right code can't both succeed."""
+        code = "".join(str(otp or "").split())
+        phone = await self._otp_phone(identifier)
+        if not code or not phone:
+            return False
+        record = await self.otp_store.find_one({"identifier": phone}, sort=[("last_sent_at", -1)])
         if not record:
             return False
-        if record.get("attempts", 0) >= self._OTP_MAX_ATTEMPTS:
+        record = await self.otp_store.find_one_and_update(
+            {"_id": record["_id"], "attempts": {"$lt": self._OTP_MAX_ATTEMPTS}, "expires_at": {"$gt": datetime.now(timezone.utc)}},
+            {"$inc": {"attempts": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not record or not secrets.compare_digest(str(record.get("otp", "")), code):
             return False
-        expires_at = record["expires_at"]
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
-            return False
-        if record["otp"] != otp:
-            await self.otp_store.update_one({"identifier": identifier}, {"$inc": {"attempts": 1}})
-            return False
-        # CONSUME the code — a successful verification deletes the record so
-        # the same OTP can never be replayed (it used to stay valid for its
-        # full 10 minutes: one observed code could reset the password, then
-        # log in, then re-verify the phone). Every caller verifies exactly
-        # once and acts immediately, so single-use is the correct contract.
-        await self.otp_store.delete_one({"identifier": identifier, "otp": otp})
-        return True
+        consumed = await self.otp_store.delete_one({"_id": record["_id"], "otp": record["otp"]})
+        return consumed.deleted_count == 1
 
     async def reset_password(self, identifier: str, otp: str, new_password: str) -> None:
-        verified = await self.verify_otp(identifier, otp)
-        if not verified:
-            raise BadRequestException("Invalid or expired OTP")
-        user = await self.users.find_by_identifier(identifier)
-        if not user:
-            raise BadRequestException("No account found for this identifier")
+        user = await self._find_user_by_identifier(identifier)
+        if not user or not user.get("phone"):
+            raise BadRequestException("No account found with this phone number or email.")
+        if not await self.verify_otp(user["phone"], otp):
+            raise BadRequestException(self._OTP_INVALID)
         await self.users.update_by_id(
             str(user["_id"]),
             {
-                "password_hash": hash_password(new_password),
+                "password_hash": await hash_password_async(new_password),
                 "must_change_password": False,
             },
         )
@@ -446,7 +578,7 @@ class AuthService:
         # credentials (change_password already did this; this path didn't).
         await self.users.collection.update_one({"_id": ObjectId(str(user["_id"]))}, {"$inc": {"token_version": 1}})
 
-    async def request_phone_verification(self, user_id: str) -> None:
+    async def request_phone_verification(self, user_id: str) -> str:
         """Gates a customer's first self-service booking/subscription
         (Section: phone verification) — same underlying OTP store as
         forgot-password, just keyed by the logged-in user's own phone
@@ -457,21 +589,19 @@ class AuthService:
             raise NotFoundException("User not found")
         if not user.get("phone"):
             raise BadRequestException("Add a phone number to your profile before verifying it.")
-        await self.request_otp(user["phone"], purpose="verification")
+        return await self._issue_otp(user["phone"], "verification")
 
     async def confirm_phone_verification_widget(self, user_id: str, access_token: str) -> dict:
         """MSG91-widget variant of phone verification: the widget already
         delivered + checked the OTP on MSG91's channels (SMS/WhatsApp/
         email); we accept only if MSG91 confirms the token AND it was
         issued for THIS user's phone."""
-        from app.services.msg91_widget_service import Msg91WidgetService
-
         user = await self.users.find_by_id(user_id)
         if not user:
             raise NotFoundException("User not found")
         if not user.get("phone"):
             raise BadRequestException("This account has no phone number on file.")
-        if not await Msg91WidgetService().verify_access_token(access_token, user["phone"]):
+        if not await self.verify_phone_proof(user["phone"], None, access_token):
             raise BadRequestException("Verification could not be confirmed — please try again.")
         return await self.users.update_by_id(user_id, {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
 
@@ -479,14 +609,13 @@ class AuthService:
         """MSG91-widget variant of forgot-password. The token must verify
         AND be bound to the given phone; only then does the password change
         (and every existing refresh token dies via token_version)."""
-        from app.services.msg91_widget_service import Msg91WidgetService
-
-        if not await Msg91WidgetService().verify_access_token(access_token, phone):
-            raise BadRequestException("Verification could not be confirmed — please try again.")
-        user = await self.users.find_by_phone(phone) or await self.users.find_by_identifier(phone)
+        normalized = validate_indian_mobile(phone)
+        user = await self.users.find_by_phone(normalized) if normalized else None
         if not user:
             raise BadRequestException("No account found for this phone number")
-        await self.users.update_by_id(str(user["_id"]), {"password_hash": hash_password(new_password), "must_change_password": False})
+        if not await self.verify_phone_proof(normalized, None, access_token):
+            raise BadRequestException("Verification could not be confirmed — please try again.")
+        await self.users.update_by_id(str(user["_id"]), {"password_hash": await hash_password_async(new_password), "must_change_password": False})
         await self.users.collection.update_one({"_id": user["_id"]}, {"$inc": {"token_version": 1}})
 
     async def confirm_phone_verification(self, user_id: str, otp: str) -> dict:
@@ -496,7 +625,7 @@ class AuthService:
         if not user.get("phone"):
             raise BadRequestException("This account has no phone number on file.")
         if not await self.verify_otp(user["phone"], otp):
-            raise BadRequestException("Invalid or expired code.")
+            raise BadRequestException(self._OTP_INVALID)
         updated = await self.users.update_by_id(user_id, {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
         return updated
 
@@ -518,7 +647,7 @@ class AuthService:
             raise BadRequestException("This customer has no phone number on file to send a temporary password to.")
 
         temp_password = "".join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=10))
-        await self.users.update_by_id(customer_id, {"password_hash": hash_password(temp_password), "must_change_password": True})
+        await self.users.update_by_id(customer_id, {"password_hash": await hash_password_async(temp_password), "must_change_password": True})
         await self.users.collection.update_one({"_id": ObjectId(customer_id)}, {"$inc": {"token_version": 1}})
         # Same channel-order fallback as OTPs (note: MSG91's OTP API can't
         # carry free text, so send_temp_password returns False and
@@ -539,9 +668,10 @@ class AuthService:
     async def booking_access_mode(self, phone: str) -> dict:
         """What should the guest wizard do for this phone?
         - "register": no account -> normal silent registration path.
-        - "otp": no real, chosen password to fall back on (a guest/
-          WhatsApp-auto-created account — must_change_password is true
-          because nobody ever set one on purpose), or a real account whose
+        - "otp": no real, chosen password to fall back on (a quick-booking/
+          WhatsApp/Google account with no password at all, or a guest
+          account whose must_change_password is true because nobody ever
+          set one on purpose), or a real account whose
           phone-ownership proof has gone stale -> prove ownership by OTP
           instead and keep booking smooth. This is what stops "you already
           have an account" from ever dead-ending someone who never
@@ -562,7 +692,7 @@ class AuthService:
             return {"mode": "register"}
         if user.get("role") != UserRole.CUSTOMER.value:
             return {"mode": "password"}
-        if user.get("must_change_password"):
+        if user.get("must_change_password") or not user.get("password_hash"):
             return {"mode": "otp"}
         return {"mode": "password" if self.phone_verification_fresh(user) else "otp"}
 
@@ -586,7 +716,7 @@ class AuthService:
             raise UnauthorizedException("Your account has been suspended. Contact support.")
 
         if not await self.verify_phone_proof(normalized, otp, widget_access_token):
-            raise BadRequestException("Invalid or expired code.")
+            raise BadRequestException(self._OTP_INVALID)
 
         await self.users.update_by_id(
             str(user["_id"]),
@@ -595,48 +725,34 @@ class AuthService:
         fresh = await self.users.find_by_id(str(user["_id"]))
         return self._issue_tokens(fresh)
 
-    async def add_phone_request(self, user_id: str, phone: str) -> None:
+    async def add_phone_request(self, user_id: str, phone: str) -> str:
         """Step 1 of attaching a phone to a phoneless account (Google
-        sign-ins): validate + uniqueness-check the number, then send an
+        sign-ins) or changing to a new one (staff profile page): validate +
+        uniqueness-check the number, then send an
         OTP to it. The OTP is keyed by the NEW phone in the same otp_store
-        the rest of auth uses (cooldown included)."""
-        from app.utils.phone import validate_indian_mobile
-
+        the rest of auth uses (cooldown, hourly cap and delivery included)."""
         normalized = validate_indian_mobile(phone)
         if not normalized:
             raise BadRequestException("Enter a valid 10-digit Indian mobile number")
+        if is_business_whatsapp_number(normalized):
+            raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
         user = await self.users.find_by_id(user_id)
         if not user:
             raise NotFoundException("User not found")
         taken = await self.users.find_by_phone(normalized)
         if taken and str(taken["_id"]) != user_id:
             raise BadRequestException("This phone number is already used by another account.")
-
-        existing = await self.otp_store.find_one({"identifier": normalized})
-        now = datetime.now(timezone.utc)
-        if existing and existing.get("last_sent_at"):
-            last_sent = existing["last_sent_at"]
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=timezone.utc)
-            if (now - last_sent).total_seconds() < self._OTP_RESEND_COOLDOWN_SECONDS:
-                raise BadRequestException("Please wait a moment before requesting another code.")
-        otp = "".join(random.choices(string.digits, k=6))
-        await self.otp_store.update_one(
-            {"identifier": normalized},
-            {"$set": {"otp": otp, "expires_at": now + timedelta(minutes=10), "attempts": 0, "last_sent_at": now, "purpose": "add_phone"}},
-            upsert=True,
-        )
-        await self._deliver_otp(normalized, otp, "verification")
+        return await self._issue_otp(normalized, "verification")
 
     async def add_phone_confirm(self, user_id: str, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:
         """Step 2: prove ownership (classic OTP or MSG91 widget token bound
         to this exact number), then attach it as the account's verified
         primary contact."""
-        from app.utils.phone import validate_indian_mobile
-
         normalized = validate_indian_mobile(phone)
         if not normalized:
             raise BadRequestException("Enter a valid 10-digit Indian mobile number")
+        if is_business_whatsapp_number(normalized):
+            raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
         user = await self.users.find_by_id(user_id)
         if not user:
             raise NotFoundException("User not found")
@@ -644,19 +760,15 @@ class AuthService:
         if taken and str(taken["_id"]) != user_id:
             raise BadRequestException("This phone number is already used by another account.")
 
-        verified = False
-        if widget_access_token:
-            from app.services.msg91_widget_service import Msg91WidgetService
-
-            verified = await Msg91WidgetService().verify_access_token(widget_access_token, normalized)
-        elif otp:
-            verified = await self.verify_otp(normalized, otp)
-        if not verified:
-            raise BadRequestException("Invalid or expired code.")
-        return await self.users.update_by_id(
-            user_id,
-            {"phone": normalized, "phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)},
-        )
+        if not await self.verify_phone_proof(normalized, otp, widget_access_token):
+            raise BadRequestException(self._OTP_INVALID)
+        try:
+            return await self.users.update_by_id(
+                user_id,
+                {"phone": normalized, "phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)},
+            )
+        except DuplicateKeyError:
+            raise BadRequestException("This phone number is already used by another account.")
 
     async def set_initial_password(self, user_id: str, new_password: str) -> None:
         """Password setup WITHOUT the current password — allowed only while
@@ -668,7 +780,7 @@ class AuthService:
             raise NotFoundException("User not found")
         if not user.get("must_change_password"):
             raise BadRequestException("Use the normal change-password option (current password required).")
-        await self.users.update_by_id(user_id, {"password_hash": hash_password(new_password), "must_change_password": False})
+        await self.users.update_by_id(user_id, {"password_hash": await hash_password_async(new_password), "must_change_password": False})
 
     def _issue_tokens(self, user: dict) -> dict:
         access_token = create_access_token(

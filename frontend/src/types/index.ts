@@ -26,6 +26,9 @@ export interface User {
   // first self-service booking/subscription) — see PhoneVerificationModal.
   phone_verified?: boolean;
   phone_verification_stale?: boolean;
+  // Customer's own switch: true = no WhatsApp reminders/offers (booking
+  // updates still go out). Absent on older accounts = opted in.
+  marketing_opt_out?: boolean;
   created_at: string;
   // Only ever populated for captains, and only by the manager/admin-scoped
   // staff-directory endpoints (staffDirectoryApi.captainsForCenter) — see
@@ -121,6 +124,34 @@ export interface Service {
   is_active: boolean;
   is_featured: boolean;
   captain_fee?: number | null;
+  /** Must be paid online before the booking is confirmed — no cash. */
+  prepaid_only?: boolean;
+  /** Visit pays a distance charge beyond the free km (Settings & pricing). */
+  charges_travel?: boolean;
+  /** Short admin-set label shown as the offer tag on this service's card;
+   *  the first active main service carrying one is the one the landing
+   *  offer popup promotes. Empty = no offer. */
+  offer_tag?: string | null;
+}
+
+/** Customer distance charge for a location, from the coverage check.
+ *  `charge` is what the visit pays IF it includes a charges_travel service
+ *  (computed server-side — never recompute it in the browser). */
+export interface TravelQuote {
+  distance_km: number;
+  free_km: number;
+  per_km_rate: number;
+  charge: number;
+}
+
+export interface VisitorStats {
+  /** Unique device-days in the selected period. */
+  total: number;
+  /** Unique devices today (IST). */
+  today: number;
+  /** Same measure for the equal-length period before. */
+  previous_total: number;
+  daily: { date: string; visitors: number }[];
 }
 
 export interface ComboOffer {
@@ -343,6 +374,15 @@ export interface Booking {
   subtotal: number;
   discount_amount: number;
   tax_amount: number;
+  /** Distance charge, once per visit (on the visit's first car), already
+   *  included in total_amount. 0 when nothing on the visit charges_travel. */
+  travel_charge?: number;
+  /** Distance the charge was computed on (the coverage-check distance the
+   *  customer was quoted) — not travel_distance_km, which is road km for the captain. */
+  travel_charge_km?: number | null;
+  /** Includes a prepaid_only service (not plan-covered): online payment
+   *  only — no "pay cash instead", no cash collection. */
+  prepaid_only?: boolean;
   total_amount: number;
   vehicle_registration_number?: string | null;
   vehicle_verified?: boolean;
@@ -462,6 +502,10 @@ export interface WithdrawalRequest {
 export interface PricingConfig {
   per_km_rate: number;
   default_captain_service_fee: number;
+  /** Customer distance charge (charges_travel services only): km included free. */
+  customer_free_km: number;
+  /** Customer distance charge: ₹ per km beyond customer_free_km. */
+  customer_per_km_rate: number;
   updated_at?: string;
 }
 
@@ -525,6 +569,10 @@ export interface UserSubscription {
   end_date: string;
   /** Auto-pay: the plan re-bills itself every cycle instead of lapsing. */
   auto_renew?: boolean;
+  /** Auto-pay pass past its end date with the next charge still due
+   *  (effective_status reads "expired"): renewing, not ended — unusable
+   *  until the charge lands, and not re-buyable meanwhile. */
+  renewal_pending?: boolean;
   /** Present only while an auto-pay mandate backs this plan. */
   razorpay_subscription_id?: string | null;
   /** How many times auto-pay has renewed it (0 = the original cycle). */

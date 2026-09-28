@@ -23,6 +23,7 @@ import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.core.http_client import shared_client
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,7 @@ class Msg91Provider(SmsProvider):
         outbox = {"phone": phone, "message": f"[msg91 otp] {code}", "kind": "otp", "provider": "msg91",
                   "created_at": datetime.now(timezone.utc)}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post("https://control.msg91.com/api/v5/otp", params=params, headers={"authkey": self.auth_key})
+            r = await shared_client("msg91_sms", 10).post("https://control.msg91.com/api/v5/otp", params=params, headers={"authkey": self.auth_key})
             body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
             ok = r.status_code < 300 and body.get("type") == "success"
             outbox.update({"status_code": r.status_code, "ok": ok, "response_body": r.text[:1000]})
@@ -86,8 +86,8 @@ class Msg91Provider(SmsProvider):
             if not ok:
                 logger.error("MSG91 OTP send failed (%s): %s", r.status_code, r.text[:300])
             return ok
-        except httpx.HTTPError as exc:
-            logger.error("MSG91 send raised %s for %s", exc, phone)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:  # network, or a malformed body
+            logger.error("MSG91 send raised %r for %s", exc, phone)
             outbox.update({"ok": False, "error": str(exc)})
             await self.db.sms_outbox.insert_one(outbox)
             return False

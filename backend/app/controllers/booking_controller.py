@@ -9,6 +9,7 @@ from app.schemas.booking_schema import (
     BookingAssignCaptainRequest,
     BookingCancelRequest,
     BookingCreateRequest,
+    BookingQuoteRequest,
     BookingRescheduleRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
@@ -89,6 +90,11 @@ class BookingController:
                 await auth.users.update_by_id(str(customer["_id"]), {"phone": payload.customer_phone})
                 customer["phone"] = payload.customer_phone
         else:
+            if not (payload.phone_otp or payload.phone_access_token):
+                await auth.require_phone_proof(payload.customer_phone, None, None)  # the "verify your number" refusal
+            # Checking a code spends it — refuse what we can first, so a
+            # corrected retry doesn't need a fresh code.
+            await self.service.precheck_quick_booking(payload, source="app")
             await auth.require_phone_proof(payload.customer_phone, payload.phone_otp, payload.phone_access_token)
             customer = await auth.ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
         result = await self.service.create_quick_booking(payload, customer=customer, source="app")
@@ -103,7 +109,11 @@ class BookingController:
             await self.audit.log_action(
                 current_user.id, current_user.role, "MANAGER_CREATE_BOOKING", "bookings", b["id"], {"customer_id": str(customer["_id"])}
             )
-        return success(result, "Booking created")
+        if not result.get("awaiting_payment"):
+            return success(result, "Booking created")
+        if result.get("payment_link"):
+            return success(result, "Payment link sent — the booking confirms once it's paid")
+        return success(result, "Booking saved — it confirms once paid online")
 
     async def manager_log_completed(self, current_user: CurrentUser, payload: ManagerLogBookingRequest):
         """A job the manager already did himself, saved directly as done."""
@@ -128,7 +138,9 @@ class BookingController:
         return success(result, "Marked as done")
 
     async def create(self, current_user: CurrentUser, payload: BookingCreateRequest):
-        result = await self.service.create_booking(current_user.id, payload)
+        """The older one-car request shape — priced, planned and parked by the
+        same rules as /bookings/quick (see create_self_service_booking)."""
+        result = await self.service.create_self_service_booking(current_user.id, payload)
         enriched = await self.service.get_booking(result["id"])
         service_label = enriched.get("combo_name") or ", ".join(enriched.get("service_names") or [])
         # The public /thank-you page reads this ticket, never the raw
@@ -142,9 +154,63 @@ class BookingController:
                 "scheduled_date": result.get("scheduled_date"),
                 "scheduled_slot": result.get("scheduled_slot"),
                 "service_label": service_label or None,
+                "service_code": result.get("service_code"),
+                "payment_link": result.get("payment_link"),
+                "awaiting_payment": result.get("awaiting_payment"),
+                "total_amount": result.get("total_amount"),
             },
         )
-        return success(result, "Booking created successfully")
+        return success(result, "Booking created successfully" if not result.get("awaiting_payment") else "Finish paying to confirm your booking")
+
+    async def quote(self, current_user: CurrentUser | None, payload: BookingQuoteRequest):
+        """The bill before booking, for every booking screen. A signed-in
+        customer is quoted as themselves (their plans, their first-time
+        status); staff quote the customer who owns customer_phone; an
+        anonymous visitor gets first-time status from the phone but never
+        anyone's plans or saved addresses."""
+        from app.core.exceptions import BadRequestException
+        from app.utils.timezone import to_ist
+
+        role = current_user.role if current_user else None
+        staff = role in ("manager", "admin")
+        customer: dict | None = None
+        phone = payload.customer_phone
+        users = self.service.user_repo
+        if role == "customer":
+            customer = await users.find_by_id(current_user.id)
+            phone = (customer or {}).get("phone") or phone
+        elif staff and phone:
+            found = await users.find_by_phone(phone)
+            customer = found if found and found.get("role") == "customer" else None
+        customer_id = str(customer["_id"]) if customer else None
+
+        address: dict | None = None
+        if payload.address_id and customer_id:
+            saved = await self.service.address_repo.find_by_id(payload.address_id)
+            if saved and saved.get("owner_id") == customer_id:
+                address = saved
+        elif payload.address and (payload.address.latitude is not None or payload.address.pincode):
+            address = payload.address.model_dump()
+            address["pincode"] = address.get("pincode") or ""
+
+        log_mode = staff and payload.mode == "log"
+        as_of = None
+        if log_mode and payload.scheduled_date and payload.service_time:
+            try:
+                as_of = to_ist(datetime.strptime(f"{payload.scheduled_date} {payload.service_time}", "%Y-%m-%d %H:%M"))
+            except ValueError:
+                raise BadRequestException("Enter a valid date and time.")
+        quote = await self.service.quote_visit(
+            customer_id=customer_id,
+            phone=phone,
+            lines=payload.lines,
+            address=address,
+            coupon_code=None if log_mode else (payload.coupon_code or "").strip().upper() or None,
+            source="staff" if staff else "app",
+            log_mode=log_mode,
+            as_of=as_of,
+        )
+        return success(quote)
 
     async def manager_create(self, current_user: CurrentUser, payload: ManagerBookingCreateRequest):
         result = await self.service.create_booking_for_customer(current_user.id, payload)
@@ -173,13 +239,17 @@ class BookingController:
         items, total = await self.service.list_for_customer(current_user.id, status, pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def list_my_jobs(self, current_user: CurrentUser, status: str | None, pagination: PaginationParams):
-        items, total = await self.service.list_for_captain(current_user.id, status, pagination.page, pagination.page_size)
+    async def list_my_jobs(self, current_user: CurrentUser, status: str | None, pagination: PaginationParams, scope: str | None = None):
+        items, total = await self.service.list_for_captain(current_user.id, status, pagination.page, pagination.page_size, scope=scope)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def list_for_center(self, current_user: CurrentUser, service_center_id: str, extra_filters: dict, pagination: PaginationParams):
+    async def list_for_center(
+        self, current_user: CurrentUser, service_center_id: str, extra_filters: dict, pagination: PaginationParams,
+        queue: list[dict] | None = None, sort: str | None = None,
+    ):
         items, total = await self.service.list_for_center(
-            service_center_id, extra_filters, pagination.page, pagination.page_size, current_user.role, current_user.service_center_id
+            service_center_id, extra_filters, pagination.page, pagination.page_size, current_user.role, current_user.service_center_id,
+            queue=queue, sort=sort,
         )
         return paginated(items, pagination.page, pagination.page_size, total)
 
@@ -293,7 +363,7 @@ class BookingController:
         return success(result, f"{result['assigned_count']} vehicles assigned")
 
     async def create_group(self, current_user: CurrentUser, payload: BookingGroupCreateRequest):
-        result = await self.service.create_booking_group(current_user.id, payload)
+        result = await self.service.create_self_service_group(current_user.id, payload)
         enriched = await self.service.get_booking_group(
             result["booking_group_id"], current_user.id, current_user.role, current_user.service_center_id
         )
@@ -312,6 +382,10 @@ class BookingController:
                 "scheduled_date": result.get("scheduled_date"),
                 "scheduled_slot": result.get("scheduled_slot"),
                 "service_label": service_label or None,
+                "service_code": result.get("service_code"),
+                "payment_link": result.get("payment_link"),
+                "awaiting_payment": result.get("awaiting_payment"),
+                "total_amount": result.get("total_amount"),
             },
         )
         await self.audit.log_action(

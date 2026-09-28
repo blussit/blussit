@@ -263,8 +263,8 @@ async def add_phone_request(
 ):
     """A phoneless account (Google sign-in) attaching its primary contact
     number — sends the OTP to the NEW number."""
-    await AuthService(db).add_phone_request(current_user.id, payload.phone)
-    return success({}, message="Code sent")
+    channel = await AuthService(db).add_phone_request(current_user.id, payload.phone)
+    return success({"otp_sent": True, "channel": channel}, message="Code sent")
 
 
 @router.post("/add-phone/confirm")

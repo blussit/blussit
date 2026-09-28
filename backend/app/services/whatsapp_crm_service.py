@@ -23,6 +23,7 @@ has messaged us within 24h. `window` on a conversation is computed from
 the last inbound timestamp and ENFORCED on the send endpoint, not just
 hinted in the UI.
 """
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,11 @@ EVENT_TEMPLATES = {
     "subscription_renewed": "blussit_subscription_renewed",
     "subscription_expiring": "blussit_subscription_expiring",
     "subscription_expired": "blussit_subscription_expired",
+    # "N washes left — book now" (main.remind_pass_washes): same approved
+    # body ("ends on {{3}} with {{4}} washes left. Book them..."), its own
+    # event name so it can move to a dedicated template later. Meta files
+    # this template as MARKETING, so the sweep sends it wa_marketing.
+    "pass_wash_reminder": "blussit_subscription_expiring",
     # Marketing — sent only through the approved template, only to
     # customers who haven't opted out (see NotificationService.notify).
     "repeat_booking": "blussit_repeat_booking",
@@ -84,6 +90,14 @@ EVENT_TEMPLATES = {
 }
 
 WINDOW_HOURS = 24
+
+# Both spellings: the CRM originally listed "on_the_way"/"in_progress", but
+# bookings actually move through captain_on_the_way/service_started — an
+# in-flight booking never showed as the contact's current booking.
+_ACTIVE_BOOKING_STATUSES = [
+    "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled", "on_the_way", "in_progress",
+]
+CONVERSATION_PAGE_MAX = 100
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -234,8 +248,21 @@ class WhatsAppCrmService:
             "has_active_booking": convo.get("_has_active_booking", False),
         }
 
-    async def list_conversations(self, filter_key: str = "all", search: str = "", agent_id: str | None = None) -> list[dict]:
-        query: dict = {}
+    async def list_conversations(
+        self, filter_key: str = "all", search: str = "", agent_id: str | None = None,
+        limit: int = 50, before: str | None = None,
+    ) -> list[dict]:
+        """Newest-first page of conversations. `before` is the
+        last_message_at (ISO) of the last row the caller already has — the
+        next page starts strictly older than it."""
+        limit = max(1, min(limit, CONVERSATION_PAGE_MAX))
+        query: dict = {"last_message_at": {"$ne": None}}  # bot-state-only docs have no traffic
+        if before:
+            try:
+                cursor_at = datetime.fromisoformat(before.replace("Z", "+00:00"))
+            except ValueError:
+                raise BadRequestException("before must be an ISO timestamp")
+            query["last_message_at"] = {"$ne": None, "$lt": cursor_at}
         if filter_key == "unread":
             query["unread_count"] = {"$gt": 0}
         elif filter_key in CRM_STATUSES:
@@ -250,34 +277,45 @@ class WhatsAppCrmService:
             if ids is not None:
                 query["wa_id"] = {"$in": ids}
 
-        rows = await self.db.whatsapp_conversations.find(query).sort("last_message_at", -1).limit(100).to_list(length=None)
-        rows = [r for r in rows if r.get("last_message_at")]  # bot-state-only docs without traffic
-
-        customer_ids = [ObjectId(r["customer_id"]) for r in rows if r.get("customer_id") and ObjectId.is_valid(r["customer_id"])]
-        users = {str(u["_id"]): u for u in await self.db.users.find({"_id": {"$in": customer_ids}}).to_list(length=None)} if customer_ids else {}
-        names = {uid: u.get("full_name", "") for uid, u in users.items()}
-
-        # Booking indicator + the two customer-derived filters.
-        active_by_customer: set[str] = set()
-        if rows:
+        # "booking"/"new_customer" are decided per row below, so a page can
+        # need more than `limit` conversations scanned to fill it.
+        post_filtered = filter_key in ("booking", "new_customer")
+        batch = limit * 3 if post_filtered else limit
+        out: list[dict] = []
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        for _ in range(5 if post_filtered else 1):
+            rows = await self.db.whatsapp_conversations.find(query).sort("last_message_at", -1).limit(batch).to_list(length=batch)
+            if not rows:
+                break
+            customer_ids = [ObjectId(r["customer_id"]) for r in rows if r.get("customer_id") and ObjectId.is_valid(r["customer_id"])]
+            users = (
+                {str(u["_id"]): u for u in await self.db.users.find({"_id": {"$in": customer_ids}}, {"full_name": 1, "created_at": 1}).to_list(length=None)}
+                if customer_ids else {}
+            )
+            names = {uid: u.get("full_name", "") for uid, u in users.items()}
+            # Booking indicator + the two customer-derived filters.
+            active_by_customer: set[str] = set()
             cids = [r["customer_id"] for r in rows if r.get("customer_id")]
             if cids:
                 async for b in self.db.bookings.aggregate([
-                    {"$match": {"customer_id": {"$in": cids}, "status": {"$in": ["pending", "assigned", "on_the_way", "in_progress", "rescheduled"]}, "is_deleted": {"$ne": True}}},
+                    {"$match": {"customer_id": {"$in": cids}, "status": {"$in": _ACTIVE_BOOKING_STATUSES}, "is_deleted": {"$ne": True}}},
                     {"$group": {"_id": "$customer_id"}},
                 ]):
                     active_by_customer.add(b["_id"])
-        out = []
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        for r in rows:
-            r["_has_active_booking"] = r.get("customer_id") in active_by_customer
-            if filter_key == "booking" and not r["_has_active_booking"]:
-                continue
-            if filter_key == "new_customer":
-                u = users.get(r.get("customer_id") or "")
-                if not u or _aware(u.get("created_at", week_ago)) < week_ago:
+            for r in rows:
+                r["_has_active_booking"] = r.get("customer_id") in active_by_customer
+                if filter_key == "booking" and not r["_has_active_booking"]:
                     continue
-            out.append(await self._convo_out(r, names))
+                if filter_key == "new_customer":
+                    u = users.get(r.get("customer_id") or "")
+                    if not u or _aware(u.get("created_at", week_ago)) < week_ago:
+                        continue
+                out.append(await self._convo_out(r, names))
+                if len(out) >= limit:
+                    return out
+            if len(rows) < batch:
+                break
+            query["last_message_at"] = {"$ne": None, "$lt": rows[-1]["last_message_at"]}
         return out
 
     async def _search_wa_ids(self, search: str) -> list[str] | None:
@@ -286,8 +324,15 @@ class WhatsAppCrmService:
         s = search.strip()
         wa_ids: set[str] = set()
         digits = "".join(ch for ch in s if ch.isdigit())
-        if len(digits) >= 4:
-            async for c in self.db.whatsapp_conversations.find({"$or": [{"wa_id": {"$regex": digits}}, {"phone": {"$regex": digits}}]}, {"wa_id": 1}):
+        if len(digits) >= 10:
+            variants = _wa_id_variants(digits)
+            async for c in self.db.whatsapp_conversations.find({"$or": [{"wa_id": {"$in": variants}}, {"phone": {"$in": variants}}]}, {"wa_id": 1}):
+                wa_ids.add(c["wa_id"])
+        elif len(digits) >= 4:
+            # Anchored prefixes stay index-served (wa_id unique index,
+            # phone index); an unanchored regex scanned every conversation.
+            prefix = {"$or": [{"phone": {"$regex": f"^{digits}"}}, {"wa_id": {"$regex": f"^(91)?{digits}"}}]}
+            async for c in self.db.whatsapp_conversations.find(prefix, {"wa_id": 1}).limit(200):
                 wa_ids.add(c["wa_id"])
 
         phones: set[str] = set()
@@ -311,10 +356,10 @@ class WhatsAppCrmService:
             if u.get("phone"):
                 phones.add(u["phone"])
 
-        for phone in phones:
-            for v in _wa_id_variants(phone):
-                async for c in self.db.whatsapp_conversations.find({"$or": [{"wa_id": v}, {"phone": v}]}, {"wa_id": 1}):
-                    wa_ids.add(c["wa_id"])
+        variants = sorted({v for phone in phones for v in _wa_id_variants(phone)})
+        if variants:
+            async for c in self.db.whatsapp_conversations.find({"$or": [{"wa_id": {"$in": variants}}, {"phone": {"$in": variants}}]}, {"wa_id": 1}):
+                wa_ids.add(c["wa_id"])
         return list(wa_ids)
 
     # ------------------------------------------------------------------
@@ -517,23 +562,41 @@ class WhatsAppCrmService:
             "created_at": _iso(user.get("created_at")),
             "phone_verified": user.get("phone_verified", False),
         }
-        vehicles = await self.db.vehicles.find({"owner_id": customer_id, "is_deleted": {"$ne": True}}).to_list(length=None)
-        vt_names = {str(v["_id"]): v.get("name") for v in await self.db.vehicle_types.find({}).to_list(length=None)}
+        vehicles = await self.db.vehicles.find({"owner_id": customer_id, "is_deleted": {"$ne": True}}).to_list(length=50)
+        vt_names = {str(v["_id"]): v.get("name") for v in await self.db.vehicle_types.find({}, {"name": 1}).to_list(length=None)}
         out["vehicles"] = [
             {"brand": v.get("brand"), "model": v.get("model"), "registration_number": v.get("registration_number"),
              "type": vt_names.get(str(v.get("vehicle_type")), None)}
             for v in vehicles
         ]
-        bookings = await self.db.bookings.find({"customer_id": customer_id, "is_deleted": {"$ne": True}}).sort("created_at", -1).to_list(length=None)
-        completed = [b for b in bookings if b.get("status") == "completed"]
-        cancelled = [b for b in bookings if b.get("status") == "cancelled"]
-        active = next((b for b in bookings if b.get("status") in ("pending", "assigned", "on_the_way", "in_progress", "rescheduled")), None)
+        live = {"customer_id": customer_id, "is_deleted": {"$ne": True}}
+        totals_rows, last_completed, active, rating_rows = await asyncio.gather(
+            self.db.bookings.aggregate([
+                {"$match": live},
+                {"$group": {
+                    "_id": None,
+                    "total": {"$sum": 1},
+                    "completed": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+                    "cancelled": {"$sum": {"$cond": [{"$eq": ["$status", "cancelled"]}, 1, 0]}},
+                    "lifetime": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, "$total_amount", 0]}},
+                }},
+            ]).to_list(length=1),
+            self.db.bookings.find_one({**live, "status": "completed"}, {"scheduled_date": 1}, sort=[("created_at", -1)]),
+            self.db.bookings.find_one({**live, "status": {"$in": _ACTIVE_BOOKING_STATUSES}}, sort=[("created_at", -1)]),
+            self.db.reviews.aggregate([
+                {"$match": {"customer_id": customer_id, "is_deleted": {"$ne": True}}},
+                {"$project": {"r": {"$cond": ["$captain_rating", "$captain_rating", "$rating"]}}},
+                {"$match": {"r": {"$nin": [None, 0]}}},
+                {"$group": {"_id": None, "avg": {"$avg": "$r"}}},
+            ]).to_list(length=1),
+        )
         if active:
             captain = None
             if active.get("captain_id") and ObjectId.is_valid(active["captain_id"]):
-                cap = await self.db.users.find_one({"_id": ObjectId(active["captain_id"])})
+                cap = await self.db.users.find_one({"_id": ObjectId(active["captain_id"])}, {"full_name": 1})
                 captain = cap.get("full_name") if cap else None
-            svc_names = {str(x["_id"]): x.get("name") for x in await self.db.services.find({}).to_list(length=None)}
+            sids = [ObjectId(x) for x in active.get("service_ids") or [] if ObjectId.is_valid(x)]
+            svc_names = {str(x["_id"]): x.get("name") for x in await self.db.services.find({"_id": {"$in": sids}}, {"name": 1}).to_list(length=None)} if sids else {}
             out["current_booking"] = {
                 "booking_number": active.get("booking_number"),
                 "id": str(active["_id"]),
@@ -544,26 +607,26 @@ class WhatsAppCrmService:
                 "captain": captain,
                 "amount": active.get("total_amount"),
             }
-        ratings = [r.get("captain_rating") or r.get("rating") for r in await self.db.reviews.find({"customer_id": customer_id, "is_deleted": {"$ne": True}}).to_list(length=None)]
-        ratings = [r for r in ratings if r]
-        last_completed = completed[0] if completed else None
+        totals = totals_rows[0] if totals_rows else {}
+        avg_rating = rating_rows[0]["avg"] if rating_rows else None
         out["stats"] = {
-            "total_bookings": len(bookings),
-            "completed": len(completed),
-            "cancelled": len(cancelled),
+            "total_bookings": totals.get("total", 0),
+            "completed": totals.get("completed", 0),
+            "cancelled": totals.get("cancelled", 0),
             "last_service": str(last_completed.get("scheduled_date"))[:10] if last_completed else None,
-            "lifetime_value": round(sum(b.get("total_amount", 0) for b in completed), 2),
-            "avg_rating_given": round(sum(ratings) / len(ratings), 1) if ratings else None,
-            "is_repeat": len(bookings) > 1,
+            "lifetime_value": round(totals.get("lifetime") or 0, 2),
+            "avg_rating_given": round(avg_rating, 1) if avg_rating else None,
+            "is_repeat": totals.get("total", 0) > 1,
         }
         return out
 
-    async def contacts(self, search: str = "") -> list[dict]:
-        rows = await self.list_conversations("all", search)
-        return rows
+    async def contacts(self, search: str = "", limit: int = 50, before: str | None = None) -> list[dict]:
+        return await self.list_conversations("all", search, limit=limit, before=before)
 
     async def assignable_agents(self) -> list[dict]:
-        agents = await self.db.users.find({"role": {"$in": ["admin", "manager"]}, "is_deleted": {"$ne": True}}).to_list(length=None)
+        agents = await self.db.users.find(
+            {"role": {"$in": ["admin", "manager"]}, "is_deleted": {"$ne": True}}, {"full_name": 1, "role": 1}
+        ).sort("full_name", 1).to_list(length=500)
         return [{"id": str(a["_id"]), "name": a.get("full_name"), "role": a.get("role")} for a in agents]
 
     async def unread_badge(self) -> dict:
@@ -606,10 +669,10 @@ class WhatsAppCrmService:
 
     async def list_local_templates(self) -> list[dict]:
         rows = await self.db.whatsapp_templates.find({}).sort("name", 1).to_list(length=None)
-        usage = {u["_id"]: u["n"] for u in await self.db.whatsapp_outbox.aggregate([
-            {"$match": {"template_name": {"$ne": None}}},
-            {"$group": {"_id": "$template_name", "n": {"$sum": 1}}},
-        ]).to_list(length=None)}
+        # One COUNT_SCAN per template on (template_name, created_at) — the
+        # old $group read every outbox row ever sent.
+        counts = await asyncio.gather(*(self.db.whatsapp_outbox.count_documents({"template_name": r["name"]}) for r in rows))
+        usage = {r["name"]: n for r, n in zip(rows, counts)}
         return [{
             "name": r["name"], "status": r.get("status", "DRAFT"), "category": r.get("category"),
             "language": r.get("language"), "body": r.get("body", ""), "param_count": r.get("param_count", 0),
@@ -715,55 +778,91 @@ class WhatsAppCrmService:
 
     async def analytics(self, days: int = 30) -> dict:
         since = datetime.now(timezone.utc) - timedelta(days=days)
-        convs = await self.db.whatsapp_conversations.find({"last_message_at": {"$ne": None}}).to_list(length=None)
-        total = len(convs)
-        open_n = sum(1 for c in convs if c.get("crm_status", "open") in ("open", None))
-        pending_n = sum(1 for c in convs if c.get("crm_status") == "pending")
-        resolved_n = sum(1 for c in convs if c.get("crm_status") == "resolved")
-        unread_n = sum(1 for c in convs if c.get("unread_count", 0) > 0)
-
-        sent = await self.db.whatsapp_outbox.count_documents({"created_at": {"$gte": since}})
-        received = await self.db.whatsapp_inbox.count_documents({"created_at": {"$gte": since}})
-        tpl_rows = await self.db.whatsapp_outbox.find(
-            {"created_at": {"$gte": since}, "template_name": {"$ne": None}},
-            {"delivery_status": 1, "ok": 1},
-        ).to_list(length=None)
-        tpl_sent = len(tpl_rows)
-        tpl_delivered = sum(1 for r in tpl_rows if r.get("delivery_status") in ("delivered", "read"))
-        tpl_read = sum(1 for r in tpl_rows if r.get("delivery_status") == "read")
-        tpl_failed = sum(1 for r in tpl_rows if r.get("ok") is False or r.get("delivery_status") == "failed")
+        with_traffic = {"last_message_at": {"$ne": None}}
+        status = {"$ifNull": ["$crm_status", "open"]}
+        template_rows = {"created_at": {"$gte": since}, "template_name": {"$ne": None}}
+        conv_rows, sent, received, tpl_rows, sample = await asyncio.gather(
+            self.db.whatsapp_conversations.aggregate([
+                {"$match": with_traffic},
+                {"$group": {
+                    "_id": None,
+                    "total": {"$sum": 1},
+                    "open": {"$sum": {"$cond": [{"$eq": [status, "open"]}, 1, 0]}},
+                    "pending": {"$sum": {"$cond": [{"$eq": ["$crm_status", "pending"]}, 1, 0]}},
+                    "resolved": {"$sum": {"$cond": [{"$eq": ["$crm_status", "resolved"]}, 1, 0]}},
+                    "unread": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$unread_count", 0]}, 0]}, 1, 0]}},
+                }},
+            ]).to_list(length=1),
+            self.db.whatsapp_outbox.count_documents({"created_at": {"$gte": since}}),
+            self.db.whatsapp_inbox.count_documents({"created_at": {"$gte": since}}),
+            self.db.whatsapp_outbox.aggregate([
+                {"$match": template_rows},
+                {"$group": {
+                    "_id": None,
+                    "sent": {"$sum": 1},
+                    "delivered": {"$sum": {"$cond": [{"$in": ["$delivery_status", ["delivered", "read"]]}, 1, 0]}},
+                    "read": {"$sum": {"$cond": [{"$eq": ["$delivery_status", "read"]}, 1, 0]}},
+                    "failed": {"$sum": {"$cond": [{"$or": [{"$eq": ["$ok", False]}, {"$eq": ["$delivery_status", "failed"]}]}, 1, 0]}},
+                }},
+            ]).to_list(length=1),
+            # Response/resolution times are sampled over the 300 most
+            # recently active conversations (previously an arbitrary 300).
+            self.db.whatsapp_conversations.find(with_traffic, {"wa_id": 1, "created_at": 1, "resolved_at": 1})
+            .sort("last_message_at", -1).limit(300).to_list(length=300),
+        )
+        c = conv_rows[0] if conv_rows else {}
+        t = tpl_rows[0] if tpl_rows else {}
+        tpl_sent = t.get("sent", 0)
 
         # First response: first outbound after the conversation's first
         # inbound. Resolution: created -> resolved_at.
-        first_resp: list[float] = []
-        resolution: list[float] = []
-        for c in convs[:300]:
-            first_in = await self.db.whatsapp_inbox.find_one({"wa_id": c["wa_id"]}, sort=[("created_at", 1)])
-            if first_in:
-                first_out = await self.db.whatsapp_outbox.find_one(
-                    {"phone": {"$in": _wa_id_variants(c["wa_id"])}, "created_at": {"$gte": first_in["created_at"]}}, sort=[("created_at", 1)])
-                if first_out:
-                    first_resp.append((_aware(first_out["created_at"]) - _aware(first_in["created_at"])).total_seconds() / 60)
-            if c.get("resolved_at") and c.get("created_at"):
-                resolution.append((_aware(c["resolved_at"]) - _aware(c["created_at"])).total_seconds() / 3600)
+        wa_ids = [conv["wa_id"] for conv in sample]
+        first_in = {
+            r["_id"]: r["first"]
+            for r in await self.db.whatsapp_inbox.aggregate([
+                {"$match": {"wa_id": {"$in": wa_ids}}},
+                {"$group": {"_id": "$wa_id", "first": {"$min": "$created_at"}}},
+            ]).to_list(length=None)
+        } if wa_ids else {}
+        limiter = asyncio.Semaphore(10)
+
+        async def first_reply(wa_id: str, after: datetime):
+            async with limiter:
+                return await self.db.whatsapp_outbox.find_one(
+                    {"phone": {"$in": _wa_id_variants(wa_id)}, "created_at": {"$gte": after}},
+                    {"created_at": 1}, sort=[("created_at", 1)],
+                )
+
+        pending_ids = [w for w in wa_ids if first_in.get(w)]
+        replies = await asyncio.gather(*(first_reply(w, first_in[w]) for w in pending_ids))
+        first_resp = [
+            (_aware(out["created_at"]) - _aware(first_in[w])).total_seconds() / 60
+            for w, out in zip(pending_ids, replies) if out
+        ]
+        resolution = [
+            (_aware(conv["resolved_at"]) - _aware(conv["created_at"])).total_seconds() / 3600
+            for conv in sample if conv.get("resolved_at") and conv.get("created_at")
+        ]
 
         def _pct(a, b):
             return round(a / b * 100, 1) if b else None
 
         return {
             "days": days,
-            "conversations": {"total": total, "open": open_n, "pending": pending_n, "resolved": resolved_n, "unread": unread_n},
+            "conversations": {
+                "total": c.get("total", 0), "open": c.get("open", 0), "pending": c.get("pending", 0),
+                "resolved": c.get("resolved", 0), "unread": c.get("unread", 0),
+            },
             "messages": {"sent": sent, "received": received},
             "templates": {
                 "sent": tpl_sent,
-                "delivery_rate_pct": _pct(tpl_delivered, tpl_sent),
-                "read_rate_pct": _pct(tpl_read, tpl_sent),
-                "failure_rate_pct": _pct(tpl_failed, tpl_sent),
+                "delivery_rate_pct": _pct(t.get("delivered", 0), tpl_sent),
+                "read_rate_pct": _pct(t.get("read", 0), tpl_sent),
+                "failure_rate_pct": _pct(t.get("failed", 0), tpl_sent),
             },
             "avg_first_response_minutes": round(sum(first_resp) / len(first_resp), 1) if first_resp else None,
             "avg_resolution_hours": round(sum(resolution) / len(resolution), 1) if resolution else None,
         }
-
 
 # ----------------------------------------------------------------------
 # The 9 BLUSSIT operational templates + 1 future marketing draft.

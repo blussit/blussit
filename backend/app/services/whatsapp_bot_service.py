@@ -45,7 +45,6 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import AppException
-from app.core.security import hash_password
 from app.models.enums import UserRole, UserStatus
 from app.repositories.address_repository import AddressRepository
 from app.repositories.booking_repository import BookingRepository
@@ -218,19 +217,17 @@ class WhatsAppBotService:
         name = (supplied_name or "").strip()
         if not name:
             return None, True
-        password = "".join(random.choices(string.ascii_letters + string.digits, k=16))
         prefix = "".join(ch for ch in name.upper() if ch.isalpha())[:4] or "USER"
         try:
             created = await self.users.create({
                 "full_name": name,
                 "phone": phone,
-                "password_hash": hash_password(password),
+                "password_hash": None,
                 "role": UserRole.CUSTOMER.value,
                 "status": UserStatus.ACTIVE.value,
                 "referral_code": f"{prefix}{''.join(random.choices(string.digits, k=4))}",
-                # The random password above is never shown to anyone —
-                # customers log in by phone OTP (quick-booking model), so
-                # there is no password to "change" and no gate to trip.
+                # No password: customers log in by phone OTP (quick-booking
+                # model), so there is nothing to "change" and no gate to trip.
                 "phone_verified": True,
                 "phone_verified_at": datetime.now(timezone.utc),
                 "account_source": "whatsapp",
@@ -425,7 +422,7 @@ class WhatsAppBotService:
             await self._book_again(wa_id, phone, customer_id, {"lines": []})
         elif choice in ("menu:bookings", "menu:my bookings", "menu:2"):
             items, _ = await self.bookings.find_many(
-                {"customer_id": customer_id, "status": {"$in": ["pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
+                {"customer_id": customer_id, "status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
                 page=1, page_size=5, sort_by="scheduled_date", sort_order=1,
             )
             if not items:
@@ -510,18 +507,30 @@ class WhatsAppBotService:
                 lines.append(f"🧑‍🔧 Captain: {captain.get('full_name', 'Assigned')}")
         else:
             lines.append("🧑‍🔧 Captain: not assigned yet")
-        pay = "Covered by subscription" if booking.get("payment_method") == "subscription" else f"₹{booking.get('total_amount')} · pay after service"
-        lines.append(f"💰 {pay}")
+        lines.append(f"💰 {self._pay_text(booking)}")
         source = booking.get("source")
         if source and source != "app":
             lines.append(f"🏷 Booked via {'WhatsApp' if source == 'whatsapp' else 'our team'}")
         detail = "\n".join(lines)
+        # An unpaid booking can't be rescheduled — paying is its next step.
+        first = {"id": f"pay:online:{booking_id}", "title": "💳 Pay now"} if booking.get("status") == "awaiting_payment" else {"id": "bkact:resched", "title": "🔁 Reschedule"}
         await self.wa.send_buttons(phone, detail, [
-            {"id": "bkact:resched", "title": "🔁 Reschedule"},
+            first,
             {"id": "bkact:cancel", "title": "❌ Cancel booking"},
             {"id": "bkact:back", "title": "⬅️ Back"},
         ])
         await self._set_state(wa_id, "booking_detail", {"booking_id": booking_id})
+
+    @staticmethod
+    def _pay_text(booking: dict) -> str:
+        total = float(booking.get("total_amount") or 0)
+        if total <= 0:
+            return "Covered by your plan" if booking.get("payment_method") == "subscription" else "₹0"
+        if booking.get("payment_status") == "paid":
+            return f"₹{total:g} · paid ✅"
+        if booking.get("status") == "awaiting_payment" or booking.get("prepaid_only"):
+            return f"₹{total:g} · pay online"
+        return f"₹{total:g} · pay after service"
 
     async def _on_booking_detail(self, wa_id, phone, customer_id, data, kind, value):
         if kind != "reply" or not value.startswith("bkact:"):
@@ -625,6 +634,22 @@ class WhatsAppBotService:
         return float((service.get("vehicle_type_prices") or {}).get(vehicle_type, service.get("price") or 0))
 
     @staticmethod
+    def _price_text(service: dict, vehicle_type: str, first_time: bool) -> str:
+        """One list-row line from the admin's own fields — price for this
+        vehicle type (first-wash price when it applies), the struck MRP,
+        the offer tag and the prepaid rule. Same numbers the website shows."""
+        view = BookingService.price_view(service, vehicle_type, first_time)
+        parts = [f"₹{view['price']:g}" + (f" (was ₹{view['struck']:g})" if view["struck"] else "")]
+        if view["first_time"]:
+            parts.append("first wash")
+        tag = (service.get("offer_tag") or "").strip()
+        if tag:
+            parts.append(tag)
+        if service.get("prepaid_only"):
+            parts.append("prepaid")
+        return _short(" · ".join(parts), 72)
+
+    @staticmethod
     def _display_name(service: dict) -> str:
         name = service.get("name") or "Service"
         return name.split("(")[0].strip() if service.get("variant_group") else name
@@ -654,7 +679,9 @@ class WhatsAppBotService:
         data.pop("strikes", None)
         cur = data.get("cur") or {}
         vt = cur.get("vehicle_type")
-        services = await self.services.find_all_no_paginate({"is_active": True})
+        # Read fresh on every list — an admin's price/offer edit shows in the
+        # very next chat, in the website's own card order.
+        services = await self.services.find_all_no_paginate({"is_active": True}, sort_by="display_order", sort_order=1)
         eligible = [s for s in services if not s.get("is_addon") and (not s.get("vehicle_types") or vt in s["vehicle_types"])]
         # One row per product: bike-wash variants ("1 bike"… "4 bikes")
         # collapse to the smallest — the count already asked decides the rest.
@@ -668,15 +695,13 @@ class WhatsAppBotService:
             await self.wa.send_text(phone, "Sorry — no services are available for this vehicle type right now. Type *hi* to start over.")
             await self._set_state(wa_id, None, {})
             return
-        count = int(cur.get("count") or 1)
+        first_time = await self.booking_service._first_time_eligible(phone)
         rows = []
         for s in options:
-            name = self._display_name(s)
-            price = self._price_for(s, vt)
             rows.append({
                 "id": f"svc:{s['_id']}",
-                "title": _short(name),
-                "description": _short(f"₹{price:g}", 72),
+                "title": _short(self._display_name(s)),
+                "description": self._price_text(s, vt, first_time),
             })
         who = f"your {cur.get('type_name', 'vehicle')}"
         await self.wa.send_list(phone, f"Which service for {who}?", "Choose service", rows)
@@ -732,7 +757,8 @@ class WhatsAppBotService:
         for line in lines:
             count = int(line.get("count") or 1)
             prefix = f"{count} × " if count > 1 else ""
-            out.append(f"• {prefix}{line['type_name']} · {line['service_name']} — ₹{line['subtotal']:g}")
+            plan = " (plan)" if line.get("plan_covered") else ""
+            out.append(f"• {prefix}{line['type_name']} · {line['service_name']} — ₹{line['subtotal']:g}{plan}")
         return "\n".join(out)
 
     async def _on_service(self, wa_id, phone, customer_id, data, kind, value):
@@ -909,10 +935,22 @@ class WhatsAppBotService:
 
     # -- when: day + slot in ONE pick -----------------------------------
 
-    async def _slot_center_id(self, data: dict) -> str | None:
+    async def _slot_center_id(self, data: dict, customer_id: str | None = None) -> str | None:
+        """Whose slot grid to offer before the address is confirmed: the
+        chosen address's center, else the center of the customer's saved
+        default address, else the oldest active center (single-center
+        launch). The real center is re-checked when the slot is held."""
         if data.get("center_id"):
             return data["center_id"]
-        centers = await self.booking_service.center_repo.find_all_no_paginate({"is_active": True}, sort_by="created_at", sort_order=1)
+        if customer_id:
+            saved = await self.addresses.find_all_no_paginate({"owner_id": customer_id}, sort_by="is_default", sort_order=-1)
+            for address in saved[:1]:
+                try:
+                    center, _ = await self.booking_service._resolve_service_center(address, allow_pinless=True)
+                    return str(center["_id"])
+                except AppException:
+                    pass
+        centers = await self.booking_service.center_repo.find_all_no_paginate({"is_active": True}, sort_by="_id", sort_order=1)
         return str(centers[0]["_id"]) if centers else None
 
     async def _start_when_step(self, wa_id, phone, data):
@@ -921,9 +959,10 @@ class WhatsAppBotService:
         # per-slot counters + admin capacity policy + closures + cutoffs
         # all come from the same BookingService.available_slots. In the
         # new short WhatsApp flow this comes before location, so use the
-        # active/default center for the early picker and revalidate after
+        # customer's likely center for the early picker and revalidate after
         # location resolves the actual service center.
-        center_id = await self._slot_center_id(data)
+        convo = await self.conversations.find_one({"wa_id": wa_id}, {"customer_id": 1}) or {}
+        center_id = await self._slot_center_id(data, convo.get("customer_id"))
         if not center_id:
             await self.wa.send_text(phone, "Please share your location first so we can show available times.")
             await self._request_location(wa_id, phone, data)
@@ -979,16 +1018,85 @@ class WhatsAppBotService:
             await self._start_when_step(wa_id, phone, data)
             return
         lines = data.get("lines") or []
-        total = round(sum(float(l.get("subtotal") or 0) for l in lines), 2)
+        try:
+            quote = await self._visit_quote(customer_id, data)
+        except AppException as exc:
+            # The catalogue changed under the chat (service retired, mix no
+            # longer valid) — the booking would be refused the same way.
+            await self.booking_service.release_hold(customer_id, data["center_id"], data["date"], data["slot"])
+            await self.wa.send_text(phone, f"{exc.message} Let's pick again.")
+            await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
+            return
         summary = (
             "Confirm your booking:\n\n"
             f"{self._lines_summary(lines)}\n\n"
             f"📍 {data.get('address_label') or 'your address'}\n"
             f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
-            f"💰 ₹{total:g}"
+            f"{self._bill_extras(quote)}"
+            f"💰 ₹{self._quote_total(lines, quote):g}"
         )
         await self.wa.send_buttons(phone, summary, [{"id": "confirm:yes", "title": "✅ Confirm"}, {"id": "confirm:no", "title": "❌ Cancel"}])
         await self._set_state(wa_id, "confirm", data)
+
+    @staticmethod
+    def _quote_total(lines: list[dict], quote: dict) -> float:
+        if "total_amount" in quote:
+            return float(quote["total_amount"])
+        return round(sum(float(l.get("subtotal") or 0) for l in lines), 2)
+
+    @staticmethod
+    def _bill_extras(quote: dict) -> str:
+        """The rows between the vehicles and the total — only what moves it."""
+        out = ""
+        if quote.get("plan_discount"):
+            out += f"✅ Your plan covers: −₹{quote['plan_discount']:g}\n"
+        travel = quote.get("travel")
+        if travel and travel["charge"] > 0:
+            out += f"🚗 Distance charge ({travel['distance_km']:g} km): ₹{travel['charge']:g}\n"
+        if quote.get("online_only"):
+            out += "💳 Prepaid — pay online to confirm\n"
+        return out
+
+    @staticmethod
+    def _quick_lines(lines: list[dict]) -> list[QuickBookingLine]:
+        return [
+            QuickBookingLine(
+                vehicle_type=l["vehicle_type"],
+                quantity=int(l.get("quantity") or 1),
+                service_ids=list(l.get("service_ids") or []),
+                service_quantities={k: int(v) for k, v in (l.get("service_quantities") or {}).items()},
+            )
+            for l in lines
+        ]
+
+    async def _visit_quote(self, customer_id: str, data: dict) -> dict:
+        """THE bill for the summary, from BookingService.quote_visit — the
+        same passes, first-wash price, distance charge and prepaid rule the
+        booking will apply. Each line's shown price is refreshed from it.
+        A business refusal raises (AppException); anything else just falls
+        back to the list prices (the booking still applies the real ones)."""
+        lines = data.get("lines") or []
+        if not lines:
+            return {}
+        try:
+            customer = await self.users.find_by_id(customer_id)
+            address = await self.addresses.find_by_id(data.get("address_id") or "") if data.get("address_id") else None
+            quote = await self.booking_service.quote_visit(
+                customer_id=customer_id,
+                phone=(customer or {}).get("phone"),
+                lines=self._quick_lines(lines),
+                address=address,
+                source="whatsapp",
+            )
+        except AppException:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not quote the visit for the WhatsApp summary")
+            return {}
+        for line, row in zip(lines, quote.get("lines") or []):
+            line["subtotal"] = row["subtotal"]
+            line["plan_covered"] = row["plan_covered"]
+        return quote
 
     # -- book again -----------------------------------------------------
 
@@ -1020,13 +1128,15 @@ class WhatsAppBotService:
                 vt = (v or {}).get("vehicle_type")
             if not vt:
                 continue
-            service_ids = list(c.get("service_ids") or [])
-            quantities = dict(c.get("service_quantities") or {})
-            key = (vt, tuple(sorted(service_ids)), tuple(sorted(quantities.items())))
-            services = [await self.services.find_by_id(sid) for sid in service_ids]
+            # Replay only what is still on sale — a retired add-on is
+            # dropped rather than failing the whole booking at confirm.
+            services = [await self.services.find_by_id(sid) for sid in (c.get("service_ids") or [])]
             services = [s for s in services if s and s.get("is_active")]
             if not services or not any(not s.get("is_addon") for s in services):
                 continue
+            service_ids = [str(s["_id"]) for s in services]
+            quantities = {sid: q for sid, q in (c.get("service_quantities") or {}).items() if sid in service_ids}
+            key = (vt, tuple(sorted(service_ids)), tuple(sorted(quantities.items())))
             base = next(s for s in services if not s.get("is_addon"))
             is_bike = bool(BookingService._BIKE_WORD.search(types.get(vt) or ""))
             bikes = self._variant_count(base) + sum(int(q) for sid, q in quantities.items() if any(str(s["_id"]) == sid and BookingService._BIKE_WORD.search(s.get("name", "")) and "polish" not in s.get("name", "").lower() for s in services))
@@ -1059,6 +1169,11 @@ class WhatsAppBotService:
         data["address_label"] = _short(address.get("line1") or address.get("label") or "your address", 60)
         if not await self._resolve_center_for(wa_id, phone, data, address):
             return
+        try:
+            await self._visit_quote(customer_id, data)  # today's prices, not last visit's
+        except AppException:
+            await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
+            return
         await self.wa.send_text(phone, f"Same as last time 👍\n\n{self._lines_summary(lines)}\n📍 {data['address_label']}")
         await self._start_when_step(wa_id, phone, data)
 
@@ -1085,6 +1200,13 @@ class WhatsAppBotService:
         cars = await self.booking_service._visit_cars(booking)
         visit_total = round(sum(float(c.get("total_amount") or 0) for c in cars), 2)
         if choice == "cash":
+            if any(c.get("prepaid_only") for c in cars):
+                await self.wa.send_buttons(
+                    phone,
+                    f"*{booking['booking_number']}* is prepaid — it can only be paid online.",
+                    [{"id": f"pay:online:{booking_id}", "title": "💳 Pay online now"}],
+                )
+                return
             if booking.get("status") == "awaiting_payment":
                 # This booking isn't real yet — nothing was dispatched, no
                 # one was told. Choosing cash here is the actual promotion
@@ -1163,6 +1285,12 @@ class WhatsAppBotService:
             return False
         amount = booking.get("total_amount")
         booking_id = str(booking.get("_id") or booking.get("id"))
+        if await self.booking_service.visit_is_prepaid(booking):
+            return await self.wa.send_buttons(
+                phone,
+                f"⏳ *{booking.get('booking_number')}* is still waiting on payment — *₹{amount}*.\nPay online to confirm it.",
+                [{"id": f"pay:online:{booking_id}", "title": "💳 Pay online now"}],
+            )
         return await self.wa.send_buttons(
             phone,
             f"⏳ *{booking.get('booking_number')}* is still waiting on payment — *₹{amount}*.\n"
@@ -1198,15 +1326,7 @@ class WhatsAppBotService:
                     customer_name=(customer.get("full_name") or "Customer").strip() or "Customer",
                     customer_phone=customer.get("phone") or phone,
                     address_id=data["address_id"],
-                    lines=[
-                        QuickBookingLine(
-                            vehicle_type=l["vehicle_type"],
-                            quantity=int(l.get("quantity") or 1),
-                            service_ids=list(l.get("service_ids") or []),
-                            service_quantities={k: int(v) for k, v in (l.get("service_quantities") or {}).items()},
-                        )
-                        for l in lines
-                    ],
+                    lines=self._quick_lines(lines),
                     scheduled_date=data["date"],
                     scheduled_slot=data["slot"],
                     customer_notes="Booked via WhatsApp",
@@ -1214,9 +1334,10 @@ class WhatsAppBotService:
                 customer=customer,
                 # The bot confirms first and offers a pay link right after —
                 # so the visit is created REAL (cash), never parked
-                # awaiting payment (source != "app"), and the pin the
-                # customer shared is trusted (allow_pinless for the rare
-                # typed-only address).
+                # awaiting payment (source != "app") — unless it is a
+                # PREPAID visit, which is parked and paid by the link below.
+                # The pin the customer shared is trusted (allow_pinless for
+                # the rare typed-only address).
                 source="whatsapp",
                 allow_pinless=True,
                 # The bot's own "confirmed" text follows immediately — the
@@ -1234,12 +1355,34 @@ class WhatsAppBotService:
         numbers = " + ".join(result.get("booking_numbers") or [])
         total = float(result.get("total_amount") or 0)
         code = result.get("service_code")
+        travel_charge = float(result.get("travel_charge") or 0)
+        travel_line = f"🚗 Distance charge: ₹{travel_charge:g}\n" if travel_charge > 0 else ""
+        first = (result.get("bookings") or [{}])[0]
+        if result.get("prepaid_only") and result.get("awaiting_payment"):
+            # Prepaid: nothing is confirmed until it's paid — the link is the
+            # only way forward (no cash button), and settlement confirms it.
+            window = int((await self.booking_service.policy_service.get_policy()).get("payment_window_minutes", 30))
+            link = result.get("payment_link")
+            await self.wa.send_text(
+                phone,
+                "💳 Almost done — this booking is prepaid.\n\n"
+                f"🧾 *{numbers}*\n"
+                f"{self._lines_summary(lines)}\n"
+                f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
+                f"{travel_line}"
+                f"💰 Total: ₹{total:g}\n\n"
+                + (f"Pay within {window} min to confirm:\n{link}" if link else f"Pay within {window} min to confirm."),
+            )
+            if not link and first.get("id"):
+                await self.wa.send_buttons(phone, "Tap to get your payment link.", [{"id": f"pay:online:{first['id']}", "title": "💳 Pay online now"}])
+            return
         await self.wa.send_text(
             phone,
             "🎉 Booking confirmed!\n\n"
             f"🧾 *{numbers}*\n"
             f"{self._lines_summary(lines)}\n"
             f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
+            f"{travel_line}"
             f"💰 Total: ₹{total:g}\n\n"
             + (f"🔐 Your service code: *{code}*\nShare it with the captain when they arrive.\n\n" if code else "")
             + "Our captain's details will be shared here once assigned.",
@@ -1248,7 +1391,6 @@ class WhatsAppBotService:
         # buttons are stateless (booking id rides in the button id), so
         # the customer can tap them any time later too — see the "pay:"
         # intercept in the dispatcher. One button pair for the whole visit.
-        first = (result.get("bookings") or [{}])[0]
         if total >= 1 and first.get("id"):
             await self.wa.send_buttons(
                 phone,

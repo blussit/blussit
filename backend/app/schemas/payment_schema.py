@@ -55,3 +55,30 @@ class VerifyPaymentRequest(BaseModel):
     def reference_id(self) -> str:
         """Whichever of the two identifies this payment — for logging/audit."""
         return self.razorpay_order_id or self.razorpay_subscription_id or ""
+
+
+class PaymentFailureReport(BaseModel):
+    """The checkout modal's payment.failed event, forwarded by the browser.
+    Display-only: it records why an attempt failed and can never mark
+    anything paid or unpaid."""
+
+    razorpay_order_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    razorpay_subscription_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    razorpay_payment_id: Optional[str] = Field(default=None, max_length=100)
+    code: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=300)
+    reason: Optional[str] = Field(default=None, max_length=100)
+    step: Optional[str] = Field(default=None, max_length=100)
+    source: Optional[str] = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def exactly_one_reference(self) -> "PaymentFailureReport":
+        if bool(self.razorpay_order_id) == bool(self.razorpay_subscription_id):
+            raise ValueError("Send exactly one of razorpay_order_id or razorpay_subscription_id")
+        return self
+
+
+class ResolveAttentionRequest(BaseModel):
+    """What the admin did about a parked payment (refunded, activated…)."""
+
+    note: str = Field(min_length=3, max_length=300)

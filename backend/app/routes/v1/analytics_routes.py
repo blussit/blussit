@@ -1,12 +1,37 @@
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pydantic import BaseModel, Field
 
 from app.core.authz import ensure_own_center
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin, require_manager_or_admin
 from app.core.responses import success
+from app.services import report_cache
 from app.services.analytics_service import AnalyticsService
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+
+class SiteVisitRequest(BaseModel):
+    device_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+
+
+@router.post("/visit")
+async def record_site_visit(payload: SiteVisitRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Public beacon: counts this device once per IST day (rate-limited)."""
+    from app.services.site_visit_service import SiteVisitService
+
+    return success({"counted": await SiteVisitService(db).record(payload.device_id)})
+
+
+@router.get("/visitors", dependencies=[Depends(require_admin)])
+async def site_visitors(period: str | None = None, start: str | None = None, end: str | None = None, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Website visitors for the same periods as /kpis/* — unique
+    device-days in range, today's devices, previous period, daily series."""
+    from app.services.kpi_service import resolve_period
+    from app.services.site_visit_service import SiteVisitService
+
+    s, e, ps, pe = resolve_period(period, start, end)
+    return success(await SiteVisitService(db).stats(s, e, ps, pe))
 
 
 @router.get("/manager-summary/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
@@ -35,9 +60,15 @@ async def manager_kpi_overview(
     return success(await KpiService(db).manager_overview(service_center_id, s, e, ps, pe))
 
 
+# Admin report endpoints below are served from a short per-instance cache
+# (report_cache): a minute of staleness on an all-time/period aggregate is
+# fine; recomputing it for every open tab on every instance is not.
+_REPORT_TTL = 60
+
+
 @router.get("/dashboard", dependencies=[Depends(require_admin)])
 async def dashboard_summary(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await AnalyticsService(db).dashboard_summary())
+    return success(await report_cache.cached(("analytics", "dashboard"), _REPORT_TTL, AnalyticsService(db).dashboard_summary))
 
 
 @router.get("/booking-trends", dependencies=[Depends(require_admin)])
@@ -49,7 +80,7 @@ async def booking_trends(days: int = 30, db: AsyncIOMotorDatabase = Depends(get_
 async def service_center_summaries(db: AsyncIOMotorDatabase = Depends(get_db)):
     """The admin bookings drill-down's entry point (Section 10) — one row
     per center, not every booking loaded up front."""
-    return success(await AnalyticsService(db).service_center_summaries())
+    return success(await report_cache.cached(("analytics", "centers"), 30, AnalyticsService(db).service_center_summaries))
 
 
 @router.get("/vehicle-types", dependencies=[Depends(require_manager_or_admin)])
@@ -61,7 +92,8 @@ async def vehicle_type_breakdown(
     platform-wide by default, optionally filtered to one center; a manager
     is always scoped to their own center regardless of what's passed."""
     center_id = current_user.service_center_id if current_user.role == "manager" else service_center_id
-    return success(await AnalyticsService(db).vehicle_type_breakdown(center_id))
+    return success(await report_cache.cached(
+        ("analytics", "vehicle_types", center_id), _REPORT_TTL, lambda: AnalyticsService(db).vehicle_type_breakdown(center_id)))
 
 
 @router.get("/services", dependencies=[Depends(require_manager_or_admin)])
@@ -70,7 +102,8 @@ async def service_breakdown(
 ):
     """Section 17 — per service KPI breakdown, same scoping rule as above."""
     center_id = current_user.service_center_id if current_user.role == "manager" else service_center_id
-    return success(await AnalyticsService(db).service_breakdown(center_id))
+    return success(await report_cache.cached(
+        ("analytics", "services", center_id), _REPORT_TTL, lambda: AnalyticsService(db).service_breakdown(center_id)))
 
 
 # --------------------------------------------------------------------------
@@ -96,7 +129,8 @@ async def kpi_section(
     if section not in _KPI_SECTIONS:
         raise BadRequestException(f"Unknown KPI section '{section}'")
     s, e, ps, pe = resolve_period(period, start, end)
-    return success(await getattr(KpiService(db), section)(s, e, ps, pe))
+    return success(await report_cache.cached(
+        ("kpi", section, s, e), _REPORT_TTL, lambda: getattr(KpiService(db), section)(s, e, ps, pe)))
 
 
 @router.get("/business-settings", dependencies=[Depends(require_admin)])
@@ -117,6 +151,7 @@ async def update_business_settings(
     if current_user.role != "admin":
         raise ForbiddenException("Admin only")
     updated = await KpiService(db).update_settings(payload)
+    report_cache.invalidate("kpi")  # cost/target inputs feed the financial & overview sections
     await AuditService(db).log_action(
         current_user.id, current_user.role, "UPDATE_BUSINESS_SETTINGS", "analytics", "singleton",
         {"fields": sorted(payload.keys())},

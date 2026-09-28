@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Body, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -27,6 +27,7 @@ from app.schemas.booking_schema import (
     BookingCancelRequest,
     BookingCreateRequest,
     BookingPhoneOtpRequest,
+    BookingQuoteRequest,
     BookingRescheduleRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
@@ -93,6 +94,18 @@ async def quick_create_booking(
     return await BookingController(db).quick_create(current_user, payload)
 
 
+@router.post("/quote")
+async def quote_booking(
+    payload: BookingQuoteRequest,
+    current_user: CurrentUser | None = Depends(get_optional_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """What a booking would cost — computed by the same code that prices
+    the booking (BookingService.quote_visit). Every booking screen and the
+    WhatsApp bot show this rather than doing their own maths."""
+    return await BookingController(db).quote(current_user, payload)
+
+
 @router.post("/manager-quick", dependencies=[Depends(require_manager_or_admin)])
 async def manager_quick_create_booking(
     payload: QuickBookingRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
@@ -124,8 +137,16 @@ async def list_my_bookings(status: Optional[str] = None, pagination: PaginationP
 
 
 @router.get("/my-jobs", dependencies=[Depends(require_captain)])
-async def list_my_jobs(status: Optional[str] = None, pagination: PaginationParams = Depends(), current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await BookingController(db).list_my_jobs(current_user, status, pagination)
+async def list_my_jobs(
+    status: Optional[str] = None,
+    scope: Optional[Literal["active", "history", "all"]] = None,
+    pagination: PaginationParams = Depends(),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """scope=active: jobs still to do, soonest first. scope=history:
+    completed/cancelled, newest first. See BookingRepository.list_for_captain."""
+    return await BookingController(db).list_my_jobs(current_user, status, pagination, scope)
 
 
 @router.get("/center/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
@@ -136,6 +157,11 @@ async def list_for_center(
     start: Optional[str] = None,
     end: Optional[str] = None,
     date_field: str = "created",
+    scope: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
@@ -143,12 +169,26 @@ async def list_for_center(
     """`period`/`start`/`end`/`date_field` — same meaning as GET /bookings
     (admin, see its own docstring) — lets a manager's own KPI drill-down
     reuse the exact same RevenueDrillModal component the admin dashboard
-    uses, scoped to their center."""
+    uses, scoped to their center.
+
+    The queue filters, all server-side so a busy center never loses a job
+    past the first page: `scope` = needs_captain | open_issues | attention
+    (both) | active (not yet finished) | late_starts; `date_from`/`date_to`
+    (YYYY-MM-DD, scheduled day, inclusive); `q` = booking number, phone or
+    customer name; `sort` = scheduled_asc | scheduled_desc | created_desc
+    (default)."""
+    from app.core.exceptions import BadRequestException
+    from app.services.booking_service import center_queue_filters
+
     filters: dict = {}
     if status:
         filters["status"] = status
     _apply_period_filters(filters, period, start, end, date_field)
-    return await BookingController(db).list_for_center(current_user, service_center_id, filters, pagination)
+    try:
+        queue = await center_queue_filters(db, scope=scope, date_from=date_from, date_to=date_to, search=q)
+    except ValueError as exc:
+        raise BadRequestException(str(exc))
+    return await BookingController(db).list_for_center(current_user, service_center_id, filters, pagination, queue=queue, sort=sort)
 
 
 @router.get("/center/{service_center_id}/subscribers", dependencies=[Depends(require_manager_or_admin)])

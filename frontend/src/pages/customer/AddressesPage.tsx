@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MapPin, Pencil, Plus, Star, Trash2 } from "lucide-react";
+import { MapPin, Pencil, Plus, Trash2 } from "lucide-react";
 import { addressApi } from "../../api/profile";
-import { Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
 import { LocationPicker, type LocationValue } from "../../components/shared/LocationPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -72,13 +72,9 @@ export default function AddressesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-black">Locations</p>
-          <h1 className="mt-1 font-display text-2xl font-bold text-[var(--color-text-primary)]">My addresses</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Where should our captains meet you?</p>
-        </div>
-        <Button onClick={() => setOpen(true)}>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-bold text-black">My addresses</h1>
+        <Button variant="info" onClick={() => setOpen(true)}>
           <Plus className="h-4 w-4" /> Add address
         </Button>
       </div>
@@ -88,17 +84,17 @@ export default function AddressesPage() {
       {isLoading ? (
         <PageLoader />
       ) : !addresses?.length ? (
-        <EmptyState icon={MapPin} title="No addresses added" description="Add an address to book your first service." action={<Button onClick={() => setOpen(true)}>Add address</Button>} />
+        <EmptyState icon={MapPin} title="No addresses yet" action={<Button variant="info" onClick={() => setOpen(true)}>Add address</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {addresses.map((a) => (
             <Card key={a.id} className="p-5">
               <div className="flex items-start justify-between">
-                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-gray-100 text-black">
                   <MapPin className="h-5 w-5" />
                 </span>
                 <div className="flex items-center gap-2">
-                  {a.is_default && <Star className="h-4 w-4 fill-amber-400 text-amber-400" />}
+                  {a.is_default && <Badge>Default</Badge>}
                   <button
                     title="Edit"
                     onClick={() => {
@@ -118,7 +114,7 @@ export default function AddressesPage() {
                       setError("");
                       setOpen(true);
                     }}
-                    className="text-gray-400 hover:text-[var(--color-primary)]"
+                    className="text-gray-400 hover:text-black"
                   >
                     <Pencil className="h-4 w-4" />
                   </button>
@@ -127,12 +123,12 @@ export default function AddressesPage() {
                   </button>
                 </div>
               </div>
-              <h3 className="mt-3 font-semibold text-[var(--color-text-primary)]">{a.label}</h3>
-              <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
+              <h3 className="mt-3 font-semibold text-black">{a.label}</h3>
+              <p className="mt-0.5 text-sm text-gray-600">
                 {a.line1}, {a.city}, {a.state} - {a.pincode}
               </p>
               {a.latitude == null && (
-                <p className="mt-1.5 text-xs text-[var(--color-warning)]">No pinned location — dispatch will fall back to pincode matching.</p>
+                <p className="mt-1.5 text-xs text-amber-700">No map pin — edit to add one.</p>
               )}
             </Card>
           ))}
@@ -194,9 +190,9 @@ export default function AddressesPage() {
           </label>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           {!mapsDown && form.latitude == null && (
-            <p className="text-xs text-amber-700">Set your location on the map first — the captain navigates to that exact pin.</p>
+            <p className="text-xs text-amber-700">Pin your location on the map first.</p>
           )}
-          <Button type="submit" className="w-full" disabled={!editingId && !mapsDown && form.latitude == null} isLoading={createMutation.isPending}>
+          <Button type="submit" variant="info" className="w-full" disabled={!editingId && !mapsDown && form.latitude == null} isLoading={createMutation.isPending}>
             {editingId ? "Save changes" : "Add address"}
           </Button>
         </form>

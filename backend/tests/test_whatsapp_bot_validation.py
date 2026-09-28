@@ -13,8 +13,8 @@ from app.services.whatsapp_bot_service import WhatsAppBotService
 from app.utils.timezone import now_ist
 from app.utils.vehicle_reg import validate_indian_registration
 
-from tests.factories import get_star_wash_service_id, get_hatchback_type_id, make_service_center
-from tests.test_whatsapp_bot import last_out, wa_payload
+from tests.factories import get_star_wash_service_id, get_hatchback_type_id
+from tests.test_whatsapp_bot import last_out, make_default_hours_center, wa_payload
 
 
 def test_registration_validator_accepts_real_indian_formats():
@@ -33,9 +33,7 @@ def test_registration_validator_accepts_real_indian_formats():
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
     foam = await get_star_wash_service_id(db)
-    center_id = await make_service_center(
-        db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=5
-    )
+    center_id = await make_default_hours_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
     cleanup.append(("daily_capacity", {"service_center_id": center_id}))
@@ -95,12 +93,13 @@ async def test_book_again_replays_the_last_visit(rig, db, cleanup):
     cleanup.append(("addresses", {"line1": "9 Again Street"}))
     customer = await AuthService(db).ensure_customer_by_phone(phone, "Again Tester")
     when = (now_ist().date() + timedelta(days=1)).isoformat()
+    slot_key = (await BookingService(db).available_slots(rig["center_id"], when))[-1]["key"]
     await BookingService(db).create_quick_booking(
         QuickBookingRequest(
             customer_name="Again Tester", customer_phone=phone,
             address=QuickAddress(line1="9 Again Street", pincode="452099"),
             lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["foam"]])],
-            scheduled_date=when, scheduled_slot="15:00-18:00",
+            scheduled_date=when, scheduled_slot=slot_key,
         ),
         customer=customer, source="app", allow_pinless=True,
     )

@@ -8,6 +8,11 @@ export interface AuthResult {
   user: User;
 }
 
+export interface OtpSentResponse {
+  otp_sent: boolean;
+  channel?: "whatsapp" | "sms";
+}
+
 export const authApi = {
   register: (payload: { full_name: string; email?: string; phone?: string; password: string; guest?: boolean }) =>
     apiClient.post<ApiSuccess<AuthResult>>("/auth/register", payload).then((r) => r.data.data),
@@ -21,13 +26,13 @@ export const authApi = {
   changePassword: (payload: { current_password: string; new_password: string }) =>
     apiClient.post<ApiSuccess<null>>("/auth/change-password", payload).then((r) => r.data),
 
-  // The OTP itself is never in this response — it's sent over WhatsApp
-  // only (see backend AuthController.forgot_password).
+  // The OTP itself is never in these responses — only which channel
+  // (WhatsApp / SMS) the backend delivered it on.
   requestOtp: (identifier: string) =>
-    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/otp/request", { identifier }).then((r) => r.data.data),
+    apiClient.post<ApiSuccess<OtpSentResponse>>("/auth/otp/request", { identifier }).then((r) => r.data.data),
 
   forgotPassword: (identifier: string) =>
-    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/forgot-password", { identifier }).then((r) => r.data.data),
+    apiClient.post<ApiSuccess<OtpSentResponse>>("/auth/forgot-password", { identifier }).then((r) => r.data.data),
 
   resetPassword: (payload: { identifier: string; otp: string; new_password: string }) =>
     apiClient.post<ApiSuccess<null>>("/auth/reset-password", payload).then((r) => r.data),
@@ -35,7 +40,7 @@ export const authApi = {
   // Phone verification gate (a logged-in customer's first self-service
   // booking/subscription) — always the caller's own phone.
   requestPhoneVerification: () =>
-    apiClient.post<ApiSuccess<{ otp_sent: boolean }>>("/auth/verify-phone/request").then((r) => r.data.data),
+    apiClient.post<ApiSuccess<OtpSentResponse>>("/auth/verify-phone/request").then((r) => r.data.data),
 
   confirmPhoneVerification: (otp: string) =>
     apiClient.post<ApiSuccess<User>>("/auth/verify-phone/confirm", { otp }).then((r) => r.data.data),
@@ -49,7 +54,7 @@ export const authApi = {
 
 // ---- MSG91 OTP widget (server-verified) -----------------------------------
 export const otpWidgetApi = {
-  config: () =>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+  config: () =>
     apiClient
       .get<ApiSuccess<{ enabled: boolean; widget_id: string | null; token_auth: string | null; whatsapp_primary?: boolean }>>("/auth/otp-widget-config")
       .then((r) => r.data.data),
@@ -72,7 +77,8 @@ export const googleAuthApi = {
     apiClient.get<ApiSuccess<{ enabled: boolean; client_id: string | null }>>("/auth/google-config").then((r) => r.data.data),
   login: (credential: string) =>
     apiClient.post<ApiSuccess<AuthResult>>("/auth/google", { credential }).then((r) => r.data.data),
-  addPhoneRequest: (phone: string) => apiClient.post("/auth/add-phone/request", { phone }),
+  addPhoneRequest: (phone: string) =>
+    apiClient.post<ApiSuccess<OtpSentResponse>>("/auth/add-phone/request", { phone }).then((r) => r.data.data),
   addPhoneConfirm: (payload: { phone: string; otp?: string; access_token?: string }) =>
     apiClient.post("/auth/add-phone/confirm", payload),
 };

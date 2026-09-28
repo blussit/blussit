@@ -17,8 +17,13 @@ async def list_public_reviews(pagination: PaginationParams = Depends(), db: Asyn
 
 
 @router.get("/my", dependencies=[Depends(require_customer)])
-async def list_my_reviews(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await ReviewController(db).list_my_reviews(current_user)
+async def list_my_reviews(
+    booking_ids: str | None = None, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """The customer's newest 100 reviews; `booking_ids` (comma-separated)
+    narrows it to just those bookings' reviews."""
+    ids = [b.strip() for b in (booking_ids or "").split(",") if b.strip()]
+    return await ReviewController(db).list_my_reviews(current_user, ids or None)
 
 
 @router.get("/admin/all", dependencies=[Depends(require_admin)])

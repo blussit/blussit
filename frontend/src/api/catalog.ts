@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { BookingPolicy, Category, ComboOffer, HomepageConfig, Service, ServiceCenter, SlotAvailability, VehicleTypeOption } from "../types";
+import type { BookingPolicy, Category, ComboOffer, HomepageConfig, Service, ServiceCenter, SlotAvailability, TravelQuote, VehicleTypeOption } from "../types";
 
 export const catalogApi = {
   categories: (activeOnly = true) =>
@@ -53,12 +53,6 @@ export const contentApi = {
     apiClient
       .get<ApiSuccess<{ id: string; customer_name: string; rating: number; comment: string }[]>>("/testimonials")
       .then((r) => r.data.data),
-  publicStats: () =>
-    apiClient
-      .get<ApiSuccess<{ vehicles_serviced: number; happy_customers: number; service_centers: number; average_rating: number }>>(
-        "/public/stats"
-      )
-      .then((r) => r.data.data),
   submitContactMessage: (payload: { name: string; phone: string; email: string; message: string }) =>
     apiClient.post<ApiSuccess<Record<string, unknown>>>("/contact", payload).then((r) => r.data),
 };
@@ -94,7 +88,7 @@ export const slotHoldApi = {
 export const coverageApi = {
   check: (payload: { latitude?: number; longitude?: number; pincode?: string }) =>
     apiClient
-      .post<ApiSuccess<{ covered: boolean; center: { id: string; name: string; city: string | null; state: string | null } | null; distance_km?: number }>>(
+      .post<ApiSuccess<{ covered: boolean; center: { id: string; name: string; city: string | null; state: string | null } | null; distance_km?: number; travel?: TravelQuote }>>(
         "/service-zones/coverage-check",
         payload,
       )

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Banknote, Check, Copy, CreditCard, Gauge, Power, RefreshCw } from "lucide-react";
 import { subscriptionApi, type ManagerOfferResult } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
@@ -36,8 +36,10 @@ export default function ManagerSellPlanPage() {
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-manager-offer"], queryFn: () => catalogApi.services({ page_size: 100 }) });
 
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  // Prefilled when arriving from a customer's drawer ("Sell a plan").
+  const [searchParams] = useSearchParams();
+  const [name, setName] = useState(searchParams.get("name") || "");
+  const [phone, setPhone] = useState(searchParams.get("phone") || "");
   const [planId, setPlanId] = useState("");
   const [vehicleType, setVehicleType] = useState<string | null>(null);
   const [serviceId, setServiceId] = useState<string | null>(null);

@@ -80,13 +80,27 @@ async def last_out(db, phone: str) -> dict:
     return await db.whatsapp_outbox.find_one({"phone": phone}, sort=[("_id", -1)])
 
 
+async def make_default_hours_center(db) -> str:
+    """A brand-new chat has no address yet, so the bot's day/time list is
+    the default (oldest active) center's grid until the pin resolves the
+    real center. Giving the test center the same hours keeps a slot picked
+    from that list valid here — the seed's hours are data, not a constant
+    this suite may assume."""
+    default = await db.service_centers.find_one({"is_active": True, "is_deleted": {"$ne": True}}, sort=[("_id", 1)])
+    return await make_service_center(
+        db,
+        working_hours_start=default.get("working_hours_start", "08:00"),
+        working_hours_end=default.get("working_hours_end", "20:00"),
+        slot_duration_minutes=default.get("slot_duration_minutes") or 180,
+        default_slot_capacity=5,
+    )
+
+
 @pytest.fixture
 async def rig(db, cleanup):
     hatchback = await get_hatchback_type_id(db)
     foam = await get_star_wash_service_id(db)
-    center_id = await make_service_center(
-        db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=5
-    )
+    center_id = await make_default_hours_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     manager_id = await make_manager(db, center_id)
     cleanup.append(("users", {"_id": ObjectId(manager_id)}))
@@ -161,10 +175,11 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     offered = {r["id"] for r in out["options"] if r["id"].startswith(f"when:{date_str}|")}
     web_slots = await BookingService(db).available_slots(rig["center_id"], date_str)
     assert offered == {f"when:{date_str}|{s['key']}" for s in web_slots if s["status"] != "full"}
+    slot_key = next(s["key"] for s in web_slots if s["status"] != "full")
 
     # 6. Pick a time → live-location request (WhatsApp native prompt);
     # sharing the pin is enough, no typed address line.
-    await bot.handle_webhook(wa_payload(wa_id, reply=f"when:{date_str}|09:00-12:00"))
+    await bot.handle_webhook(wa_payload(wa_id, reply=f"when:{date_str}|{slot_key}"))
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "location_request"
     await bot.handle_webhook(wa_payload(wa_id, location=(22.701, 75.801)))
@@ -183,14 +198,14 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     assert booking is not None
     assert booking["source"] == "whatsapp"
     assert booking["service_center_id"] == rig["center_id"]
-    assert booking["scheduled_slot"] == "09:00-12:00"
+    assert booking["scheduled_slot"] == slot_key
     # Quick-booking model: a vehicle TYPE, no vehicle record, and the
     # 4-digit code the captain asks for.
     assert booking["vehicle_id"] is None and booking["vehicle_type"] == rig["hatchback"]
     assert booking["service_code"] and len(booking["service_code"]) == 4
 
     # Centralization: the SAME capacity counter web bookings use went down.
-    slot_doc = await db.slot_capacity.find_one({"service_center_id": rig["center_id"], "date": date_str, "slot_key": "09:00-12:00"})
+    slot_doc = await db.slot_capacity.find_one({"service_center_id": rig["center_id"], "date": date_str, "slot_key": slot_key})
     assert slot_doc["booked_count"] == 1
 
     # Visible to the manager: same notification path as a web booking.
@@ -264,7 +279,9 @@ async def test_admin_slot_closure_is_reflected_in_chat_offers(rig, db, cleanup):
     _register_wa_cleanup(cleanup, wa_id, phone)
 
     date_str = (now_ist().date() + timedelta(days=1)).isoformat()
-    await BookingService(db).set_slot_capacity(rig["center_id"], date_str, "12:00-15:00", capacity=None, is_closed=True)
+    grid = [s["key"] for s in await BookingService(db).available_slots(rig["center_id"], date_str)]
+    open_key, closed_key = grid[0], grid[1]
+    await BookingService(db).set_slot_capacity(rig["center_id"], date_str, closed_key, capacity=None, is_closed=True)
 
     bot = WhatsAppBotService(db)
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
@@ -274,8 +291,9 @@ async def test_admin_slot_closure_is_reflected_in_chat_offers(rig, db, cleanup):
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "list"
     offered = {r["id"] for r in out["options"]}
-    assert f"when:{date_str}|12:00-15:00" not in offered  # the admin-closed slot
-    assert f"when:{date_str}|09:00-12:00" in offered  # the rest still bookable
+    # The customer's saved address resolves THIS center, so its grid is offered.
+    assert f"when:{date_str}|{closed_key}" not in offered  # the admin-closed slot
+    assert f"when:{date_str}|{open_key}" in offered  # the rest still bookable
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,9 @@ const emptyForm = {
   is_waterless: false,
   variant_group: "",
   variant_label: "",
+  prepaid_only: false,
+  charges_travel: false,
+  offer_tag: "",
 };
 
 function toNumberMap(input: Record<string, string>): Record<string, number> {
@@ -92,6 +95,10 @@ export default function AdminServicesPage() {
     is_waterless: form.is_waterless,
     variant_group: form.variant_group.trim() || undefined,
     variant_label: form.variant_label.trim() || undefined,
+    prepaid_only: form.prepaid_only,
+    charges_travel: form.charges_travel,
+    // "" (not null) so clearing the tag sticks — the update endpoint drops null fields.
+    offer_tag: form.offer_tag.trim(),
   });
 
   const createServiceMutation = useMutation({
@@ -171,6 +178,9 @@ export default function AdminServicesPage() {
       is_waterless: !!service.is_waterless,
       variant_group: service.variant_group || "",
       variant_label: service.variant_label || "",
+      prepaid_only: !!service.prepaid_only,
+      charges_travel: !!service.charges_travel,
+      offer_tag: service.offer_tag || "",
     });
     setOpen(true);
   };
@@ -198,7 +208,21 @@ export default function AdminServicesPage() {
         emptyTitle="No services yet"
         onRowClick={(s) => setStatsFor(s)}
         columns={[
-          { header: "Name", accessor: (s) => s.name },
+          {
+            header: "Name",
+            accessor: (s) => (
+              <span>
+                {s.name}
+                {(s.offer_tag || s.prepaid_only || s.charges_travel) && (
+                  <span className="mt-1 flex flex-wrap gap-1">
+                    {s.offer_tag && <Badge tone="info" className="px-2 py-0.5 text-[10px]">{s.offer_tag}</Badge>}
+                    {s.prepaid_only && <Badge className="px-2 py-0.5 text-[10px]">Prepaid</Badge>}
+                    {s.charges_travel && <Badge className="px-2 py-0.5 text-[10px]">Distance charge</Badge>}
+                  </span>
+                )}
+              </span>
+            ),
+          },
           {
             header: "Price",
             accessor: (s) => (
@@ -420,6 +444,46 @@ export default function AdminServicesPage() {
                 placeholder="e.g. 2 bikes"
                 value={form.variant_label}
                 onChange={(e) => setForm({ ...form, variant_label: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="rounded-xl border border-dashed border-gray-300 p-4">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                checked={form.prepaid_only}
+                onChange={(e) => setForm({ ...form, prepaid_only: e.target.checked })}
+              />
+              <span>
+                <span className="block text-sm font-medium text-[var(--color-text-primary)]">Prepaid only (online payment required)</span>
+                <span className="block text-xs text-[var(--color-text-secondary)]">
+                  The booking is confirmed only once paid online — no cash option. Plan-covered washes are unaffected.
+                </span>
+              </span>
+            </label>
+            <label className="mt-3 flex cursor-pointer items-start gap-3 border-t border-gray-100 pt-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                checked={form.charges_travel}
+                onChange={(e) => setForm({ ...form, charges_travel: e.target.checked })}
+              />
+              <span>
+                <span className="block text-sm font-medium text-[var(--color-text-primary)]">Charge distance (beyond free km)</span>
+                <span className="block text-xs text-[var(--color-text-secondary)]">
+                  Adds the customer distance charge to the visit — free km and ₹ per km are set in Settings & pricing.
+                </span>
+              </span>
+            </label>
+            <div className="mt-3 border-t border-gray-100 pt-3">
+              <Input
+                label="Offer tag"
+                placeholder="e.g. Launch offer"
+                maxLength={30}
+                hint="Shown on the service card; the first active service with a tag is promoted in the website popup. Leave blank for no offer."
+                value={form.offer_tag}
+                onChange={(e) => setForm({ ...form, offer_tag: e.target.value })}
               />
             </div>
           </div>

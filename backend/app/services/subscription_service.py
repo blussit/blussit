@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
@@ -20,6 +21,9 @@ from app.schemas.subscription_schema import (
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.text import slugify
 from app.utils.timezone import from_stored, now_ist, to_ist
+
+# A customer's own pass list: newest first, never unbounded.
+CUSTOMER_LIST_LIMIT = 50
 
 _CYCLE_DAYS = {
     BillingCycle.MONTHLY.value: 30,
@@ -100,6 +104,38 @@ def tier_allows(plan: dict, purchased_type: str | None, candidate_type: str) -> 
     return resolve_plan_price(plan, candidate_type) <= resolve_plan_price(plan, purchased_type)
 
 
+def renews_automatically(sub: dict) -> bool:
+    """A pass Razorpay will charge again at the end of its cycle: auto-pay
+    on AND a live mandate behind it. Such a pass stays ACTIVE at 0 washes
+    until the next charge refills it (see commit_consumption) — it is still
+    the customer's pass, and the mandate is still billing for it."""
+    return bool(sub.get("auto_renew") and sub.get("razorpay_subscription_id"))
+
+
+# Auto-pay passes get this long past end_date before the ended-pass sweep
+# expires them, so a charge that lands a little late never produces a
+# "your pass has ended" note. Longer while Razorpay is retrying a failed
+# charge (mandate status "pending"); a halted mandate turns auto_renew off,
+# after which the normal rule applies.
+AUTOPAY_GRACE = timedelta(days=2)
+AUTOPAY_RETRY_GRACE = timedelta(days=7)
+# The "N washes left — book now" nudge: at most once a week per pass, never
+# within this long of a purchase / renewal / booked wash.
+WASH_REMINDER_EVERY = timedelta(days=7)
+WASH_REMINDER_QUIET_AFTER_USE = timedelta(days=3)
+
+
+def in_autopay_grace(sub: dict, now: datetime) -> bool:
+    """An auto-renewing pass past its end_date while its next charge is
+    still expected — AUTOPAY_GRACE, or AUTOPAY_RETRY_GRACE while Razorpay
+    retries (same windows the ended-pass sweep waits out)."""
+    end = sub.get("end_date")
+    if not end or not renews_automatically(sub):
+        return False
+    grace = AUTOPAY_RETRY_GRACE if sub.get("autopay_state") == "pending" else AUTOPAY_GRACE
+    return timedelta(0) <= now - end.replace(tzinfo=timezone.utc) < grace
+
+
 def _with_effective_status(sub: dict) -> dict:
     """Serializes a subscription with an `effective_status` that reflects
     expiry immediately (end_date has passed => "expired"), even though the
@@ -114,8 +150,13 @@ def _with_effective_status(sub: dict) -> dict:
         # end_date is a computed aware-UTC-semantic instant (see
         # _get_active_subscription's comment for why .replace(tzinfo=utc)
         # is the correct treatment here, not to_ist()).
-        if end_date.replace(tzinfo=timezone.utc) < now_ist():
+        ended_at = end_date.replace(tzinfo=timezone.utc)
+        if ended_at < now_ist():
             doc["effective_status"] = SubscriptionStatus.EXPIRED.value
+            # Auto-pay's next charge is due/retrying (the ended sweep waits
+            # for it): unusable right now, but the app says "Renewing".
+            if in_autopay_grace(sub, now_ist()):
+                doc["renewal_pending"] = True
             return doc
     doc["effective_status"] = status
     return doc
@@ -200,14 +241,25 @@ class UserSubscriptionService:
         self.service_repo = ServiceRepository(db)
 
     async def list_my_subscriptions(self, customer_id: str) -> list[dict]:
-        subs = await self.repo.list_for_customer(customer_id)
-        return _with_effective_statuses(subs)
+        subs = await self.repo.list_for_customer(customer_id, limit=CUSTOMER_LIST_LIMIT)
+        return await self._with_plan_names(_with_effective_statuses(subs))
+
+    async def _with_plan_names(self, subs: list[dict]) -> list[dict]:
+        """plan_name on each pass (one batched lookup), so the dashboard
+        can title a pass — even one whose plan is no longer on sale —
+        without fetching the whole plan catalogue."""
+        plan_ids = list({s.get("plan_id") for s in subs if s.get("plan_id")})
+        plans = await self.plan_repo.find_by_ids(plan_ids) if plan_ids else []
+        names = {str(p["_id"]): p.get("name") for p in plans}
+        for s in subs:
+            s.setdefault("plan_name", names.get(s.get("plan_id") or ""))
+        return subs
 
     async def list_for_customer(self, customer_id: str) -> list[dict]:
         """Manager/admin-facing equivalent of list_my_subscriptions for an
         arbitrary customer — used by the manager booking flow and the
         manager assign-a-plan action."""
-        subs = await self.repo.list_for_customer(customer_id)
+        subs = await self.repo.list_for_customer(customer_id, limit=CUSTOMER_LIST_LIMIT)
         return _with_effective_statuses(subs)
 
     async def subscribe(
@@ -462,6 +514,10 @@ class UserSubscriptionService:
         # 404, not 403, so a guessed id doesn't confirm the sub exists.
         if sub.get("customer_id") != customer_id:
             raise NotFoundException("Subscription not found")
+        if renews_automatically(sub) and int(sub.get("remaining_service_count") or 0) < 1:
+            raise BadRequestException(
+                f"All washes on this pass are used. It refills on {from_stored(sub['end_date']).strftime('%d %b')} when auto-pay renews."
+            )
         plan = await self.plan_repo.find_by_id(sub["plan_id"])
 
         # ---- PASS PATH: one vehicle TYPE (2026-09 model) or one named car
@@ -572,8 +628,14 @@ class UserSubscriptionService:
             if update_data.get("remaining_service_count", 0) < 0 or any(v < 0 for v in update_data.get("remaining_by_category", {}).values()):
                 raise BadRequestException("This subscription's remaining services just ran out — someone else may have just booked with it.")
             new_remaining = update_data.get("remaining_service_count", sub.get("remaining_service_count", 0))
-            if new_remaining <= 0:
+            # An auto-pay pass stays ACTIVE at 0 until the next charge
+            # refills it: expiring it would let the customer buy a second
+            # pass while the mandate keeps billing the first.
+            if new_remaining <= 0 and not renews_automatically(sub):
                 update_data["status"] = SubscriptionStatus.EXPIRED.value
+            # When a wash was last booked on it — the wash reminder leaves a
+            # pass alone for a few days after.
+            update_data["last_used_at"] = now_ist()
             result = await self.repo.update_if(subscription_id, {"updated_at": sub["updated_at"]}, update_data)
             if result is not None:
                 return
@@ -695,6 +757,10 @@ class UserSubscriptionService:
             end = candidate.get("end_date")
             if end is None or end.replace(tzinfo=timezone.utc) > now:
                 return candidate
+            # Past its end but auto-pay's charge is still due — the mandate
+            # will renew it, so a second pass would bill twice.
+            if in_autopay_grace(candidate, now):
+                return candidate
         return None
 
     async def quote_pass(self, customer_id: str, plan_id: str, vehicle_id: str | None, service_id: str, vehicle_type: str | None = None) -> dict:
@@ -795,6 +861,12 @@ class UserSubscriptionService:
             end = existing.get("end_date")
             until = f" until {from_stored(end).strftime('%d %b %Y')}" if end else ""
             left = existing.get("remaining_service_count") or 0
+            if renews_automatically(existing) and end and from_stored(end) <= now_ist():
+                raise BadRequestException("You already have this pass on auto-pay and it's renewing now — no need to buy it again.")
+            if renews_automatically(existing) and left < 1 and end:
+                raise BadRequestException(
+                    f"You already have this pass on auto-pay. It refills on {from_stored(end).strftime('%d %b %Y')} — no need to buy it again."
+                )
             raise BadRequestException(
                 f"You already have an active pass for this vehicle type and service ({left} wash{'' if left == 1 else 'es'} left{until}). "
                 "Use it up or let it expire first."
@@ -874,6 +946,12 @@ class UserSubscriptionService:
                 "auto_renew": True,
                 "renewal_count": (sub.get("renewal_count") or 0) + 1,
                 "last_renewed_at": now,
+                # A new cycle: its own "ends soon" / "washes left" notices,
+                # and whatever retry state the last charge was in is over.
+                "expiry_reminder_sent": False,
+                "wash_reminder_sent_at": None,
+                "used_up_notice_sent_at": None,
+                "autopay_state": None,
             },
         )
         return _with_effective_status(updated) if updated else None
@@ -881,7 +959,29 @@ class UserSubscriptionService:
     async def mark_auto_renew_off(self, subscription_id: str) -> None:
         """The mandate is gone at Razorpay (cancelled/completed/halted) — stop
         promising the customer it will renew."""
-        await self.repo.update_by_id(subscription_id, {"auto_renew": False})
+        sub = await self.repo.find_by_id(subscription_id)
+        if sub:
+            await self.repo.update_by_id(subscription_id, self._auto_pay_off_fields(sub))
+
+    @staticmethod
+    def _auto_pay_off_fields(sub: dict) -> dict:
+        """Auto-pay going off. A pass that was waiting at 0 washes for its
+        refill has nothing left to use and no refill coming — it's spent,
+        exactly like a one-time pass at 0 (and re-buyable at once)."""
+        fields: dict = {"auto_renew": False, "autopay_state": None}
+        if sub.get("status") == SubscriptionStatus.ACTIVE.value and int(sub.get("remaining_service_count") or 0) <= 0:
+            fields["status"] = SubscriptionStatus.EXPIRED.value
+        return fields
+
+    async def set_autopay_state(self, subscription_id: str, state: str | None) -> None:
+        """"pending" while Razorpay retries a failed renewal charge (the
+        ended-pass sweep waits longer for those), None once it's settled."""
+        if not ObjectId.is_valid(subscription_id or ""):
+            return
+        await self.repo.collection.update_one(
+            {"_id": ObjectId(subscription_id), "autopay_state": {"$ne": state}},
+            {"$set": {"autopay_state": state, "updated_at": now_ist()}},
+        )
 
     async def set_auto_pay(self, customer_id: str, subscription_id: str, enabled: bool) -> dict:
         """Customer-facing auto-pay switch. Turning it OFF cancels the
@@ -904,7 +1004,7 @@ class UserSubscriptionService:
             from app.services.payment_service import PaymentService
 
             await PaymentService(self.repo.db).cancel_autopay(mandate_id, at_cycle_end=True)
-        updated = await self.repo.update_by_id(subscription_id, {"auto_renew": False})
+        updated = await self.repo.update_by_id(subscription_id, self._auto_pay_off_fields(sub))
         return _with_effective_status(updated or sub)
 
     async def upgrade(self, customer_id: str, subscription_id: str, new_plan_id: str) -> dict:
@@ -983,13 +1083,127 @@ class UserSubscriptionService:
         items, total = await self.repo.list_all(page, page_size)
         return _with_effective_statuses(items), total
 
-    async def center_overview(self, service_center_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+    # ------------------------------------------------------------------
+    # Reports (manager Subscribers page, admin Purchased plans page,
+    # plan-revenue KPIs). KPIs are aggregated on the server over every
+    # matching subscription; only one page of detail rows is ever loaded.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _effective_status_expr(now: datetime) -> dict:
+        """Mongo twin of _with_effective_status: a stored-"active" pass whose
+        end_date has passed reads as "expired"."""
+        lapsed = {"$and": [{"$eq": ["$status", SubscriptionStatus.ACTIVE.value]}, {"$ifNull": ["$end_date", False]}, {"$lt": ["$end_date", now]}]}
+        return {"$cond": [lapsed, SubscriptionStatus.EXPIRED.value, "$status"]}
+
+    @staticmethod
+    def _status_filter(status: str | None, now: datetime) -> dict:
+        active = SubscriptionStatus.ACTIVE.value
+        if not status or status == "all":
+            return {}
+        if status == "active":
+            return {"status": active, "$or": [{"end_date": None}, {"end_date": {"$gte": now}}]}
+        if status == "expiring":
+            # days_left = (end - now).days <= 14  <=>  end < now + 15 days
+            return {"status": active, "end_date": {"$gte": now, "$lt": now + timedelta(days=15)}}
+        if status == "expired":
+            return {"$or": [{"status": SubscriptionStatus.EXPIRED.value}, {"status": active, "end_date": {"$lt": now}}]}
+        return {"status": status}
+
+    async def _search_filter(self, search: str | None) -> dict:
+        """Customer name/phone or plan name -> a filter on the subscription
+        rows. Customers are resolved through the users collection first
+        (subscriptions carry no names)."""
+        from app.repositories.base_repository import build_search_filter
+
+        text = (search or "").strip()
+        if not text:
+            return {}
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) == 12 and digits.startswith("91"):
+            text = digits[2:]
+        users = await self.user_repo.collection.find(
+            {"role": "customer", **build_search_filter(text, ["full_name", "phone", "email"])}, {"_id": 1}
+        ).limit(500).to_list(length=500)
+        plans = await self.plan_repo.collection.find(build_search_filter(text, ["name"]), {"_id": 1}).to_list(length=200)
+        return {"$or": [
+            {"customer_id": {"$in": [str(u["_id"]) for u in users]}},
+            {"plan_id": {"$in": [str(p["_id"]) for p in plans]}},
+        ]}
+
+    async def _page_of_subscriptions(self, query: dict, page: int, page_size: int) -> tuple[list[dict], int]:
+        total, docs = await asyncio.gather(
+            self.repo.collection.count_documents(query),
+            self.repo.collection.find(query).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(length=page_size),
+        )
+        return _with_effective_statuses(docs), total
+
+    async def _kpi_groups(self, base: dict, now: datetime) -> list[dict]:
+        """Per-plan counters over every subscription matching `base`."""
+        active = SubscriptionStatus.ACTIVE.value
+        effective = self._effective_status_expr(now)
+        no_center = {"$not": [{"$and": ["$service_center_id", {"$ne": ["$service_center_id", ""]}]}]}
+        paid = {"$cond": [
+            {"$and": [{"$eq": [{"$ifNull": ["$amount_paid", None]}, None]}, no_center]},
+            {"$ifNull": ["$purchased_price", 0]},
+            {"$ifNull": ["$amount_paid", 0]},
+        ]}
+        return await self.repo.collection.aggregate([
+            {"$match": base},
+            {"$project": {"plan_id": 1, "end_date": 1, "eff": effective, "paid": paid}},
+            {"$group": {
+                "_id": "$plan_id",
+                "total": {"$sum": 1},
+                "active": {"$sum": {"$cond": [{"$eq": ["$eff", active]}, 1, 0]}},
+                "expired": {"$sum": {"$cond": [{"$eq": ["$eff", SubscriptionStatus.EXPIRED.value]}, 1, 0]}},
+                "expiring": {"$sum": {"$cond": [{"$and": [
+                    {"$eq": ["$eff", active]}, {"$ifNull": ["$end_date", False]}, {"$lt": ["$end_date", now + timedelta(days=15)]},
+                ]}, 1, 0]}},
+                "revenue": {"$sum": "$paid"},
+            }},
+        ], allowDiskUse=True).to_list(length=None)
+
+    async def _plan_names(self, plan_ids) -> dict[str, str]:
+        oids = [ObjectId(p) for p in plan_ids if isinstance(p, str) and ObjectId.is_valid(p)]
+        if not oids:
+            return {}
+        return {str(p["_id"]): p.get("name") for p in await self.plan_repo.collection.find({"_id": {"$in": oids}}, {"name": 1}).to_list(length=len(oids))}
+
+    async def _holders(self, subs: list[dict]) -> dict[str, dict]:
+        ids = [ObjectId(s["customer_id"]) for s in subs if ObjectId.is_valid(s.get("customer_id") or "")]
+        if not ids:
+            return {}
+        return {str(u["_id"]): u for u in await self.user_repo.collection.find({"_id": {"$in": ids}}, {"full_name": 1, "phone": 1}).to_list(length=len(ids))}
+
+    @staticmethod
+    def _amount_paid(s: dict):
+        # What the customer actually PAID — never just the plan's list
+        # price. A manager-sold plan almost always differs from
+        # purchased_price (a discount, a coupon); a genuine self-serve
+        # purchase never stamps amount_paid, so purchased_price IS what they
+        # paid in that one case.
+        amount_paid = s.get("amount_paid")
+        if amount_paid is None and not s.get("service_center_id"):
+            amount_paid = s.get("purchased_price")
+        return amount_paid
+
+    @staticmethod
+    def _meta(page: int, page_size: int, total: int) -> dict:
+        return {"page": page, "page_size": page_size, "total": total, "total_pages": max((total + page_size - 1) // page_size, 1) if total else 0}
+
+    async def center_overview(
+        self, service_center_id: str, actor_role: str, actor_center_id: str | None, *,
+        page: int = 1, page_size: int = 50, search: str | None = None, status: str | None = None,
+        plan_id: str | None = None,
+    ) -> dict:
         """The manager's subscription dashboard: every subscription held by
         a customer this center has ever served (any booking dispatched
         here, not only plan redemptions — a plan-holder who hasn't
         redeemed yet is exactly who the manager wants to call), rolled up
         into KPIs (active / expiring within 14 days / expired) plus a
-        per-plan breakdown, with one detail row per subscription."""
+        per-plan breakdown over ALL of them, and one page of detail rows
+        (filterable by `status` — active/expiring/expired/cancelled — and
+        searchable by customer name/phone or plan name)."""
         from app.core.authz import ensure_own_center
 
         ensure_own_center(actor_role, actor_center_id, service_center_id)
@@ -1003,38 +1217,34 @@ class UserSubscriptionService:
         # booking-history list above alone would hide them. Union both so
         # a just-assigned plan shows up immediately, not only after the
         # customer's first visit.
-        query = {"is_deleted": {"$ne": True}, "$or": [{"service_center_id": service_center_id}]}
+        base: dict = {"is_deleted": {"$ne": True}, "$or": [{"service_center_id": service_center_id}]}
         if customer_ids:
-            query["$or"].append({"customer_id": {"$in": customer_ids}})
-        subs = _with_effective_statuses(
-            await self.repo.collection.find(query).sort("created_at", -1).to_list(length=2000)
-        )
-        if not subs:
-            return {"kpis": {"total": 0, "active": 0, "expiring_soon": 0, "expired": 0}, "plan_breakdown": [], "rows": []}
+            base["$or"].append({"customer_id": {"$in": customer_ids}})
+        now = now_ist()
+        filters = [f for f in (base, self._status_filter(status, now), {"plan_id": plan_id} if plan_id else {}, await self._search_filter(search)) if f]
+        query = {"$and": filters} if len(filters) > 1 else base
 
-        plan_ids = {ObjectId(s["plan_id"]) for s in subs if s.get("plan_id") and ObjectId.is_valid(s["plan_id"])}
-        plans = {
-            str(p["_id"]): p
-            for p in await self.plan_repo.collection.find({"_id": {"$in": list(plan_ids)}}).to_list(length=500)
+        groups, (subs, total) = await asyncio.gather(self._kpi_groups(base, now), self._page_of_subscriptions(query, page, page_size))
+        plan_names = await self._plan_names({g["_id"] for g in groups} | {s.get("plan_id") for s in subs})
+        plan_counts: dict[str, int] = {}
+        for g in groups:
+            if g["active"]:
+                name = plan_names.get(g["_id"] or "") or "Unknown plan"
+                plan_counts[name] = plan_counts.get(name, 0) + g["active"]
+        kpis = {
+            "total": sum(g["total"] for g in groups),
+            "active": sum(g["active"] for g in groups),
+            "expiring_soon": sum(g["expiring"] for g in groups),
+            "expired": sum(g["expired"] for g in groups),
         }
-        holder_ids = {ObjectId(s["customer_id"]) for s in subs if ObjectId.is_valid(s["customer_id"])}
-        users = {
-            str(u["_id"]): u
-            for u in await self.user_repo.collection.find(
-                {"_id": {"$in": list(holder_ids)}}, {"full_name": 1, "phone": 1}
-            ).to_list(length=2000)
-        }
+
+        users = await self._holders(subs)
         type_names = {
             str(t["_id"]): t.get("name", "")
             for t in await self.vehicle_type_repo.collection.find({}, {"name": 1}).to_list(length=200)
         }
-
-        now = now_ist()
         rows = []
-        active = expiring_soon = expired = 0
-        plan_counts: dict[str, int] = {}
         for s in subs:
-            plan = plans.get(s.get("plan_id") or "")
             holder = users.get(s["customer_id"], {})
             end_date = s.get("end_date")
             days_left = None
@@ -1046,38 +1256,18 @@ class UserSubscriptionService:
                 if end.tzinfo is None:
                     end = end.replace(tzinfo=timezone.utc)
                 days_left = (end - now).days
-            status = s.get("effective_status")
-            if status == SubscriptionStatus.ACTIVE.value:
-                active += 1
-                plan_name = plan.get("name") if plan else "Unknown plan"
-                plan_counts[plan_name] = plan_counts.get(plan_name, 0) + 1
-                if days_left is not None and days_left <= 14:
-                    expiring_soon += 1
-            elif status == SubscriptionStatus.EXPIRED.value:
-                expired += 1
-            # What the customer actually PAID — never just the plan's list
-            # price. A manager-sold plan almost always differs from
-            # purchased_price (a discount, a coupon), and showing the list
-            # price here instead is exactly the kind of gap that makes cash
-            # collected not match what the screen says was charged. Same
-            # fallback as admin_overview: a genuine self-serve purchase
-            # never stamps amount_paid, so purchased_price IS what they
-            # paid in that one case.
-            amount_paid = s.get("amount_paid")
-            if amount_paid is None and not s.get("service_center_id"):
-                amount_paid = s.get("purchased_price")
             rows.append({
                 "subscription_id": s["id"],
                 "customer_id": s["customer_id"],
                 "customer_name": holder.get("full_name", "Unknown"),
                 "customer_phone": holder.get("phone"),
                 "plan_id": s.get("plan_id"),
-                "plan_name": plan.get("name") if plan else "Unknown plan",
-                "status": status,
+                "plan_name": plan_names.get(s.get("plan_id") or "") or "Unknown plan",
+                "status": s.get("effective_status"),
                 "vehicle_type": s.get("vehicle_type"),
                 "vehicle_type_name": type_names.get(s.get("vehicle_type") or ""),
                 "purchased_price": s.get("purchased_price"),
-                "amount_paid": amount_paid,
+                "amount_paid": self._amount_paid(s),
                 "discount_amount": s.get("discount_amount"),
                 "coupon_code": s.get("coupon_code"),
                 "payment_method": s.get("payment_method"),
@@ -1088,76 +1278,63 @@ class UserSubscriptionService:
                 "days_left": days_left,
             })
         return {
-            "kpis": {"total": len(rows), "active": active, "expiring_soon": expiring_soon, "expired": expired},
+            "kpis": kpis,
             "plan_breakdown": sorted(
                 ({"plan_name": name, "active_count": count} for name, count in plan_counts.items()),
-                key=lambda x: -x["active_count"],
+                key=lambda x: (-x["active_count"], x["plan_name"]),
             ),
+            "plans": sorted(({"plan_id": pid, "plan_name": name} for pid, name in plan_names.items()), key=lambda p: p["plan_name"] or ""),
             "rows": rows,
+            "meta": self._meta(page, page_size, total),
         }
 
-    async def admin_overview(self) -> dict:
+    async def admin_overview(
+        self, *, page: int = 1, page_size: int = 50, search: str | None = None,
+        status: str | None = None, plan_id: str | None = None,
+    ) -> dict:
         """Every plan ever purchased or granted, platform-wide — the admin's
         answer to "who bought what, for how much". Unlike center_overview
         (one manager's own center, booking-history-derived customer list)
-        this has no center scope at all: every user_subscriptions row,
-        enriched with who paid what and which center (if any) sold it."""
-        subs = _with_effective_statuses(
-            await self.repo.collection.find({"is_deleted": {"$ne": True}}).sort("created_at", -1).to_list(length=5000)
-        )
-        if not subs:
-            return {"kpis": {"total": 0, "active": 0, "expired": 0, "total_revenue": 0.0}, "plan_breakdown": [], "rows": []}
+        this has no center scope at all. KPIs and the per-plan breakdown
+        cover every subscription; rows are one filtered/searched page."""
+        base = {"is_deleted": {"$ne": True}}
+        now = now_ist()
+        filters = [f for f in (base, self._status_filter(status, now), {"plan_id": plan_id} if plan_id else {}, await self._search_filter(search)) if f]
+        query = {"$and": filters} if len(filters) > 1 else base
 
-        plan_ids = {ObjectId(s["plan_id"]) for s in subs if s.get("plan_id") and ObjectId.is_valid(s["plan_id"])}
-        plans = {
-            str(p["_id"]): p
-            for p in await self.plan_repo.collection.find({"_id": {"$in": list(plan_ids)}}).to_list(length=500)
+        groups, (subs, total) = await asyncio.gather(self._kpi_groups(base, now), self._page_of_subscriptions(query, page, page_size))
+        plan_names = await self._plan_names({g["_id"] for g in groups} | {s.get("plan_id") for s in subs})
+        plan_counts: dict[str, int] = {}
+        for g in groups:
+            name = plan_names.get(g["_id"] or "") or "Unknown plan"
+            plan_counts[name] = plan_counts.get(name, 0) + g["total"]
+        kpis = {
+            "total": sum(g["total"] for g in groups),
+            "active": sum(g["active"] for g in groups),
+            "expired": sum(g["expired"] for g in groups),
+            "total_revenue": round(sum(float(g["revenue"] or 0) for g in groups), 2),
         }
-        holder_ids = {ObjectId(s["customer_id"]) for s in subs if ObjectId.is_valid(s["customer_id"])}
-        users = {
-            str(u["_id"]): u
-            for u in await self.user_repo.collection.find(
-                {"_id": {"$in": list(holder_ids)}}, {"full_name": 1, "phone": 1}
-            ).to_list(length=5000)
-        }
+
+        users = await self._holders(subs)
         center_ids = {s["service_center_id"] for s in subs if s.get("service_center_id")}
         centers = {
             str(c["_id"]): c.get("name")
             for c in await self.repo.db.service_centers.find(
                 {"_id": {"$in": [ObjectId(c) for c in center_ids if ObjectId.is_valid(c)]}}, {"name": 1}
             ).to_list(length=200)
-        }
-
+        } if center_ids else {}
         rows = []
-        active = expired = 0
-        total_revenue = 0.0
-        plan_counts: dict[str, int] = {}
         for s in subs:
-            plan = plans.get(s.get("plan_id") or "")
             holder = users.get(s["customer_id"], {})
-            status = s.get("effective_status")
-            if status == SubscriptionStatus.ACTIVE.value:
-                active += 1
-            elif status == SubscriptionStatus.EXPIRED.value:
-                expired += 1
-            plan_name = plan.get("name") if plan else "Unknown plan"
-            plan_counts[plan_name] = plan_counts.get(plan_name, 0) + 1
-            amount_paid = s.get("amount_paid")
-            if amount_paid is None and not s.get("service_center_id"):
-                # A self-serve purchase never stamped amount_paid (that field
-                # only exists for staff-issued offers) — purchased_price is
-                # the actual amount charged for it at the time.
-                amount_paid = s.get("purchased_price")
-            total_revenue += float(amount_paid or 0)
             rows.append({
                 "subscription_id": s["id"],
                 "customer_id": s["customer_id"],
                 "customer_name": holder.get("full_name", "Unknown"),
                 "customer_phone": holder.get("phone"),
                 "plan_id": s.get("plan_id"),
-                "plan_name": plan_name,
-                "status": status,
-                "amount_paid": amount_paid,
+                "plan_name": plan_names.get(s.get("plan_id") or "") or "Unknown plan",
+                "status": s.get("effective_status"),
+                "amount_paid": self._amount_paid(s),
                 "discount_amount": s.get("discount_amount"),
                 "coupon_code": s.get("coupon_code"),
                 "payment_method": s.get("payment_method"),
@@ -1170,63 +1347,52 @@ class UserSubscriptionService:
                 "end_date": s.get("end_date"),
             })
         return {
-            "kpis": {"total": len(rows), "active": active, "expired": expired, "total_revenue": round(total_revenue, 2)},
+            "kpis": kpis,
             "plan_breakdown": sorted(
                 ({"plan_name": name, "count": count} for name, count in plan_counts.items()),
-                key=lambda x: -x["count"],
+                key=lambda x: (-x["count"], x["plan_name"]),
             ),
+            "plans": sorted(({"plan_id": pid, "plan_name": name} for pid, name in plan_names.items()), key=lambda p: p["plan_name"] or ""),
             "rows": rows,
+            "meta": self._meta(page, page_size, total),
         }
 
-    async def _resolve_order_centers(self, orders: list[dict]) -> dict[str, str | None]:
-        """Maps a payment_order's str _id -> its service_center_id. A
-        manager-issued link or auto-pay order stamps this directly at
-        creation (payment_service.py's _create_manager_subscription_link /
-        _create_manager_autopay_mandate); a cash sale, an autopay renewal
-        row, and a customer's own self-serve autopay checkout never do —
-        for those the center only lives on the subscription doc the order
-        settled into, so it's resolved through subscription_id instead."""
-        result: dict[str, str | None] = {}
-        need_lookup: dict[str, str] = {}
-        for o in orders:
-            oid = str(o["_id"])
-            if o.get("service_center_id"):
-                result[oid] = o["service_center_id"]
-            elif o.get("subscription_id"):
-                need_lookup[oid] = o["subscription_id"]
-            else:
-                result[oid] = None
-        if need_lookup:
-            sub_ids = [ObjectId(v) for v in set(need_lookup.values()) if ObjectId.is_valid(v)]
-            subs = (
-                {
-                    str(s["_id"]): s.get("service_center_id")
-                    for s in await self.repo.collection.find({"_id": {"$in": sub_ids}}, {"service_center_id": 1}).to_list(length=len(sub_ids))
-                }
-                if sub_ids
-                else {}
-            )
-            for oid, sub_id in need_lookup.items():
-                result[oid] = subs.get(sub_id)
-        return result
+    @staticmethod
+    def _center_orders(match: dict, service_center_id: str) -> list[dict]:
+        """payment_orders in `match` that belong to one center. A manager-
+        issued link or auto-pay order stamps service_center_id directly; a
+        cash sale, an autopay renewal row and a self-serve autopay checkout
+        never do — for those the center lives on the subscription the order
+        settled into, joined here server-side."""
+        own_center = {"$and": ["$service_center_id", {"$ne": ["$service_center_id", ""]}]}
+        return [
+            {"$match": match},
+            {"$addFields": {"_sub_oid": {"$cond": [
+                own_center, None,
+                {"$convert": {"input": "$subscription_id", "to": "objectId", "onError": None, "onNull": None}},
+            ]}}},
+            {"$lookup": {
+                "from": "user_subscriptions", "localField": "_sub_oid", "foreignField": "_id",
+                "pipeline": [{"$project": {"service_center_id": 1}}], "as": "_sub",
+            }},
+            {"$match": {"$expr": {"$eq": [
+                {"$cond": [own_center, "$service_center_id", {"$first": "$_sub.service_center_id"}]},
+                service_center_id,
+            ]}}},
+        ]
 
     async def center_plan_revenue(self, service_center_id: str, s: datetime, e: datetime) -> tuple[float, int]:
         """This center's plan revenue + count of plans sold in the window —
         the manager-KPI sibling of KpiService._plan_revenue (platform-
-        wide). Resolves every matching order's center first (see
-        _resolve_order_centers) since payment_orders doesn't uniformly
-        carry service_center_id, then sums just this center's rows."""
+        wide), resolved per order through _center_orders."""
         match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
-        # Sorted so that IF a window ever has more than 5000 platform-wide
-        # subscription payments (not realistic at today's volume, but this
-        # cap is a real long-term scaling limit — see this method's own
-        # docstring), the most RECENT ones are what gets kept, not an
-        # arbitrary slice.
-        orders = await self.repo.db.payment_orders.find(match).sort("created_at", -1).to_list(length=5000)
-        centers = await self._resolve_order_centers(orders)
-        matching = [o for o in orders if centers.get(str(o["_id"])) == service_center_id]
-        revenue = round(sum(o.get("amount_paise") or 0 for o in matching) / 100, 2)
-        return revenue, len(matching)
+        rows = await self.repo.db.payment_orders.aggregate([
+            *self._center_orders(match, service_center_id),
+            {"$group": {"_id": None, "paise": {"$sum": {"$ifNull": ["$amount_paise", 0]}}, "n": {"$sum": 1}}},
+        ]).to_list(length=1)
+        if not rows:
+            return 0.0, 0
+        return round(rows[0]["paise"] / 100, 2), rows[0]["n"]
 
     async def plan_purchases(
         self, s: datetime, e: datetime, page: int, page_size: int, service_center_id: str | None = None,
@@ -1241,12 +1407,7 @@ class UserSubscriptionService:
         disagree with the revenue tile if reused here).
 
         service_center_id (optional): scopes to one center's own sales —
-        a manager's own drill-down. Not every order carries this field
-        directly (see _resolve_order_centers), so a scoped call resolves
-        every row in the window and filters/paginates in Python instead
-        of pushing the filter into the initial Mongo query the unscoped
-        (admin) path below still uses — a center's own volume is small
-        enough for this to be cheap, and the admin path is untouched."""
+        a manager's own drill-down, resolved per order by _center_orders."""
         match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
         if service_center_id is None:
             total = await self.repo.db.payment_orders.count_documents(match)
@@ -1258,12 +1419,16 @@ class UserSubscriptionService:
                 .to_list(length=page_size)
             )
         else:
-            all_orders = await self.repo.db.payment_orders.find(match).sort("created_at", -1).to_list(length=5000)
-            centers = await self._resolve_order_centers(all_orders)
-            matching = [o for o in all_orders if centers.get(str(o["_id"])) == service_center_id]
-            total = len(matching)
-            start = (page - 1) * page_size
-            orders = matching[start : start + page_size]
+            facet = await self.repo.db.payment_orders.aggregate([
+                *self._center_orders(match, service_center_id),
+                {"$sort": {"created_at": -1}},
+                {"$facet": {
+                    "total": [{"$count": "n"}],
+                    "page": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}, {"$project": {"_sub": 0, "_sub_oid": 0}}],
+                }},
+            ], allowDiskUse=True).to_list(length=1)
+            total = facet[0]["total"][0]["n"] if facet and facet[0]["total"] else 0
+            orders = facet[0]["page"] if facet else []
         if not orders:
             return [], total
 
@@ -1330,23 +1495,136 @@ class UserSubscriptionService:
 
 # -- Pass lifecycle sweeps (called from main._reminder_loop) ----------------
 
-async def find_subscriptions_expiring_soon(db, days: int = 2) -> list[dict]:
-    """Active passes that end within `days` and haven't had their heads-up
-    yet — one message per pass, sent by the reminder loop."""
-    from datetime import datetime, timedelta, timezone
+# Live bookings — a pass with one of these already has its next wash on the way.
+_LIVE_BOOKING_STATUSES = ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]
 
+# Mongo twin of renews_automatically(): auto-pay on and a mandate on file.
+_NOT_AUTO_RENEWING = {"$or": [{"auto_renew": {"$ne": True}}, {"razorpay_subscription_id": {"$in": [None, ""]}}]}
+
+
+async def find_subscriptions_expiring_soon(db, days: int = 2, limit: int = 200) -> list[dict]:
+    """Active passes that end within `days` and haven't had their heads-up
+    yet — one message per pass, sent by the reminder loop, soonest first.
+    A pass on auto-pay is skipped: it isn't ending, it's renewing, and
+    "renew to keep going" would be wrong."""
     now = datetime.now(timezone.utc)
     return await db.user_subscriptions.find(
         {
-            "status": "active",
+            "status": SubscriptionStatus.ACTIVE.value,
             "is_deleted": {"$ne": True},
             "expiry_reminder_sent": {"$ne": True},
             "end_date": {"$gt": now, "$lte": now + timedelta(days=days)},
+            **_NOT_AUTO_RENEWING,
         }
-    ).to_list(length=200)
+    ).sort("end_date", 1).limit(limit).to_list(length=limit)
 
 
 async def mark_expiry_reminder_sent(db, subscription_id: str) -> None:
-    from bson import ObjectId
-
     await db.user_subscriptions.update_one({"_id": ObjectId(subscription_id)}, {"$set": {"expiry_reminder_sent": True}})
+
+
+async def find_subscriptions_ended(db, limit: int = 100, exclude_ids=()) -> list[dict]:
+    """Passes still stored "active" whose end_date has passed — the loop
+    tells each customer once, then flips that one pass to expired
+    (mark_subscription_expired). Oldest first; `exclude_ids` lets a pass
+    page past rows it already tried without re-fetching a failing one.
+
+    An auto-pay pass is left alone for AUTOPAY_GRACE past its end (the
+    charge is usually minutes away), AUTOPAY_RETRY_GRACE while Razorpay is
+    retrying a failed charge — a renewal that lands in that window just
+    refreshes it, and the customer never hears "your pass has ended"."""
+    now = datetime.now(timezone.utc)
+    query: dict = {
+        "status": SubscriptionStatus.ACTIVE.value,
+        "end_date": {"$lt": now},
+        "$or": [
+            *_NOT_AUTO_RENEWING["$or"],
+            {"autopay_state": {"$ne": "pending"}, "end_date": {"$lt": now - AUTOPAY_GRACE}},
+            {"end_date": {"$lt": now - AUTOPAY_RETRY_GRACE}},
+        ],
+    }
+    if exclude_ids:
+        query["_id"] = {"$nin": list(exclude_ids)}
+    return await db.user_subscriptions.find(query).sort("end_date", 1).to_list(length=limit)
+
+
+async def mark_subscription_expired(db, subscription_id: str) -> None:
+    """Guarded on still-active so it never overwrites a status something
+    else set meanwhile (a renewal, a cancel)."""
+    now = datetime.now(timezone.utc)
+    await db.user_subscriptions.update_one(
+        {"_id": ObjectId(subscription_id), "status": SubscriptionStatus.ACTIVE.value, "end_date": {"$lt": now}},
+        {"$set": {"status": SubscriptionStatus.EXPIRED.value, "updated_at": now}},
+    )
+
+
+async def find_passes_due_wash_reminder(db, limit: int = 200, expiring_days: int = 2) -> list[dict]:
+    """Live passes with washes left and nothing booked on them — the ones a
+    "3 washes left — book your next wash" nudge is for. Skips a pass that:
+      - was reminded within WASH_REMINDER_EVERY;
+      - was bought, renewed or booked on within WASH_REMINDER_QUIET_AFTER_USE
+        (someone who just booked doesn't need telling);
+      - ends within `expiring_days` (the "ends soon" notice covers it);
+      - has an upcoming or in-progress booking already using it.
+    Soonest-ending first. Every exclusion runs in the pipeline before the
+    batch is cut, so passes behind a skipped one are still reached; the
+    booking check is an indexed lookup (subscription_id + status)."""
+    now = datetime.now(timezone.utc)
+    quiet_floor = now - WASH_REMINDER_QUIET_AFTER_USE
+    reminded_floor = now - WASH_REMINDER_EVERY
+    pipeline = [
+        {"$match": {
+            "status": SubscriptionStatus.ACTIVE.value,
+            "end_date": {"$gt": now + timedelta(days=expiring_days)},
+            "is_deleted": {"$ne": True},
+            "remaining_service_count": {"$gt": 0},
+            "start_date": {"$lte": quiet_floor},
+            "last_used_at": {"$not": {"$gt": quiet_floor}},
+            "last_renewed_at": {"$not": {"$gt": quiet_floor}},
+            "wash_reminder_sent_at": {"$not": {"$gt": reminded_floor}},
+        }},
+        {"$sort": {"end_date": 1}},
+        {"$lookup": {
+            "from": "bookings",
+            "let": {"sid": {"$toString": "$_id"}},
+            "pipeline": [
+                {"$match": {
+                    "$expr": {"$eq": ["$subscription_id", "$$sid"]},
+                    "status": {"$in": _LIVE_BOOKING_STATUSES},
+                    "is_deleted": {"$ne": True},
+                }},
+                {"$limit": 1},
+                {"$project": {"_id": 1}},
+            ],
+            "as": "_live_booking",
+        }},
+        {"$match": {"_live_booking": {"$size": 0}}},
+        {"$limit": limit},
+        {"$project": {"_live_booking": 0}},
+    ]
+    return await db.user_subscriptions.aggregate(pipeline).to_list(length=limit)
+
+
+async def mark_wash_reminder_sent(db, subscription_id: str) -> None:
+    await db.user_subscriptions.update_one(
+        {"_id": ObjectId(subscription_id)}, {"$set": {"wash_reminder_sent_at": datetime.now(timezone.utc)}}
+    )
+
+
+async def claim_used_up_notice(db, subscription_id: str) -> dict | None:
+    """The "you've used all washes" notice goes out once per pass: this
+    stamps it atomically and returns the pass only to the caller that won —
+    and only when the pass really is spent and expired (an auto-pay pass at
+    0 is still active, waiting for its refill)."""
+    if not ObjectId.is_valid(subscription_id or ""):
+        return None
+    return await db.user_subscriptions.find_one_and_update(
+        {
+            "_id": ObjectId(subscription_id),
+            "status": SubscriptionStatus.EXPIRED.value,
+            "remaining_service_count": {"$lte": 0},
+            "used_up_notice_sent_at": None,
+            "is_deleted": {"$ne": True},
+        },
+        {"$set": {"used_up_notice_sent_at": datetime.now(timezone.utc)}},
+    )

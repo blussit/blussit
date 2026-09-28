@@ -108,6 +108,18 @@ def gateway(monkeypatch):
     return client
 
 
+async def _earlier_today(rig) -> str:
+    """A clock time TODAY that has already passed and sits inside the center's
+    hours — a logged job must be in the past. The test center is widened to
+    the whole day first, so this also holds before it would normally open
+    (these tests used to fail whenever the suite ran before ~10:00 IST)."""
+    await rig["db"].service_centers.update_one(
+        {"_id": ObjectId(rig["center_id"])}, {"$set": {"working_hours_start": "00:00", "working_hours_end": "23:59"}}
+    )
+    now = now_ist()
+    return max(now - timedelta(minutes=1), now.replace(hour=0, minute=0, second=0, microsecond=0)).strftime("%H:%M")
+
+
 @pytest.fixture
 async def rig(db, cleanup, gateway):
     hatchback = await get_hatchback_type_id(db)
@@ -1092,7 +1104,7 @@ async def test_a_manager_sold_plan_is_correctly_spent_by_a_new_booking_then_a_lo
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
             lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
-            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="10:00",
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time=await _earlier_today(rig),
             address_line="1 Manager Booking Lane, Indore", send_whatsapp=False,
         ),
         manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
@@ -1197,7 +1209,7 @@ async def test_manager_unticking_use_plan_on_a_logged_job_also_charges_full_and_
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
             lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=False)],
-            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="09:00",
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time=await _earlier_today(rig),
             address_line="2 Opt Out Lane, Indore", send_whatsapp=False,
         ),
         manager_id=rig["manager_id"], manager_center_id=rig["center_id"],
@@ -1340,7 +1352,7 @@ async def test_a_pass_cannot_cover_a_logged_job_from_before_it_was_granted(rig, 
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
             lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
-            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time="10:00",
+            scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time=await _earlier_today(rig),
             address_line="4 Backdated Lane, Indore", send_whatsapp=False,
         ),
         manager_id=rig["manager_id"], manager_center_id=rig["center_id"],

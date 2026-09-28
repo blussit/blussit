@@ -20,3 +20,19 @@ def validate_indian_mobile(raw: str) -> str | None:
     if len(digits) == 10 and digits[0] in "6789":
         return digits
     return None
+
+
+BUSINESS_NUMBER_MESSAGE = (
+    "This is Blussit's own WhatsApp business number — WhatsApp can't send messages to itself. "
+    "Use the person's own mobile number."
+)
+
+
+def is_business_whatsapp_number(raw: str | None) -> bool:
+    """True when `raw` is the number our WhatsApp Cloud API sends FROM
+    (settings.WHATSAPP_BUSINESS_NUMBER). Meta rejects every message
+    addressed to it, so it must never be anyone's contact number."""
+    from app.core.config import settings
+
+    business = validate_indian_mobile(settings.WHATSAPP_BUSINESS_NUMBER or "")
+    return bool(business) and validate_indian_mobile(raw or "") == business

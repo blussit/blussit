@@ -26,10 +26,23 @@ export interface CenterSubscriptionRow {
   days_left?: number | null;
 }
 
+/** Paging for the overview endpoints: KPIs/breakdowns cover everything,
+ *  `rows` is one filtered page. */
+export interface OverviewPageMeta {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export type SubscriptionStatusFilter = "" | "active" | "expiring" | "expired" | "cancelled";
+
 export interface CenterSubscriptionOverview {
   kpis: { total: number; active: number; expiring_soon: number; expired: number };
   plan_breakdown: { plan_name: string; active_count: number }[];
+  plans?: { plan_id: string; plan_name: string }[];
   rows: CenterSubscriptionRow[];
+  meta?: OverviewPageMeta;
 }
 
 /** One row on the admin's "all purchased plans" view — every subscription
@@ -58,7 +71,10 @@ export interface AdminSubscriptionRow {
 export interface AdminSubscriptionOverview {
   kpis: { total: number; active: number; expired: number; total_revenue: number };
   plan_breakdown: { plan_name: string; count: number }[];
+  /** Every plan that has at least one subscription — for the plan filter. */
+  plans?: { plan_id: string; plan_name: string }[];
   rows: AdminSubscriptionRow[];
+  meta?: OverviewPageMeta;
 }
 
 export interface SubscriptionUsageBooking {
@@ -169,17 +185,25 @@ export const subscriptionApi = {
     apiClient.post<ApiSuccess<PassQuote>>("/subscriptions/quote", payload).then((r) => r.data.data),
   submitEnquiry: (payload: PlanEnquiryPayload) =>
     apiClient.post<ApiSuccess<null>>("/subscriptions/enquiries", payload).then((r) => r.data),
-  centerOverview: (centerId: string) =>
-    apiClient.get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`).then((r) => r.data.data),
+  centerOverview: (
+    centerId: string,
+    params?: { page?: number; page_size?: number; search?: string; status?: SubscriptionStatusFilter; plan_id?: string },
+  ) =>
+    apiClient
+      .get<ApiSuccess<CenterSubscriptionOverview>>(`/subscriptions/center/${centerId}/overview`, { params: { ...params, status: params?.status || undefined } })
+      .then((r) => r.data.data),
   /** Admin-only: every plan ever purchased or granted, platform-wide. */
-  adminOverview: () => apiClient.get<ApiSuccess<AdminSubscriptionOverview>>("/subscriptions/admin/overview").then((r) => r.data.data),
+  adminOverview: (params?: { page?: number; page_size?: number; search?: string; status?: SubscriptionStatusFilter; plan_id?: string }) =>
+    apiClient
+      .get<ApiSuccess<AdminSubscriptionOverview>>("/subscriptions/admin/overview", { params: { ...params, status: params?.status || undefined } })
+      .then((r) => r.data.data),
   /** Admin-only: individual plan payments settled in a period — the
    *  plan-revenue tile's drill-down. Same `period`/`start`/`end` shape as
    *  bookingApi.all(), so a dashboard tile's number and this list agree. */
-  planPurchases: (params: { period?: string; start?: string; end?: string; page_size?: number }) =>
+  planPurchases: (params: { period?: string; start?: string; end?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<PlanPurchaseRow>>("/subscriptions/admin/plan-purchases", { params }).then((r) => r.data),
   /** Same shape, scoped to one center — a manager's own Plans tab. */
-  centerPlanPurchases: (centerId: string, params: { period?: string; start?: string; end?: string; page_size?: number }) =>
+  centerPlanPurchases: (centerId: string, params: { period?: string; start?: string; end?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<PlanPurchaseRow>>(`/subscriptions/center/${centerId}/plan-purchases`, { params }).then((r) => r.data),
   /** One plan's spend history — when it was last used, bookings that drew on it. */
   usageHistory: (subscriptionId: string) =>
@@ -230,7 +254,11 @@ export const couponApi = {
 };
 
 export const reviewApi = {
-  mine: () => apiClient.get<ApiSuccess<Review[]>>("/reviews/my").then((r) => r.data.data),
+  /** Newest 100 — or, with ids, exactly those bookings' reviews. */
+  mine: (bookingIds?: string[]) =>
+    apiClient
+      .get<ApiSuccess<Review[]>>("/reviews/my", { params: bookingIds?.length ? { booking_ids: bookingIds.join(",") } : undefined })
+      .then((r) => r.data.data),
   create: (payload: { booking_id: string; captain_rating?: number; captain_comment?: string; service_rating: number; service_comment?: string }) =>
     apiClient.post<ApiSuccess<Review>>("/reviews", payload).then((r) => r.data.data),
   update: (id: string, payload: { captain_rating?: number; captain_comment?: string; service_rating?: number; service_comment?: string }) =>
@@ -262,10 +290,13 @@ export const complaintApi = {
     apiClient.post<ApiSuccess<Complaint>>("/complaints", payload).then((r) => r.data.data),
   mine: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Complaint>>("/complaints/my", { params }).then((r) => r.data),
-  forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number }) =>
+  /** `search`: subject, booking number, or the customer's name/phone. */
+  forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number; search?: string }) =>
     apiClient.get<ApiPaginated<Complaint>>(`/complaints/center/${serviceCenterId}`, { params }).then((r) => r.data),
-  all: (params?: { status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string }) =>
-    apiClient.get<ApiPaginated<Complaint>>("/complaints", { params }).then((r) => r.data),
+  all: (params?: {
+    status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string;
+    search?: string; service_center_id?: string;
+  }) => apiClient.get<ApiPaginated<Complaint>>("/complaints", { params }).then((r) => r.data),
   update: (id: string, payload: { status?: string; priority?: string; resolution_note?: string }) =>
     apiClient.put<ApiSuccess<Complaint>>(`/complaints/${id}`, payload).then((r) => r.data.data),
   reply: (id: string, payload: { message: string; status?: string }) =>

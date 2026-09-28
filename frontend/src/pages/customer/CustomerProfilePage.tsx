@@ -17,6 +17,7 @@ import {
   LifeBuoy,
   LogOut,
   MapPin,
+  MessageCircle,
   Pencil,
   type LucideIcon,
 } from "lucide-react";
@@ -67,10 +68,49 @@ function Row({
   );
 }
 
+/** A settings row whose whole width flips the switch (gold track when on). */
+function ToggleRow({
+  icon: Icon,
+  label,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: {
+  icon: LucideIcon;
+  label: string;
+  description?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="flex w-full items-center gap-3.5 px-4 py-3.5 text-left transition-colors hover:bg-[#FAFAFA] disabled:cursor-wait"
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gray-100 text-black">
+        <Icon className="h-[17px] w-[17px]" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold text-black">{label}</span>
+        {description && <span className="block text-xs text-gray-500">{description}</span>}
+      </span>
+      <span aria-hidden className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-[#E8A900]" : "bg-gray-300"}`}>
+        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+      </span>
+    </button>
+  );
+}
+
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2">
-      <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-black">{title}</p>
+      <p className="text-sm text-gray-500">{title}</p>
       <div className="overflow-hidden rounded-2xl border border-[#F3E5B5] bg-white">{children}</div>
     </div>
   );
@@ -81,7 +121,12 @@ export default function CustomerProfilePage() {
   const confirm = useConfirm();
   const { data: addresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const { data: subs } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
-  const activeSub = (subs || []).find((s) => s.effective_status === "active");
+  const activeSubs = (subs || []).filter((s) => s.effective_status === "active");
+  const plansMeta = !activeSubs.length
+    ? "No active plan"
+    : activeSubs.length === 1
+      ? `${activeSubs[0].remaining_service_count} washes left`
+      : `${activeSubs.length} active plans`;
 
   const [editingName, setEditingName] = useState(false);
   const [fullName, setFullName] = useState(user?.full_name || "");
@@ -102,6 +147,29 @@ export default function CustomerProfilePage() {
     },
     onError: (err) => setNameError(getErrorMessage(err)),
   });
+
+  // WhatsApp reminders & offers: on = not opted out. Shown flipped at once;
+  // the saved account is the truth once the request answers.
+  const [optInDraft, setOptInDraft] = useState<boolean | null>(null);
+  const [marketingError, setMarketingError] = useState("");
+  const marketing = useMutation({
+    mutationFn: (optIn: boolean) => userApi.updateProfile({ marketing_opt_out: !optIn }),
+    onMutate: (optIn) => {
+      setMarketingError("");
+      setOptInDraft(optIn);
+    },
+    onSuccess: async (updated, optIn) => {
+      const fresh = await refreshUser();
+      const savedOptOut = fresh?.marketing_opt_out ?? updated?.marketing_opt_out ?? false;
+      if (savedOptOut !== !optIn) setMarketingError("Couldn't save that right now. Please try again later.");
+      setOptInDraft(null);
+    },
+    onError: (err) => {
+      setOptInDraft(null);
+      setMarketingError(getErrorMessage(err));
+    },
+  });
+  const optedIn = optInDraft ?? !user?.marketing_opt_out;
 
   const changePassword = useMutation({
     mutationFn: () => authApi.changePassword({ current_password: currentPassword, new_password: newPassword }),
@@ -131,7 +199,7 @@ export default function CustomerProfilePage() {
             <div className="mt-0.5 flex flex-wrap items-center gap-2">
               {user?.phone && <span className="font-mono-num text-xs text-gray-400">{user.phone}</span>}
               {user?.phone && user?.phone_verified && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">
+                <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-medium text-green-700">
                   <Check className="h-2.5 w-2.5" strokeWidth={3.5} /> Verified
                 </span>
               )}
@@ -145,7 +213,7 @@ export default function CustomerProfilePage() {
               setFullName(user?.full_name || "");
               setEditingName((v) => !v);
             }}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#F3E5B5] text-black transition-colors hover:border-[#E8A900]/60"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#F3E5B5] text-black transition-colors hover:border-gray-300"
           >
             <Pencil className="h-4 w-4" />
           </button>
@@ -155,7 +223,7 @@ export default function CustomerProfilePage() {
             <Input label="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} autoFocus />
             {nameError && <p className="text-sm text-[var(--color-error)]">{nameError}</p>}
             <div className="flex gap-2">
-              <Button size="sm" isLoading={saveName.isPending} onClick={() => saveName.mutate()}>
+              <Button variant="info" size="sm" isLoading={saveName.isPending} onClick={() => saveName.mutate()}>
                 Save
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setEditingName(false)}>
@@ -170,12 +238,24 @@ export default function CustomerProfilePage() {
         <Row icon={MapPin} label="Saved addresses" meta={addresses?.length ? String(addresses.length) : undefined} to="/app/addresses" />
         <Row
           icon={Gift}
-          label="My subscription"
-          meta={activeSub ? `${activeSub.remaining_service_count} washes left` : "No active plan"}
+          label="My plans"
+          meta={plansMeta}
           to="/app/subscriptions"
           last
         />
       </Group>
+
+      <Group title="Notifications">
+        <ToggleRow
+          icon={MessageCircle}
+          label="WhatsApp reminders & offers"
+          description="Booking updates always come."
+          checked={optedIn}
+          disabled={marketing.isPending}
+          onChange={(next) => marketing.mutate(next)}
+        />
+      </Group>
+      {marketingError && <p className="text-sm text-[var(--color-error)]">{marketingError}</p>}
 
       <Group title="Security">
         <Row icon={KeyRound} label="Change password" onClick={() => setChangingPassword((v) => !v)} last={!changingPassword} />
@@ -184,7 +264,7 @@ export default function CustomerProfilePage() {
             <Input label="Current password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
             <Input label="New password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} hint="At least 8 characters" />
             {passwordError && <p className="text-sm text-[var(--color-error)]">{passwordError}</p>}
-            <Button size="sm" isLoading={changePassword.isPending} onClick={() => changePassword.mutate()}>
+            <Button variant="info" size="sm" isLoading={changePassword.isPending} onClick={() => changePassword.mutate()}>
               Update password
             </Button>
           </div>

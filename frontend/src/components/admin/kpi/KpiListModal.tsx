@@ -1,7 +1,8 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Modal, PageLoader } from "../../ui";
-import type { ApiPaginated } from "../../../lib/api-client";
+import { Pager } from "../../shared/ListControls";
+import { getErrorMessage, type ApiPaginated } from "../../../lib/api-client";
 
 /**
  * A KPI tile that maps to REAL records — "click on it to see the list of
@@ -23,24 +24,32 @@ export function KpiListModal<T>({
   onClose: () => void;
   title: string;
   queryKey: unknown[];
-  fetchFn: () => Promise<ApiPaginated<T>>;
+  /** One page of the list (server-paginated). */
+  fetchFn: (page: number) => Promise<ApiPaginated<T>>;
   renderRow: (item: T) => ReactNode;
   getRowKey: (item: T) => string;
   emptyText?: string;
 }) {
-  const { data, isLoading } = useQuery({ queryKey, queryFn: fetchFn, enabled: open });
+  const [page, setPage] = useState(1);
+  const drillKey = JSON.stringify(queryKey);
+  useEffect(() => setPage(1), [drillKey, open]);
+  const { data, isLoading, isError, error, isFetching } = useQuery({
+    queryKey: [...queryKey, page],
+    queryFn: () => fetchFn(page),
+    enabled: open,
+  });
 
   return (
     <Modal open={open} onClose={onClose} title={title} maxWidth="max-w-2xl">
-      {isLoading || !data ? (
+      {isError ? (
+        <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-600">{getErrorMessage(error)}</p>
+      ) : isLoading || !data ? (
         <PageLoader />
       ) : !data.data.length ? (
         <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">{emptyText}</p>
       ) : (
         <div className="space-y-2">
-          <p className="text-xs text-gray-400">
-            {data.meta.total} total{data.meta.total > data.data.length ? ` — showing the first ${data.data.length}` : ""}
-          </p>
+          <p className="text-xs text-gray-400">{data.meta.total} total</p>
           <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
             {data.data.map((item) => (
               <div key={getRowKey(item)} className="px-3.5 py-2.5">
@@ -48,6 +57,7 @@ export function KpiListModal<T>({
               </div>
             ))}
           </div>
+          <Pager page={page} totalPages={data.meta.total_pages} onPage={setPage} busy={isFetching} />
         </div>
       )}
     </Modal>

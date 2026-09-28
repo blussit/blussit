@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Calendar, Car, Clock, CreditCard, Flag, MapPin, Navigation, Star, User as UserIcon, Wrench } from "lucide-react";
-import { Badge, Modal, StatusBadge } from "../ui";
+import { AlertTriangle, Calendar, Car, Clock, CreditCard, Flag, MapPin, Navigation, Pencil, Star, Trash2, User as UserIcon, Wrench } from "lucide-react";
+import { Badge, Button, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
 import { formatDateTime, formatSlot } from "../../lib/date";
@@ -28,6 +28,8 @@ export function BookingDetailDrawer({
   onClose,
   captainName,
   centerName,
+  onEdit,
+  onDelete,
 }: {
   booking: Booking | null;
   onClose: () => void;
@@ -35,6 +37,11 @@ export function BookingDetailDrawer({
    * falls back to showing nothing rather than a raw id. */
   captainName?: string | null;
   centerName?: string | null;
+  /** Admin-only actions; omitted by every other caller, so no buttons show.
+   *  onEdit gets a car on the visit that is still open (edit fans out to
+   *  the whole visit server-side). */
+  onEdit?: (booking: Booking) => void;
+  onDelete?: (booking: Booking) => void;
 }) {
   // The rest of the visit, when the row opened is one car of several.
   const groupId = booking?.booking_group_id || null;
@@ -54,6 +61,11 @@ export function BookingDetailDrawer({
   const car = cars.find((c) => c.id === carId) || booking;
   const flagged = cars.filter((c) => c.issue_flag && !c.issue_resolved);
   const paymentPending = cars.some((c) => c.payment_status !== "paid");
+  const editableCar = cars.find((c) => !["completed", "cancelled"].includes(c.status)) || null;
+  const prepaid = cars.some((c) => c.prepaid_only);
+  // Charged once per visit (on its first car); summed so it shows whichever car carries it.
+  const travelCharge = cars.reduce((sum, c) => sum + (c.travel_charge || 0), 0);
+  const travelKm = cars.find((c) => (c.travel_charge || 0) > 0)?.travel_charge_km;
   /** "Car 2 · MP09RB0002" — how a per-car section is labelled on a visit. */
   const carTag = (c: Booking) =>
     `Car ${cars.indexOf(c) + 1} · ${vehicleLabel(c) || c.booking_number}`;
@@ -81,6 +93,26 @@ export function BookingDetailDrawer({
     >
       {booking && car && (
         <div className="space-y-5">
+          {(onEdit || onDelete) && (
+            <div className="flex flex-wrap justify-end gap-2 border-b border-gray-100 pb-3">
+              {onEdit && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!editableCar}
+                  title={editableCar ? undefined : "A completed or cancelled booking can't be edited"}
+                  onClick={() => editableCar && onEdit(editableCar)}
+                >
+                  <Pencil className="h-3.5 w-3.5" /> Edit details
+                </Button>
+              )}
+              {onDelete && (
+                <Button size="sm" variant="outline" onClick={() => onDelete(booking)}>
+                  <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" /> Delete
+                </Button>
+              )}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             {/* The VISIT's status: least-advanced car wins, because the
                 visit isn't done until the last car is. */}
@@ -89,6 +121,11 @@ export function BookingDetailDrawer({
             {isVisit && (
               <Badge tone="neutral">
                 <Car className="h-3 w-3" /> 1 visit · {cars.length} vehicles
+              </Badge>
+            )}
+            {prepaid && (
+              <Badge tone="info">
+                <CreditCard className="h-3 w-3" /> Prepaid
               </Badge>
             )}
             {booking.source === "whatsapp" && <Badge tone="success">Booked via WhatsApp</Badge>}
@@ -223,6 +260,17 @@ export function BookingDetailDrawer({
                   value={<span className="font-mono-num">₹{c.total_amount}</span>}
                 />
               ))}
+            {travelCharge > 0 && (
+              <Row
+                label="Distance charge"
+                value={
+                  <span className="font-mono-num">
+                    ₹{travelCharge}
+                    {travelKm != null && <span className="ml-1 text-xs font-normal text-[var(--color-text-secondary)]">· {travelKm} km, in the total</span>}
+                  </span>
+                }
+              />
+            )}
             <Row
               label={isVisit ? `Total · ${cars.length} vehicles` : "Amount"}
               value={<span className="font-mono-num">₹{visitTotal}</span>}

@@ -5,6 +5,7 @@ import { bookingApi } from "../../../api/booking";
 import { subscriptionApi } from "../../../api/engagement";
 import { BookingDetailDrawer } from "../../shared/BookingDetailDrawer";
 import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
+import { Pager } from "../../shared/ListControls";
 import { format, formatSlot } from "../../../lib/date";
 import { formatINR } from "./charts";
 import type { KpiPeriodParams } from "../../../api/admin";
@@ -41,24 +42,30 @@ export function RevenueDrillModal({
   // Re-open on whichever tab actually explains the number that was
   // clicked (revenueScope="plans" -> Plans tab), every time the modal
   // opens fresh — not just on first mount.
+  const [bookingPage, setBookingPage] = useState(1);
+  const [planPage, setPlanPage] = useState(1);
   useEffect(() => {
-    if (open) setTab(defaultTab);
+    if (open) {
+      setTab(defaultTab);
+      setBookingPage(1);
+      setPlanPage(1);
+    }
   }, [open, defaultTab]);
 
   const bookings = useQuery({
-    queryKey: ["kpi-drill-revenue-bookings", params, serviceCenterId],
+    queryKey: ["kpi-drill-revenue-bookings", params, serviceCenterId, bookingPage],
     queryFn: () =>
       serviceCenterId
-        ? bookingApi.forCenter(serviceCenterId, { ...params, page_size: 100, date_field: "completed", status: "completed" })
-        : bookingApi.all({ ...params, page_size: 100, date_field: "completed", status: "completed" }),
+        ? bookingApi.forCenter(serviceCenterId, { ...params, page: bookingPage, page_size: 50, date_field: "completed", status: "completed" })
+        : bookingApi.all({ ...params, page: bookingPage, page_size: 50, date_field: "completed", status: "completed" }),
     enabled: open && tab === "bookings",
   });
   const plans = useQuery({
-    queryKey: ["kpi-drill-revenue-plans", params, serviceCenterId],
+    queryKey: ["kpi-drill-revenue-plans", params, serviceCenterId, planPage],
     queryFn: () =>
       serviceCenterId
-        ? subscriptionApi.centerPlanPurchases(serviceCenterId, { ...params, page_size: 100 })
-        : subscriptionApi.planPurchases({ ...params, page_size: 100 }),
+        ? subscriptionApi.centerPlanPurchases(serviceCenterId, { ...params, page: planPage, page_size: 50 })
+        : subscriptionApi.planPurchases({ ...params, page: planPage, page_size: 50 }),
     enabled: open && tab === "plans",
   });
 
@@ -91,10 +98,7 @@ export function RevenueDrillModal({
               <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">No completed washes in this period.</p>
             ) : (
               <div className="space-y-2">
-                <p className="text-xs text-gray-400">
-                  {bookings.data.meta.total} total
-                  {bookings.data.meta.total > bookings.data.data.length ? ` — showing the first ${bookings.data.data.length}` : ""}
-                </p>
+                <p className="text-xs text-gray-400">{bookings.data.meta.total} total</p>
                 <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
                   {bookings.data.data.map((b) => (
                     <div key={b.id} className="px-3.5 py-2.5">
@@ -111,6 +115,7 @@ export function RevenueDrillModal({
                     </div>
                   ))}
                 </div>
+                <Pager page={bookingPage} totalPages={bookings.data.meta.total_pages} onPage={setBookingPage} busy={bookings.isFetching} />
               </div>
             )
           ) : plans.isLoading || !plans.data ? (
@@ -119,10 +124,7 @@ export function RevenueDrillModal({
             <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">No plans purchased in this period.</p>
           ) : (
             <div className="space-y-2">
-              <p className="text-xs text-gray-400">
-                {plans.data.meta.total} total
-                {plans.data.meta.total > plans.data.data.length ? ` — showing the first ${plans.data.data.length}` : ""}
-              </p>
+              <p className="text-xs text-gray-400">{plans.data.meta.total} total</p>
               <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
                 {plans.data.data.map((p) => (
                   <div key={p.id} className="px-3.5 py-2.5">
@@ -144,6 +146,7 @@ export function RevenueDrillModal({
                   </div>
                 ))}
               </div>
+              <Pager page={planPage} totalPages={plans.data.meta.total_pages} onPage={setPlanPage} busy={plans.isFetching} />
             </div>
           )}
         </div>

@@ -38,7 +38,10 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
 
   if (!isLoading && active.length === 0 && !showEmpty) return null;
 
-  const choose = () => navigate(user?.role === "customer" ? "/app/subscriptions" : "/login");
+  // A guest comes back to the passes after logging in (LoginPage honours
+  // state.from.pathname for customers) instead of landing on the dashboard.
+  const choose = () =>
+    user?.role === "customer" ? navigate("/app/subscriptions") : navigate("/login", { state: { from: { pathname: "/app/subscriptions" } } });
 
   // "Two cards, always" (founder call): ONE pass card, whatever the exact
   // washes/vehicle-types behind it — never one card per plan document. An
@@ -78,30 +81,30 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   return (
     <SectionShell id={id} className="bg-white">
       <SectionHeader
-        title="Monthly Pass"
+        title="Monthly pass"
         subtitle="One car, one wash, one monthly price. Book whenever you need it."
       />
 
       <div className="mt-8 grid grid-cols-1 gap-5 sm:mt-10 sm:grid-cols-2">
         {isLoading ? (
-          <div className="h-[320px] animate-pulse rounded-2xl border border-cream-line bg-white" aria-hidden="true" />
+          <div className="h-[320px] animate-pulse rounded-2xl border border-card-border bg-white" aria-hidden="true" />
         ) : (
           <div className="flex flex-col rounded-2xl border border-black bg-black p-6 text-white sm:p-7">
-            <h3 className="font-display text-[22px] font-bold leading-tight">Monthly Pass</h3>
+            <h3 className="font-display text-[22px] font-bold leading-tight">Monthly pass</h3>
 
             <div className="mt-5 flex flex-wrap items-baseline gap-x-2">
               {from != null && <span className="text-[13px] text-white/70">From</span>}
               <span className="font-display text-[34px] font-bold leading-none">{from != null ? INR(from) : "—"}</span>
-              <span className="text-[13px] text-white/70">Per Month</span>
+              <span className="text-[13px] text-white/70">per month</span>
             </div>
             <p className="mt-2 text-[14px] text-white/70">
-              {maxWashesAMonth > 0 ? `Up to ${maxWashesAMonth} washes a month` : "Washes every month"} · your price depends on your car and the wash you pick
+              {maxWashesAMonth > 0 ? `Up to ${maxWashesAMonth} washes a month` : "Washes every month"} · price depends on your car and wash
             </p>
 
             <ul className="mt-5 space-y-2 text-[14px]">
               {washes.length > 0 && <PlanLine dark>Choose one: {washes.join(", ")}</PlanLine>}
-              <PlanLine dark>One car per pass — take one for each of your cars</PlanLine>
-              <PlanLine dark>Washed at your doorstep, whenever you book</PlanLine>
+              <PlanLine dark>One car per pass</PlanLine>
+              <PlanLine dark>At your doorstep, whenever you book</PlanLine>
             </ul>
 
             <button
@@ -109,7 +112,7 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
               onClick={choose}
               className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gold py-3 text-[14px] font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-gold-dark hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)]"
             >
-              Get This Pass
+              Get this pass
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
@@ -117,12 +120,12 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
 
         {/* Always present, even with no plans configured — it's the route
             for everyone the standard pass can't serve. */}
-        <div className="flex flex-col rounded-2xl border border-cream-line bg-white p-6 text-black sm:p-7">
-          <h3 className="font-display text-[22px] font-bold leading-tight">Custom Plan</h3>
+        <div className="flex flex-col rounded-2xl border border-card-border bg-white p-6 text-black sm:p-7">
+          <h3 className="font-display text-[22px] font-bold leading-tight">Custom plan</h3>
           <p className="mt-5 text-[14px] leading-relaxed text-neutral-600">
             More cars, more washes, or a fixed time every week? Tell us what you need and we'll price it for you.
           </p>
-          <ul className="mt-5 space-y-2 text-[14px]">
+          <ul className="mb-6 mt-5 space-y-2 text-[14px]">
             <PlanLine dark={false}>Any number of vehicles</PlanLine>
             <PlanLine dark={false}>Your own schedule</PlanLine>
             <PlanLine dark={false}>We call you back with a price</PlanLine>
@@ -132,7 +135,7 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
             onClick={() => setEnquiryOpen(true)}
             className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-xl border border-black py-3 text-[14px] font-bold text-black transition-colors hover:bg-black hover:text-white"
           >
-            Request a Custom Plan
+            Request a custom plan
             <ArrowRight className="h-4 w-4" />
           </button>
         </div>

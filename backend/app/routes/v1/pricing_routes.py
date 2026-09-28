@@ -21,9 +21,15 @@ async def set_pricing_config(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    await PricingService(db).set_pricing_config(payload.per_km_rate, payload.default_captain_service_fee, updated_by=current_user.id)
-    await AuditService(db).log_action(current_user.id, current_user.role, "UPDATE_PRICING_CONFIG", "settings", None, payload.model_dump())
-    # Return the flat {per_km_rate, default_captain_service_fee} shape — same as GET —
-    # rather than the raw settings document, which nests these under "value".
+    await PricingService(db).set_pricing_config(
+        payload.per_km_rate,
+        payload.default_captain_service_fee,
+        updated_by=current_user.id,
+        customer_free_km=payload.customer_free_km,
+        customer_per_km_rate=payload.customer_per_km_rate,
+    )
+    await AuditService(db).log_action(current_user.id, current_user.role, "UPDATE_PRICING_CONFIG", "settings", None, payload.model_dump(exclude_none=True))
+    # Return the flat config shape — same as GET — rather than the raw
+    # settings document, which nests these under "value".
     result = await PricingService(db).get_pricing_config()
     return success(result, "Pricing configuration updated")

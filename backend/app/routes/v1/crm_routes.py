@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_manager_or_admin
@@ -19,11 +19,12 @@ async def search_customer_by_phone(phone: str, db: AsyncIOMotorDatabase = Depend
 
 
 @router.get("/customers/typeahead")
-async def search_customers_typeahead(q: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def search_customers_typeahead(q: str, limit: int = Query(8, ge=1, le=25), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Live suggestions as a manager types a name or number into a booking
-    or plan-sale form, so an existing customer is picked directly instead
-    of a duplicate account getting created."""
-    return success(await CRMService(db).search_customers(q))
+    or plan-sale form (or the Customers lookup page), so an existing
+    customer is picked directly instead of a duplicate account getting
+    created."""
+    return success(await CRMService(db).search_customers(q, limit))
 
 
 @router.get("/customers/{customer_id}")

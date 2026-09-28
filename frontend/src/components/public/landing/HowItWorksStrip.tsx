@@ -4,17 +4,17 @@ import { SectionShell } from "./shared";
 const STEPS = [
   {
     icon: Car,
-    title: "Pick a Service",
+    title: "Pick a service",
     text: "Choose what your car or bike needs and see the price upfront.",
   },
   {
     icon: CalendarClock,
-    title: "Choose Time & Address",
+    title: "Choose time & address",
     text: "Pick a slot that suits you. Home, office or parking — we come there.",
   },
   {
     icon: Armchair,
-    title: "Sit Back and Relax",
+    title: "Sit back and relax",
     text: "Our captain washes your vehicle at your doorstep while you watch.",
   },
 ];
@@ -60,7 +60,7 @@ export function HowItWorksStrip({ id = "how-it-works" }: { id?: string }) {
                 </div>
                 
                 <div className="pt-1 sm:pt-0 sm:text-center">
-                  <p className="text-[12px] font-bold uppercase tracking-[0.15em] text-[var(--color-gold)]">
+                  <p className="text-[12px] font-semibold text-neutral-500">
                     Step {i + 1}
                   </p>
                   <h3 className="mt-2 font-display text-[18px] font-bold text-gray-900 sm:text-[19px]">

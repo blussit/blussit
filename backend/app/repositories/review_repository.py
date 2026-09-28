@@ -10,8 +10,15 @@ class ReviewRepository(BaseRepository):
     async def list_for_captain(self, captain_id: str) -> list[dict]:
         return await self.find_all_no_paginate({"captain_id": captain_id})
 
-    async def list_for_customer(self, customer_id: str) -> list[dict]:
-        return await self.find_all_no_paginate({"customer_id": customer_id})
+    # GET /reviews/my: the customer's newest reviews, or just the ones for
+    # the bookings asked about — never an unbounded list.
+    MY_REVIEWS_LIMIT = 100
+
+    async def list_for_customer(self, customer_id: str, booking_ids: list[str] | None = None) -> list[dict]:
+        filters: dict = {"customer_id": customer_id}
+        if booking_ids:
+            filters["booking_id"] = {"$in": booking_ids[: self.MY_REVIEWS_LIMIT]}
+        return await self.find_all_no_paginate(filters, limit=self.MY_REVIEWS_LIMIT)
 
     async def find_by_booking_id(self, booking_id: str) -> dict | None:
         return await self.find_one({"booking_id": booking_id})

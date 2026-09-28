@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.payment_controller import PaymentController
@@ -15,6 +15,7 @@ from app.core.dependencies import (
     require_customer,
     require_manager_or_admin,
 )
+from app.core.responses import success
 from app.schemas.subscription_schema import (
     AssignSubscriptionRequest,
     AutoPayRequest,
@@ -107,12 +108,24 @@ async def list_customer_subscriptions(customer_id: str, db: AsyncIOMotorDatabase
 
 @subscription_router.get("/center/{service_center_id}/overview", dependencies=[Depends(require_manager_or_admin)])
 async def center_subscription_overview(
-    service_center_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+    service_center_id: str,
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    plan_id: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """KPIs + rows for the manager's Subscribers page: every subscription
     held by a customer this center has served — active / expiring-in-14-days
-    / expired counts, per-plan breakdown, and one detail row each."""
-    return await UserSubscriptionController(db).center_overview(current_user, service_center_id)
+    / expired counts and per-plan breakdown over ALL of them, plus one page
+    of detail rows (`meta` carries the paging; `search` matches customer
+    name/phone or plan name)."""
+    from app.services.subscription_service import UserSubscriptionService
+
+    return success(await UserSubscriptionService(db).center_overview(
+        service_center_id, current_user.role, current_user.service_center_id,
+        page=pagination.page, page_size=pagination.page_size, search=pagination.search, status=status, plan_id=plan_id,
+    ))
 
 
 @subscription_router.get("/{subscription_id}/usage", dependencies=[Depends(require_manager_or_admin)])
@@ -193,10 +206,20 @@ async def list_all_subscriptions(pagination: PaginationParams = Depends(), db: A
 
 
 @subscription_router.get("/admin/overview", dependencies=[Depends(require_admin)])
-async def subscriptions_admin_overview(db: AsyncIOMotorDatabase = Depends(get_db)):
+async def subscriptions_admin_overview(
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    plan_id: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
     """Every plan ever purchased or granted, platform-wide, with who paid
-    what — the admin's revenue/ownership view (see UserSubscriptionService.admin_overview)."""
-    return await UserSubscriptionController(db).admin_overview()
+    what — the admin's revenue/ownership view (see UserSubscriptionService.
+    admin_overview). KPIs cover everything; rows are one filtered page."""
+    from app.services.subscription_service import UserSubscriptionService
+
+    return success(await UserSubscriptionService(db).admin_overview(
+        page=pagination.page, page_size=pagination.page_size, search=pagination.search, status=status, plan_id=plan_id,
+    ))
 
 
 @subscription_router.get("/admin/plan-purchases", dependencies=[Depends(require_admin)])

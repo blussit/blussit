@@ -1,18 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, MapPin, Navigation, Pencil, Phone, RotateCcw, Star } from "lucide-react";
+import { BadgeCheck, CheckCircle2, ChevronLeft, Clock, LifeBuoy, Navigation, Pencil, Phone, RotateCcw, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
+import { paymentApi } from "../../api/payment";
 import { complaintApi, reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { Button, Card, CardBody, CardHeader, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useLiveChannel } from "../../lib/socket";
-import { formatDateTime, formatSlot } from "../../lib/date";
+import { format, formatDateTime, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
-import { PaymentCancelled, payWithRazorpay } from "../../lib/razorpay";
+import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay, sentence } from "../../lib/razorpay";
 import { vehicleLabel } from "../../lib/constants";
+import type { Booking } from "../../types";
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = { cash: "Cash on service", online: "Online", subscription: "Plan" };
+
+/** Nothing more will happen to it: cancelled, or done and settled. A done
+ * but still-unpaid booking stays live — the captain may be collecting. */
+function isFinished(b: Booking | undefined): boolean {
+  if (!b) return false;
+  if (b.status === "cancelled") return true;
+  return b.status === "completed" && (b.payment_status === "paid" || b.payment_status === "refunded" || !(b.total_amount > 0));
+}
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -40,6 +52,9 @@ export default function BookingDetailPage() {
   const [supportSubject, setSupportSubject] = useState("");
   const [supportDescription, setSupportDescription] = useState("");
   const [supportError, setSupportError] = useState("");
+  // What the last pay attempt on THIS screen came to — failed (with the
+  // bank's reason), still being confirmed, or parked for review.
+  const [payNote, setPayNote] = useState<{ tone: "info" | "error"; text: string } | null>(null);
 
   const bookingQueryKey = ["booking", id];
   const { data: booking, isLoading } = useQuery({
@@ -48,8 +63,9 @@ export default function BookingDetailPage() {
     enabled: !!id,
     // Live-pushed over "booking:{id}" below (status/assignment/priority
     // changes) — this interval is the fallback for while the socket is
-    // reconnecting, not the primary way this page stays current.
-    refetchInterval: 45000,
+    // reconnecting, not the primary way this page stays current. Nothing
+    // left to watch once the visit is finished.
+    refetchInterval: (query) => (isFinished(query.state.data) ? false : 45000),
   });
 
   // A car booked as part of a multi-vehicle visit is only half the story on
@@ -59,23 +75,41 @@ export default function BookingDetailPage() {
     queryKey: ["booking-group", groupId],
     queryFn: () => bookingApi.getGroup(groupId as string),
     enabled: !!groupId,
-    refetchInterval: 45000,
+    refetchInterval: (query) => (query.state.data?.every(isFinished) ? false : 45000),
   });
   const visit = groupId && visitBookings?.length ? visitBookings : null;
+  const live = !!booking && !(visit ? visit.every(isFinished) : isFinished(booking));
   /** The whole visit's outstanding amount — what the customer actually owes. */
   const visitTotal = (visit || (booking ? [booking] : [])).reduce((sum, b) => sum + (b.total_amount || 0), 0);
   // Status timeline + before/after photos: every car on the visit, not
   // just whichever one this page happens to be for.
   const trailCars = visit || (booking ? [booking] : []);
   const multiCar = trailCars.length > 1;
+  // Charged once per visit (on its first car) and already inside total_amount.
+  const travelCharge = trailCars.reduce((sum, b) => sum + (b.travel_charge || 0), 0);
+  const travelKm = trailCars.find((b) => (b.travel_charge || 0) > 0)?.travel_charge_km;
+  const prepaidOnly = trailCars.some((b) => b.prepaid_only);
+  // Founder rule: a prepaid service can never fall back to cash.
+  const cashAllowed = !prepaidOnly && booking?.status === "awaiting_payment";
   const carLabel = (car: (typeof trailCars)[number]) =>
     vehicleLabel(car);
 
-  useLiveChannel(id ? `booking:${id}` : null, () => {
+  useLiveChannel(id && live ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
   });
 
-  const { data: myReviews } = useQuery({ queryKey: ["my-reviews"], queryFn: reviewApi.mine, enabled: isCustomer });
+  // A failed attempt (retryable) or money received that couldn't be
+  // applied (being fixed/refunded) — facts the booking itself doesn't carry.
+  const paymentStateKey = ["booking-payment-state", id];
+  const { data: paymentState } = useQuery({
+    queryKey: paymentStateKey,
+    queryFn: () => paymentApi.bookingState(id as string),
+    enabled: !!id && isCustomer,
+    refetchInterval: live ? 45000 : false,
+  });
+
+  // Just this booking's review — the unfiltered list stops at the newest 100.
+  const { data: myReviews } = useQuery({ queryKey: ["my-reviews", "for", id], queryFn: () => reviewApi.mine(id ? [id] : undefined), enabled: isCustomer && !!id });
   const myReview = myReviews?.find((r) => r.booking_id === id);
 
   // A completed-but-unrated booking opens the rating window by itself —
@@ -161,25 +195,49 @@ export default function BookingDetailPage() {
   });
 
   const payMutation = useMutation({
-    mutationFn: () =>
-      payWithRazorpay(
-        { purpose: "booking", booking_id: id as string },
-        { name: user?.full_name, email: user?.email, contact: user?.phone }
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bookingQueryKey });
-      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+    mutationFn: () => {
+      setPayNote(null);
+      setError("");
+      return payWithRazorpay(
+        // A visit is paid for once — every car on it, one order.
+        groupId ? { purpose: "booking_group", booking_group_id: groupId } : { purpose: "booking", booking_id: id as string },
+        { name: user?.full_name, email: user?.email, contact: user?.phone },
+        undefined,
+        {
+          onConfirming: () => setPayNote({ tone: "info", text: "Payment done — confirming it with the bank…" }),
+          onFailed: (reason) => setPayNote({ tone: "error", text: `Payment failed — ${reason}` }),
+        }
+      );
     },
+    onSuccess: () => setPayNote(null),
     onError: (err) => {
-      if (err instanceof PaymentCancelled) return; // closed the modal — no error to show
-      setError(getErrorMessage(err));
+      if (err instanceof PaymentFailed) {
+        setPayNote({ tone: "error", text: `Payment failed — ${err.reason} Try again${cashAllowed ? ", or pay cash instead" : ""}.` });
+      } else if (err instanceof PaymentPendingConfirmation || err instanceof PaymentNeedsAttention) {
+        setPayNote({ tone: "info", text: err.message });
+      } else if (err instanceof PaymentCancelled) {
+        setPayNote(null); // closed the modal without paying — nothing to report
+      } else {
+        setError(paymentErrorMessage(err));
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+      queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
+      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      queryClient.invalidateQueries({ queryKey: paymentStateKey });
     },
   });
 
   const switchToCashMutation = useMutation({
-    mutationFn: () => bookingApi.switchToCash(id as string),
+    // One decision for the whole visit — switching one car would leave the others unpaid.
+    mutationFn: async (): Promise<void> => {
+      if (groupId) await bookingApi.switchGroupToCash(groupId);
+      else await bookingApi.switchToCash(id as string);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+      queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
       setError("");
     },
@@ -227,12 +285,15 @@ export default function BookingDetailPage() {
   // 4-hour lock (which protects a dispatched job) doesn't apply — matching
   // the backend, which lets them walk away from it at any time.
   const awaitingPayment = booking.status === "awaiting_payment";
+  // Only while nothing newer (this screen's own attempt) says otherwise.
+  const failedReason = !payNote && !payMutation.isPending ? paymentState?.last_failure?.reason : undefined;
+  const lastFailure = failedReason ? sentence(failedReason) : undefined;
   const canCancel = isCustomer && (awaitingPayment || (unassigned && !insideCancelLock));
   const cancelLockHint =
     isCustomer && !["completed", "cancelled"].includes(booking.status) && !canCancel
       ? !unassigned
-        ? "A captain is on this booking — it can no longer be cancelled online."
-        : "Cancellations close 4 hours before your slot — message us on WhatsApp if you need help."
+        ? "A captain is assigned, so it can't be cancelled online."
+        : "Cancellations close 4 hours before your slot. Message us on WhatsApp for help."
       : null;
   // Mirrors the backend's reschedule guard — once a captain is on the way
   // or mid-service, rescheduling would pull the booking out from under
@@ -241,161 +302,183 @@ export default function BookingDetailPage() {
     isCustomer &&
     !["completed", "cancelled", "captain_on_the_way", "service_started", "awaiting_payment"].includes(booking.status);
   const cancelReasonValid = cancelReason.trim().length >= 3;
+  // Same wording as the booking lists: every service on the visit, once each.
+  const title = [...new Set(trailCars.map((b) => b.combo_name || b.service_names?.join(", ") || "Service"))].join(" + ");
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      <div className="flex items-center gap-3">
-        <button onClick={() => navigate(-1)} className="rounded-full p-2 hover:bg-gray-100">
+    <div className="mx-auto max-w-2xl space-y-5">
+      <div className="flex items-start gap-3">
+        <button onClick={() => navigate(-1)} aria-label="Back" className="-ml-2 rounded-full p-2 hover:bg-gray-100">
           <ChevronLeft className="h-5 w-5" />
         </button>
-        <div>
-          <h1 className="text-xl font-bold text-[var(--color-text-primary)]">
-            {booking.combo_name || booking.service_names?.join(", ") || "Service"}
-          </h1>
-          <p className="text-sm text-[var(--color-text-secondary)]">
-            <span className="font-mono-num text-xs">{booking.booking_number}</span> · {formatDateTime(booking.created_at)}
+        <div className="min-w-0 flex-1">
+          <h1 className="text-xl font-bold text-black">{title}</h1>
+          <p className="mt-0.5 text-sm text-gray-500">
+            {format(booking.scheduled_date)} · {formatSlot(booking.scheduled_slot)}
+            {visit ? ` · ${visit.length} vehicles` : ""}
           </p>
+          <p className="font-mono-num text-xs text-gray-400">{booking.booking_number}</p>
         </div>
         <StatusBadge status={booking.status} />
       </div>
 
-      {/* The one number the customer needs on the day — the captain asks
-          for it on arrival (quick-booking model). Hidden once the visit is
-          over. */}
-      {booking.service_code && !["completed", "cancelled"].includes(booking.status) && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] px-4 py-3">
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#B08A00]">Service code</p>
-            <p className="text-xs text-[var(--color-text-secondary)]">Share this with the captain when they arrive.</p>
-          </div>
-          <p className="font-mono-num text-2xl font-bold tracking-[0.3em] text-black">{booking.service_code}</p>
-        </div>
-      )}
-
-      {/* The whole point of the awaiting-payment state: say plainly that
-          this isn't booked yet, and give the two ways out — finish paying,
-          or have the captain collect cash instead. */}
-      {isCustomer && awaitingPayment && (
-        <Card className="border-2 border-[#E8A900] bg-[#FFFCF0]">
-          <CardBody className="!p-5">
-            <p className="font-display text-base font-bold text-black">Payment Not Completed</p>
-            <p className="mt-1 text-sm text-gray-600">
-              We're holding your {formatSlot(booking.scheduled_slot)} slot, but {visit ? "this visit isn't" : "this booking isn't"}{" "}
-              confirmed until the payment goes through. Finish paying, or have the captain collect the cash at your
-              doorstep.
-              {visit ? ` One payment covers all ${visit.length} vehicles.` : ""}
-            </p>
-            <div className="mt-4 flex flex-wrap gap-2.5">
-              <Button
-                isLoading={payMutation.isPending}
-                onClick={() => payMutation.mutate()}
-                className="bg-[#E8A900] hover:bg-[#D99A00]"
-              >
-                Pay ₹{visitTotal} Online
-              </Button>
-              <Button
-                variant="outline"
-                isLoading={switchToCashMutation.isPending}
-                onClick={() => switchToCashMutation.mutate()}
-              >
-                Pay Cash On Service Instead
-              </Button>
-              {/* Nothing is booked yet, so everything is still open —
-                  the wizard reopens with every choice filled in. */}
-              <Button variant="ghost" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
-                <Pencil className="h-4 w-4" /> Edit Booking
-              </Button>
-            </div>
-            <p className="mt-3 text-xs text-gray-400">
-              If you do neither, we'll release the slot shortly so someone else can book it.
-            </p>
-          </CardBody>
+      {/* Money that arrived but couldn't be applied — said plainly, so nobody pays twice. */}
+      {isCustomer && paymentState?.attention && (
+        <Card className="p-4 sm:p-5">
+          <p className="font-semibold text-black">Payment received — under review</p>
+          <p className="mt-1 text-sm text-gray-600">
+            ₹{paymentState.attention.amount} · {paymentState.attention.message}
+          </p>
         </Card>
       )}
 
-      {/* Who's coming to your door — the captain's public card, shown the
-          moment one is assigned (photo, staff id, phone). */}
+      {/* Not booked until paid: finish paying, or (unless prepaid only) have the captain collect cash. */}
+      {isCustomer && awaitingPayment && (
+        <Card className="p-4 sm:p-5">
+          <p className="font-semibold text-black">
+            {paymentState?.confirming ? "Confirming your payment…" : lastFailure ? "Payment failed" : "Payment pending"}
+          </p>
+          <p className="mt-1 text-sm text-gray-600">
+            {lastFailure
+              ? `${lastFailure} Try again${cashAllowed ? ", or pay cash instead" : ""} — unpaid slots are released shortly.`
+              : `Pay to confirm your slot${visit ? ` — one payment covers all ${visit.length} vehicles` : ""}. Unpaid slots are released shortly.`}
+          </p>
+          {payNote && (
+            <p className={`mt-2 text-sm ${payNote.tone === "error" ? "text-[var(--color-error)]" : "text-gray-700"}`}>{payNote.text}</p>
+          )}
+          <div className="mt-4 flex flex-wrap gap-2.5">
+            <Button variant="info" isLoading={payMutation.isPending} onClick={() => payMutation.mutate()}>
+              {lastFailure ? `Try again — ₹${visitTotal}` : `Pay ₹${visitTotal} now`}
+            </Button>
+            {!prepaidOnly && (
+              <Button variant="outline" isLoading={switchToCashMutation.isPending} onClick={() => switchToCashMutation.mutate()}>
+                Pay cash instead
+              </Button>
+            )}
+            {/* Nothing is booked yet, so the wizard reopens with every choice filled in. */}
+            <Button variant="ghost" onClick={() => navigate(`/app/book?edit=${booking.id}`)}>
+              <Pencil className="h-4 w-4" /> Edit booking
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+      {payNote && !awaitingPayment && (
+        <p className={`text-sm ${payNote.tone === "error" ? "text-[var(--color-error)]" : "text-gray-700"}`}>{payNote.text}</p>
+      )}
+
+      <div className="flex flex-wrap gap-2.5">
+        {/* Founder rule: any unpaid booking can be paid online at any time, even one booked as cash. */}
+        {isCustomer &&
+          booking.payment_status === "pending" &&
+          booking.status !== "cancelled" &&
+          !awaitingPayment &&
+          booking.total_amount > 0 && (
+            <Button variant="info" isLoading={payMutation.isPending} onClick={() => payMutation.mutate()}>
+              Pay ₹{visitTotal} online
+            </Button>
+          )}
+        {/* The wizard replays vehicle, services and address; only the date and slot are new. */}
+        {isCustomer && ["completed", "cancelled"].includes(booking.status) && (
+          <Button variant="info" onClick={() => navigate(`/app/book?repeat=${booking.id}`)}>
+            <RotateCcw className="h-4 w-4" /> Book again
+          </Button>
+        )}
+        {isCustomer && booking.status === "completed" && !myReview && (
+          <Button variant="outline" onClick={openReview}>
+            <Star className="h-4 w-4" /> Rate this service
+          </Button>
+        )}
+        {canReschedule && (
+          <Button variant="outline" onClick={() => setRescheduleOpen(true)}>
+            Reschedule
+          </Button>
+        )}
+        {canCancel && (
+          <Button variant="outline" onClick={() => setCancelOpen(true)}>
+            Cancel booking
+          </Button>
+        )}
+        {isCustomer && (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setSupportError("");
+              setSupportOpen(true);
+            }}
+          >
+            <LifeBuoy className="h-4 w-4" /> Need help?
+          </Button>
+        )}
+        {cancelLockHint && <p className="w-full text-xs text-gray-500">{cancelLockHint}</p>}
+      </div>
+
+      {/* The one number the customer needs on the day — the captain asks for it on arrival. */}
+      {booking.service_code && !["completed", "cancelled"].includes(booking.status) && (
+        <Card className="flex items-center justify-between gap-3 px-4 py-3">
+          <div>
+            <p className="text-sm font-medium text-black">Service code</p>
+            <p className="text-xs text-gray-500">Share it with the captain on arrival.</p>
+          </div>
+          <p className="font-mono-num text-2xl font-bold tracking-[0.3em] text-black">{booking.service_code}</p>
+        </Card>
+      )}
+
       {booking.captain_profile && booking.status !== "cancelled" && (
-        <Card className="border-[#F3E5B5]">
-          <CardBody className="flex items-center gap-4 !p-4">
-            {booking.captain_profile.photo_url ? (
-              <img src={booking.captain_profile.photo_url} alt={booking.captain_profile.full_name || "Captain"} className="h-14 w-14 shrink-0 rounded-full object-cover" />
-            ) : (
-              <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gray-100 font-display text-lg font-bold text-black">
-                {(booking.captain_profile.full_name || "C").trim().charAt(0).toUpperCase()}
-              </span>
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-black">Your captain</p>
-              <p className="flex flex-wrap items-center gap-1.5 font-semibold text-black">
-                {booking.captain_profile.full_name || "Captain"}
-                {booking.captain_profile.verified && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-green-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-green-700">
-                    <BadgeCheck className="h-2.5 w-2.5" /> Verified
-                  </span>
-                )}
-              </p>
-              {booking.captain_profile.employee_id && (
-                <p className="font-mono-num text-xs text-gray-400">ID {booking.captain_profile.employee_id}</p>
+        <Card className="flex items-center gap-4 p-4">
+          {booking.captain_profile.photo_url ? (
+            <img src={booking.captain_profile.photo_url} alt={booking.captain_profile.full_name || "Captain"} className="h-14 w-14 shrink-0 rounded-full object-cover" />
+          ) : (
+            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gray-100 font-display text-lg font-bold text-black">
+              {(booking.captain_profile.full_name || "C").trim().charAt(0).toUpperCase()}
+            </span>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-xs text-gray-500">Your captain</p>
+            <p className="flex flex-wrap items-center gap-1.5 font-semibold text-black">
+              {booking.captain_profile.full_name || "Captain"}
+              {booking.captain_profile.verified && (
+                <span className="inline-flex items-center gap-0.5 rounded-full bg-green-50 px-1.5 py-0.5 text-[11px] font-medium text-green-700">
+                  <BadgeCheck className="h-3 w-3" /> Verified
+                </span>
               )}
-            </div>
-            {booking.captain_profile.phone && (
-              <a
-                href={`tel:${booking.captain_profile.phone}`}
-                className="flex shrink-0 items-center gap-1.5 rounded-xl bg-black px-3.5 py-2.5 text-sm font-bold text-white hover:opacity-90"
-              >
-                <Phone className="h-4 w-4" /> Call
-              </a>
+            </p>
+            {booking.captain_profile.employee_id && (
+              <p className="font-mono-num text-xs text-gray-400">ID {booking.captain_profile.employee_id}</p>
             )}
-          </CardBody>
+          </div>
+          {booking.captain_profile.phone && (
+            <a
+              href={`tel:${booking.captain_profile.phone}`}
+              className="flex shrink-0 items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-black transition-colors hover:border-gray-400 hover:bg-gray-50"
+            >
+              <Phone className="h-4 w-4" /> Call
+            </a>
+          )}
         </Card>
       )}
 
       <Card>
         <CardHeader>
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Booking Summary</h2>
+          <h2 className="font-semibold text-black">Price details</h2>
         </CardHeader>
         <CardBody className="space-y-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-[var(--color-text-secondary)]">Scheduled for</span>
-            <span>{new Date(booking.scheduled_date).toLocaleDateString("en-IN")} · {formatSlot(booking.scheduled_slot)}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-[var(--color-text-secondary)]">Payment method</span>
-            <span className="capitalize">{(booking.payment_method || "—").replace(/_/g, " ")}</span>
-          </div>
-
-          {/* A visit is one booking to the customer, so the summary shows
-              every vehicle on it — not just whichever car's page they
-              happened to open. */}
+          {/* A visit is one booking to the customer: every vehicle on it, one total. */}
           {visit ? (
-            <div className="space-y-2 border-t border-gray-100 pt-3">
-              {visit.map((car) => (
-                <div key={car.id}>
-                  <p className="flex items-center gap-2 text-xs font-semibold text-black">
-                    {car.vehicle_snapshot
-                      ? vehicleLabel(car)
-                      : "Vehicle"}
-                    {car.id === booking.id && (
-                      <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">
-                        this page
-                      </span>
-                    )}
-                  </p>
-                  <div className="flex justify-between">
-                    <span className="text-[var(--color-text-secondary)]">
-                      {car.combo_name || car.service_names?.join(", ") || "Service"}
-                      <span className="font-mono-num ml-1.5 text-xs text-gray-400">{car.booking_number}</span>
-                    </span>
-                    <span className="font-mono-num">₹{car.total_amount}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+            visit.map((car) => (
+              <div key={car.id} className="flex justify-between gap-3">
+                <span className="min-w-0 text-gray-600">
+                  <span className="block font-medium text-black">{car.vehicle_snapshot ? vehicleLabel(car) : "Vehicle"}</span>
+                  {car.combo_name || car.service_names?.join(", ") || "Service"}
+                </span>
+                <span className="font-mono-num">₹{(car.total_amount || 0) - (car.travel_charge || 0)}</span>
+              </div>
+            ))
           ) : (
             <>
               <div className="flex justify-between">
-                <span className="text-[var(--color-text-secondary)]">Subtotal</span>
+                <span className="text-gray-600">Subtotal</span>
                 <span className="font-mono-num">₹{booking.subtotal}</span>
               </div>
               {booking.discount_amount > 0 && (
@@ -406,45 +489,52 @@ export default function BookingDetailPage() {
               )}
             </>
           )}
+          {travelCharge > 0 && (
+            <div className="flex justify-between">
+              <span className="text-gray-600">
+                Distance charge{travelKm ? ` · ${Math.round(travelKm * 10) / 10} km` : ""}
+              </span>
+              <span className="font-mono-num">₹{travelCharge}</span>
+            </div>
+          )}
           <div className="flex justify-between border-t border-gray-100 pt-3 text-base font-bold">
-            <span>Total{visit ? ` · ${visit.length} vehicles` : ""}</span>
+            <span>Total</span>
             <span className="font-mono-num">₹{visitTotal}</span>
+          </div>
+          <div className="flex justify-between text-xs text-gray-500">
+            <span>Payment</span>
+            <span>
+              {PAYMENT_METHOD_LABELS[booking.payment_method] || (booking.payment_method || "—").replace(/_/g, " ")}
+              {booking.payment_status === "paid" ? " · Paid" : ""}
+            </span>
           </div>
         </CardBody>
       </Card>
 
-      {/* A multi-vehicle visit shows EVERY car's own timeline, one after
-          another — the customer booked one visit and expects to see all of
-          it, not just whichever car's page they happened to open (same
-          "this page" labeling as the Booking Summary above). */}
+      {/* Every car on a visit has its own timeline, shown one after another. */}
       {trailCars.some((car) => !!car.status_history?.length) && (
         <Card>
           <CardHeader>
-            <h2 className="font-semibold text-[var(--color-text-primary)]">Status timeline</h2>
+            <h2 className="font-semibold text-black">Status timeline</h2>
           </CardHeader>
           <CardBody className="space-y-6">
             {trailCars.map(
               (car) =>
                 !!car.status_history?.length && (
                   <div key={car.id}>
-                    {multiCar && (
-                      <p className="mb-3 flex items-center gap-2 text-xs font-semibold text-black">
-                        {carLabel(car)}
-                        {car.id === booking.id && <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">this page</span>}
-                      </p>
-                    )}
+                    {multiCar && <p className="mb-3 text-xs font-semibold text-black">{carLabel(car)}</p>}
                     <div className="space-y-4">
                       {car.status_history!.map((h, i) => (
                         <div key={i} className="flex gap-3">
                           <div className="flex flex-col items-center">
-                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-black">
                               <CheckCircle2 className="h-3.5 w-3.5" />
                             </span>
                             {i < (car.status_history?.length || 0) - 1 && <div className="mt-1 h-full w-px flex-1 bg-gray-200" />}
                           </div>
                           <div className="pb-4">
-                            <p className="text-sm font-medium capitalize text-[var(--color-text-primary)]">{h.status.replace(/_/g, " ")}</p>
-                            {h.note && <p className="text-xs text-[var(--color-text-secondary)]">{h.note}</p>}
+                            <p className="text-sm font-medium capitalize text-black">{h.status.replace(/_/g, " ")}</p>
+                            {h.note && <p className="text-xs text-gray-500">{h.note}</p>}
                             <p className="mt-0.5 text-xs text-gray-400">{formatDateTime(h.created_at)}</p>
                           </div>
                         </div>
@@ -459,14 +549,11 @@ export default function BookingDetailPage() {
 
       {/* Issue flags ("Captain started late", geofence alerts…) are
           internal manager↔captain ops — the API redacts them for customer
-          responses (_CUSTOMER_HIDDEN_FIELDS) and no banner renders here.
-          The customer's window into progress is the transparency timeline
-          below, which shows what happened, not who got flagged. */}
+          responses (_CUSTOMER_HIDDEN_FIELDS) and no banner renders here. */}
 
       {/* Internal to manager/captain — the specific lateness stage and pay
           penalty are operational/financial detail, not something the
-          customer needs (they already see the generic "flagged" card
-          above if there's an active issue). */}
+          customer needs. */}
       {!isCustomer && booking.captain_start_stage && booking.captain_start_stage !== "on_time" && booking.captain_start_stage !== "early" && (
         <Card className="border border-[var(--color-warning)]/40">
           <CardBody className="flex items-start gap-3">
@@ -488,32 +575,22 @@ export default function BookingDetailPage() {
       {trailCars.some((car) => car.heading_at || car.before_photo || car.after_photo) && (
         <Card>
           <CardHeader>
-            <h2 className="font-semibold text-[var(--color-text-primary)]">Status</h2>
+            <h2 className="font-semibold text-black">Service updates</h2>
           </CardHeader>
           <CardBody className="space-y-6">
             {trailCars.map(
               (car) =>
                 (car.heading_at || car.before_photo || car.after_photo) && (
                   <div key={car.id} className={multiCar ? "space-y-4 border-b border-gray-100 pb-6 last:border-b-0 last:pb-0" : "space-y-5"}>
-                    {multiCar && (
-                      <p className="flex items-center gap-2 text-xs font-semibold text-black">
-                        {carLabel(car)}
-                        {car.id === booking.id && <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-gray-600">this page</span>}
-                      </p>
-                    )}
+                    {multiCar && <p className="text-xs font-semibold text-black">{carLabel(car)}</p>}
                     {car.heading_at && (
                       <div className="flex items-start gap-3 text-sm">
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-light)] text-[var(--color-primary)]">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-100 text-black">
                           <Navigation className="h-4 w-4" />
                         </span>
                         <div>
-                          <p className="font-medium text-[var(--color-text-primary)]">Captain started heading over</p>
-                          <p className="text-xs text-[var(--color-text-secondary)]">{formatDateTime(car.heading_at)}</p>
-                          {car.heading_location && (
-                            <p className="mt-0.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                              <MapPin className="h-3 w-3" /> {car.heading_location.latitude.toFixed(5)}, {car.heading_location.longitude.toFixed(5)}
-                            </p>
-                          )}
+                          <p className="font-medium text-black">Captain started heading over</p>
+                          <p className="text-xs text-gray-500">{formatDateTime(car.heading_at)}</p>
                         </div>
                       </div>
                     )}
@@ -521,20 +598,16 @@ export default function BookingDetailPage() {
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       {car.before_photo && (
                         <div>
-                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Before service</p>
+                          <p className="mb-2 text-xs font-medium text-gray-500">Before</p>
                           <img src={car.before_photo.image_url} alt="Before service" className="h-40 w-full rounded-xl object-cover" />
-                          <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                            <MapPin className="h-3 w-3" /> {formatDateTime(car.before_photo.captured_at)}
-                          </p>
+                          <p className="mt-1.5 text-xs text-gray-500">{formatDateTime(car.before_photo.captured_at)}</p>
                         </div>
                       )}
                       {car.after_photo && (
                         <div>
-                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">After service</p>
+                          <p className="mb-2 text-xs font-medium text-gray-500">After</p>
                           <img src={car.after_photo.image_url} alt="After service" className="h-40 w-full rounded-xl object-cover" />
-                          <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                            <MapPin className="h-3 w-3" /> {formatDateTime(car.after_photo.captured_at)}
-                          </p>
+                          <p className="mt-1.5 text-xs text-gray-500">{formatDateTime(car.after_photo.captured_at)}</p>
                         </div>
                       )}
                     </div>
@@ -543,8 +616,7 @@ export default function BookingDetailPage() {
             )}
 
             {/* Captain payout / platform margin — internal financial detail,
-                never shown to the customer or the captain themselves, only
-                to manager/admin (this page is shared across all three). */}
+                only ever shown to manager/admin. */}
             {booking.captain_earning != null && (user?.role === "manager" || user?.role === "admin") && (
               <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-4 text-sm">
                 <div className="flex justify-between">
@@ -566,88 +638,24 @@ export default function BookingDetailPage() {
         </Card>
       )}
 
-      {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-
-      <div className="flex flex-wrap gap-3">
-        {/* An online booking whose payment didn't go through (modal closed
-            mid-checkout, network blip) finishes it from here — same
-            server-verified Razorpay flow as at booking time. */}
-        {/* Founder rule: ANY unpaid booking can be paid online any time —
-            before, during or after the service — even one booked as cash
-            (paying flips it to online; the captain's app sees it as paid). */}
-        {isCustomer &&
-          booking.payment_status === "pending" &&
-          booking.status !== "cancelled" &&
-          !awaitingPayment && // the panel above already offers this, with context
-          booking.total_amount > 0 && (
-            <Button
-              isLoading={payMutation.isPending}
-              onClick={() => payMutation.mutate()}
-              className="bg-[#E8A900] hover:bg-[#D99A00]"
-            >
-              Pay ₹{visitTotal} Online
-            </Button>
-          )}
-        {canReschedule && (
-          <Button variant="outline" onClick={() => setRescheduleOpen(true)}>
-            Reschedule
+      {isCustomer && myReview && (
+        <div className="flex flex-wrap gap-2.5">
+          <Button variant="outline" onClick={openReview}>
+            <Star className="h-4 w-4" /> Edit review
           </Button>
-        )}
-        {canCancel && (
-          <Button variant="danger" onClick={() => setCancelOpen(true)}>
-            Cancel Booking
-          </Button>
-        )}
-        {isCustomer && (
           <Button
-            variant="outline"
-            onClick={() => {
-              setSupportError("");
-              setSupportOpen(true);
+            variant="ghost"
+            isLoading={deleteReviewMutation.isPending}
+            onClick={async () => {
+              if (await confirm({ title: "Delete your review?", message: "It can't be restored afterwards.", tone: "danger" })) deleteReviewMutation.mutate();
             }}
           >
-            <LifeBuoy className="h-4 w-4" /> Need help?
+            Delete review
           </Button>
-        )}
-        {cancelLockHint && <p className="w-full text-xs text-[var(--color-text-secondary)]">{cancelLockHint}</p>}
-        {isCustomer && booking.status === "completed" && !myReview && (
-          <Button variant="outline" onClick={openReview}>
-            <Star className="h-4 w-4" /> Rate this service
-          </Button>
-        )}
-        {isCustomer && myReview && (
-          <>
-            <Button variant="outline" onClick={openReview}>
-              <Star className="h-4 w-4" /> Edit review
-            </Button>
-            <Button
-              variant="ghost"
-              isLoading={deleteReviewMutation.isPending}
-              onClick={async () => {
-                if (await confirm({ title: "Delete your review?", message: "It can't be restored afterwards.", tone: "danger" })) deleteReviewMutation.mutate();
-              }}
-            >
-              Delete review
-            </Button>
-          </>
-        )}
-        {/* Book the same thing again: the wizard replays the vehicle, the
-            services and the address from this booking and asks only for a
-            new date and slot. Offered on a finished wash and on a cancelled
-            one — a cancellation is the other moment a customer wants
-            exactly this booking back, and re-picking it by hand is the
-            whole friction. */}
-        {isCustomer && ["completed", "cancelled"].includes(booking.status) && (
-          <Button
-            variant={booking.status === "cancelled" ? "primary" : "outline"}
-            onClick={() => navigate(`/app/book?repeat=${booking.id}`)}
-          >
-            <RotateCcw className="h-4 w-4" /> Book again{visit ? ` · ${visit.length} vehicles` : ""}
-          </Button>
-        )}
-      </div>
+        </div>
+      )}
 
-      <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="Cancel Booking">
+      <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="Cancel booking">
         <div className="space-y-4">
           <Input
             label="Reason for cancellation"
@@ -668,11 +676,9 @@ export default function BookingDetailPage() {
         </div>
       </Modal>
 
-      <Modal open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} title="Reschedule Booking">
+      <Modal open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} title="Reschedule">
         <div className="space-y-4">
-          <p className="text-sm text-[var(--color-text-secondary)]">
-            This clears the current captain — you'll need a new one assigned to the new time.
-          </p>
+          <p className="text-sm text-gray-500">Your captain may change for the new time.</p>
           <SlotPicker serviceCenterId={booking.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
@@ -721,8 +727,8 @@ export default function BookingDetailPage() {
 
       <Modal open={supportOpen} onClose={() => setSupportOpen(false)} title="Raise a support request">
         <div className="space-y-4">
-          <p className="rounded-xl bg-[#FAFAFA] p-3 text-xs text-gray-600">
-            This is linked to booking <span className="font-mono-num font-semibold">{booking.booking_number}</span> so it reaches the team that served you.
+          <p className="text-xs text-gray-500">
+            Booking <span className="font-mono-num">{booking.booking_number}</span>
           </p>
           <Input
             label="What went wrong?"

@@ -1,114 +1,95 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { MessageCircle, ShieldCheck } from "lucide-react";
 import { authApi, googleAuthApi, otpWidgetApi } from "../../api/auth";
 import { Button, Input, Modal, OtpInput } from "../ui";
 import { useAuth } from "../../context/AuthContext";
-import { getErrorMessage } from "../../lib/api-client";
-import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
-import { validateIndianMobile } from "../../lib/validators";
+import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
 
 /**
- * The one-time phone-verification gate a customer's FIRST self-service
- * booking or subscription purchase blocks on (backend: 403
- * PHONE_NOT_VERIFIED — see PhoneNotVerifiedException). Once verified here,
- * phone_verified is permanent on their account, so this never shows again
- * for any booking/subscription after the first.
+ * Phone verification for a logged-in customer: the 90-day re-verification
+ * gate (MandatoryGates) and, for a Google sign-in with no phone yet, adding
+ * and verifying the primary contact number (add-phone flow). `changeNumber`
+ * runs the same add-phone flow for someone who already has a number and
+ * wants a new one (manager/admin profile page).
  *
- * Two delivery paths, decided by the backend's widget config:
- *  - MSG91 OTP widget (preferred once configured): MSG91 sends the code
- *    over SMS/WhatsApp and our backend verifies the resulting token
- *    server-side with identifier binding.
- *  - Classic backend-generated OTP over WhatsApp (fallback).
+ * Delivery goes through sendOtpCode — the same channel choice and fallback
+ * as login and the booking popup (MSG91 widget SMS until an approved
+ * WhatsApp template exists, then WhatsApp first). The verify step checks
+ * the code on whichever channel actually delivered it: a widget code and a
+ * backend code are verified completely differently.
  */
 export function PhoneVerificationModal({
   open,
   onClose,
   onVerified,
   autoSend = false,
+  changeNumber = false,
 }: {
   open: boolean;
   onClose: () => void;
   onVerified: () => void;
   autoSend?: boolean;
+  changeNumber?: boolean;
 }) {
   const { user, refreshUser } = useAuth();
   const [step, setStep] = useState<"send" | "verify">("send");
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
-  // Google sign-ins arrive with no phone at all — collect the primary
-  // contact number here and verify it in the same breath (add-phone flow).
-  const needsPhone = !user?.phone;
+  const needsPhone = changeNumber || !user?.phone;
   const [newPhone, setNewPhone] = useState("");
-  const targetPhone = user?.phone || validateIndianMobile(newPhone) || "";
-
-  const { data: widgetReady } = useQuery({
-    queryKey: ["otp-widget-ready"],
-    queryFn: ensureOtpWidget,
-    enabled: open,
-    staleTime: Infinity,
-  });
-  // Which channel actually DELIVERED this OTP — not just which one we
-  // tried. The widget script can load fine (widgetReady = true) and still
-  // fail to send (MSG91 account out of balance, its API down, etc.); when
-  // that happens we fall back to our own WhatsApp OTP rather than leaving
-  // the customer stuck on a "send" step that silently never arrives. The
-  // verify step below has to know which channel actually won, since a
-  // widget OTP and a backend OTP are checked completely differently.
-  const [usedWidget, setUsedWidget] = useState(false);
+  const targetPhone = (needsPhone ? validateIndianMobile(newPhone) : user?.phone) || "";
+  const sameAsCurrent = changeNumber && !!targetPhone && targetPhone === user?.phone;
+  const [channel, setChannel] = useState<OtpChannel | null>(null);
+  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const [smsAvailable, setSmsAvailable] = useState(false);
+  const verifyingRef = useRef(false);
 
   const sendMutation = useMutation({
-    mutationFn: async () => {
-      if (needsPhone) {
-        const phone = validateIndianMobile(newPhone);
-        if (!phone) throw new Error("Enter a valid 10-digit mobile number");
-        if (widgetReady) {
-          try {
-            await widgetSendOtp(phone);
-            setUsedWidget(true);
-            return;
-          } catch {
-            // Falls through to the backend channel below.
-          }
-        }
-        setUsedWidget(false);
-        await googleAuthApi.addPhoneRequest(phone);
-        return;
-      }
-      if (widgetReady && user?.phone) {
-        try {
-          await widgetSendOtp(user.phone);
-          setUsedWidget(true);
-          return;
-        } catch {
-          // Falls through to the backend channel below.
-        }
-      }
-      setUsedWidget(false);
-      await authApi.requestPhoneVerification();
+    mutationFn: async (order?: OtpChannel[]) => {
+      const phone = needsPhone ? validateIndianMobile(newPhone) : user?.phone;
+      if (!phone) throw new Error("Enter a valid 10-digit mobile number.");
+      let backendChannel: "whatsapp" | "sms" | undefined;
+      const sent = await sendOtpCode(
+        phone,
+        async () => {
+          const res = needsPhone ? await googleAuthApi.addPhoneRequest(phone) : await authApi.requestPhoneVerification();
+          backendChannel = res.channel;
+        },
+        order,
+      );
+      return { ...sent, delivered: sent.channel === "widget" ? ("sms" as const) : (backendChannel ?? null) };
     },
-    onSuccess: () => {
+    onSuccess: (sent) => {
+      setChannel(sent.channel);
+      setDelivered(sent.delivered);
+      setCooldown(sent.cooldown);
+      setOtp("");
       setStep("verify");
       setError("");
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => {
+      setError(otpErrorMessage(err));
+      setCooldown(0);
+    },
   });
 
   const verifyMutation = useMutation({
-    mutationFn: async () => {
+    // The code comes in as the mutation variable — reading `otp` state here
+    // would see the value from before a paste/autofill landed.
+    mutationFn: async (code: string) => {
       if (needsPhone) {
-        const payload = usedWidget
-          ? { phone: targetPhone, access_token: await widgetVerifyOtp(otp.trim()) }
-          : { phone: targetPhone, otp: otp.trim() };
+        const payload = channel === "widget" ? { phone: targetPhone, access_token: await widgetVerifyOtp(code) } : { phone: targetPhone, otp: code };
         await googleAuthApi.addPhoneConfirm(payload);
         return;
       }
-      if (usedWidget && user?.phone) {
-        const token = await widgetVerifyOtp(otp.trim());
-        await otpWidgetApi.verifyPhone(token);
+      if (channel === "widget") {
+        await otpWidgetApi.verifyPhone(await widgetVerifyOtp(code));
         return;
       }
-      await authApi.confirmPhoneVerification(otp.trim());
+      await authApi.confirmPhoneVerification(code);
     },
     onSuccess: async () => {
       await refreshUser();
@@ -117,46 +98,73 @@ export function PhoneVerificationModal({
       setError("");
       onVerified();
     },
-    onError: (err) => setError(getErrorMessage(err)),
+    onError: (err) => {
+      setError(otpErrorMessage(err));
+      setOtp("");
+    },
   });
 
+  const submitCode = (code: string) => {
+    const clean = code.trim();
+    if (clean.length < 6 || verifyingRef.current) return;
+    verifyingRef.current = true;
+    setError("");
+    verifyMutation.mutate(clean, { onSettled: () => (verifyingRef.current = false) });
+  };
+
+  const send = (order?: OtpChannel[]) => {
+    if (!sendMutation.isPending) sendMutation.mutate(order);
+  };
+
   const autoSent = useRef(false);
-  const sendOtp = sendMutation.mutate;
   useEffect(() => {
     if (!open) {
       autoSent.current = false;
       return;
     }
-    if (!autoSend || autoSent.current || step !== "send" || widgetReady === undefined || sendMutation.isPending) return;
+    if (!autoSend || autoSent.current || step !== "send" || needsPhone) return;
     autoSent.current = true;
-    sendOtp();
-  }, [autoSend, open, sendMutation.isPending, sendOtp, step, widgetReady]);
+    sendMutation.mutate(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSend, open, step, needsPhone]);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  useEffect(() => {
+    if (open && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
+  }, [open, channel]);
 
   const close = () => {
     setStep("send");
     setOtp("");
     setError("");
-    setUsedWidget(false);
+    setChannel(null);
+    setDelivered(null);
+    setNewPhone("");
     autoSent.current = false;
     onClose();
   };
 
-  // Before sending: what we'll TRY. After sending: what actually delivered
-  // it — those can differ when MSG91 loaded but couldn't send, and the
-  // code silently fell back to WhatsApp.
-  const channelLabel = step === "verify" ? (usedWidget ? "SMS / WhatsApp" : "WhatsApp") : widgetReady ? "SMS / WhatsApp" : "WhatsApp";
+  const sentVia = delivered === "sms" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : "";
+  const resendOrder: OtpChannel[] | undefined = channel ? [channel, channel === "widget" ? "backend" : "widget"] : undefined;
 
   return (
-    <Modal open={open} onClose={close} title="Verify Your Phone Number">
+    <Modal open={open} onClose={close} title={changeNumber ? "Change Phone Number" : "Verify Your Phone Number"}>
       <div className="space-y-4">
         <div className="flex items-start gap-3 rounded-xl bg-[var(--color-primary-light)] p-3.5">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-primary)]" />
           <p className="text-sm text-[var(--color-text-primary)]">
-            {needsPhone
+            {changeNumber
+              ? "Enter your new mobile number — we'll send a one-time code to it to confirm it's yours."
+              : needsPhone
               ? "Your phone number is our primary contact for bookings — add it once and verify with a one-time code."
               : step === "verify"
-                ? <>We sent an OTP on <span className="font-medium">{user?.phone}</span>.</>
-                : <>We'll send an OTP on <span className="font-medium">{user?.phone}</span> to verify it's you.</>}
+                ? <>We sent an OTP{sentVia} to <span className="font-medium">{user?.phone}</span>.</>
+                : <>We'll send an OTP to <span className="font-medium">{user?.phone}</span> to verify it's you.</>}
           </p>
         </div>
 
@@ -167,39 +175,55 @@ export function PhoneVerificationModal({
             )}
             {needsPhone && (
               <Input
-                label="Mobile Number"
+                label={changeNumber ? "New Mobile Number" : "Mobile Number"}
+                type="tel"
+                inputMode="numeric"
+                autoComplete="tel"
                 value={newPhone}
-                onChange={(e) => setNewPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                onChange={(e) => setNewPhone(cleanMobileInput(e.target.value))}
                 placeholder="10-Digit Mobile"
                 autoFocus
               />
             )}
+            {sameAsCurrent && <p className="text-sm text-[var(--color-text-secondary)]">This is already your number.</p>}
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-            <Button className="w-full" disabled={needsPhone && !validateIndianMobile(newPhone)} isLoading={sendMutation.isPending} onClick={() => sendMutation.mutate()}>
-              <MessageCircle className="h-4 w-4" /> Send Code Via {channelLabel}
+            <Button className="w-full" disabled={(needsPhone && !validateIndianMobile(newPhone)) || sameAsCurrent} isLoading={sendMutation.isPending} onClick={() => send()}>
+              <MessageCircle className="h-4 w-4" /> Send Code
             </Button>
           </>
         ) : (
           <>
-            <p className="text-sm text-[var(--color-text-secondary)]">Enter the 6-digit code we sent over {channelLabel}.</p>
-            <OtpInput
-              value={otp}
-              onChange={setOtp}
-              autoFocus
-              disabled={verifyMutation.isPending}
-              // Six digits in = nothing left to decide; submit for them.
-              onComplete={() => verifyMutation.mutate()}
-            />
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              Enter the 6-digit code sent to <span className="font-medium text-black">+91 {targetPhone}</span>.
+            </p>
+            <OtpInput value={otp} onChange={setOtp} autoFocus disabled={verifyMutation.isPending} onComplete={submitCode} />
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
-            <Button className="w-full" disabled={otp.trim().length < 6} isLoading={verifyMutation.isPending} onClick={() => verifyMutation.mutate()}>
+            <Button className="w-full" disabled={otp.trim().length < 6 || sendMutation.isPending} isLoading={verifyMutation.isPending} onClick={() => submitCode(otp)}>
               Verify And Continue
             </Button>
-            <p className="text-center text-xs text-[var(--color-text-secondary)]">
-              Didn't get it?{" "}
-              <button type="button" className="font-semibold text-black hover:underline" onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending}>
-                Resend Code
-              </button>
-            </p>
+            <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)]">
+              {needsPhone ? (
+                <button type="button" className="font-semibold text-black hover:underline" onClick={() => { setStep("send"); setError(""); setOtp(""); }}>
+                  Change number
+                </button>
+              ) : (
+                <span />
+              )}
+              {cooldown > 0 ? (
+                <span>Resend in {cooldown}s</span>
+              ) : (
+                <span className="flex items-center gap-3">
+                  {channel === "backend" && smsAvailable && (
+                    <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(["widget"])}>
+                      Get it by SMS
+                    </button>
+                  )}
+                  <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(resendOrder)}>
+                    Resend code
+                  </button>
+                </span>
+              )}
+            </div>
           </>
         )}
       </div>

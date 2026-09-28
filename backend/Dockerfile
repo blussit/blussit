@@ -23,4 +23,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", \"8080\")}/api/health', timeout=3).read()"
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --no-access-log"]
+# Per-message-deflate keeps zlib buffers per open WebSocket (tens to hundreds of KB
+# each); with hundreds of sockets per instance that memory matters more than
+# the bandwidth saved on small JSON events.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --no-access-log --ws-per-message-deflate false"]

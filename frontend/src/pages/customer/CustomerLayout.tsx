@@ -7,7 +7,7 @@ import { DashboardShell, type NavItem } from "../../components/layout/DashboardS
 // matching pass is applied to a booking automatically by the server.
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/app", icon: LayoutDashboard, end: true },
-  { label: "Book A Service", to: "/app/book", icon: CalendarPlus },
+  { label: "Book a service", to: "/app/book", icon: CalendarPlus },
   { label: "My bookings", to: "/app/bookings", icon: ListChecks },
   { label: "Subscriptions", to: "/app/subscriptions", icon: Gift },
   { label: "Addresses", to: "/app/addresses", icon: MapPin },

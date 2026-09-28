@@ -56,7 +56,7 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
         {reviews.map((r) => (
           <figure
             key={r.id}
-            className="flex w-[80vw] max-w-[340px] shrink-0 snap-center sm:w-auto sm:max-w-none flex-col rounded-2xl border border-cream-line bg-white p-6"
+            className="flex w-[80vw] max-w-[340px] shrink-0 snap-center sm:w-auto sm:max-w-none flex-col rounded-2xl border border-card-border bg-white p-6"
           >
             <div className="flex gap-0.5" aria-label={`${r.rating} out of 5 stars`}>
               {Array.from({ length: 5 }).map((_, i) => (

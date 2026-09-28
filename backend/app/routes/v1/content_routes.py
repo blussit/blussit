@@ -12,11 +12,13 @@ from app.schemas.content_schema import (
     TestimonialUpdateRequest,
 )
 from app.services.audit_service import AuditService
-from app.services.content_service import ContactMessageService, FaqService, PublicStatsService, SettingService, TestimonialService
+from app.services.content_service import ContactMessageService, FaqService, SettingService, TestimonialService
 
 faq_router = APIRouter(prefix="/faqs", tags=["FAQs"])
 testimonial_router = APIRouter(prefix="/testimonials", tags=["Testimonials"])
 settings_router = APIRouter(prefix="/settings", tags=["Settings"], dependencies=[Depends(require_admin)])
+# Currently routeless (the unused, uncached /public/stats was removed); kept
+# because main.py still includes it.
 public_router = APIRouter(prefix="/public", tags=["Public Content"])
 contact_router = APIRouter(prefix="/contact", tags=["Contact"])
 
@@ -78,11 +80,6 @@ async def get_setting(key: str, db: AsyncIOMotorDatabase = Depends(get_db)):
 @settings_router.put("")
 async def upsert_setting(payload: SettingUpsertRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await SettingService(db).upsert(payload), "Setting saved successfully")
-
-
-@public_router.get("/stats")
-async def landing_stats(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await PublicStatsService(db).landing_page_stats())
 
 
 @contact_router.post("")

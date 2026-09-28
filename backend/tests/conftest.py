@@ -36,6 +36,12 @@ os.environ["WHATSAPP_ACCESS_TOKEN"] = ""
 os.environ["WHATSAPP_OTP_TEMPLATE_NAME"] = ""
 os.environ["SMS_PROVIDER"] = ""
 os.environ["OTP_CHANNEL"] = "whatsapp"
+# Same reason for Razorpay: .env holds the LIVE pair. Tests stub the client,
+# but a missed stub must fail against fake keys, never move real money.
+os.environ["RAZORPAY_KEY_ID"] = "rzp_test_fakekey"
+os.environ["RAZORPAY_KEY_SECRET"] = "fake_secret"
+os.environ["RAZORPAY_LIVE_KEY_ID"] = ""
+os.environ["RAZORPAY_LIVE_KEY_SECRET"] = ""
 
 import pytest
 import pytest_asyncio

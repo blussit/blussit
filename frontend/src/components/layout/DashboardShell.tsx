@@ -88,6 +88,7 @@ export function DashboardShell({
       : "unsupported",
   );
 
+  const isStaff = !!user && user.role !== "customer";
   const notifQueryKey = ["notifications", "unread"];
   const { data: notifData } = useQuery({
     queryKey: notifQueryKey,
@@ -99,35 +100,28 @@ export function DashboardShell({
     queryFn: () => notificationApi.list({ page: 1, page_size: 20 }),
     // Live-pushed over the "user:{id}" WebSocket channel below — this is
     // now just the fallback for while the socket is reconnecting.
-    refetchInterval: 30000,
-    // Keep polling while the tab is in the background/unfocused — otherwise
-    // React Query pauses the interval and a manager who's switched to
-    // another tab would never actually get notified of anything until they
-    // click back in, defeating the point of a system-level alert.
-    refetchIntervalInBackground: true,
+    // Staff (a few dozen people) keep polling in background tabs: a manager
+    // on another tab must still get the OS-level alert. Customers (the
+    // 100k) poll only while the tab is visible, and less often — otherwise
+    // every idle customer tab is a request every 30 s, forever.
+    refetchInterval: isStaff ? 30000 : 60000,
+    refetchIntervalInBackground: isStaff,
+    refetchOnWindowFocus: true,
   });
 
-  useLiveChannel(user ? `user:${user.id}` : null, () => {
+  // Staff only: every open socket holds a server slot, and a customer's
+  // notifications are fine on the visible-tab poll above. Customers get a
+  // socket only on the pages where live updates matter (an active
+  // booking's detail page, the slot picker).
+  useLiveChannel(user && isStaff ? `user:${user.id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: notifQueryKey });
   });
 
-  // Ask once, quietly, on mount — works in most browsers. Safari (and some
-  // Chrome versions under stricter settings) only honor a permission
-  // request that's triggered by an actual user gesture, so this is backed
-  // up by a second request on the bell icon's own click handler below.
-  useEffect(() => {
-    if (
-      typeof Notification !== "undefined" &&
-      Notification.permission === "default"
-    ) {
-      Notification.requestPermission()
-        .then(setNotifPermission)
-        .catch(() => {});
-    }
-  }, []);
-
+  // Only ever from a click (the bell, or the "Enable alerts" chip below):
+  // browsers penalize sites that prompt on page load.
   const requestNotificationPermission = () => {
     if (
+      !isStaff ||
       typeof Notification === "undefined" ||
       Notification.permission !== "default"
     )
@@ -241,7 +235,7 @@ export function DashboardShell({
         // glow), selected chips (tint + black border), progress fills, and
         // accents inside black panels. No cream page wash, no yellow tiles.
         "--color-surface": "#FFFFFF",
-        "--color-card-border": "#E5E7EB",
+        "--color-card-border": "#F3E5B5",
         "--color-primary": "#0A0A0A",
         "--color-primary-dark": "#000000",
         "--color-primary-light": "#FFF4CD",
@@ -380,6 +374,15 @@ export function DashboardShell({
           <div className="hidden md:block" />
           <div className="flex items-center gap-4">
             {headerRight}
+            {isStaff && notifPermission === "default" && (
+              <button
+                type="button"
+                onClick={requestNotificationPermission}
+                className="hidden items-center gap-1.5 rounded-full border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:border-gray-400 sm:inline-flex"
+              >
+                <Bell className="h-3.5 w-3.5" /> Enable alerts
+              </button>
+            )}
             <div className="group relative">
               <button
                 onClick={() => {

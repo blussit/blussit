@@ -52,30 +52,28 @@ class AuthController:
         return success(None, "Password changed successfully")
 
     async def request_otp(self, payload: RequestOtpRequest):
-        # SECURITY: the OTP itself is never included in this response —
-        # it goes out over WhatsApp only (see AuthService.request_otp /
-        # WhatsAppService). Earlier Phase 1 code echoed it back as
-        # "debug_otp" for testing before any real delivery existed, which
-        # made the whole verification step trivially bypassable (anyone
-        # could read the code straight out of the network response).
-        await self.auth_service.request_otp(payload.identifier)
-        return success({"otp_sent": True}, "Verification code sent")
+        # SECURITY: the OTP itself is never included in this response.
+        # Earlier Phase 1 code echoed it back as "debug_otp" for testing
+        # before any real delivery existed, which made the whole
+        # verification step trivially bypassable.
+        channel = await self.auth_service.request_otp(payload.identifier, customer_only=True)
+        return success({"otp_sent": True, "channel": channel}, "Verification code sent")
 
     async def verify_otp(self, payload: VerifyOtpRequest):
         verified = await self.auth_service.verify_otp(payload.identifier, payload.otp)
         return success({"verified": verified}, "OTP verified" if verified else "OTP verification failed")
 
     async def forgot_password(self, payload: ForgotPasswordRequest):
-        await self.auth_service.request_otp(payload.identifier, purpose="password_reset")
-        return success({"otp_sent": True}, "A reset code has been sent to your WhatsApp")
+        channel = await self.auth_service.request_otp(payload.identifier, purpose="password_reset")
+        return success({"otp_sent": True, "channel": channel}, "Reset code sent")
 
     async def reset_password(self, payload: ResetPasswordRequest):
         await self.auth_service.reset_password(payload.identifier, payload.otp, payload.new_password)
         return success(None, "Password reset successfully")
 
     async def request_phone_verification(self, current_user: CurrentUser):
-        await self.auth_service.request_phone_verification(current_user.id)
-        return success({"otp_sent": True}, "A verification code has been sent to your WhatsApp")
+        channel = await self.auth_service.request_phone_verification(current_user.id)
+        return success({"otp_sent": True, "channel": channel}, "Verification code sent")
 
     async def confirm_phone_verification(self, current_user: CurrentUser, payload: ConfirmPhoneVerificationRequest):
         user = await self.auth_service.confirm_phone_verification(current_user.id, payload.otp)

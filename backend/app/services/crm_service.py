@@ -44,12 +44,20 @@ class CRMService:
         — matching by name OR phone as they type, so an existing customer
         is picked directly instead of accidentally re-created. Customers
         only, same rule as find_customer_by_phone above."""
+        from app.repositories.base_repository import build_search_filter
+
         q = (q or "").strip()
+        if q and all(ch.isdigit() or ch in " +-" for ch in q):
+            # A pasted "+91 98765 43210" must still find the stored 10 digits.
+            q = "".join(ch for ch in q if ch.isdigit())
+            if len(q) == 12 and q.startswith("91"):
+                q = q[2:]
         if len(q) < 2:
             return []
-        items, _total = await self.user_repo.list_by_role(
-            UserRole.CUSTOMER.value, page=1, page_size=limit, search=q
-        )
+        # No count_documents here (find_many would run one over every
+        # customer per keystroke) — a typeahead only needs the first few.
+        query = {"role": UserRole.CUSTOMER.value, "is_deleted": {"$ne": True}, **build_search_filter(q, ["full_name", "email", "phone"])}
+        items = await self.user_repo.collection.find(query).sort("created_at", -1).limit(limit).to_list(length=limit)
         return [UserPublic.from_doc(u).model_dump() for u in items]
 
     async def get_customer_360(self, customer_id: str, actor_role: str | None = None, actor_center_id: str | None = None) -> dict:

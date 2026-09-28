@@ -7,7 +7,13 @@ from typing import Optional
 
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin, require_captain, require_customer, require_manager_or_admin
 from app.core.exceptions import AppException
-from app.schemas.payment_schema import CollectPaymentRequest, CreateOrderRequest, VerifyPaymentRequest
+from app.schemas.payment_schema import (
+    CollectPaymentRequest,
+    CreateOrderRequest,
+    PaymentFailureReport,
+    ResolveAttentionRequest,
+    VerifyPaymentRequest,
+)
 from app.services.payment_service import PaymentService
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -86,6 +92,11 @@ async def payment_link_callback(request: Request, db: AsyncIOMotorDatabase = Dep
     loop's link sweep is the backstop when this redirect never happens."""
     try:
         result = await PaymentService(db).verify_link_callback(dict(request.query_params))
+        if result.get("status") == "needs_attention":
+            return HTMLResponse(_RESULT_PAGE.format(
+                icon="🕒", title="Payment received — under review",
+                detail="We got your payment but couldn't apply it automatically. Our team will fix or refund it — no need to pay again.",
+            ))
         return HTMLResponse(_RESULT_PAGE.format(
             icon="✅", title="Payment received!",
             detail=f"Booking {result.get('booking_number') or ''} is paid. We've noted it — see you at your doorstep!",
@@ -103,3 +114,54 @@ async def verify_payment(payload: VerifyPaymentRequest, current_user: CurrentUse
     secret) — only a match applies the purchase; a mismatch is a 400 and
     nothing is marked paid."""
     return await PaymentController(db).verify(current_user, payload)
+
+
+@router.post("/webhook", include_in_schema=False)
+async def razorpay_webhook(request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Razorpay's server-to-server events. Unauthenticated by necessity —
+    the X-Razorpay-Signature HMAC over the raw body (RAZORPAY_WEBHOOK_SECRET)
+    is the whole trust decision. 404 while no secret is configured; 2xx for
+    every event it accepted, handled or ignored; a 5xx only when processing
+    failed, so Razorpay retries it."""
+    result = await PaymentService(db).handle_webhook(
+        await request.body(),
+        request.headers.get("X-Razorpay-Signature"),
+        request.headers.get("X-Razorpay-Event-Id"),
+    )
+    return {"success": True, **result}
+
+
+@router.post("/failure", dependencies=[Depends(require_customer)])
+async def report_payment_failure(payload: PaymentFailureReport, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """The checkout's payment.failed event — records why the attempt failed
+    so the booking page can say so. Changes nothing that's paid."""
+    return await PaymentController(db).report_failure(current_user, payload)
+
+
+@router.get("/status", dependencies=[Depends(require_customer)])
+async def payment_status(
+    order_id: Optional[str] = None,
+    subscription_id: Optional[str] = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Polled while a paid checkout is being confirmed (verify didn't get
+    through). Re-checks an open order against Razorpay and settles it the
+    moment the money is there."""
+    return await PaymentController(db).status(current_user, order_id, subscription_id)
+
+
+@router.get("/bookings/{booking_id}/state", dependencies=[Depends(require_customer)])
+async def booking_payment_state(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Last failed attempt + any received-but-unapplied money for the
+    customer's own booking (or its visit)."""
+    return await PaymentController(db).booking_state(current_user, booking_id)
+
+
+@router.post("/attention/{order_id}/resolve", dependencies=[Depends(require_admin)])
+async def resolve_payment_attention(
+    order_id: str, payload: ResolveAttentionRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Takes a handled (refunded / activated) payment off the open
+    needs-attention queue, with a note of what was done."""
+    return await PaymentController(db).resolve_attention(current_user, order_id, payload)

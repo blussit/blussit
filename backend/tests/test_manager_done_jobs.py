@@ -798,6 +798,10 @@ async def test_discount_on_a_two_car_visit_is_split_by_price_and_adds_up_exactly
     assert result["vehicle_count"] == 2
     shares = [b["manager_discount"] for b in [await db.bookings.find_one({"_id": ObjectId(x["id"])}) for x in result["bookings"]]]
     assert round(sum(shares), 2) == 101 and all(s > 0 for s in shares)
+    # Whole rupees per car — ₹51 + ₹50, never ₹50.50 + ₹50.50.
+    assert all(float(s).is_integer() for s in shares), shares
+    totals = [x["total_amount"] for x in result["bookings"]]
+    assert all(float(t).is_integer() for t in totals), totals
     assert result["total_amount"] == round(bill - 101, 2)
     assert len(await _outbox(db, phone)) == 1  # still ONE "service done" message
 

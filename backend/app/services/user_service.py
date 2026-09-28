@@ -1,8 +1,10 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
-from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
 from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import AdminUserUpdateRequest, UserPublic, UserUpdateRequest
+from app.utils.phone import BUSINESS_NUMBER_MESSAGE, is_business_whatsapp_number
 
 
 class UserService:
@@ -45,7 +47,23 @@ class UserService:
         # `is not None` here used to silently ignore that, the one field on
         # this form that legitimately needs to go from "set" back to "unset".
         data = {k: v.value if hasattr(v, "value") else v for k, v in payload.model_dump(exclude_unset=True).items()}
-        updated = await self.repo.update_by_id(user_id, data)
+        if "phone" in data:
+            phone = data.pop("phone")
+            current = await self.repo.find_by_id(user_id)
+            if not current:
+                raise NotFoundException("User not found")
+            if phone and phone != current.get("phone"):
+                if is_business_whatsapp_number(phone):
+                    raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
+                taken = await self.repo.find_by_phone(phone)
+                if taken and str(taken["_id"]) != user_id:
+                    raise ConflictException("An account with this phone number already exists")
+                # Set by an admin, not proven by OTP — the owner re-verifies.
+                data.update({"phone": phone, "phone_verified": False, "phone_verified_at": None})
+        try:
+            updated = await self.repo.update_by_id(user_id, data)
+        except DuplicateKeyError:
+            raise ConflictException("An account with this phone number already exists")
         if not updated:
             raise NotFoundException("User not found")
         return UserPublic.from_doc(updated).model_dump()

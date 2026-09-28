@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { BadgeCheck, Banknote, Car, CheckCircle2, CreditCard, MapPin, Plus, Trash2, ShieldCheck } from "lucide-react";
+import { BadgeCheck, Banknote, CheckCircle2, Copy, CreditCard, Gift, Info, MapPin, Plus, Trash2, ShieldCheck } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
-import { bookingApi, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { bookingApi, type BookingQuotePayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
 import { addressApi } from "../../api/profile";
 import { adminServiceCenterApi } from "../../api/admin";
-import { Button, Input, Select, Spinner, Switch } from "../ui";
+import { Button, DiscountBadge, Input, Modal, OfferTag, Select, Spinner, Switch, discountPercent } from "../ui";
 import { SlotPicker } from "../shared/SlotPicker";
 import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
@@ -22,10 +22,10 @@ import { scrollToTopNow } from "../../lib/scroll";
 import { ensureGoogleMaps } from "../../lib/googleMaps";
 import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
-import { addonKit, baseGroups, bikeTypeIds, variantCount, type BaseGroup } from "../../lib/serviceMix";
-import { parseIncludes, titleCase } from "../public/landing/shared";
+import { addonKit, baseGroups, bikeTypeIds, eligibleFor, variantCount, type BaseGroup } from "../../lib/serviceMix";
+import { parseIncludes, priceForType, titleCase } from "../public/landing/shared";
 import { subscriptionApi } from "../../api/engagement";
-import type { Address, Service, UserSubscription, VehicleTypeOption } from "../../types";
+import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption } from "../../types";
 
 /**
  * THE booking flow (2026-09 quick-booking model) — two steps, no account;
@@ -41,9 +41,14 @@ import type { Address, Service, UserSubscription, VehicleTypeOption } from "../.
  *   - "public":   anyone on /book — a profile is created silently from the
  *                 phone; login stays optional (OTP) for viewing history.
  *   - "customer": the same flow on /app/book, with name/phone/saved
- *                 addresses prefilled and any matching pass applied by
- *                 the server automatically.
- *   - "manager":  the same flow on a customer's behalf (phone-in bookings).
+ *                 addresses prefilled and a "use my plan" switch for every
+ *                 vehicle a live plan covers (on by default).
+ *   - "manager":  the same flow on a customer's behalf (phone-in bookings);
+ *                 picking an existing customer brings their saved
+ *                 addresses and plans.
+ *
+ * Deep links: ?service=<slug|id> preselects a service, ?subscription=<id>
+ * (customer) preselects that plan's vehicle type + service.
  *
  * Bikes keep the catalogue's per-bike pricing (base wash + N extra bikes
  * on ONE booking); every car of a type is its own booking on the visit —
@@ -67,8 +72,24 @@ type Coverage = "idle" | "checking" | "covered" | "uncovered";
 
 const STEPS = ["What Are We Washing?", "Where And When?"];
 const LOG_STEPS = ["What Was Washed?", "Who, Where And When?"];
-const LAUNCH_FREE_BIKE_OFFER = "free-bike-wash";
-const LAUNCH_FREE_BIKE_COUPON = "FREEBIKE";
+
+const SECTION_LABEL = "mb-2 text-sm font-medium text-gray-600";
+
+/** Every pickable box and chip: light tint + black border when chosen. */
+function choiceClass(on: boolean): string {
+  return `border-2 transition-colors ${on ? "border-black bg-[#FFF4CD] text-black" : "border-[#F3E5B5] bg-white text-gray-700 hover:border-gray-400"}`;
+}
+
+/** The latest value once it has stopped changing for `ms` — a string, so an
+ *  equal payload rebuilt on every render never restarts the timer. */
+function useSettled(value: string, ms: number): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), ms);
+    return () => window.clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
 
 function priceFor(s: Service, vt: string): number {
   return s.vehicle_type_prices?.[vt] ?? s.price;
@@ -79,17 +100,18 @@ function firstWashPriceFor(s: Service, vt: string): number | null {
 
 export function QuickBookFlow({ mode }: { mode: Mode }) {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { push: pushToast } = useToast();
   const queryClient = useQueryClient();
   const isCustomer = mode === "customer";
   const isLog = mode === "manager-log";
   const isManager = mode === "manager" || isLog;
-  const launchOfferActive = !isLog && searchParams.get("offer") === LAUNCH_FREE_BIKE_OFFER;
-  // Guests are (almost always) first-time customers — quote the first-wash
-  // price where one exists. The backend re-checks eligibility by phone.
-  const showFirstWash = mode === "public" && !user;
+  // Whether the first-wash price applies is the server's call (by phone,
+  // platform-wide) — it arrives with the quote below. Until then a guest is
+  // assumed new and everyone else isn't.
+  const [firstWashKnown, setFirstWashKnown] = useState<boolean | null>(null);
+  const showFirstWash = firstWashKnown ?? (mode === "public" && !user);
 
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: catalogue, isLoading: servicesLoading } = useQuery({
@@ -98,6 +120,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   });
   const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get, staleTime: 5 * 60 * 1000 });
   const { data: myAddresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list, enabled: isCustomer });
+  const { data: myPasses, isError: passesFailed } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions, enabled: isCustomer });
 
   const services = useMemo(() => (catalogue?.data || []).filter((s) => s.is_active !== false), [catalogue]);
   const types: VehicleTypeOption[] = useMemo(
@@ -112,19 +135,23 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // Vehicles already added to the visit, plus the one being edited now.
   const [added, setAdded] = useState<Draft[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  // Customer "Book now" on a pass (?subscription=): the pass it came from,
+  // shown as a summary on the address step — or why it couldn't be used.
+  const [planIntro, setPlanIntro] = useState<string | null>(null);
+  const [planIssue, setPlanIssue] = useState("");
 
   // ---- step 2 state ------------------------------------------------------
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   // Manager modes only: set when an existing customer is picked from the
-  // typeahead, so their active passes can be matched against what's being
-  // booked below.
+  // typeahead, so their saved addresses and active passes can be offered.
   const [pickedCustomerId, setPickedCustomerId] = useState<string | null>(null);
   // Per-line (index into `lines`) override of whether a matched pass is
-  // actually used — absent = default to true (use it). Manager-only; keyed
-  // by index since a line's position is stable for the life of this form.
+  // actually used — absent = default to true (use it). Reset whenever the
+  // line list is reshuffled, so an index always means the same line.
   const [subscriptionOverride, setSubscriptionOverride] = useState<Record<number, boolean>>({});
   useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
+  // null = nothing chosen yet (a default may be preselected), "" = "New address".
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
   const [mapsUp, setMapsUp] = useState(true);
@@ -136,6 +163,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [centerId, setCenterId] = useState("");
   const [centerCity, setCenterCity] = useState("");
   const [centerState, setCenterState] = useState("");
+  // Distance quote from the coverage check that resolved the current address.
+  const [travel, setTravel] = useState<TravelQuote | null>(null);
   const [date, setDate] = useState(todayIST());
   const [slot, setSlot] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "online">("cash");
@@ -148,32 +177,35 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [otpOpen, setOtpOpen] = useState(false);
-  // A MSG91 widget token stays reusable for a retry on the same number; a
-  // classic OTP code is spent by the booking call, so it isn't kept.
-  const [verified, setVerified] = useState<{ phone: string; token: string } | null>(null);
+  // Kept for a retry on the same number: a widget token stays reusable, and
+  // the server only spends a classic code once the booking has passed its
+  // checks (a spent one comes back "Invalid or expired code" → the popup).
+  const [verified, setVerified] = useState<{ phone: string; proof: PhoneProof } | null>(null);
   const [otpError, setOtpError] = useState("");
   const [forceOtp, setForceOtp] = useState(false);
   // manager-log only: the clock time of the job, and the WhatsApp switch.
   const [logTime, setLogTime] = useState("");
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const [discount, setDiscount] = useState("");
+  // Manager booking of a prepaid service: the pay link the customer was sent.
+  const [sentLink, setSentLink] = useState<{ numbers: string; link: string } | null>(null);
+  const [copied, setCopied] = useState(false);
   const phoneRef = useRef<HTMLInputElement>(null);
 
   // ---- keep an unfinished booking for THIS browser tab ---------------------
   // Back button, a tap on the logo, a refresh — the customer comes back to
   // exactly where they were. sessionStorage on purpose: this tab only,
   // gone when it closes, never days-old state resurfacing.
-  const storageKey = `blussit:quickbook:${mode}${launchOfferActive ? ":launch-free-bike" : ""}`;
+  const storageKey = `blussit:quickbook:${mode}`;
   const repeatId = searchParams.get("repeat");
+  const serviceParam = searchParams.get("service") || searchParams.get("serviceId");
+  const subscriptionParam = isCustomer ? searchParams.get("subscription") : null;
   const [restored, setRestored] = useState(false);
   const restoreAddressRef = useRef<null | { pinned: LocationValue | null; savedAddressId: string | null; pincode: string; typed: boolean; slot: string }>(null);
   const skipAutoDateRef = useRef(false);
   useEffect(() => {
-    if (launchOfferActive) {
-      setRestored(true);
-      return;
-    }
-    if (repeatId) {
+    // A deep link starts a fresh booking instead of resuming the last one.
+    if (repeatId || serviceParam || subscriptionParam) {
       setRestored(true);
       return;
     }
@@ -184,11 +216,15 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setStep(saved.step === 1 ? 1 : 0);
         setAdded(Array.isArray(saved.added) ? saved.added : []);
         setDraft(saved.draft && typeof saved.draft === "object" ? { ...EMPTY_DRAFT, ...saved.draft } : EMPTY_DRAFT);
+        if (isCustomer && typeof saved.planIntro === "string") setPlanIntro(saved.planIntro);
         if (!isCustomer) {
           setName(saved.name || "");
           setPhone(saved.phone || "");
+          setPickedCustomerId(typeof saved.pickedCustomerId === "string" ? saved.pickedCustomerId : null);
         }
-        setSavedAddressId(saved.savedAddressId ?? null);
+        // A manager's saved address only means something with its customer.
+        const savedAddr: string | null = isCustomer || saved.pickedCustomerId ? saved.savedAddressId ?? null : null;
+        setSavedAddressId(savedAddr);
         setPinned(saved.pinned || null);
         setTypedAddress(!!saved.typedAddress);
         setLine1(saved.line1 || "");
@@ -206,7 +242,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
         restoreAddressRef.current = {
           pinned: saved.pinned || null,
-          savedAddressId: saved.savedAddressId ?? null,
+          savedAddressId: savedAddr,
           pincode: saved.pincode || "",
           typed: !!saved.typedAddress,
           slot: saved.slot || "",
@@ -224,12 +260,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount })
+        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, name, phone, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount]);
+  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -253,12 +289,26 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       setPhone(user.phone || "");
     }
   }, [isCustomer, user]);
+  // Saved addresses on offer: the customer's own, or (manager) the picked
+  // customer's — so a repeat customer's visit reuses the address on file.
+  const { data: customerAddresses } = useQuery({
+    queryKey: ["customer-addresses", pickedCustomerId],
+    queryFn: () => addressApi.forCustomer(pickedCustomerId as string),
+    enabled: mode === "manager" && !!pickedCustomerId,
+  });
+  const savedAddresses = isCustomer ? myAddresses : mode === "manager" && pickedCustomerId ? customerAddresses : undefined;
   useEffect(() => {
-    if (!isCustomer || !myAddresses?.length || savedAddressId !== null) return;
-    const def = myAddresses.find((a) => a.is_default) || myAddresses[0];
+    if (!savedAddresses?.length || savedAddressId !== null) return;
+    const def = savedAddresses.find((a) => a.is_default) || savedAddresses[0];
     void chooseSavedAddress(def);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCustomer, myAddresses]);
+  }, [savedAddresses, savedAddressId]);
+  /** Manager: a different (or no) customer — their saved address no longer applies. */
+  const pickCustomer = (id: string | null) => {
+    setPickedCustomerId(id);
+    if (savedAddressId) resetCoverage();
+    if (savedAddressId !== null) setSavedAddressId(null);
+  };
 
   // "Book again" — replay a previous booking's vehicles/services/address.
   const { data: repeatBooking } = useQuery({
@@ -271,9 +321,15 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     queryFn: () => bookingApi.getGroup(repeatBooking!.booking_group_id!),
     enabled: isCustomer && !!repeatBooking?.booking_group_id,
   });
+  // Each half applies ONCE — a later refetch (window focus) must never
+  // overwrite what the customer has changed since.
+  const repeatLinesDone = useRef(false);
+  const repeatAddressDone = useRef(false);
   useEffect(() => {
     if (!repeatBooking || !services.length || !types.length) return;
     if (repeatBooking.booking_group_id && !repeatGroup) return;
+    if (!repeatLinesDone.current) {
+    repeatLinesDone.current = true;
     const cars = repeatGroup || [repeatBooking];
     const drafts: Draft[] = [];
     for (const car of cars) {
@@ -294,12 +350,78 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       setAdded(drafts);
       setDraft(EMPTY_DRAFT);
     }
-    if (isCustomer && myAddresses?.length) {
+    }
+    // Wins over the default address even when the default's coverage check
+    // is still in flight — chooseSavedAddress is latest-wins.
+    if (!repeatAddressDone.current && isCustomer && myAddresses) {
+      repeatAddressDone.current = true;
       const addr = myAddresses.find((a) => a.id === repeatBooking.address_id);
       if (addr) void chooseSavedAddress(addr);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repeatBooking, repeatGroup, services, types, myAddresses]);
+
+  // ?service= / ?subscription= deep links — applied once the catalogue (and,
+  // for a plan, the customer's plans) are in, then dropped from the URL so a
+  // refresh resumes the booking instead of starting it over.
+  const [preferredBase, setPreferredBase] = useState<string | null>(null);
+  const deepLinkDone = useRef(false);
+  useEffect(() => {
+    if (deepLinkDone.current || (!serviceParam && !subscriptionParam) || !services.length || !types.length) return;
+    // A failed plans call must not leave the deep link waiting forever.
+    if (subscriptionParam && !myPasses && !passesFailed) return;
+    deepLinkDone.current = true;
+    if (subscriptionParam) {
+      // "Book now" on a pass: when its vehicle type and service are both on
+      // sale, the "what" is already answered — straight to where & when.
+      // Otherwise say so and let the customer pick; never guess a service
+      // (a wrong one would silently skip the pass and charge full price).
+      const sub = myPasses?.find((p) => p.id === subscriptionParam);
+      const typeId = sub?.vehicle_type && types.some((t) => t.id === sub.vehicle_type) ? sub.vehicle_type : "";
+      const svc = sub?.service_id ? services.find((s) => s.id === sub.service_id && !s.is_addon) : undefined;
+      const usable = !!sub && sub.effective_status === "active" && (sub.remaining_service_count ?? 0) > 0;
+      let resolved = false;
+      if (sub && usable && typeId && svc) {
+        // A bike pass covers one exact bike-count variant — book that count.
+        const fromPass: Draft = { typeId, count: bikeIds.has(typeId) ? variantCount(svc) : 1, base: svc.variant_group || svc.id, addons: [] };
+        if (lineFor(fromPass)?.payload?.service_ids.includes(svc.id)) {
+          setAdded([]);
+          setDraft(fromPass);
+          setPlanIntro(sub.id);
+          setPlanIssue("");
+          setStep(1);
+          resolved = true;
+        }
+      }
+      if (!resolved) {
+        setPlanIntro(null);
+        setDraft(typeId ? { typeId, count: 1, base: null, addons: [] } : EMPTY_DRAFT);
+        setPlanIssue(
+          sub?.renewal_pending
+            ? "Your pass is renewing — pick a service to book as usual."
+            : sub && sub.effective_status !== "active"
+            ? "This pass has ended — pick a service to book as usual."
+            : sub && !usable
+              ? "This pass has no washes left right now — pick a service to book as usual."
+              : "We couldn't load your pass — pick your service and we'll apply it if it matches."
+        );
+      }
+    } else {
+      const mains = services.filter((s) => !s.is_addon);
+      // Slug first; older shared links carry the id.
+      const svc = mains.find((s) => s.slug === serviceParam) || mains.find((s) => s.id === serviceParam);
+      if (svc) {
+        const key = svc.variant_group || svc.id;
+        setPreferredBase(key);
+        const eligible = types.filter((t) => eligibleFor(svc, t.id));
+        if (eligible.length === 1) setDraft({ typeId: eligible[0].id, count: 1, base: key, addons: [] });
+      }
+    }
+    const next = new URLSearchParams(searchParams);
+    ["service", "serviceId", "subscription"].forEach((k) => next.delete(k));
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceParam, subscriptionParam, services, types, myPasses, passesFailed]);
 
   function isBikeLine(s: Service): boolean {
     return !!s.is_addon && /bike|scooter|two.?wheeler/i.test(s.name) && !/polish/i.test(s.name);
@@ -323,8 +445,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     addons: Service[];
     subtotal: number;
     regularSubtotal: number;
-    offerDiscount: number;
-    freeBikeAddon: Service | null;
     baseUnitPrice: number;
     payload: QuickBookingLine | null;
     services: Service[];
@@ -336,22 +456,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     const first = firstWashPriceFor(s, vt);
     return first != null && first < regular ? first : regular;
   };
-  function isLaunchOfferBase(s: Service | null | undefined) {
-    const name = `${s?.name || ""} ${s?.slug || ""}`.toLowerCase();
-    return /star/.test(name) || (/deep/.test(name) && /clean/.test(name));
-  }
-  function launchOfferBaseKey(typeId: string) {
-    const groups = baseGroups(services, typeId);
-    return (
-      groups.find((g) => /star/.test(`${g.label} ${g.primary.slug}`.toLowerCase())) ||
-      groups.find((g) => {
-        const name = `${g.label} ${g.primary.slug}`.toLowerCase();
-        return /deep/.test(name) && /clean/.test(name);
-      }) ||
-      groups[0]
-    )?.key ?? null;
-  }
-
   const lineFor = (d: Draft): Line | null => {
     const t = types.find((x) => x.id === d.typeId);
     if (!t) return null;
@@ -380,14 +484,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           }
         }
         const addons = c.addons.map((id) => services.find((s) => s.id === id)).filter(Boolean) as Service[];
-        const requestedFreeBike = !isLog && !!(kit.addBike && addons.some((a) => a.id === kit.addBike?.id));
-        const freeBikeAddon = (launchOfferActive || requestedFreeBike) && !isBike && base && isLaunchOfferBase(base) && kit.addBike ? kit.addBike : null;
-        if (freeBikeAddon && !addons.some((a) => a.id === freeBikeAddon.id)) addons.push(freeBikeAddon);
         const perUnit = (s: Service) => unit(s, t.id);
         const perUnitRegular = (s: Service) => priceFor(s, t.id);
         let subtotal = 0;
         let regularSubtotal = 0;
-        let offerDiscount = 0;
         const serviceIds: string[] = [];
         const quantities: Record<string, number> = {};
         if (base) {
@@ -407,7 +507,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             if (qty > 1) quantities[a.id] = qty;
             subtotal += perUnit(a) * qty;
             regularSubtotal += perUnitRegular(a) * qty;
-            if (freeBikeAddon && a.id === freeBikeAddon.id) offerDiscount += perUnit(a) * qty;
           }
         }
         // Cars: every car of this type is its own booking with the same service.
@@ -424,12 +523,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           addons,
           subtotal: subtotal * quantity,
           regularSubtotal: regularSubtotal * quantity,
-          offerDiscount: offerDiscount * quantity,
-          freeBikeAddon,
           // What ONE matching pass actually waives on this line — the base
           // service's own per-unit price, same figure the backend's
           // _subscription_discount computes (add-ons/extra-bikes never
-          // waived). Used to price the "use this customer's plan?" toggle.
+          // waived). Used to price the "use the plan" switch.
           baseUnitPrice: base ? perUnit(base) : 0,
           payload: base ? { vehicle_type: t.id, quantity, service_ids: serviceIds, service_quantities: quantities } : null,
           services: lineServices,
@@ -440,103 +537,204 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const lines: Line[] = useMemo(() => drafts.map(lineFor).filter(Boolean) as Line[], [drafts, types, services, bikeIds, showFirstWash]);
 
-  // Manager modes only — which of this customer's active passes match what's
-  // actually being booked, so "use their plan?" can be offered per line
-  // instead of silently happening (or not) once the booking is submitted.
+  const summary = lines.map((l) => `${l.count} ${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`).join("  +  ");
+  const lineLabel = (l: Line) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`;
+
+  // The plans that can pay for this visit: the signed-in customer's own, or
+  // (manager) the picked customer's.
   const { data: customerPasses } = useQuery({
     queryKey: ["customer-active-passes", pickedCustomerId],
     queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string),
     enabled: isManager && !!pickedCustomerId,
   });
+  const passes = isCustomer ? myPasses : isManager && pickedCustomerId ? customerPasses : undefined;
+  const usablePasses = useMemo(
+    () => (passes || []).filter((p) => p.effective_status === "active" && (p.remaining_service_count ?? 0) > 0 && !!p.service_id),
+    [passes]
+  );
+  const passFor = (typeId: string, serviceIds: string[], taken: Set<string>) =>
+    usablePasses.find((p) => !taken.has(p.id) && p.vehicle_type === typeId && serviceIds.includes(p.service_id as string));
   interface LineMatch {
-    sub: UserSubscription;
-    /** How many of this line's units (bounded by the payload's own
-     *  quantity, NOT the raw bike/car count — a bike line is ONE booking
-     *  no matter how many bikes) a pass can actually cover. */
+    /** The passes this line would use, one per car. */
+    subs: UserSubscription[];
+    /** Units of the payload (a bike line is ONE booking however many bikes) a pass covers. */
     coveredCount: number;
+    /** The "use the plan" switch — a line switched off claims no pass. */
+    on: boolean;
   }
-  // Same one-document-one-wash-per-request rule the backend's
-  // _cars_for_lines enforces — a pass with remaining_service_count=4 still
-  // only ever covers ONE unit per booking; walked in line order so this
-  // always agrees with what the server will actually match.
-  const lineMatches: (LineMatch | null)[] = useMemo(() => {
-    if (!isManager || !customerPasses?.length) return lines.map(() => null);
-    const usable = customerPasses.filter(
-      (s) => s.effective_status === "active" && (s.remaining_service_count ?? 0) > 0 && s.service_id && s.vehicle_type
-    );
-    const used = new Set<string>();
-    return lines.map((line) => {
-      if (!line.base) return null;
-      const cap = line.payload?.quantity ?? 1;
-      let coveredCount = 0;
-      let matchedSub: UserSubscription | null = null;
-      for (const sub of usable) {
-        if (used.has(sub.id) || coveredCount >= cap) break;
-        if (sub.vehicle_type === line.type.id && sub.service_id === line.base!.id) {
-          used.add(sub.id);
-          matchedSub = matchedSub || sub;
-          coveredCount += 1;
-        }
+  // Mirrors the backend's _cars_for_lines exactly: lines in order, each car
+  // takes the first unused pass for its vehicle type whose service is on the
+  // line, and one pass covers one car per booking.
+  const lineMatches: (LineMatch | null)[] = lines.map(() => null);
+  {
+    const taken = new Set<string>();
+    lines.forEach((line, i) => {
+      if (!line.payload) return;
+      const on = subscriptionOverride[i] !== false;
+      const mine = new Set(taken);
+      const subs: UserSubscription[] = [];
+      for (let n = 0; n < line.payload.quantity; n++) {
+        const sub = passFor(line.type.id, line.payload.service_ids, mine);
+        if (!sub) break;
+        mine.add(sub.id);
+        subs.push(sub);
       }
-      return matchedSub ? { sub: matchedSub, coveredCount } : null;
+      if (on) subs.forEach((sub) => taken.add(sub.id));
+      if (subs.length) lineMatches[i] = { subs, coveredCount: subs.length, on };
     });
-  }, [isManager, customerPasses, lines]);
-  const passSavings = lines.reduce((sum, line, i) => {
-    const match = lineMatches[i];
-    if (!match || subscriptionOverride[i] === false) return sum;
-    return sum + match.coveredCount * line.baseUnitPrice;
-  }, 0);
-  // Passes this customer holds that don't match ANYTHING being booked right
-  // now — shown as plain context, never a checkbox (nothing to toggle).
-  const nonMatchingPasses = isManager && customerPasses
-    ? customerPasses.filter(
-        (s) => s.effective_status === "active" && !lineMatches.some((m) => m?.sub.id === s.id)
-      )
-    : [];
+  }
+  /** Cars on each line the plan actually pays for. */
+  const coveredUnits = lineMatches.map((m) => (m?.on ? m.coveredCount : 0));
+  const lineCost = (i: number) => lines[i].subtotal - coveredUnits[i] * lines[i].baseUnitPrice;
+  // What one pass waives is the base service's own price — add-ons and extra
+  // bikes are always paid (same figure as the backend's _subscription_discount).
+  const passSavings = lines.reduce((sum, line, i) => sum + coveredUnits[i] * line.baseUnitPrice, 0);
+  /** Services still on the bill — a base service every car of which is plan-covered isn't. */
+  const billed = lines.flatMap((line, i) =>
+    line.services.filter((s) => s.id !== line.base?.id || coveredUnits[i] < (line.payload?.quantity ?? 1))
+  );
+  const otherPasses = isManager ? usablePasses.filter((p) => !lineMatches.some((m) => m?.subs.some((x) => x.id === p.id))) : [];
 
-  // "Use this customer's plan?" — one row per line with a matching pass,
-  // ticked by default (the wash IS covered unless the manager says
-  // otherwise). Shown once, right where the money is decided, in both
-  // manager forms (New booking / Log a done job).
-  const subscriptionTogglesNode = isManager && lineMatches.some(Boolean) ? (
-    <div className="space-y-2 rounded-xl border border-[#F3E5B5] bg-[#FFF9E6] p-3">
-      <p className="flex items-center gap-1.5 text-sm font-semibold text-black">
-        <BadgeCheck className="h-4 w-4 text-[var(--color-primary)]" /> This customer holds a matching plan
-      </p>
+  const planTogglesNode = lineMatches.some(Boolean) ? (
+    <div className="space-y-2">
       {lines.map((line, i) => {
         const match = lineMatches[i];
         if (!match) return null;
-        const on = subscriptionOverride[i] !== false;
-        const saved = match.coveredCount * line.baseUnitPrice;
+        const plan = match.subs[0].plan_name || "plan";
+        const left = match.subs[0].remaining_service_count;
+        const units = line.payload?.quantity ?? 1;
         return (
           <Switch
             key={i}
-            checked={on}
+            checked={match.on}
             onChange={(next) => setSubscriptionOverride((prev) => ({ ...prev, [i]: next }))}
-            label={`Use ${match.sub.plan_name || "their plan"} for this ${line.type.name}${line.count > 1 ? ` (${match.coveredCount} of ${line.count})` : ""}`}
-            description={`${match.coveredCount} wash${match.coveredCount > 1 ? "es" : ""} off their plan · saves ₹${saved}`}
+            label={`${isCustomer ? "Use my" : "Use their"} ${plan} — ${left} wash${left === 1 ? "" : "es"} left`}
+            description={`${lineLabel(line)}${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`}
           />
         );
       })}
-      {nonMatchingPasses.length > 0 && (
-        <p className="text-[11px] text-gray-500">
-          Also holds: {nonMatchingPasses.map((s) => s.plan_name).filter(Boolean).join(", ")} — doesn't match what's being booked here.
-        </p>
+      {otherPasses.length > 0 && (
+        <p className="text-xs text-gray-500">Other plans: {otherPasses.map((p) => p.plan_name).filter(Boolean).join(", ")} — not for this booking.</p>
       )}
     </div>
   ) : null;
 
+  // Arrived from a pass's "Book now": the summary that replaces step 1 —
+  // shown while that pass still covers what's on the visit.
+  const introSub = planIntro ? (myPasses || []).find((p) => p.id === planIntro) : undefined;
+  const introIndex = introSub ? lineMatches.findIndex((m) => !!m?.on && m.subs.some((x) => x.id === introSub.id)) : -1;
+  const { data: introPlans } = useQuery({
+    queryKey: ["public-plans"],
+    queryFn: () => subscriptionApi.plans(true),
+    enabled: isCustomer && !!introSub && !introSub.plan_name,
+    staleTime: 5 * 60 * 1000,
+  });
+  const introLine = introIndex >= 0 ? lines[introIndex] : null;
+  const introPlanName = introSub ? introSub.plan_name || introPlans?.find((p) => p.id === introSub.plan_id)?.name : undefined;
+  const introLeft = introSub?.remaining_service_count ?? 0;
+  const planIntroNode =
+    isCustomer && introSub && introLine ? (
+      <div className="flex items-center gap-3 rounded-xl border border-[#F3E5B5] bg-white p-3.5">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
+          <Gift className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-black">Using your {introPlanName ? `${introPlanName} pass` : "pass"}</p>
+          <p className="text-xs text-gray-500">
+            {introLine.type.name}
+            {introLine.base ? ` · ${titleCase(introLine.base.name)}` : ""} · {introLeft} wash{introLeft === 1 ? "" : "es"} left
+          </p>
+        </div>
+        <button type="button" onClick={() => setStep(0)} className="shrink-0 text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black">
+          Change
+        </button>
+      </div>
+    ) : null;
+
   // The editor's own line (may be incomplete — used for the chips/prices).
   const editing = draft.typeId ? lineFor({ ...draft, base: draft.base }) : null;
   const editingGroups = draft.typeId ? baseGroups(services, draft.typeId) : [];
-  const launchOfferGroups = launchOfferActive ? editingGroups.filter((g) => isLaunchOfferBase(g.primary)) : [];
   const editingKit = draft.typeId ? addonKit(services, draft.typeId, bikeIds) : null;
   const editingIsBike = bikeIds.has(draft.typeId);
 
-  const total = lines.reduce((n, l) => n + l.subtotal, 0);
-  const regularTotal = lines.reduce((n, l) => n + l.regularSubtotal, 0);
-  const offerDiscount = lines.reduce((n, l) => n + l.offerDiscount, 0);
-  const displayTotal = Math.max(0, total - offerDiscount - passSavings);
+  // use_subscription defaults true (server auto-applies a matching pass) —
+  // false only for a line whose "use the plan" switch was turned off.
+  const linesForPayload = (): QuickBookingLine[] =>
+    lines
+      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: subscriptionOverride[i] !== false } : null))
+      .filter(Boolean) as QuickBookingLine[];
+
+  // ---- the bill, from the server --------------------------------------------
+  // POST /bookings/quote runs the same pricing code the booking will
+  // (first-wash price by phone, plans, coupon, distance charge, prepaid), so
+  // what this screen shows is what gets charged, in every mode. The local
+  // maths below is only the placeholder until the first quote lands.
+  const quoteLines = lines.length > 0 && lines.every((l) => !!l.payload) ? linesForPayload() : [];
+  const quotePhone = isCustomer ? undefined : validateIndianMobile(phone) || undefined;
+  const quoteAddress: Pick<BookingQuotePayload, "address_id" | "address"> =
+    isLog || coverage !== "covered"
+      ? {}
+      : savedAddressId
+        ? { address_id: savedAddressId }
+        : pinned
+          ? { address: { latitude: pinned.latitude, longitude: pinned.longitude, pincode: pinned.pincode || checkedPincode || undefined } }
+          : checkedPincode
+            ? { address: { pincode: checkedPincode } }
+            : {};
+  const quoteRequest: BookingQuotePayload | null = quoteLines.length
+    ? {
+        lines: quoteLines,
+        customer_phone: quotePhone,
+        ...quoteAddress,
+        coupon_code: isManager && !isLog && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
+        ...(isLog ? { mode: "log" as const, scheduled_date: date, service_time: logTime || undefined } : {}),
+      }
+    : null;
+  // Step 2 always; step 1 only for a signed-in customer (their first-wash
+  // status and plans are known without typing anything).
+  const quoteWanted = !!quoteRequest && (step === 1 || isCustomer);
+  const settledQuoteKey = useSettled(quoteWanted ? JSON.stringify(quoteRequest) : "", 450);
+  const { data: quote, error: quoteFailure, isFetching: quoting } = useQuery({
+    queryKey: ["booking-quote", mode, settledQuoteKey],
+    queryFn: () => bookingApi.quote(JSON.parse(settledQuoteKey) as BookingQuotePayload),
+    enabled: !!settledQuoteKey,
+    retry: false,
+    staleTime: 15_000,
+  });
+  // Only a quote for exactly what is on screen right now counts.
+  const liveQuote = quoteWanted && settledQuoteKey === JSON.stringify(quoteRequest) ? quote : undefined;
+  useEffect(() => {
+    if (quote) setFirstWashKnown(quote.first_time_eligible);
+  }, [quote]);
+  // A refusal the booking would also hit (e.g. a plan that can't be used)
+  // is shown; a network blip or rate limit just leaves the local estimate.
+  const quoteStatus = (quoteFailure as { response?: { status?: number } } | null)?.response?.status;
+  const quoteError = quoteWanted && quoteFailure && quoteStatus && quoteStatus < 500 && quoteStatus !== 429 ? getErrorMessage(quoteFailure) : "";
+
+  const total = liveQuote ? liveQuote.subtotal : lines.reduce((n, l) => n + l.subtotal, 0);
+  const regularTotal = liveQuote ? liveQuote.regular_subtotal : lines.reduce((n, l) => n + l.regularSubtotal, 0);
+  const planSavings = liveQuote ? liveQuote.plan_discount : passSavings;
+  const couponSavings = liveQuote ? liveQuote.coupon_discount : 0;
+  const displayTotal = Math.max(0, total - planSavings - couponSavings);
+  // Distance charge: once per visit, only when a billed service charges
+  // travel — the amount is the server's quote for this address.
+  const travelQuote = liveQuote ? liveQuote.travel : travel;
+  const travelDue = !isLog && !!travelQuote && (liveQuote ? true : billed.some((s) => s.charges_travel));
+  const travelCharge = travelDue && travelQuote ? travelQuote.charge : 0;
+  const payable = liveQuote && !isLog ? liveQuote.total_amount : displayTotal + travelCharge;
+  // Online only: a billed prepaid service, or (self-serve) extras on a plan
+  // wash — the server parks both until paid.
+  const prepaidName = isLog ? undefined : liveQuote ? liveQuote.prepaid_service || undefined : billed.find((s) => s.prepaid_only)?.name;
+  const planExtrasOnline = !isManager && lines.some((l, i) => coveredUnits[i] > 0 && l.subtotal / (l.payload?.quantity || 1) > l.baseUnitPrice);
+  const onlineOnly = liveQuote && !isLog ? liveQuote.online_only : payable > 0 && (!!prepaidName || planExtrasOnline);
+  const payMethod: "cash" | "online" = onlineOnly ? "online" : paymentMethod;
+  const onlineReason = prepaidName
+    ? `${titleCase(prepaidName)} is prepaid${isManager ? " — the customer gets a payment link on WhatsApp." : "."}`
+    : "Extras on a plan wash are paid online.";
+  const payOptions = [
+    { id: "cash", icon: Banknote, title: isManager ? "Cash" : "Pay after the wash", sub: isManager ? "Collected at the visit" : "Cash or UPI to the captain" },
+    { id: "online", icon: CreditCard, title: isManager ? "Online" : "Pay online now", sub: isManager ? "Customer pays online" : "UPI, card or netbanking" },
+  ] as const;
   // Log mode only: rupees the manager took off the bill. What the customer
   // actually paid (finalTotal) drives the footer, the payment choice and the save.
   const discountNum = isLog ? Math.round(Number(discount) || 0) : 0;
@@ -545,11 +743,11 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const step1Ready = lines.length > 0 && lines.every((l) => !!l.base) && (!draft.typeId || draftReady);
 
   const otherVehicles = added.reduce((n, d) => n + d.count, 0);
-  const selectableTypes = launchOfferActive ? types.filter((t) => !bikeIds.has(t.id)) : types;
   const pickType = (typeId: string) => {
-    // Default the service to the first one offered for this type so the
-    // dropdown pick is already a bookable line.
-    const first = launchOfferActive ? launchOfferBaseKey(typeId) : baseGroups(services, typeId)[0]?.key ?? null;
+    // Default the service (a deep-linked one when offered for this type) so
+    // the dropdown pick is already a bookable line.
+    const groups = baseGroups(services, typeId);
+    const first = (groups.find((g) => g.key === preferredBase) || groups[0])?.key ?? null;
     setDraft({ typeId, count: 1, base: first, addons: [] });
   };
   const setCount = (next: number) => {
@@ -574,47 +772,62 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     setDraft(EMPTY_DRAFT);
     scrollToTopNow();
   };
-  const removeAdded = (index: number) => setAdded((a) => a.filter((_, i) => i !== index));
+  const removeAdded = (index: number) => {
+    setAdded((a) => a.filter((_, i) => i !== index));
+    setSubscriptionOverride({});
+  };
   const editAdded = (index: number) => {
     const d = added[index];
     if (!d) return;
     // Anything half-typed in the editor is kept as its own line.
     setAdded((a) => [...a.filter((_, i) => i !== index), ...(draftReady ? [draft] : [])]);
+    setSubscriptionOverride({});
     setDraft(d);
     scrollToTopNow();
   };
 
   // ---- address / coverage --------------------------------------------------
+  // Latest wins: every address pick bumps this, and a coverage answer for an
+  // older pick (a default address still checking when "Book again" or the
+  // customer picks another) is dropped instead of overwriting the newer one.
+  const addressSeq = useRef(0);
   const resetCoverage = () => {
+    addressSeq.current += 1;
     setCoverage("idle");
     setCheckedPincode("");
     setCenterId("");
     setSlot("");
+    setTravel(null);
   };
 
   async function chooseSavedAddress(a: Address) {
+    const seq = ++addressSeq.current;
     setSavedAddressId(a.id);
     setPinned(null);
     setCoverage("checking");
     setCheckedPincode(a.pincode);
     setCenterId("");
     setSlot("");
+    setTravel(null);
     try {
       const result = await coverageApi.check({ latitude: a.latitude ?? undefined, longitude: a.longitude ?? undefined, pincode: a.pincode });
+      if (seq !== addressSeq.current) return;
       if (result.covered && result.center) {
         setCenterId(result.center.id);
         setCenterCity(result.center.city || a.city);
         setCenterState(result.center.state || a.state);
+        setTravel(result.travel ?? null);
         setCoverage("covered");
       } else {
         setCoverage("uncovered");
       }
     } catch {
-      setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("uncovered");
     }
   }
 
   async function onPin(v: LocationValue) {
+    const seq = ++addressSeq.current;
     setPinned(v);
     if (v.pincode) setPincode(v.pincode);
     setCoverage("checking");
@@ -623,32 +836,37 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     setCheckedPincode(v.pincode || "");
     setCenterId("");
     setSlot("");
+    setTravel(null);
     try {
       const result = await coverageApi.check({ latitude: v.latitude, longitude: v.longitude, pincode: v.pincode });
+      if (seq !== addressSeq.current) return;
       if (result.covered && result.center) {
         setCenterId(result.center.id);
         setCenterCity(result.center.city || v.city);
         setCenterState(result.center.state || v.state);
+        setTravel(result.travel ?? null);
         setCoverage("covered");
       } else {
         setCoverage("uncovered");
       }
     } catch {
-      setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("uncovered");
     }
   }
 
   const latestPincode = useRef("");
   async function checkPincode(pin: string) {
+    const seq = ++addressSeq.current;
     latestPincode.current = pin;
     setCoverage("checking");
     setCheckedPincode(pin);
     setCenterId("");
     setSlot("");
+    setTravel(null);
     try {
       const centers = await serviceCenterApi.lookupByPincode(pin);
       // The customer kept typing while this was in flight — a newer check owns the screen.
-      if (latestPincode.current !== pin) return;
+      if (latestPincode.current !== pin || seq !== addressSeq.current) return;
       if (centers.length) {
         setCenterId(centers[0].id);
         setCenterCity(centers[0].location.city);
@@ -658,7 +876,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setCoverage("uncovered");
       }
     } catch {
-      if (latestPincode.current === pin) setCoverage("uncovered");
+      if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("uncovered");
     }
   }
 
@@ -726,10 +944,11 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       return;
     }
     if (r.savedAddressId) {
-      if (!myAddresses) return; // wait for the list
-      const a = myAddresses.find((x) => x.id === r.savedAddressId);
+      if (!savedAddresses) return; // wait for the list
+      const a = savedAddresses.find((x) => x.id === r.savedAddressId);
       void finish(async () => {
         if (a) await chooseSavedAddress(a);
+        else setSavedAddressId(null); // gone since — fall back to the default
       });
       return;
     }
@@ -739,7 +958,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     }
     restoreAddressRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restored, myAddresses]);
+  }, [restored, savedAddresses]);
 
   const usingPin = !savedAddressId && mapsUp && !typedAddress;
   const addressReady = savedAddressId ? true : usingPin ? !!pinned : line1.trim().length >= 3 && pincode.trim().length >= 6;
@@ -802,14 +1021,6 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // signed-in customers already did (OTP login) and managers book on behalf.
   const needsOtp = !isManager && (!user || user.role !== "customer" || forceOtp);
 
-  // use_subscription defaults true (server auto-applies a matching pass
-  // with nothing to pick) — only ever set to false here, for a line this
-  // manager explicitly unticked "use this customer's plan?" for.
-  const linesForPayload = (): QuickBookingLine[] =>
-    lines
-      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: subscriptionOverride[i] !== false } : null))
-      .filter(Boolean) as QuickBookingLine[];
-
   const submitLog = async () => {
     setError("");
     setSubmitting(true);
@@ -854,7 +1065,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       return;
     }
     const canonicalPhone = validateIndianMobile(phone) || phone.trim();
-    const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? { phone_access_token: verified.token } : undefined);
+    const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? verified.proof : undefined);
     if (needsOtp && !proof) {
       setOtpError("");
       setOtpOpen(true);
@@ -870,8 +1081,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         lines: linesForPayload(),
         scheduled_date: date,
         scheduled_slot: slot,
-        payment_method: displayTotal > 0 ? paymentMethod : "cash",
-        coupon_code: launchOfferActive || offerDiscount > 0 ? LAUNCH_FREE_BIKE_COUPON : isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
+        payment_method: payable > 0 ? payMethod : "cash",
+        coupon_code: isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
         customer_notes: notes.trim() || undefined,
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
@@ -896,13 +1107,25 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         // ignore
       }
       if (isManager) {
+        if (result.payment_link) {
+          setSentLink({ numbers: result.booking_numbers.join(" + "), link: result.payment_link });
+          return;
+        }
+        // Prepaid but no link came back (e.g. the gateway was down): say so.
+        const linkMissing = payMethod === "online" && !!prepaidName;
         pushToast({
-          tone: "success",
+          tone: linkMissing ? "warning" : "success",
           title: "Booking created",
-          message: `${result.booking_numbers.join(" + ")} · service code ${result.service_code || "—"}`,
+          message: linkMissing
+            ? `${result.booking_numbers.join(" + ")} · the payment link couldn't be sent.`
+            : `${result.booking_numbers.join(" + ")} · service code ${result.service_code || "—"}`,
         });
         navigate("/manager/bookings");
         return;
+      }
+      if (isCustomer) {
+        queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
+        queryClient.invalidateQueries({ queryKey: ["addresses"] });
       }
       navigate(`/thank-you?token=${result.confirmation_token}`, {
         state: {
@@ -910,7 +1133,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           booking_number: result.booking_numbers.join(" + "),
           scheduled_date: date,
           scheduled_slot: slot,
-          service_label: lines.map((l) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name} · ${titleCase(l.base?.name)}${l.freeBikeAddon ? " + Free Bike Wash" : ""}`).join(" + "),
+          service_label: lines.map(lineLabel).join(" + "),
           service_code: result.service_code,
           payment_link: result.payment_link,
           awaiting_payment: result.awaiting_payment,
@@ -936,49 +1159,88 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     }
   };
 
+  const copyLink = async () => {
+    if (!sentLink) return;
+    try {
+      await navigator.clipboard.writeText(sentLink.link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard unavailable — the link is still visible to select by hand
+    }
+  };
+
   // ---- render --------------------------------------------------------------
-  const summary = lines.map((l) => `${l.count} ${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`).join("  +  ");
-  const lineLabel = (l: Line) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`;
+  // Only what moves the total gets its own row; otherwise the summary alone.
+  const travelBeyondKm = travelQuote ? Math.max(0, Math.round((travelQuote.distance_km - travelQuote.free_km) * 10) / 10) : 0;
+  const billRows: { label: string; value: string }[] = [];
+  if (planSavings > 0) billRows.push({ label: isCustomer ? "Covered by your plan" : "Covered by plan", value: `−₹${planSavings}` });
+  if (couponSavings > 0) billRows.push({ label: `Coupon ${liveQuote?.coupon_code || ""}`.trim(), value: `−₹${couponSavings}` });
+  if (travelDue && travelQuote)
+    billRows.push(
+      travelQuote.charge > 0
+        ? { label: `Distance charge · ${travelBeyondKm} km`, value: `₹${travelQuote.charge}` }
+        : { label: "Distance charge", value: `Free — within ${travelQuote.free_km} km` }
+    );
+  if (discountNum > 0 && discountNum <= displayTotal) billRows.push({ label: "Discount", value: `−₹${discountNum}` });
+  const shownTotal = isLog ? finalTotal : payable;
+  // The first-wash price struck against what a returning customer pays.
+  const struckTotal = showFirstWash && regularTotal > total ? shownTotal + (regularTotal - total) : null;
 
   const footer = (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-end justify-between gap-2">
-        <span className="min-w-0 flex-1 truncate text-xs text-gray-500">{summary || "Pick your vehicles"}</span>
+      {billRows.length > 0 && (
+        <div className="space-y-1 text-sm text-gray-600">
+          <div className="flex justify-between gap-3">
+            <span className="min-w-0 truncate">{summary}</span>
+            <span className="font-mono-num shrink-0">₹{total}</span>
+          </div>
+          {billRows.map((r) => (
+            <div key={r.label} className="flex justify-between gap-3">
+              <span>{r.label}</span>
+              <span className="font-mono-num shrink-0">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-end justify-between gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm text-gray-600">{billRows.length ? "Total" : summary || "Pick your vehicle"}</span>
         <span className="text-right">
-          {showFirstWash && regularTotal > total && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{regularTotal}</span>}
-          {offerDiscount > 0 && <span className="mr-1.5 text-xs font-bold text-[#E11D48]">FREE bike -₹{offerDiscount}</span>}
-          {discountNum > 0 && discountNum <= displayTotal && (
-            <span className="mr-1.5 text-xs text-gray-400">
-              <span className="line-through">₹{displayTotal}</span> <span className="font-bold text-[#E11D48]">-₹{discountNum}</span>
-            </span>
-          )}
-          <span className="font-mono-num text-lg font-bold text-black">₹{isLog ? finalTotal : displayTotal}</span>
+          {struckTotal != null && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{struckTotal}</span>}
+          <span className="font-mono-num text-lg font-bold text-black">₹{shownTotal}</span>
         </span>
       </div>
       {!isLog && (
-        <p className="flex items-center gap-1.5 text-xs font-medium text-gray-600">
+        <p className="flex items-center gap-1.5 text-xs text-gray-500">
           <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-black" aria-hidden="true" />
-          Price shown is final — no extra or hidden charges.
+          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoting ? "Checking the price…" : "Price shown is final — no hidden charges."}
         </p>
       )}
-      {error && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error}</p>}
+      {(error || quoteError) && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error || quoteError}</p>}
       <div className="flex items-center justify-between gap-3">
         <Button variant="outline" onClick={() => (step > 0 ? setStep(0) : navigate(-1))}>
           Back
         </Button>
         {step === 0 ? (
-          <Button className="min-w-[150px]" disabled={!step1Ready} onClick={() => setStep(1)}>
+          <Button
+            variant="info"
+            className="min-w-[150px] font-semibold"
+            disabled={!step1Ready}
+            onClick={() => {
+              setPlanIssue("");
+              setStep(1);
+            }}
+          >
             Continue
           </Button>
         ) : (
-          <Button className="min-w-[150px]" disabled={!step2Ready} isLoading={submitting} onClick={() => void submit()}>
-            <CheckCircle2 className="h-4 w-4" />
-            {isLog ? "Save As Done" : displayTotal > 0 && paymentMethod === "online" ? "Book And Pay" : "Book Now"}
+          <Button variant="info" className="min-w-[150px] font-semibold" disabled={!step2Ready} isLoading={submitting} onClick={() => void submit()}>
+            {isLog ? "Save As Done" : !isManager && payable > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
           </Button>
         )}
       </div>
       {step === 0 && !step1Ready && (draft.typeId || added.length > 0) && (
-        <p className="text-right text-xs text-[var(--color-error)]">Pick a service for this vehicle to continue.</p>
+        <p className="text-right text-xs text-[var(--color-error)]">Pick a service to continue.</p>
       )}
     </div>
   );
@@ -996,14 +1258,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           setTimeout(() => phoneRef.current?.focus(), 0);
         }}
         onVerified={(proof) => {
-          if (proof.phone_access_token) setVerified({ phone: validateIndianMobile(phone) || phone.trim(), token: proof.phone_access_token });
+          setVerified({ phone: validateIndianMobile(phone) || phone.trim(), proof });
           setOtpOpen(false);
           void submit(proof);
         }}
       />
     )}
     <WizardShell
-      eyebrow={isLog ? "Log a job you did" : isManager ? "Book for a customer" : "Book a wash"}
       title={isLog ? "Log A Completed Job" : isManager ? "New Booking" : "Book Your Doorstep Wash"}
       steps={isLog ? LOG_STEPS : STEPS}
       current={step}
@@ -1012,53 +1273,39 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     >
       {/* ---------------- STEP 1 ---------------- */}
       {step === 0 && (
-        <div className="space-y-6">
-          <WizardStepHeader
-            title="What Are We Washing?"
-            description={
-              launchOfferActive
-                ? "Your launch offer is ready: choose your car type, pick Star Wash or Deep Cleaning, and one Bike Wash is added free."
-                : isLog
-                  ? `Pick the vehicle and the service you did. Up to ${maxVehicles} vehicles on one visit.`
-                  : `Pick the vehicle and the service. Up to ${maxVehicles} vehicles on one visit — one address, one slot.`
-            }
-          />
+        <div className="space-y-5">
+          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[0]} />
 
-          {launchOfferActive && (
-            <div className="overflow-hidden rounded-2xl border border-[#F3E5B5] bg-[#111] text-white shadow-[0_16px_38px_rgba(0,0,0,0.18)]">
-              <div className="grid gap-0 sm:grid-cols-[1fr_auto] sm:items-center">
-                <div className="p-4 sm:p-5">
-                  <p className="text-xs font-bold uppercase tracking-wide text-[#FACC15]">Launch offer claimed</p>
-                  <h3 className="mt-1 text-xl font-black">Star Wash Or Deep Cleaning + Bike Wash</h3>
-                  <p className="mt-1 text-sm text-white/70">Select your car type and service. We add one Bike Wash free to this booking.</p>
-                </div>
-                <div className="flex items-center gap-2 border-t border-white/10 bg-white/[0.06] p-4 sm:border-l sm:border-t-0">
-                  <span className="rounded-full bg-[#E11D48] px-3 py-1 text-xs font-black uppercase tracking-wide text-white">Bike FREE</span>
-                  <span className="text-xs font-semibold text-white/70">Till 24 Sep</span>
-                </div>
-              </div>
-            </div>
+          {planIssue && (
+            <p role="status" className="flex items-start gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-3 text-sm text-gray-700">
+              <Info className="mt-0.5 h-4 w-4 shrink-0 text-black" />
+              <span>{planIssue}</span>
+            </p>
           )}
 
           {/* Vehicles already on the visit */}
           {added.length > 0 && (
-            <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3.5">
-              <p className="text-sm font-semibold text-black">On this visit ({totalVehicles} of {maxVehicles})</p>
+            <div className="rounded-xl border border-[#F3E5B5] p-3.5">
+              <p className="text-sm font-medium text-gray-600">
+                On this visit · {totalVehicles} of {maxVehicles}
+              </p>
               <div className="mt-2 space-y-1.5">
                 {added.map((d, i) => {
-                  const l = lineFor(d);
+                  const li = lines.findIndex((x) => x.draft === d);
+                  const l = lines[li];
                   if (!l) return null;
+                  const cost = lineCost(li);
                   return (
                     <div key={`${d.typeId}-${i}`} className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate text-gray-700">
+                      <span className="min-w-0 flex-1 truncate text-gray-600">
                         <span className="font-medium text-black">{lineLabel(l)}</span>
                         {l.addons.length ? ` + ${l.addons.map((x) => titleCase(x.name)).join(", ")}` : ""}
                       </span>
-                      <span className="font-mono-num shrink-0 text-gray-600">₹{l.subtotal}</span>
-                      <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-xs font-bold text-gray-500 underline underline-offset-2 hover:text-black">
+                      <span className="font-mono-num shrink-0 text-gray-600">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : `₹${cost}`}</span>
+                      <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-xs font-semibold text-gray-500 underline underline-offset-2 hover:text-black">
                         Edit
                       </button>
-                      <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-gray-400 hover:text-[var(--color-error)]">
+                      <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-gray-400 hover:text-black">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
@@ -1069,91 +1316,53 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           )}
 
           {/* The editor: one vehicle at a time */}
-          <div className="space-y-4">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-black">
-              <Car className="h-3.5 w-3.5" />
-              {added.length ? `Vehicle ${added.length + 1}` : "Your vehicle"}
-              {added.length > 0 && !draft.typeId && <span className="text-xs font-normal text-gray-500">(optional — or just continue)</span>}
-            </p>
+          <div className="space-y-5">
+            {added.length > 0 && (
+              <p className="text-sm font-medium text-black">
+                Vehicle {added.length + 1}
+                {!draft.typeId && <span className="font-normal text-gray-500"> · optional</span>}
+              </p>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
               <Select label="Vehicle type" value={draft.typeId} onChange={(e) => pickType(e.target.value)}>
-                <option value="">Select vehicle type…</option>
-                {selectableTypes.map((t) => (
+                <option value="">Select vehicle type</option>
+                {types.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name}
                   </option>
                 ))}
               </Select>
-              {draft.typeId && !launchOfferActive && (
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 sm:h-[46px]">
+              {draft.typeId && (
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-2.5 sm:h-[46px]">
                   <span className="text-sm text-gray-600">How many?</span>
                   <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
                 </div>
               )}
             </div>
 
-            {draft.typeId && editing && (
-              <div className="space-y-3 rounded-2xl border border-gray-200 bg-white p-4">
-                {servicesLoading ? (
-                  <p className="text-sm text-gray-500">Loading services…</p>
-                ) : editingGroups.length === 0 ? (
-                  <p className="text-sm text-gray-500">No services are offered for this vehicle type yet.</p>
-                ) : (
-                  launchOfferActive ? (
-                    <div className="space-y-3">
-                      <div>
-                        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">Choose Offer Service</p>
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          {(launchOfferGroups.length ? launchOfferGroups : editingGroups).map((g) => {
-                            const selected = draft.base === g.key;
-                            const shown = unit(g.primary, draft.typeId);
-                            return (
-                              <button
-                                key={g.key}
-                                type="button"
-                                onClick={() => pickBase(g.key)}
-                                aria-pressed={selected}
-                                className={`rounded-xl border-2 px-3.5 py-3 text-left transition-colors ${
-                                  selected ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white hover:border-gray-400"
-                                }`}
-                              >
-                                <span className="flex items-center justify-between gap-3">
-                                  <span className="text-sm font-semibold text-black">{titleCase(g.label)}</span>
-                                  <span className="font-mono-num shrink-0 text-sm font-bold text-black">₹{shown}</span>
-                                </span>
-                                <span className="mt-1 block text-xs text-gray-600">Includes one Bike Wash free with this launch offer.</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-3">
-                        <div>
-                          <p className="text-sm font-semibold text-black">Bike Wash</p>
-                          <p className="mt-0.5 text-xs text-gray-600">Added automatically with your selected offer service.</p>
-                        </div>
-                        <span className="rounded-full bg-[#E11D48] px-2.5 py-1 text-[11px] font-black uppercase tracking-wide text-white">Free</span>
-                      </div>
-
-                      {editing.offerDiscount > 0 && (
-                        <p className="text-sm text-gray-700">
-                          Offer discount: <span className="font-mono-num font-semibold text-[#E11D48]">-₹{editing.offerDiscount}</span>
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                  <>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      Service {draft.count > 1 ? `(same for all ${draft.count})` : ""}
-                    </p>
-                    {/* Every option shows exactly what it includes, so the
-                        customer compares before tapping — not after. */}
+            {draft.typeId &&
+              editing &&
+              (servicesLoading ? (
+                <p className="text-sm text-gray-500">Loading services…</p>
+              ) : editingGroups.length === 0 ? (
+                <p className="text-sm text-gray-500">No services for this vehicle yet.</p>
+              ) : (
+                <>
+                  <div>
+                    <p className={SECTION_LABEL}>Service</p>
+                    {/* Every option shows what it includes, so the customer
+                        compares before tapping — not after. */}
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       {editingGroups.map((g) => {
                         const selected = draft.base === g.key;
                         const shown = unit(g.primary, draft.typeId);
-                        const regular = priceFor(g.primary, draft.typeId);
+                        const { price, original } = priceForType(g.primary, draft.typeId);
+                        // A first-wash price is struck against the regular one, else against the MRP.
+                        const struck = shown < price ? price : original;
+                        const pct = discountPercent(shown, struck);
+                        const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag;
+                        const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
+                        const inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
                         const inc = parseIncludes(g.primary.description);
                         const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
                         return (
@@ -1162,19 +1371,29 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                             type="button"
                             onClick={() => pickBase(g.key)}
                             aria-pressed={selected}
-                            className={`rounded-xl border-2 px-3.5 py-3 text-left transition-colors ${
-                              selected ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white hover:border-gray-400"
-                            }`}
+                            className={`rounded-xl px-3.5 py-3 text-left ${choiceClass(selected)}`}
                           >
-                            <span className="flex items-center justify-between gap-3">
+                            <span className="flex items-start justify-between gap-3">
                               <span className="text-sm font-semibold text-black">{titleCase(g.label)}</span>
-                              <span className="font-mono-num shrink-0 text-sm font-bold text-black">
-                                ₹{shown}
-                                {showFirstWash && shown < regular && <span className="ml-1 text-[10px] font-normal text-gray-500">first wash</span>}
+                              <span className="shrink-0 text-right">
+                                {struck != null && <span className="mr-1 text-xs text-gray-400 line-through">₹{struck}</span>}
+                                <span className="font-mono-num text-sm font-bold text-black">₹{shown}</span>
                               </span>
                             </span>
+                            {(pct != null || offerTag || inPlan || shown < price) && (
+                              <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                <DiscountBadge percent={pct} />
+                                <OfferTag label={offerTag} />
+                                {shown < price && <span className="text-[11px] text-gray-500">First wash</span>}
+                                {inPlan && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-black">
+                                    <BadgeCheck className="h-3 w-3" /> In {isCustomer ? "your" : "their"} plan
+                                  </span>
+                                )}
+                              </span>
+                            )}
                             {items.length > 0 && (
-                              <ul className="mt-1.5 space-y-0.5">
+                              <ul className="mt-2 space-y-0.5">
                                 {items.map((it) => (
                                   <li key={it} className="flex items-start gap-1.5 text-xs text-gray-600">
                                     <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-black" />
@@ -1187,78 +1406,40 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                         );
                       })}
                     </div>
+                  </div>
 
-                    {editing.base && editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
-                      <div>
-                        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">Add-ons</p>
-                        <div className="flex flex-wrap gap-2">
-                          {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
-                            const on = draft.addons.includes(a.id);
-                            const per = unit(a, draft.typeId);
-                            const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
-                            return (
-                              <button
-                                key={a.id}
-                                type="button"
-                                onClick={() => toggleAddon(a.id)}
-                                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
-                                  on ? "border-black bg-[#FFF4CD] text-black" : "border-gray-300 bg-white text-gray-600 hover:border-black"
-                                }`}
-                              >
-                                + {titleCase(a.name)} · ₹{per}
-                                {perBike ? "/bike" : ""}
-                              </button>
-                            );
-                          })}
-                        </div>
+                  {editing.base && editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
+                    <div>
+                      <p className={SECTION_LABEL}>Add-ons</p>
+                      <div className="flex flex-wrap gap-2">
+                        {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
+                          const on = draft.addons.includes(a.id);
+                          const per = unit(a, draft.typeId);
+                          const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
+                          return (
+                            <button
+                              key={a.id}
+                              type="button"
+                              onClick={() => toggleAddon(a.id)}
+                              aria-pressed={on}
+                              className={`rounded-full px-3 py-1.5 text-xs font-medium ${choiceClass(on)}`}
+                            >
+                              + {titleCase(a.name)} · ₹{per}
+                              {perBike ? "/bike" : ""}
+                            </button>
+                          );
+                        })}
                       </div>
-                    )}
-
-                    {!isLog && editing.base && !editingIsBike && editingKit?.addBike && isLaunchOfferBase(editing.base) && (
-                      <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <p className="text-sm font-semibold text-black">Add Free Bike Wash</p>
-                            <p className="mt-0.5 text-xs text-gray-600">Optional launch offer with {titleCase(editing.base.name)}.</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => toggleAddon(editingKit.addBike!.id)}
-                            className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-full border px-3.5 py-2 text-xs font-black uppercase tracking-wide transition-colors ${
-                              draft.addons.includes(editingKit.addBike.id)
-                                ? "border-[#E11D48] bg-[#E11D48] text-white"
-                                : "border-[#E11D48]/30 bg-white text-[#E11D48] hover:border-[#E11D48]"
-                            }`}
-                          >
-                            {draft.addons.includes(editingKit.addBike.id) ? "Free Bike Added" : "Add Free Bike"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {editing.base && (
-                      <p className="text-sm text-gray-700">
-                        {lineLabel(editing)}:{" "}
-                        {editing.offerDiscount > 0 && <span className="mr-1.5 text-xs font-bold text-[#E11D48]">FREE bike -₹{editing.offerDiscount}</span>}
-                        <span className="font-mono-num font-semibold text-black">₹{editing.subtotal - editing.offerDiscount}</span>
-                      </p>
-                    )}
-                  </>
-                  )
-                )}
-              </div>
-            )}
+                    </div>
+                  )}
+                </>
+              ))}
 
             {/* A different type on the same visit */}
-            {!launchOfferActive && totalVehicles < maxVehicles && (
-              <div>
-                <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
-                  <Plus className="h-4 w-4" /> Add another vehicle
-                </Button>
-                <p className="mt-1.5 text-center text-xs text-gray-500">
-                  {draftReady ? `Up to ${maxVehicles} vehicles washed on one visit, at one address.` : "Pick this vehicle's service first."}
-                </p>
-              </div>
+            {totalVehicles < maxVehicles && (
+              <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
+                <Plus className="h-4 w-4" /> Add another vehicle
+              </Button>
             )}
             {!types.length && <p className="text-sm text-gray-500">Loading vehicle types…</p>}
           </div>
@@ -1268,38 +1449,33 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       {/* ---------------- STEP 2 ---------------- */}
       {step === 1 && (
         <div className="space-y-6">
-          <WizardStepHeader
-            title={isLog ? "Who, Where And When?" : "Where And When?"}
-            description={isLog ? "Enter the job as it happened. It is saved as done — no captain or photos needed." : "The captain drives to the pin you drop. Pick a slot that suits you."}
-          />
+          {planIntroNode}
+          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[1]} description={isLog ? "Saved as done — no captain or photos needed." : undefined} />
 
           {/* Who — a signed-in customer books as themselves, unless the
               account has no phone yet (Google sign-in) and we still need one
               for the captain and the WhatsApp updates. */}
           {isCustomer && user && user.phone ? (
-            <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-4 py-3 text-sm">
-              Booking as <span className="font-semibold text-black">{user.full_name}</span>
-              {user.phone ? <span className="text-gray-500"> · {user.phone}</span> : null}
-            </div>
+            <p className="text-sm text-gray-600">
+              Booking as <span className="font-semibold text-black">{user.full_name}</span> · {user.phone}
+            </p>
           ) : isManager ? (
-            <div className="space-y-3">
-              <CustomerNamePhoneFields
-                name={name}
-                phone={phone}
-                onChangeName={(v) => {
-                  setName(v);
-                  setPickedCustomerId(null);
-                }}
-                onChangePhone={(v) => {
-                  setPhone(v);
-                  setPickedCustomerId(null);
-                }}
-                onPick={(c) => setPickedCustomerId(c.id)}
-                nameError={fieldErrors.name}
-                phoneError={fieldErrors.phone}
-                phoneInputRef={phoneRef}
-              />
-            </div>
+            <CustomerNamePhoneFields
+              name={name}
+              phone={phone}
+              onChangeName={(v) => {
+                setName(v);
+                pickCustomer(null);
+              }}
+              onChangePhone={(v) => {
+                setPhone(v);
+                pickCustomer(null);
+              }}
+              onPick={(c) => pickCustomer(c.id)}
+              nameError={fieldErrors.name}
+              phoneError={fieldErrors.phone}
+              phoneInputRef={phoneRef}
+            />
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Input label="Your name" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
@@ -1311,19 +1487,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
                 error={fieldErrors.phone}
                 placeholder="10-digit mobile"
-                hint="Your booking updates and service code come here on WhatsApp."
+                hint="Booking updates come on WhatsApp."
               />
             </div>
           )}
 
           {isLog && (
             <div className="space-y-6">
-              <div className="space-y-3">
-                <p className="flex items-center gap-1.5 text-sm font-medium text-black">
-                  <MapPin className="h-3.5 w-3.5" /> Where was it done?
-                </p>
-                <Input label="Address / area" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
-              </div>
+              <Input label="Where was it done?" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />
@@ -1337,30 +1508,27 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
                 placeholder="0"
                 error={fieldErrors.discount}
-                hint={
-                  discountNum > 0 && discountNum <= displayTotal
-                    ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.`
-                    : "Only if you gave this customer a discount — it comes off the total."
-                }
+                hint={discountNum > 0 && discountNum <= displayTotal ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.` : undefined}
               />
 
-              {subscriptionTogglesNode}
+              {planTogglesNode}
 
               {finalTotal > 0 && (
                 <div>
-                  <p className="mb-2 text-sm font-medium text-black">How was it paid?</p>
+                  <p className={SECTION_LABEL}>How was it paid?</p>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {(
                       [
                         { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you" },
-                        { id: "online", icon: CreditCard, title: "Online / UPI", sub: "Paid to the business account" },
+                        { id: "online", icon: CreditCard, title: "Online / UPI", sub: "To the business account" },
                       ] as const
                     ).map((opt) => (
                       <button
                         key={opt.id}
                         type="button"
                         onClick={() => setPaymentMethod(opt.id)}
-                        className={`flex items-start gap-3 rounded-xl border-2 p-3 text-left ${paymentMethod === opt.id ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white"}`}
+                        aria-pressed={paymentMethod === opt.id}
+                        className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(paymentMethod === opt.id)}`}
                       >
                         <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
                         <span>
@@ -1373,13 +1541,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                 </div>
               )}
 
-              <Input label="Note (optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything worth remembering about this job" />
+              <Input label="Note (optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
 
               <Switch
                 checked={sendWhatsApp}
                 onChange={setSendWhatsApp}
                 label="Tell the customer on WhatsApp"
-                description={`They get one message${validateIndianMobile(phone) ? ` on +91 ${validateIndianMobile(phone)}` : ""} saying the service is done. Nothing else is sent.`}
+                description="One message saying the service is done."
               />
             </div>
           )}
@@ -1388,22 +1556,23 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           <>
           {/* Where */}
           <div className="space-y-3">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-black">
-              <MapPin className="h-3.5 w-3.5" /> Service address
+            <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
+              <MapPin className="h-3.5 w-3.5" /> Address
             </p>
-            {isCustomer && !!myAddresses?.length && (
+            {!!savedAddresses?.length && (
               <div className="flex flex-wrap gap-2">
-                {myAddresses.map((a) => (
+                {savedAddresses.map((a) => (
                   <button
                     key={a.id}
                     type="button"
                     onClick={() => void chooseSavedAddress(a)}
-                    className={`max-w-full rounded-xl border-2 px-3.5 py-2 text-left text-sm ${
-                      savedAddressId === a.id ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white"
-                    }`}
+                    aria-pressed={savedAddressId === a.id}
+                    className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
                   >
                     <span className="block font-semibold text-black">{a.label}</span>
-                    <span className="block truncate text-xs text-gray-500">{a.line1} · {a.pincode}</span>
+                    <span className="block truncate text-xs text-gray-500">
+                      {a.line1} · {a.pincode}
+                    </span>
                   </button>
                 ))}
                 <button
@@ -1413,7 +1582,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                     setPinned(null);
                     resetCoverage();
                   }}
-                  className={`rounded-xl border-2 px-3.5 py-2 text-sm ${savedAddressId === "" ? "border-black bg-[#FFF4CD]" : "border-dashed border-gray-300 text-gray-600"}`}
+                  aria-pressed={savedAddressId === ""}
+                  className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
                 >
                   + New address
                 </button>
@@ -1431,9 +1601,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                       setPinned(null);
                       resetCoverage();
                     }}
-                    className="text-xs font-semibold text-black underline underline-offset-2"
+                    className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black"
                   >
-                    {typedAddress ? "Pin it on the map instead" : "Can't pin it? Type the address instead"}
+                    {typedAddress ? "Pin on the map instead" : "Type the address instead"}
                   </button>
                 )}
                 {!usingPin && (
@@ -1444,7 +1614,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
                       onChange={(e) => setLine1(e.target.value)}
                       error={fieldErrors.address}
                       placeholder="House / flat, street, area"
-                      hint={!mapsUp ? "Maps are unavailable right now — type the address instead." : undefined}
+                      hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
                     />
                     <Input
                       label="Pincode"
@@ -1471,20 +1641,17 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
             {coverage === "checking" && (
               <p className="flex items-center gap-1.5 text-xs text-gray-500">
-                <Spinner className="h-3.5 w-3.5" /> Checking coverage…
+                <Spinner className="h-3.5 w-3.5" /> Checking your area…
               </p>
             )}
             {coverage === "covered" && (
-              <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-3">
-                <p className="flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
-                  <BadgeCheck className="h-3.5 w-3.5" /> We serve this area
-                </p>
-                {pinned && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    <span className="font-medium text-black">{pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")}</span> — drag the pin if this isn't your exact gate.
-                  </p>
-                )}
-              </div>
+              <p className="flex items-start gap-1.5 text-xs text-gray-600">
+                <BadgeCheck className="mt-px h-3.5 w-3.5 shrink-0 text-black" />
+                <span>
+                  <span className="font-medium text-black">We serve this area.</span>
+                  {pinned && <> {pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")} — drag the pin if this isn't your exact gate.</>}
+                </span>
+              </p>
             )}
             {coverage === "uncovered" && (
               <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
@@ -1500,58 +1667,56 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             </div>
           )}
 
-          {subscriptionTogglesNode}
+          {/* The pass summary on top already says the pass is used. */}
+          {!(planIntroNode && lines.length === 1) && planTogglesNode}
 
           {/* How to pay */}
-          {displayTotal > 0 && (
+          {payable > 0 && (
             <div>
-              <p className="mb-2 text-sm font-medium text-black">How would you like to pay?</p>
+              <p className={SECTION_LABEL}>Payment</p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {(
-                  [
-                    { id: "cash", icon: Banknote, title: "Pay at your doorstep", sub: "Cash or UPI to the captain after the wash" },
-                    { id: "online", icon: CreditCard, title: "Pay online now", sub: "UPI, cards, netbanking — confirms instantly" },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => setPaymentMethod(opt.id)}
-                    className={`flex items-start gap-3 rounded-xl border-2 p-3 text-left ${paymentMethod === opt.id ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white"}`}
-                  >
-                    <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-                    <span>
-                      <span className="block text-sm font-semibold text-black">{opt.title}</span>
-                      <span className="block text-xs text-gray-500">{opt.sub}</span>
-                    </span>
-                  </button>
-                ))}
+                {payOptions
+                  .filter((opt) => !onlineOnly || opt.id === "online")
+                  .map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setPaymentMethod(opt.id)}
+                      aria-pressed={payMethod === opt.id}
+                      className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(payMethod === opt.id)}`}
+                    >
+                      <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
+                      <span>
+                        <span className="block text-sm font-semibold text-black">{opt.title}</span>
+                        <span className="block text-xs text-gray-500">{opt.sub}</span>
+                      </span>
+                    </button>
+                  ))}
               </div>
+              {onlineOnly && <p className="mt-2 text-xs text-gray-500">{onlineReason}</p>}
             </div>
           )}
 
-          {isManager && displayTotal > 0 && (
+          {isManager && payable > 0 && (
             <div className="max-w-sm">
               <Input
-                label="Coupon code"
+                label="Coupon code (optional)"
                 value={couponCode}
                 maxLength={20}
                 onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                error={fieldErrors.couponCode}
-                placeholder="Optional"
-                hint="Applied by the server when the booking is created."
+                error={fieldErrors.couponCode || liveQuote?.coupon_error || undefined}
               />
             </div>
           )}
 
           {/* Optional extras */}
           <div>
-            <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-xs font-semibold text-gray-600 underline underline-offset-2">
-              {moreOpen ? "Hide extra details" : "Add a note or a second contact (optional)"}
+            <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black">
+              {moreOpen ? "Hide note and second contact" : "Add a note or second contact"}
             </button>
             {moreOpen && (
               <div className="mt-3 space-y-3">
-                <Input label="Note for the captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. car is in the basement parking, gate B" />
+                <Input label="Note for the captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. basement parking, gate B" />
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Input label="Second contact name" value={altName} onChange={(e) => setAltName(e.target.value)} />
                   <Input
@@ -1572,6 +1737,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         </div>
       )}
     </WizardShell>
+    <Modal open={!!sentLink} onClose={() => navigate("/manager/bookings")} title="Booking created" maxWidth="max-w-md">
+      {sentLink && (
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            {sentLink.numbers} · payment link sent to the customer on WhatsApp. It confirms once paid.
+          </p>
+          <div className="flex items-center gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-2.5">
+            <span className="font-mono-num min-w-0 flex-1 truncate text-sm text-black">{sentLink.link}</span>
+            <Button size="sm" variant="outline" onClick={() => void copyLink()}>
+              <Copy className="h-3.5 w-3.5" /> {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+          <Button variant="info" className="w-full font-semibold" onClick={() => navigate("/manager/bookings")}>
+            Done
+          </Button>
+        </div>
+      )}
+    </Modal>
     </>
   );
 }

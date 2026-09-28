@@ -1,6 +1,6 @@
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   BadgeCheck,
@@ -45,21 +45,16 @@ import type { Booking, BookingStatus } from "../../types";
 // active job — frequent enough that a manager watching (CaptainPicker /
 // ManagerCaptainsPage's live map) sees real movement, sparse enough not to
 // drain a phone's battery or hammer the backend. Only ever runs while
-// ACTIVE_STATUSES below has at least one job — see the effect further down.
+// the active-jobs list has at least one job — see the effect further down.
 const LOCATION_PING_INTERVAL_MS = 25000;
+
+// New assignments arrive over the "user:{id}" push; this poll only catches
+// one the socket missed while it was reconnecting.
+const ACTIVE_FALLBACK_POLL_MS = 3 * 60_000;
+const HISTORY_PAGE_SIZE = 20;
 
 type ModalKind =
   "heading" | "verify" | "before" | "after" | "cancel" | "report-risk" | null;
-
-// t("captain.status.active") (the default, unfiltered view) means "not finished yet" — a
-// completed job has no more actions to take and shouldn't clutter the list
-// a captain checks to see what needs doing next. Completed jobs get their
-// own explicit filter instead.
-const ACTIVE_STATUSES: BookingStatus[] = [
-  "assigned",
-  "captain_on_the_way",
-  "service_started",
-];
 
 export default function CaptainJobsPage() {
   const { t, language } = useCaptainTranslation();
@@ -90,15 +85,32 @@ export default function CaptainJobsPage() {
     queryFn: bookingPolicyApi.get,
   });
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["my-jobs", status],
-    queryFn: () =>
-      bookingApi.myJobs({
-        status: status || undefined,
-        page: 1,
-        page_size: 100,
-      }),
+  const isHistory = status === "completed";
+
+  // Jobs still to do (assigned / on the way / started), soonest first —
+  // filtered on the server, so a long history can never push them off the
+  // page. Kept mounted on every tab: it also gates the location pings.
+  const activeQuery = useQuery({
+    queryKey: ["my-jobs", "active"],
+    queryFn: () => bookingApi.myJobs({ scope: "active", page: 1, page_size: 100 }),
+    refetchInterval: ACTIVE_FALLBACK_POLL_MS,
   });
+
+  const historyQuery = useInfiniteQuery({
+    queryKey: ["my-jobs", "history"],
+    queryFn: ({ pageParam }) =>
+      bookingApi.myJobs({ scope: "history", status: "completed", page: pageParam, page_size: HISTORY_PAGE_SIZE }),
+    initialPageParam: 1,
+    getNextPageParam: (last) => (last.meta.page < last.meta.total_pages ? last.meta.page + 1 : undefined),
+    enabled: isHistory,
+  });
+
+  const activeJobs = useMemo(() => activeQuery.data?.data ?? [], [activeQuery.data]);
+  const historyJobs = useMemo(
+    () => historyQuery.data?.pages.flatMap((p) => p.data) ?? [],
+    [historyQuery.data],
+  );
+  const isLoading = isHistory ? historyQuery.isLoading : activeQuery.isLoading;
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["my-jobs"] });
@@ -108,18 +120,7 @@ export default function CaptainJobsPage() {
   // of whatever status tab is currently selected below.
   useLiveChannel(user ? `user:${user.id}` : null, invalidate);
 
-  // Unfiltered (not the `status`-filtered query above) so the location
-  // ping keeps running regardless of which tab the captain has open —
-  // whether they currently have ANY job in an "actively working" status is
-  // its own question from "what's currently displayed."
-  const { data: allJobsForPing } = useQuery({
-    queryKey: ["my-jobs-ping-check"],
-    queryFn: () => bookingApi.myJobs({ page: 1, page_size: 100 }),
-    refetchInterval: LOCATION_PING_INTERVAL_MS,
-  });
-  const hasActiveJob = (allJobsForPing?.data || []).some((j) =>
-    (ACTIVE_STATUSES as string[]).includes(j.status),
-  );
+  const hasActiveJob = (activeQuery.data?.meta.total ?? 0) > 0;
 
   useEffect(() => {
     if (!hasActiveJob || !navigator.geolocation) return;
@@ -244,7 +245,7 @@ export default function CaptainJobsPage() {
   const afterPhotoMutation = useMutation({
     mutationFn: ({ id, photo }: { id: string; photo: CapturedPhoto }) =>
       bookingApi.captureAfterPhoto(id, photo),
-    onSuccess: (updated) => {
+    onSuccess: async (updated) => {
       invalidate();
       const job = activeJob;
       closeModal();
@@ -254,9 +255,16 @@ export default function CaptainJobsPage() {
       // online — nothing to collect, nothing to show. On a visit the
       // customer pays ONCE, so this waits for the LAST car's after-photo.
       const finished = { ...job, ...(updated || {}), status: "completed" as const };
-      const others = (data?.data || []).filter(
-        (b) => !!job.booking_group_id && b.booking_group_id === job.booking_group_id && b.id !== job.id,
-      );
+      // The visit's finished cars are not in the active list, so ask for
+      // the whole visit.
+      let others: Booking[] = [];
+      if (job.booking_group_id) {
+        try {
+          others = (await bookingApi.getGroup(job.booking_group_id)).filter((b) => b.id !== job.id);
+        } catch {
+          others = activeJobs.filter((b) => b.booking_group_id === job.booking_group_id && b.id !== job.id);
+        }
+      }
       const visitDone = others.every((b) => b.status === "completed" || b.status === "cancelled");
       const anyUnpaid = [finished, ...others].some(
         (b) => b.status !== "cancelled" && b.payment_status !== "paid" && b.total_amount > 0,
@@ -367,15 +375,10 @@ export default function CaptainJobsPage() {
   const canReportRisk = (job: Booking) =>
     job.status === "assigned" && !(job.issue_flag && !job.issue_resolved);
 
-  // The default t("captain.status.active") view (no explicit status filter) fetches every
-  // status from the API — filter completed/cancelled back out here so it
-  // only ever shows jobs still needing action.
   const statusVisible = useMemo(() => {
-    const items = data?.data || [];
-    return status
-      ? items
-      : items.filter((j) => (ACTIVE_STATUSES as string[]).includes(j.status));
-  }, [data, status]);
+    if (isHistory) return historyJobs;
+    return status ? activeJobs.filter((j) => j.status === status) : activeJobs;
+  }, [isHistory, historyJobs, activeJobs, status]);
 
   // Earliest-first is right for active jobs ("what needs to start soonest");
   // completed jobs read better most-recent-first ("what did I just finish")
@@ -561,6 +564,19 @@ export default function CaptainJobsPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Client-side search/date filters only see loaded pages, so this
+          stays visible even when they hide everything loaded so far. */}
+      {!isLoading && isHistory && historyQuery.hasNextPage && (
+        <Button
+          variant="outline"
+          className="w-full"
+          isLoading={historyQuery.isFetchingNextPage}
+          onClick={() => void historyQuery.fetchNextPage()}
+        >
+          {language === "hi" ? "पुराने काम देखें" : "Load older jobs"}
+        </Button>
       )}
 
       {/* Heading confirmation */}

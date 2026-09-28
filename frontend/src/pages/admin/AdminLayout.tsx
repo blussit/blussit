@@ -24,6 +24,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
+import { CustomerLookup } from "../../components/shared/CustomerLookup";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/admin", icon: LayoutDashboard, end: true },
@@ -50,16 +51,19 @@ const navItems: NavItem[] = [
 ];
 
 export default function AdminLayout() {
+  // Paused while the tab is hidden (react-query default); the server
+  // answers it from a 15 s shared cache, and marking a chat read
+  // invalidates it directly.
   const { data: waBadge } = useQuery({
     queryKey: ["wa-badge"],
     queryFn: whatsappCrmApi.badge,
-    refetchInterval: 20000,
+    refetchInterval: 30000,
   });
   const items = navItems.map((item) =>
     item.to === "/admin/whatsapp" ? { ...item, badge: waBadge?.unread_conversations || 0 } : item,
   );
   return (
-    <DashboardShell navItems={items} portalLabel="Super Admin" brand>
+    <DashboardShell navItems={items} portalLabel="Super Admin" brand headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

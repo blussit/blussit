@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { motion, useReducedMotion } from "framer-motion";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
@@ -7,8 +7,8 @@ import { useAuth } from "../../context/AuthContext";
 import { authApi, guestAuthApi } from "../../api/auth";
 import { getErrorMessage, tokenStorage } from "../../lib/api-client";
 import { roleHomePath } from "../../lib/roleHome";
-import { validateIndianMobile } from "../../lib/validators";
-import { ensureOtpWidget, widgetSendOtp, widgetVerifyOtp } from "../../lib/otpWidget";
+import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
+import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
 import { GoogleSignInButton } from "../../components/shared/GoogleSignInButton";
 import type { UserRole } from "../../types";
 
@@ -30,7 +30,11 @@ export default function LoginPage() {
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
   const [otpStep, setOtpStep] = useState<"phone" | "code">("phone");
-  const [viaWidget, setViaWidget] = useState(false);
+  const [channel, setChannel] = useState<OtpChannel | null>(null);
+  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const [smsAvailable, setSmsAvailable] = useState(false);
+  const verifying = useRef(false);
   // -- staff (password) --
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
@@ -43,6 +47,16 @@ export default function LoginPage() {
     setError("");
   }, [staff, otpStep]);
 
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  useEffect(() => {
+    if (otpStep === "code" && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
+  }, [otpStep, channel]);
+
   const landAfterLogin = (role: UserRole) => {
     // Honor the deep-link ProtectedRoute captured (state.from) — but only
     // for the customer portal; staff always land on their own home.
@@ -50,8 +64,13 @@ export default function LoginPage() {
     navigate(from && role === "customer" ? from : roleHomePath(role), { replace: true });
   };
 
-  const sendCode = async (e?: React.FormEvent) => {
+  // order: the first send tries the backend first — its answer doubles as
+  // the account check (no account / staff number stop right there) and it
+  // costs nothing when WhatsApp can't reach the number, so the MSG91 widget
+  // (SMS) takes over at once. Resend retries whichever channel delivered.
+  const sendCode = async (e?: React.FormEvent, order: OtpChannel[] = ["backend", "widget"]) => {
     e?.preventDefault();
+    if (isLoading) return;
     const normalized = validateIndianMobile(phone);
     if (!normalized) {
       setError("Enter a valid 10-digit mobile number.");
@@ -60,56 +79,56 @@ export default function LoginPage() {
     setError("");
     setIsLoading(true);
     try {
-      // WhatsApp first (our own OTP, sent by the backend). If WhatsApp can't
-      // reach this number the backend says so straight away, and we fall
-      // back to SMS through the MSG91 widget — one code, whichever lands.
-      let sent = false;
-      let firstError = "";
-      try {
-        await authApi.requestOtp(normalized);
-        sent = true;
-        setViaWidget(false);
-      } catch (err) {
-        firstError = getErrorMessage(err);
-        // No account at all is final — nothing to fall back to.
-        if (/no account/i.test(firstError)) throw err;
-      }
-      if (!sent && (await ensureOtpWidget())) {
-        try {
-          await widgetSendOtp(normalized);
-          sent = true;
-          setViaWidget(true);
-        } catch {
-          // fall through to the WhatsApp error below
-        }
-      }
-      if (!sent) throw new Error(firstError || "Couldn't send the code right now — please try again in a moment.");
+      let backendChannel: "whatsapp" | "sms" | undefined;
+      const sent = await sendOtpCode(
+        normalized,
+        async () => {
+          backendChannel = (await authApi.requestOtp(normalized)).channel;
+        },
+        order,
+      );
+      setChannel(sent.channel);
+      setDelivered(sent.channel === "widget" ? "sms" : (backendChannel ?? null));
+      setCooldown(sent.cooldown);
       setOtp("");
       setOtpStep("code");
     } catch (err) {
-      const message = getErrorMessage(err);
+      const message = otpErrorMessage(err);
       setError(/no account/i.test(message) ? "No account for this number yet — your account is created automatically the first time you book." : message);
+      setCooldown(0);
     } finally {
       setIsLoading(false);
     }
   };
 
   const verifyCode = async (code = otp) => {
-    if (code.trim().length < 6) return;
+    const clean = code.trim();
+    if (clean.length < 6 || verifying.current) return;
+    verifying.current = true;
     const normalized = validateIndianMobile(phone) || phone.trim();
     setError("");
     setIsLoading(true);
     try {
-      const payload = viaWidget ? { phone: normalized, access_token: await widgetVerifyOtp(code.trim()) } : { phone: normalized, otp: code.trim() };
+      const payload = channel === "widget" ? { phone: normalized, access_token: await widgetVerifyOtp(clean) } : { phone: normalized, otp: clean };
       const result = await guestAuthApi.otpLogin(payload);
       tokenStorage.set(result.access_token, result.refresh_token);
       const user = await refreshUser();
       landAfterLogin(user?.role || result.user.role);
     } catch (err) {
-      setError(getErrorMessage(err));
+      setError(otpErrorMessage(err));
+      setOtp("");
     } finally {
+      verifying.current = false;
       setIsLoading(false);
     }
+  };
+
+  const changeNumber = () => {
+    setOtpStep("phone");
+    setOtp("");
+    setChannel(null);
+    setDelivered(null);
+    setCooldown(0);
   };
 
   const staffSubmit = async (e: React.FormEvent) => {
@@ -159,7 +178,7 @@ export default function LoginPage() {
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
                   {otpStep === "phone"
                     ? "Log in with your mobile number to see your bookings and passes."
-                    : `We sent a 6-digit code to ${phone} ${viaWidget ? "by SMS" : "on WhatsApp"}.`}
+                    : `We sent a 6-digit code to +91 ${phone}${delivered === "sms" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : ""}.`}
                 </p>
               </div>
 
@@ -171,10 +190,9 @@ export default function LoginPage() {
                       type="tel"
                       inputMode="numeric"
                       value={phone}
-                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                      onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
                       required
                       autoComplete="tel"
-                      maxLength={10}
                       placeholder="10-digit mobile number"
                       className={inputClass}
                     />
@@ -193,10 +211,26 @@ export default function LoginPage() {
                     <span>{isLoading ? "Verifying..." : "Log In"}</span>
                   </button>
                   <div className="mt-3 flex items-center justify-between text-[12px]">
-                    <button type="button" className="font-semibold text-[#D99400] hover:text-[#B87800]" onClick={() => void sendCode()} disabled={isLoading}>
-                      Resend code
-                    </button>
-                    <button type="button" className="font-medium text-[#737B88] hover:text-[#111]" onClick={() => setOtpStep("phone")}>
+                    {cooldown > 0 ? (
+                      <span className="font-medium text-[#737B88]">Resend in {cooldown}s</span>
+                    ) : (
+                      <span className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50"
+                          onClick={() => void sendCode(undefined, channel === "widget" ? ["widget", "backend"] : ["backend", "widget"])}
+                          disabled={isLoading}
+                        >
+                          Resend code
+                        </button>
+                        {channel === "backend" && smsAvailable && (
+                          <button type="button" className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
+                            Get it by SMS
+                          </button>
+                        )}
+                      </span>
+                    )}
+                    <button type="button" className="font-medium text-[#737B88] hover:text-[#111]" onClick={changeNumber} disabled={isLoading}>
                       Change number
                     </button>
                   </div>

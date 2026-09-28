@@ -104,3 +104,18 @@ function buildSlab(key: string, bookings: Booking[]): BookingSlab {
     paymentPending: ordered.some((b) => b.payment_status === "pending" && b.status !== "cancelled"),
   };
 }
+
+/**
+ * What a customer reads for a visit: each distinct service once
+ * ("Star Wash", not "Star Wash + Star Wash" for two cars of one kind).
+ */
+export function visitServiceLabel(slab: BookingSlab): string {
+  return Array.from(new Set(slab.bookings.map(serviceOf))).join(" + ");
+}
+
+/** "Hatchback", "2 × SUV", or "3 vehicles" when the types differ. */
+export function visitVehicleLabel(slab: BookingSlab): string {
+  const labels = Array.from(new Set(slab.bookings.map((b) => vehicleLabel(b))));
+  if (!slab.isVisit) return labels[0] || "";
+  return labels.length === 1 ? `${slab.vehicleCount} × ${labels[0]}` : `${slab.vehicleCount} vehicles`;
+}

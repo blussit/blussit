@@ -6,6 +6,7 @@ import { authApi } from "../../api/auth";
 import { adminServiceCenterApi } from "../../api/admin";
 import { uploadApi } from "../../api/upload";
 import { Badge, Button, Card, CardBody, CardHeader, Input } from "../../components/ui";
+import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -20,6 +21,7 @@ export default function ProfilePage() {
   const [profileMsg, setProfileMsg] = useState("");
   const [profileError, setProfileError] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [phoneModalOpen, setPhoneModalOpen] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -165,8 +167,30 @@ export default function ProfilePage() {
           <Input label="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input label="Email" value={user?.email || "—"} disabled hint="Contact an admin to change login details." />
-            <Input label="Phone" value={user?.phone || "—"} disabled />
+            <div>
+              <div className="flex items-end gap-2">
+                <div className="min-w-0 flex-1">
+                  <Input label="Phone" value={user?.phone || "—"} disabled />
+                </div>
+                <Button variant="outline" className="shrink-0" onClick={() => { setProfileMsg(""); setPhoneModalOpen(true); }}>
+                  <Phone className="h-4 w-4" /> {user?.phone ? "Change" : "Add"}
+                </Button>
+              </div>
+              {user?.role === "manager" && (
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">New-booking alerts come to this number on WhatsApp.</p>
+              )}
+            </div>
           </div>
+          <PhoneVerificationModal
+            open={phoneModalOpen}
+            changeNumber
+            onClose={() => setPhoneModalOpen(false)}
+            onVerified={() => {
+              setPhoneModalOpen(false);
+              setProfileError("");
+              setProfileMsg("Phone number updated.");
+            }}
+          />
           {profileMsg && <p className="text-sm text-[var(--color-success)]">{profileMsg}</p>}
           {profileError && <p className="text-sm text-[var(--color-error)]">{profileError}</p>}
           <Button

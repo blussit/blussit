@@ -1,6 +1,12 @@
 """
 Password hashing and JWT access/refresh token utilities.
+
+bcrypt costs ~250 ms of CPU. Async request handlers must use the *_async
+variants, which run it on a worker thread — calling the sync ones inline
+freezes every request and WebSocket on the instance while it hashes. The
+sync versions remain for seed data and scripts.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -22,8 +28,25 @@ def hash_password(plain_password: str) -> str:
     return pwd_context.hash(plain_password)
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, hashed_password: str | None) -> bool:
+    # OTP/Google-only accounts store no password; malformed legacy hashes
+    # count as a mismatch too — never an error.
+    if not hashed_password:
+        return False
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except ValueError:
+        return False
+
+
+async def hash_password_async(plain_password: str) -> str:
+    return await asyncio.to_thread(hash_password, plain_password)
+
+
+async def verify_password_async(plain_password: str, hashed_password: str | None) -> bool:
+    if not hashed_password:
+        return False
+    return await asyncio.to_thread(verify_password, plain_password, hashed_password)
 
 
 def create_token(subject: str, role: str, token_type: TokenType, extra_claims: dict[str, Any] | None = None) -> str:

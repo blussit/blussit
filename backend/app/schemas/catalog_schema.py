@@ -1,6 +1,13 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _clean_offer_tag(value):
+    if not isinstance(value, str):
+        return value
+    return value.strip() or None
+
 
 class CategoryCreateRequest(BaseModel):
     name: str
@@ -33,12 +40,17 @@ class ServiceCreateRequest(BaseModel):
     is_waterless: bool = Field(default=False, description="Waterless wash — needs shade; no water/power from the customer.")
     variant_group: Optional[str] = Field(default=None, max_length=60, description="Services sharing a group are variants of one product (e.g. Bike Wash 1–4 bikes)")
     variant_label: Optional[str] = Field(default=None, max_length=40, description="Short label for this variant, e.g. '2 bikes'")
+    prepaid_only: bool = Field(default=False, description="Must be paid online before the booking is confirmed")
+    charges_travel: bool = Field(default=False, description="The visit pays the customer distance charge")
+    offer_tag: Optional[str] = Field(default=None, max_length=30, description="Offer label on the service card; blank = none")
     captain_fee: Optional[float] = Field(default=None, ge=0, description="Flat ₹ paid to captain for this service; falls back to admin default if unset")
     duration_minutes: int = Field(default=30, gt=0)
     image: Optional[str] = None
     is_active: bool = True
     is_featured: bool = False
     display_order: int = 0
+
+    _offer_tag = field_validator("offer_tag", mode="before")(_clean_offer_tag)
 
 
 class ServiceUpdateRequest(BaseModel):
@@ -56,12 +68,18 @@ class ServiceUpdateRequest(BaseModel):
     is_waterless: Optional[bool] = None
     variant_group: Optional[str] = Field(default=None, max_length=60)
     variant_label: Optional[str] = Field(default=None, max_length=40)
+    prepaid_only: Optional[bool] = None
+    charges_travel: Optional[bool] = None
+    # Sent blank (or null) = clear the tag; omitted = leave it alone.
+    offer_tag: Optional[str] = Field(default=None, max_length=30)
     captain_fee: Optional[float] = None
     duration_minutes: Optional[int] = None
     image: Optional[str] = None
     is_active: Optional[bool] = None
     is_featured: Optional[bool] = None
     display_order: Optional[int] = None
+
+    _offer_tag = field_validator("offer_tag", mode="before")(_clean_offer_tag)
 
 
 class ComboOfferCreateRequest(BaseModel):

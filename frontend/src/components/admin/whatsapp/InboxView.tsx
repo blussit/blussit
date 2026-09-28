@@ -6,7 +6,7 @@
  * can go out.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Bot, Check, CheckCheck, ChevronDown, CircleAlert, FileText,
   Info, MapPin, MessageSquarePlus, Paperclip, Search, Send, User, X,
@@ -15,6 +15,8 @@ import { Badge, Button, Spinner } from "../../ui";
 import { whatsappCrmApi, type WaConversation, type WaMessage } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
 import { NewConversationModal, SendTemplateModal } from "./modals";
+import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
+import { useDebouncedValue } from "../../shared/ListControls";
 import { formatClockIST, formatSlot } from "../../../lib/date";
 
 const FILTERS = [
@@ -45,20 +47,27 @@ function StatusTicks({ status }: { status: WaMessage["status"] }) {
   return null;
 }
 
-export function InboxView() {
+const PAGE_SIZE = 40;
+
+export function InboxView({ initialActive = null }: { initialActive?: string | null }) {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [active, setActive] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(initialActive);
   const [showProfile, setShowProfile] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const debouncedSearch = useDebouncedValue(search.trim(), 350);
 
-  const { data: conversations, isLoading } = useQuery({
-    queryKey: ["wa-conversations", filter, search],
-    queryFn: () => whatsappCrmApi.conversations(filter, search),
-    refetchInterval: 8000,
+  // Newest page polls; older pages load on demand through the cursor.
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: ["wa-conversations", filter, debouncedSearch],
+    queryFn: ({ pageParam }) => whatsappCrmApi.conversations(filter, debouncedSearch, pageParam, PAGE_SIZE),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.length < PAGE_SIZE ? undefined : last[last.length - 1]?.last_message_at || undefined),
+    refetchInterval: 10000,
   });
+  const conversations = useMemo(() => data?.pages.flat() || [], [data]);
 
-  const activeConvo = useMemo(() => (conversations || []).find((c) => c.wa_id === active) || null, [conversations, active]);
+  const activeConvo = useMemo(() => conversations.find((c) => c.wa_id === active) || null, [conversations, active]);
 
   return (
     <div className="flex h-[calc(100vh-11rem)] min-h-[480px] overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-[var(--shadow-soft)]">
@@ -99,10 +108,10 @@ export function InboxView() {
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {isLoading && <div className="flex justify-center py-10"><Spinner /></div>}
-          {!isLoading && (conversations || []).length === 0 && (
+          {!isLoading && conversations.length === 0 && (
             <p className="px-4 py-10 text-center text-sm text-[var(--color-text-secondary)]">No conversations found.</p>
           )}
-          {(conversations || []).map((c) => (
+          {conversations.map((c) => (
             <button
               key={c.wa_id}
               type="button"
@@ -134,6 +143,13 @@ export function InboxView() {
               </div>
             </button>
           ))}
+          {hasNextPage && (
+            <div className="p-3">
+              <Button size="sm" variant="outline" className="w-full" isLoading={isFetchingNextPage} onClick={() => fetchNextPage()}>
+                Load older conversations
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -196,7 +212,10 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
   const windowActive = conversation?.window?.active ?? false;
 
   useEffect(() => {
-    whatsappCrmApi.markRead(waId).then(() => qc.invalidateQueries({ queryKey: ["wa-conversations"] }));
+    whatsappCrmApi.markRead(waId).then(() => {
+      qc.invalidateQueries({ queryKey: ["wa-conversations"] });
+      qc.invalidateQueries({ queryKey: ["wa-badge"] });
+    });
   }, [waId, qc, data?.messages?.length]);
 
   useEffect(() => {
@@ -440,6 +459,7 @@ function MessageBody({ m }: { m: WaMessage }) {
 /* ------------------------------------------------------------------ */
 function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void }) {
   const qc = useQueryClient();
+  const [customer360, setCustomer360] = useState<string | null>(null);
   const { data, isLoading } = useQuery({ queryKey: ["wa-profile", waId], queryFn: () => whatsappCrmApi.contactProfile(waId) });
   const { data: defaultTags } = useQuery({ queryKey: ["wa-default-tags"], queryFn: whatsappCrmApi.defaultTags, staleTime: 600000 });
   const setTags = useMutation({
@@ -521,11 +541,15 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
         </PanelSection>
 
         {c && (
-          <div className="space-y-1.5">
-            <a href={`/admin/users?search=${encodeURIComponent(c.phone)}`} className="block rounded-xl border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-[var(--color-text-primary)] hover:bg-gray-50">View customer</a>
-            <a href={`/admin/bookings?search=${encodeURIComponent(c.phone)}`} className="block rounded-xl border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-[var(--color-text-primary)] hover:bg-gray-50">View booking history</a>
-          </div>
+          <button
+            type="button"
+            onClick={() => setCustomer360(c.id)}
+            className="block w-full rounded-xl border border-[#F3E5B5] px-3 py-2 text-center text-xs font-semibold text-black hover:bg-[#FFFCF0]"
+          >
+            Bookings, plans & history
+          </button>
         )}
+        <CustomerDetailDrawer customerId={customer360} onClose={() => setCustomer360(null)} />
         {data.conversation.assigned_to_name && (
           <p className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)]"><Info className="h-3 w-3" /> Assigned to {data.conversation.assigned_to_name}</p>
         )}

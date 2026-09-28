@@ -12,21 +12,18 @@ Account rules:
   - new users are created as customers with NO phone — the booking gate
     (phone_verification_fresh) forces adding + verifying a phone before
     the first booking, since the phone is BLUSSIT's primary contact;
-  - no password gate for Google users (they sign in with Google;
+  - no password at all for Google users (they sign in with Google;
     must_change_password stays False, a password can be set later via
     forgot-password if they ever want one).
 """
 import logging
 from datetime import datetime, timezone
-import random
-import string
 
 import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestException, UnauthorizedException
-from app.core.security import hash_password
 from app.models.enums import UserRole, UserStatus
 from app.services.auth_service import AuthService
 
@@ -85,13 +82,12 @@ class GoogleAuthService:
 
         # New customer — created WITHOUT a phone; the booking gate collects
         # and verifies one before their first booking.
-        password = "".join(random.choices(string.ascii_letters + string.digits, k=24))
         # Absent email must OMIT the key entirely (never store null) — the
         # sparse-unique email index treats two explicit nulls as duplicates,
         # turning the second no-email Google account into a 500.
         doc: dict = {
             "full_name": name,
-            "password_hash": hash_password(password),
+            "password_hash": None,
             "role": UserRole.CUSTOMER.value,
             "status": UserStatus.ACTIVE.value,
             "google_sub": sub,

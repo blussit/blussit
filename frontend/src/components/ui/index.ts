@@ -10,3 +10,4 @@ export * from "./Modal";
 export * from "./DataTable";
 export * from "./OtpInput";
 export * from "./Switch";
+export * from "./DiscountBadge";

@@ -108,6 +108,9 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
         if payload.get("type") != "access":
             raise ValueError("Invalid token type")
     except ValueError:
+        # Accept first: a close before accept reaches the browser as a bare
+        # 1006, and the client can only refresh its token if it sees 4401.
+        await websocket.accept()
         await websocket.close(code=4401)
         return
 
@@ -124,9 +127,9 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
 
     # A socket must not outlive its token: without this, one handshake
     # stayed authorized forever — through token expiry, role changes, and
-    # account suspension. Closing at `exp` forces a reconnect with a fresh
-    # token (the frontend's socket client already auto-reconnects), which
-    # re-runs decode_token and re-authorizes every channel.
+    # account suspension. Closing at `exp` with 4401 makes the frontend's
+    # socket client refresh its token and reconnect, which re-runs
+    # decode_token and re-authorizes every channel.
     token_exp = payload.get("exp")
     expiry_handle = None
     if token_exp:

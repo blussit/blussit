@@ -27,8 +27,8 @@ class ReviewController:
         await self.audit.log_action(current_user.id, current_user.role, "DELETE_REVIEW", "reviews", review_id, None)
         return success(None, "Review deleted")
 
-    async def list_my_reviews(self, current_user: CurrentUser):
-        return success(await self.service.list_my_reviews(current_user.id))
+    async def list_my_reviews(self, current_user: CurrentUser, booking_ids: list[str] | None = None):
+        return success(await self.service.list_my_reviews(current_user.id, booking_ids))
 
     async def list_public(self, pagination: PaginationParams):
         items, total = await self.service.list_public(pagination.page, pagination.page_size)

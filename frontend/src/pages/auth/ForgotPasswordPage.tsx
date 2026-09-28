@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion, useReducedMotion } from "framer-motion";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
-import { authApi } from "../../api/auth";
+import { authApi, otpWidgetApi } from "../../api/auth";
 import { CheckCircle2 } from "lucide-react";
-import { getErrorMessage } from "../../lib/api-client";
+import { otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { validateIndianMobile } from "../../lib/validators";
 
 
 export default function ForgotPasswordPage() {
@@ -17,34 +18,70 @@ export default function ForgotPasswordPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [channel, setChannel] = useState<OtpChannel | null>(null);
+  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  // Only a typed phone can fall back to the MSG91 widget (SMS) — for an
+  // email we don't know (and must not reveal) the number on file.
+  const phone = validateIndianMobile(identifier);
 
-  const requestOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  const sendCode = async (order?: OtpChannel[]) => {
+    if (isLoading) return;
     setError("");
     setIsLoading(true);
     try {
-      await authApi.forgotPassword(identifier);
+      let backendChannel: "whatsapp" | "sms" | undefined;
+      const sent = await sendOtpCode(
+        phone || "",
+        async () => {
+          backendChannel = (await authApi.forgotPassword(phone || identifier.trim())).channel;
+        },
+        order ?? (phone ? ["backend", "widget"] : ["backend"]),
+      );
+      setChannel(sent.channel);
+      setDelivered(sent.channel === "widget" ? "sms" : (backendChannel ?? null));
+      setCooldown(sent.cooldown);
+      setOtp("");
       setStep("reset");
     } catch (err) {
-      setError(getErrorMessage(err));
+      setError(otpErrorMessage(err));
+      setCooldown(0);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const requestOtp = (e: React.FormEvent) => {
+    e.preventDefault();
+    void sendCode();
   };
 
   const resetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
     setError("");
     setIsLoading(true);
     try {
-      await authApi.resetPassword({ identifier, otp, new_password: newPassword });
+      if (channel === "widget" && phone) {
+        await otpWidgetApi.resetPassword({ access_token: await widgetVerifyOtp(otp.trim()), phone, new_password: newPassword });
+      } else {
+        await authApi.resetPassword({ identifier: phone || identifier.trim(), otp: otp.trim(), new_password: newPassword });
+      }
       setStep("done");
     } catch (err) {
-      setError(getErrorMessage(err));
+      setError(otpErrorMessage(err));
     } finally {
       setIsLoading(false);
     }
   };
+
+  const sentTo = delivered === "sms" ? "by SMS to" : delivered === "whatsapp" ? "on WhatsApp to" : "to";
 
   return (
     <motion.main 
@@ -181,7 +218,7 @@ export default function ForgotPasswordPage() {
                     Enter reset code
                   </h1>
                   <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
-                    We sent a code to the WhatsApp number on file for <span className="font-medium">{identifier}</span>.
+                    We sent a 6-digit code {sentTo} {phone ? <span className="font-medium">+91 {phone}</span> : <>the number on file for <span className="font-medium">{identifier}</span></>}.
                   </p>
                 </div>
                 <form onSubmit={resetPassword}>
@@ -195,10 +232,12 @@ export default function ForgotPasswordPage() {
                       </div>
                       <input
                         type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
                         value={otp}
-                        onChange={(e) => setOtp(e.target.value)}
+                        onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
                         required
-                        placeholder="Enter code"
+                        placeholder="6-digit code"
                         className="h-[43px] w-full rounded-[9px] border border-[#D9DDE3] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10"
                       />
                     </div>
@@ -236,9 +275,37 @@ export default function ForgotPasswordPage() {
                       {error}
                     </div>
                   )}
+                  <div className="mt-3 flex items-center justify-between text-[12px]">
+                    {cooldown > 0 ? (
+                      <span className="font-medium text-[#737B88]">Resend in {cooldown}s</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50"
+                        disabled={isLoading}
+                        onClick={() => void sendCode(channel === "widget" ? ["widget", "backend"] : undefined)}
+                      >
+                        Resend code
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="font-medium text-[#737B88] hover:text-[#111]"
+                      disabled={isLoading}
+                      onClick={() => {
+                        setStep("request");
+                        setOtp("");
+                        setError("");
+                        setChannel(null);
+                        setCooldown(0);
+                      }}
+                    >
+                      Change email / phone
+                    </button>
+                  </div>
                   <button
                     type="submit"
-                    disabled={isLoading || newPassword.length < 8}
+                    disabled={isLoading || otp.length < 6 || newPassword.length < 8}
                     className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] hover:shadow-[0_10px_24px_rgba(245,180,0,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <span>{isLoading ? "Resetting..." : "Reset password"}</span>

@@ -73,9 +73,14 @@ async def coverage_check(payload: CoverageCheckRequest, db: AsyncIOMotorDatabase
     except BadRequestException as exc:
         pin_required = "[PIN_REQUIRED]" in (exc.message or "")
         return success({"covered": False, "center": None, "pin_required": pin_required})
+    from app.services.pricing_service import PricingService
+
     loc = center.get("location") or {}
     return success({
         "covered": True,
         "center": {"id": str(center["_id"]), "name": center.get("name"), "city": loc.get("city"), "state": loc.get("state")},
         "distance_km": distance_km,
+        # What a visit here pays IF it includes a charges_travel service —
+        # the same quote create_booking applies, so the wizard never guesses.
+        "travel": await PricingService(db).travel_quote(distance_km),
     })

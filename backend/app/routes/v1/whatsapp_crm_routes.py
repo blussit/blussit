@@ -3,13 +3,14 @@ WhatsApp CRM panel routes (admin-only). All Meta credentials stay
 server-side; media is proxied, never linked directly. Assignment/status/
 tag changes are audited.
 """
-from fastapi import APIRouter, Depends, File, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin
 from app.core.exceptions import BadRequestException
 from app.core.responses import success
+from app.services import report_cache
 from app.services.audit_service import AuditService
 from app.services.whatsapp_crm_service import DEFAULT_TAGS, WhatsAppCrmService, bootstrap_blussit_templates
 
@@ -76,9 +77,11 @@ class CreateTemplateRequest(BaseModel):
 @router.get("/conversations")
 async def list_conversations(
     filter: str = "all", search: str = "",
+    limit: int = Query(50, ge=1, le=100),
+    before: str | None = Query(None, description="last_message_at of the last row already shown — returns the next, older page"),
     current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return success(await WhatsAppCrmService(db).list_conversations(filter, search, current_user.id))
+    return success(await WhatsAppCrmService(db).list_conversations(filter, search, current_user.id, limit=limit, before=before))
 
 
 @router.get("/conversations/{wa_id}/messages")
@@ -89,6 +92,7 @@ async def get_thread(wa_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
 @router.post("/conversations/{wa_id}/read")
 async def mark_read(wa_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
     await WhatsAppCrmService(db).mark_read(wa_id)
+    report_cache.invalidate("wa_badge")
     return success({"read": True})
 
 
@@ -148,8 +152,11 @@ async def contact_profile(wa_id: str, db: AsyncIOMotorDatabase = Depends(get_db)
 
 
 @router.get("/contacts")
-async def contacts(search: str = "", db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).contacts(search))
+async def contacts(
+    search: str = "", limit: int = Query(50, ge=1, le=100), before: str | None = None,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return success(await WhatsAppCrmService(db).contacts(search, limit=limit, before=before))
 
 
 @router.get("/agents")
@@ -159,7 +166,9 @@ async def agents(db: AsyncIOMotorDatabase = Depends(get_db)):
 
 @router.get("/badge")
 async def badge(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).unread_badge())
+    """Polled by every open admin console tab — one shared count per
+    instance every 15 s instead of one per tab per poll."""
+    return success(await report_cache.cached(("wa_badge",), 15, WhatsAppCrmService(db).unread_badge))
 
 
 @router.get("/tags")
@@ -168,8 +177,8 @@ async def default_tags():
 
 
 @router.get("/analytics")
-async def analytics(days: int = 30, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).analytics(days))
+async def analytics(days: int = Query(30, ge=1, le=365), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await report_cache.cached(("wa_analytics", days), 60, lambda: WhatsAppCrmService(db).analytics(days)))
 
 
 # ---- media -----------------------------------------------------------------

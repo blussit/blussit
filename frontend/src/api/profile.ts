@@ -21,8 +21,13 @@ export const addressApi = {
   create: (payload: Partial<Address>) => apiClient.post<ApiSuccess<Address>>("/addresses", payload).then((r) => r.data.data),
   update: (id: string, payload: Partial<Address>) => apiClient.put<ApiSuccess<Address>>(`/addresses/${id}`, payload).then((r) => r.data.data),
   remove: (id: string) => apiClient.delete(`/addresses/${id}`).then((r) => r.data),
+  /** Staff only (manager/admin): an existing customer's saved addresses. */
+  forCustomer: (customerId: string) => apiClient.get<ApiSuccess<Address[]>>(`/addresses/customer/${customerId}`).then((r) => r.data.data),
 };
 
+/** What PUT /users/me accepts from the signed-in user. */
+export type ProfileUpdatePayload = Partial<Pick<User, "full_name" | "profile_image" | "marketing_opt_out">>;
+
 export const userApi = {
-  updateProfile: (payload: Partial<User>) => apiClient.put<ApiSuccess<User>>("/users/me", payload).then((r) => r.data.data),
+  updateProfile: (payload: ProfileUpdatePayload) => apiClient.put<ApiSuccess<User>>("/users/me", payload).then((r) => r.data.data),
 };

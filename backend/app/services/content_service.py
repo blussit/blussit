@@ -1,11 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import NotFoundException
-from app.repositories.booking_repository import BookingRepository
 from app.repositories.content_repository import ContactMessageRepository, FaqRepository, SettingRepository, TestimonialRepository
-from app.repositories.review_repository import ReviewRepository
-from app.repositories.service_center_repository import ServiceCenterRepository
-from app.repositories.user_repository import UserRepository
 from app.schemas.content_schema import (
     ContactMessageCreateRequest,
     FaqCreateRequest,
@@ -95,27 +91,3 @@ class ContactMessageService:
     async def list_all(self, page: int, page_size: int):
         items, total = await self.repo.find_many(page=page, page_size=page_size)
         return serialize_list(items), total
-
-
-class PublicStatsService:
-    def __init__(self, db: AsyncIOMotorDatabase):
-        self.booking_repo = BookingRepository(db)
-        self.user_repo = UserRepository(db)
-        self.center_repo = ServiceCenterRepository(db)
-        self.review_repo = ReviewRepository(db)
-
-    async def landing_page_stats(self) -> dict:
-        vehicles_serviced = await self.booking_repo.count({"status": "completed"})
-        happy_customers = await self.user_repo.count({"role": "customer"})
-        service_centers = await self.center_repo.count({"is_active": True})
-
-        pipeline = [{"$match": {"is_deleted": {"$ne": True}}}, {"$group": {"_id": None, "avg_rating": {"$avg": "$rating"}}}]
-        rating_result = await self.review_repo.aggregate(pipeline)
-        average_rating = round(rating_result[0]["avg_rating"], 1) if rating_result and rating_result[0].get("avg_rating") else 4.8
-
-        return {
-            "vehicles_serviced": vehicles_serviced,
-            "happy_customers": happy_customers,
-            "service_centers": service_centers,
-            "average_rating": average_rating,
-        }

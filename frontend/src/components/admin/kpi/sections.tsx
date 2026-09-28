@@ -16,6 +16,7 @@ import { BusinessSettingsModal } from "./SettingsModal";
 import { KpiListModal } from "./KpiListModal";
 import { KpiBriefModal } from "./KpiBriefModal";
 import { BookingDetailDrawer } from "../../shared/BookingDetailDrawer";
+import { ComplaintDetailDrawer } from "../../shared/ComplaintDetailDrawer";
 import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
 import { format, formatSlot } from "../../../lib/date";
 import type { Booking, Complaint, User } from "../../../types";
@@ -62,7 +63,7 @@ function useBookingDrill(params: KpiPeriodParams) {
         onClose={() => setFilter(null)}
         title={filter?.title || "Bookings"}
         queryKey={["kpi-drill-bookings", filter, params]}
-        fetchFn={() => bookingApi.all({ ...params, page_size: 100, date_field: filter?.dateField, status: filter?.status })}
+        fetchFn={(page) => bookingApi.all({ ...params, page, page_size: 50, date_field: filter?.dateField, status: filter?.status })}
         getRowKey={(b) => b.id}
         renderRow={(b) => (
           <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
@@ -95,7 +96,7 @@ function useCustomerDrill(params: KpiPeriodParams) {
         onClose={() => setOpen(null)}
         title={open?.title || "Customers"}
         queryKey={["kpi-drill-customers", open, params]}
-        fetchFn={() => adminUserApi.list({ ...(open?.allTime ? {} : params), role: "customer", page_size: 100 })}
+        fetchFn={(page) => adminUserApi.list({ ...(open?.allTime ? {} : params), role: "customer", page, page_size: 50 })}
         getRowKey={(u) => u.id}
         renderRow={(u) => (
           <button type="button" onClick={() => setOpenCustomerId(u.id)} className="flex w-full items-center justify-between gap-3 text-left">
@@ -113,24 +114,30 @@ function useCustomerDrill(params: KpiPeriodParams) {
 /** Complaints, filtered to the tab's period. */
 function useComplaintDrill(params: KpiPeriodParams) {
   const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<Complaint | null>(null);
   const modal = (
-    <KpiListModal<Complaint>
-      open={open}
-      onClose={() => setOpen(false)}
-      title="Complaints"
-      queryKey={["kpi-drill-complaints", params]}
-      fetchFn={() => complaintApi.all({ ...params, page_size: 100 })}
-      getRowKey={(c) => c.id}
-      renderRow={(c) => (
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-black">{c.subject}</p>
-            <p className="text-xs text-gray-500">{c.booking_number ? `Booking ${c.booking_number}` : ""}</p>
-          </div>
-          <StatusBadge status={c.status} />
-        </div>
-      )}
-    />
+    <>
+      <KpiListModal<Complaint>
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Complaints"
+        queryKey={["kpi-drill-complaints", params]}
+        fetchFn={(page) => complaintApi.all({ ...params, page, page_size: 50 })}
+        getRowKey={(c) => c.id}
+        renderRow={(c) => (
+          <button type="button" onClick={() => setSelected(c)} className="flex w-full items-center justify-between gap-3 text-left">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-black">{c.subject}</p>
+              <p className="text-xs text-gray-500">
+                {[c.customer_name, c.booking_number ? `Booking ${c.booking_number}` : ""].filter(Boolean).join(" · ")}
+              </p>
+            </div>
+            <StatusBadge status={c.status} />
+          </button>
+        )}
+      />
+      <ComplaintDetailDrawer complaint={selected} onClose={() => setSelected(null)} onUpdated={setSelected} />
+    </>
   );
   return { open: () => setOpen(true), modal };
 }

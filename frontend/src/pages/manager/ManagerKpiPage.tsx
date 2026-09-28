@@ -30,6 +30,7 @@ export default function ManagerKpiPage() {
   const [periodKey, setPeriodKey] = useState<string>("today");
   const [revenueScope, setRevenueScope] = useState<RevenueScope>("combined");
   const [revenueDrillOpen, setRevenueDrillOpen] = useState(false);
+  const [drillTab, setDrillTab] = useState<"bookings" | "plans" | null>(null);
   const params = useMemo(() => ({ period: periodKey }), [periodKey]);
 
   const { data, isLoading } = useQuery({
@@ -109,13 +110,31 @@ export default function ManagerKpiPage() {
         {salesLoading || !cur ? (
           <div className="h-[104px] animate-pulse rounded-2xl border border-[#F3E5B5] bg-gray-50" />
         ) : (
-          <StatCard label={revenueLabel} value={formatINR(revenueFor(cur))} icon={IndianRupee} onClick={() => setRevenueDrillOpen(true)} linkLabel="Details" />
+          <StatCard
+            label={revenueLabel}
+            value={formatINR(revenueFor(cur))}
+            icon={IndianRupee}
+            onClick={() => {
+              setDrillTab(null);
+              setRevenueDrillOpen(true);
+            }}
+            linkLabel="Details"
+          />
         )}
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <StatCard label="Bookings" value={cur?.bookings ?? 0} hint={`${cur?.completed ?? 0} completed`} icon={ShoppingBag} />
-        <StatCard label="Plans sold" value={cur?.plans_sold ?? 0} icon={Gift} />
+        <StatCard
+          label="Plans sold"
+          value={cur?.plans_sold ?? 0}
+          icon={Gift}
+          onClick={() => {
+            setDrillTab("plans");
+            setRevenueDrillOpen(true);
+          }}
+          linkLabel="See who bought"
+        />
       </div>
 
       <StatCard
@@ -189,7 +208,7 @@ export default function ManagerKpiPage() {
         open={revenueDrillOpen}
         onClose={() => setRevenueDrillOpen(false)}
         params={params}
-        defaultTab={revenueScope === "plans" ? "plans" : "bookings"}
+        defaultTab={drillTab || (revenueScope === "plans" ? "plans" : "bookings")}
         serviceCenterId={centerId}
       />
     </div>

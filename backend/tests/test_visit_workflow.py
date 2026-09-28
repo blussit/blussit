@@ -196,9 +196,10 @@ async def test_sweeps_flag_the_visit_once_and_on_every_car(rig, db):
     group_id, ids = await _visit(rig, db)
     await _assign(db, rig, group_id)
     bs = BookingService(db)
-    # Both cars' start times are in the past and nobody headed out.
+    # Both cars' start times are in the past (today) and nobody headed out.
+    today = now_ist().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     for car in await _cars(db, group_id):
-        await db.bookings.update_one({"_id": car["_id"]}, {"$set": {"estimated_start_at": now_ist() - timedelta(minutes=40), "assigned_at": now_ist() - timedelta(hours=2)}})
+        await db.bookings.update_one({"_id": car["_id"]}, {"$set": {"scheduled_date": today, "estimated_start_at": now_ist() - timedelta(minutes=40), "assigned_at": now_ist() - timedelta(hours=2)}})
 
     due = [b for b in await bs.find_bookings_late_to_start() if b.get("booking_group_id") == group_id]
     assert len(due) == 1, "the sweep names the visit once, not once per car"

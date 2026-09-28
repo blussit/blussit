@@ -42,13 +42,18 @@ async def list_for_center(
 @router.get("", dependencies=[Depends(require_admin)])
 async def list_all(
     status: Optional[str] = None,
+    service_center_id: Optional[str] = None,
     period: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
+    """`search` (PaginationParams) matches subject, booking number, or the
+    customer's name/phone."""
     filters: dict = {"status": status} if status else {}
+    if service_center_id:
+        filters["service_center_id"] = service_center_id
     if period or (start and end):
         from app.services.kpi_service import resolve_period
 

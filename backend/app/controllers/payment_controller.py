@@ -2,7 +2,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import CurrentUser
 from app.core.responses import success
-from app.schemas.payment_schema import CollectPaymentRequest, CreateOrderRequest, VerifyPaymentRequest
+from app.schemas.payment_schema import (
+    CollectPaymentRequest,
+    CreateOrderRequest,
+    PaymentFailureReport,
+    ResolveAttentionRequest,
+    VerifyPaymentRequest,
+)
 from app.schemas.subscription_schema import ManagerSubscriptionOfferRequest, ManagerSubscriptionPreviewRequest
 from app.services.audit_service import AuditService
 from app.services.payment_service import PaymentService
@@ -49,14 +55,38 @@ class PaymentController:
             payload.reference_id,
             {"purpose": result.get("purpose"), "payment_id": payload.razorpay_payment_id},
         )
-        # A paid subscription purchase gets the same thank-you ticket a
-        # direct subscribe used to issue (ThankYouPage consumes it).
-        sub = result.get("subscription")
-        if sub and not result.get("already_processed"):
-            result["confirmation_token"] = await self.confirmations.issue(
-                "subscription", sub["id"], current_user.id, {"plan_name": sub.get("plan_name")}
-            )
+        await self._attach_confirmation(result, current_user.id)
         return success(result, "Payment verified")
+
+    async def _attach_confirmation(self, result: dict, customer_id: str) -> None:
+        # A paid subscription purchase gets the same thank-you ticket a
+        # direct subscribe used to issue (ThankYouPage consumes it) — once,
+        # to whichever request first confirms it (verify, or the status poll
+        # after a verify that never got through).
+        sub = result.get("subscription")
+        if sub and result.pop("first_confirmation", False):
+            result["confirmation_token"] = await self.confirmations.issue(
+                "subscription", sub["id"], customer_id, {"plan_name": sub.get("plan_name")}
+            )
+        result.pop("first_confirmation", None)
+
+    async def report_failure(self, current_user: CurrentUser, payload: PaymentFailureReport):
+        return success(await self.service.record_payment_failure(current_user.id, payload))
+
+    async def status(self, current_user: CurrentUser, order_id: str | None, subscription_id: str | None):
+        result = await self.service.payment_status_for_customer(current_user.id, order_id, subscription_id)
+        await self._attach_confirmation(result, current_user.id)
+        return success(result)
+
+    async def booking_state(self, current_user: CurrentUser, booking_id: str):
+        return success(await self.service.booking_payment_state(current_user.id, booking_id))
+
+    async def resolve_attention(self, current_user: CurrentUser, order_id: str, payload: ResolveAttentionRequest):
+        result = await self.service.resolve_attention(order_id, current_user.id, payload.note)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "PAYMENT_ATTENTION_RESOLVED", "payment_orders", order_id, {"note": payload.note}
+        )
+        return success(result, "Marked as resolved")
 
     # -- Manager selling a plan (WhatsApp link / auto-pay / cash) --------
 

@@ -25,6 +25,12 @@ assigned service center to the customer:
 captain can never earn more than the customer paid) and never goes below
 zero.
 
+The same config also carries the CUSTOMER distance charge, which is a
+different thing entirely: a visit that includes a `charges_travel` service
+pays `customer_per_km_rate` for every km beyond `customer_free_km`
+(travel_quote below — the one place that number is computed). It is
+platform revenue and never enters the captain split above.
+
 Settlement then depends on how the customer paid — see WalletService for
 the credit/debit logic:
   - Online payment  -> platform holds 100%, CREDITS captain_earning to the
@@ -34,12 +40,29 @@ the credit/debit logic:
     captain owes the platform since they collected the customer's cash
     directly).
 """
+from decimal import ROUND_HALF_UP, Decimal
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.repositories.catalog_repository import ServiceRepository
 from app.repositories.content_repository import SettingRepository
 
-DEFAULT_PRICING_CONFIG = {"per_km_rate": 5.0, "default_captain_service_fee": 40.0}
+DEFAULT_PRICING_CONFIG = {
+    "per_km_rate": 5.0,
+    "default_captain_service_fee": 40.0,
+    "customer_free_km": 5.0,
+    "customer_per_km_rate": 2.0,
+}
+
+
+def compute_travel_quote(distance_km: float | None, free_km: float, per_km_rate: float) -> dict:
+    """Customer distance charge, rounded half-up to whole rupees — so the
+    "3 km · ₹6" the customer reads always adds up (a ceil turned 3.01 km into
+    ₹7). Rounded to paise first so float drift can't tip a half-rupee."""
+    distance = max(0.0, float(distance_km or 0.0))
+    paise = Decimal(str(round(max(0.0, distance - free_km) * per_km_rate, 2)))
+    charge = int(paise.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return {"distance_km": round(distance, 2), "free_km": free_km, "per_km_rate": per_km_rate, "charge": charge}
 
 
 class PricingService:
@@ -55,13 +78,32 @@ class PricingService:
         config.update(setting.get("value", {}))
         return config
 
-    async def set_pricing_config(self, per_km_rate: float, default_captain_service_fee: float, updated_by: str | None = None) -> dict:
+    async def set_pricing_config(
+        self,
+        per_km_rate: float,
+        default_captain_service_fee: float,
+        updated_by: str | None = None,
+        customer_free_km: float | None = None,
+        customer_per_km_rate: float | None = None,
+    ) -> dict:
+        # Omitted customer fields keep their current value, so an older
+        # client that only knows the captain fields can't wipe them.
+        current = await self.get_pricing_config()
         return await self.settings_repo.upsert(
             "pricing_config",
-            {"per_km_rate": per_km_rate, "default_captain_service_fee": default_captain_service_fee},
-            "Global captain payout configuration",
+            {
+                "per_km_rate": per_km_rate,
+                "default_captain_service_fee": default_captain_service_fee,
+                "customer_free_km": current["customer_free_km"] if customer_free_km is None else customer_free_km,
+                "customer_per_km_rate": current["customer_per_km_rate"] if customer_per_km_rate is None else customer_per_km_rate,
+            },
+            "Captain payout + customer distance charge configuration",
             updated_by=updated_by,
         )
+
+    async def travel_quote(self, distance_km: float | None) -> dict:
+        config = await self.get_pricing_config()
+        return compute_travel_quote(distance_km, float(config["customer_free_km"]), float(config["customer_per_km_rate"]))
 
     async def calculate_split(self, service_price: float, distance_km: float, service_doc: dict | None) -> dict:
         config = await self.get_pricing_config()

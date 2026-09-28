@@ -153,6 +153,42 @@ class QuickBookingRequest(BaseModel):
         return self
 
 
+class QuoteAddress(BaseModel):
+    """Just enough of an unsaved address to measure the distance charge."""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    pincode: Optional[str] = Field(default=None, max_length=10)
+
+
+class BookingQuoteRequest(BaseModel):
+    """What a booking WOULD cost, from the same code that prices it (see
+    BookingService.quote_visit). Same lines as QuickBookingRequest; the
+    customer is the signed-in one, or (staff / anonymous) whoever owns
+    customer_phone."""
+    customer_phone: Optional[str] = Field(default=None, max_length=20)
+    lines: list[QuickBookingLine] = Field(min_length=1)
+    address_id: Optional[str] = None
+    address: Optional[QuoteAddress] = None
+    coupon_code: Optional[str] = Field(default=None, max_length=20)
+    # "log" = a manager-logged done job (no distance charge / prepaid rule /
+    # coupon); scheduled_date + service_time then say when it happened.
+    mode: str = Field(default="book", pattern=r"^(book|log)$")
+    scheduled_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    service_time: Optional[str] = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+    @field_validator("customer_phone")
+    @classmethod
+    def _phone(cls, v: Optional[str]) -> Optional[str]:
+        # A half-typed number is simply "not known yet", never an error.
+        return validate_indian_mobile(v) if v else None
+
+    @model_validator(mode="after")
+    def _vehicle_limit(self) -> "BookingQuoteRequest":
+        if sum(line.quantity for line in self.lines) > 10:
+            raise ValueError("You can book up to 10 vehicles on one visit")
+        return self
+
+
 def _canonical_phone(v: str) -> str:
     phone = validate_indian_mobile(v)
     if not phone:
@@ -191,7 +227,9 @@ class ManagerLogBookingRequest(BaseModel):
     @field_validator("discount_amount")
     @classmethod
     def _round_discount(cls, v: float) -> float:
-        return round(v, 2)
+        from app.utils.money import round_rupees
+
+        return float(round_rupees(v))  # whole rupees, never paise
 
     @field_validator("customer_name")
     @classmethod

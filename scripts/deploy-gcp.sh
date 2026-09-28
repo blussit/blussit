@@ -13,6 +13,16 @@ PORT="${CLOUD_RUN_PORT:-8080}"
 # several seconds of a blank booking screen). It costs a small always-on
 # instance; set CLOUD_RUN_MIN_INSTANCES=0 to go back to scale-to-zero.
 MIN_INSTANCES="${CLOUD_RUN_MIN_INSTANCES:-1}"
+# Requests (incl. open WebSockets) per instance. Most requests wait on Mongo,
+# so one async worker handles far more than Cloud Run's default of 80.
+CONCURRENCY="${CLOUD_RUN_CONCURRENCY:-250}"
+# Cloud Run closes every request, WebSockets included, at this timeout
+# (default 300 s would drop every live socket every 5 minutes). 3600 is the max.
+TIMEOUT="${CLOUD_RUN_TIMEOUT:-3600}"
+# Each instance opens up to 30 Mongo connections (maxPoolSize in
+# app/core/database.py). Keep MAX_INSTANCES x 30 below the Atlas tier's
+# connection limit, or a traffic spike exhausts Atlas and every instance fails.
+MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-10}"
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -39,6 +49,7 @@ set +a
 : "${DEBUG:=true}"
 : "${RATE_LIMIT_ENABLED:=true}"
 : "${TRUST_PROXY_HEADERS:=false}"
+: "${TRUSTED_PROXY_COUNT:=1}"
 : "${MONGO_DB_NAME:=doorstep_vehicle_care}"
 : "${JWT_ALGORITHM:=HS256}"
 : "${ACCESS_TOKEN_EXPIRE_MINUTES:=15}"
@@ -129,6 +140,9 @@ if [[ -n "${RAZORPAY_KEY_ID:-}" || -n "${RAZORPAY_KEY_SECRET:-}" ]]; then
   require_value RAZORPAY_KEY_ID
   require_value RAZORPAY_KEY_SECRET
   RAZORPAY_ENABLED=true
+  if [[ -z "${RAZORPAY_WEBHOOK_SECRET:-}" ]]; then
+    printf 'WARNING: RAZORPAY_WEBHOOK_SECRET is empty — the Razorpay webhook endpoint stays disabled; unverified payments are still reconciled by the sweep (within a few minutes).\n' >&2
+  fi
 fi
 
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
@@ -175,11 +189,11 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 
 SECRET_NAMES=()
 NORMAL_NAMES=(
-  APP_NAME APP_ENV API_V1_PREFIX DEBUG RATE_LIMIT_ENABLED TRUST_PROXY_HEADERS
+  APP_NAME APP_ENV API_V1_PREFIX DEBUG RATE_LIMIT_ENABLED TRUST_PROXY_HEADERS TRUSTED_PROXY_COUNT
   MONGO_DB_NAME JWT_ALGORITHM ACCESS_TOKEN_EXPIRE_MINUTES REFRESH_TOKEN_EXPIRE_DAYS
   CORS_ORIGINS STORAGE_PROVIDER UPLOAD_DIR R2_ENDPOINT_URL R2_BUCKET_NAME
   R2_PRIVATE_BUCKET_NAME R2_PUBLIC_BASE_URL R2_UPLOAD_PREFIX DEFAULT_PAGE_SIZE MAX_PAGE_SIZE
-  WHATSAPP_PROVIDER WHATSAPP_PHONE_NUMBER_ID WHATSAPP_BUSINESS_ACCOUNT_ID
+  WHATSAPP_PROVIDER WHATSAPP_PHONE_NUMBER_ID WHATSAPP_BUSINESS_ACCOUNT_ID WHATSAPP_BUSINESS_NUMBER
   WHATSAPP_API_VERSION WHATSAPP_OTP_TEMPLATE_NAME WHATSAPP_OTP_TEMPLATE_LANGUAGE
   WHATSAPP_UPDATE_TEMPLATE_NAME WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME WHATSAPP_TEMPLATE_LANGUAGE
   SMS_PROVIDER OTP_CHANNEL PUBLIC_BASE_URL GOOGLE_MAPS_BROWSER_KEY GOOGLE_OAUTH_CLIENT_ID
@@ -205,6 +219,9 @@ if [[ -n "${GOOGLE_MAPS_SERVER_KEY:-}" ]]; then
 fi
 if [[ "$RAZORPAY_ENABLED" == true ]]; then
   SECRET_NAMES+=(RAZORPAY_KEY_SECRET)
+  if [[ -n "${RAZORPAY_WEBHOOK_SECRET:-}" ]]; then
+    SECRET_NAMES+=(RAZORPAY_WEBHOOK_SECRET)
+  fi
 fi
 
 # Remove duplicate secret names while preserving order.
@@ -258,6 +275,9 @@ gcloud run deploy "$SERVICE" \
   --service-account "$RUNTIME_SA" \
   --port "$PORT" \
   --min-instances "$MIN_INSTANCES" \
+  --max-instances "$MAX_INSTANCES" \
+  --concurrency "$CONCURRENCY" \
+  --timeout "$TIMEOUT" \
   --cpu-boost \
   --allow-unauthenticated \
   --set-env-vars="^|^${NORMAL_SPEC}" \

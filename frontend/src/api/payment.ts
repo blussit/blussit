@@ -25,13 +25,52 @@ export interface RazorpayOrder {
 
 export interface VerifyPaymentResult {
   status: "paid";
-  purpose: "booking" | "subscription";
+  purpose: "booking" | "booking_group" | "subscription";
   /** The purchase set up a recurring mandate, not just one cycle. */
   auto_pay?: boolean;
   booking_id?: string;
+  booking_group_id?: string;
+  subscription_id?: string;
   subscription?: UserSubscription & { plan_name?: string };
+  /** Issued once per purchase, to whichever request confirms it first. */
   confirmation_token?: string;
   already_processed?: boolean;
+}
+
+/** An order's state as the server (asking Razorpay) sees it right now. */
+export interface PaymentStatusResult {
+  status: "paid" | "pending" | "failed" | "needs_attention";
+  purpose: "booking" | "booking_group" | "subscription";
+  confirming?: boolean;
+  failure_reason?: string | null;
+  booking_id?: string;
+  booking_group_id?: string;
+  subscription_id?: string;
+  subscription?: UserSubscription & { plan_name?: string };
+  confirmation_token?: string;
+  auto_pay?: boolean;
+}
+
+/** What the customer's booking page says about its payment. */
+export interface BookingPaymentState {
+  booking_id: string;
+  payment_status: string;
+  /** The newest attempt failed and can still be retried. */
+  last_failure: { reason: string; at?: string | null } | null;
+  /** Money received that couldn't be applied — being fixed or refunded. */
+  attention: { amount: number; message: string; at?: string | null } | null;
+  confirming: boolean;
+}
+
+export interface PaymentFailureReport {
+  razorpay_order_id?: string;
+  razorpay_subscription_id?: string;
+  razorpay_payment_id?: string;
+  code?: string;
+  description?: string;
+  reason?: string;
+  step?: string;
+  source?: string;
 }
 
 export const paymentApi = {
@@ -39,6 +78,15 @@ export const paymentApi = {
     apiClient.post<ApiSuccess<RazorpayOrder>>("/payments/create-order", payload).then((r) => r.data.data),
   verify: (payload: { razorpay_order_id?: string; razorpay_subscription_id?: string; razorpay_payment_id: string; razorpay_signature: string }) =>
     apiClient.post<ApiSuccess<VerifyPaymentResult>>("/payments/verify", payload).then((r) => r.data.data),
+  reportFailure: (payload: PaymentFailureReport) =>
+    apiClient.post<ApiSuccess<{ recorded: boolean }>>("/payments/failure", payload).then((r) => r.data.data),
+  status: (params: { order_id?: string; subscription_id?: string }) =>
+    apiClient.get<ApiSuccess<PaymentStatusResult>>("/payments/status", { params }).then((r) => r.data.data),
+  bookingState: (bookingId: string) =>
+    apiClient.get<ApiSuccess<BookingPaymentState>>(`/payments/bookings/${bookingId}/state`).then((r) => r.data.data),
+  // Admin: a parked payment was refunded/activated — take it off the queue.
+  resolveAttention: (id: string, note: string) =>
+    apiClient.post<ApiSuccess<{ id: string; resolved: boolean }>>(`/payments/attention/${encodeURIComponent(id)}/resolve`, { note }).then((r) => r.data.data),
   // Captain doorstep settlement (see CollectPaymentModal).
   // A booking on a multi-car visit settles the VISIT: amount and vehicles
   // cover every car on it, and "paid" means every car is paid.
@@ -90,5 +138,17 @@ export interface CollectionsReport {
   totals: Omit<CollectionsRow, "captain_id" | "captain_name" | "employee_id" | "service_center_id" | "center_name">;
   /** Admin roll-up only. */
   subscriptions?: { online_amount: number; cash_amount: number; count: number; cash_count: number };
-  attention?: { reason?: string | null; booking_number?: string | null; purpose?: string | null; amount: number; flagged_at?: string | null }[];
+  attention?: {
+    id?: string;
+    reason?: string | null;
+    booking_number?: string | null;
+    purpose?: string | null;
+    kind?: string | null;
+    amount: number;
+    customer_id?: string | null;
+    /** Razorpay payment id to refund/look up. */
+    payment_id?: string | null;
+    gateway_ref?: string | null;
+    flagged_at?: string | null;
+  }[];
 }

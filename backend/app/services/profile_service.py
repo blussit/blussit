@@ -3,6 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.repositories.address_repository import AddressRepository
 from app.repositories.booking_repository import BookingRepository
+from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.schemas.profile_schema import (
     AddressCreateRequest,
@@ -99,10 +100,19 @@ class AddressService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = AddressRepository(db)
         self.booking_repo = BookingRepository(db)
+        self.user_repo = UserRepository(db)
 
     async def list_my_addresses(self, owner_id: str) -> list[dict]:
         addresses = await self.repo.list_by_owner(owner_id)
         return [serialize_doc(a) for a in addresses]
+
+    async def list_for_customer(self, customer_id: str) -> list[dict]:
+        """Staff booking for an existing customer picks one of their saved
+        addresses instead of creating a new copy every time."""
+        customer = await self.user_repo.find_by_id(customer_id)
+        if not customer or customer.get("role") != "customer":
+            raise NotFoundException("Customer not found")
+        return await self.list_my_addresses(customer_id)
 
     async def create(self, owner_id: str, payload: AddressCreateRequest) -> dict:
         if payload.is_default:

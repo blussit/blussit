@@ -2,7 +2,6 @@ import { type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
-import { LaunchCountdownBar } from "../../components/public/landing/LaunchCountdownBar";
 import { LandingHero } from "../../components/public/LandingSections";
 import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 import { HowItWorksStrip } from "../../components/public/landing/HowItWorksStrip";
@@ -10,7 +9,7 @@ import { PlansShowcase } from "../../components/public/landing/PlansShowcase";
 import { VideoReviews } from "../../components/public/landing/VideoReviews";
 import { ReviewsShowcase } from "../../components/public/landing/ReviewsShowcase";
 import { FaqSection } from "../../components/public/landing/FaqSection";
-import { LaunchOfferPopup, LaunchOfferStrip } from "../../components/public/LaunchOfferPopup";
+import { LaunchOfferPopup, LaunchOfferStrip, usePromotedOffer } from "../../components/public/LaunchOfferPopup";
 import { PageSeo } from "../../components/shared/PageSeo";
 import { useAuth } from "../../context/AuthContext";
 
@@ -28,6 +27,9 @@ export default function LandingPage() {
   // book at all). Staff roles never see this landing page's CTA in
   // practice, but the guest wizard remains a safe fallback for them too.
   const bookPath = user?.role === "customer" ? "/app/book" : "/book";
+  const bookService = (slug?: string) => navigate(slug ? `${bookPath}?service=${encodeURIComponent(slug)}` : bookPath);
+  const offer = usePromotedOffer();
+  const claimOffer = () => offer && bookService(offer.service.slug);
 
   const themeScope = {
     "--color-primary": "#000000",
@@ -39,21 +41,10 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
       <PageSeo path="/" />
-      <LaunchCountdownBar />
       <PublicNavbar />
-      <LaunchOfferStrip onClaim={() => navigate(`${bookPath}?offer=free-bike-wash`)} />
-      <LaunchOfferPopup onClaim={() => navigate(`${bookPath}?offer=free-bike-wash`)} />
-      <LandingHero
-        onBook={(serviceId) => {
-          if (bookPath === "/app/book") {
-            // NewBookingPage reads the preselected service from "service",
-            // not "serviceId" — matching its own query param name.
-            navigate(serviceId ? `/app/book?service=${serviceId}` : "/app/book");
-            return;
-          }
-          navigate(serviceId ? `/book?serviceId=${serviceId}` : "/book");
-        }}
-      />
+      {offer && <LaunchOfferStrip offer={offer} onClaim={claimOffer} />}
+      {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
+      <LandingHero onBook={bookService} />
       <ServicesShowcase limit={6} />
       <HowItWorksStrip />
       <PlansShowcase />
