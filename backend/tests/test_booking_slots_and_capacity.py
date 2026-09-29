@@ -73,18 +73,28 @@ async def test_availability_never_exposes_raw_capacity(rig, cleanup):
 
 @pytest.mark.asyncio
 async def test_low_and_full_wording_thresholds(rig, cleanup):
-    """Section 3: status flips to "low" (remaining shown) once remaining <=
-    5, and to "full" (remaining=0) once the slot is exhausted — exact
-    thresholds, not approximate."""
+    """Status flips to "low" (remaining shown) only once remaining <= 2
+    (founder: "5 spots left" isn't worth saying), and to "full"
+    (remaining=0) once the slot is exhausted — exact thresholds."""
     bs = BookingService(rig["db"])
     tomorrow = now_ist().replace(tzinfo=None) + timedelta(days=1)
-    for _ in range(15):  # 20 capacity - 15 = 5 remaining -> "low"
+    for _ in range(15):  # 20 capacity - 15 = 5 remaining -> still "available"
         await _book(rig["db"], cleanup, rig, tomorrow)
     slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
     slot = next(s for s in slots if s["key"] == "09:00-12:00")
-    assert slot["status"] == "low" and slot["remaining"] == 5
+    assert slot["status"] == "available" and slot["remaining"] is None
 
-    for _ in range(5):  # fill the remaining 5 -> "full"
+    for _ in range(2):  # 3 remaining -> still "available"
+        await _book(rig["db"], cleanup, rig, tomorrow)
+    slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
+    assert next(s for s in slots if s["key"] == "09:00-12:00")["status"] == "available"
+
+    await _book(rig["db"], cleanup, rig, tomorrow)  # 2 remaining -> "low"
+    slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
+    slot = next(s for s in slots if s["key"] == "09:00-12:00")
+    assert slot["status"] == "low" and slot["remaining"] == 2
+
+    for _ in range(2):  # fill the remaining 2 -> "full"
         await _book(rig["db"], cleanup, rig, tomorrow)
     slots = await bs.available_slots(rig["center_id"], tomorrow.strftime("%Y-%m-%d"))
     slot = next(s for s in slots if s["key"] == "09:00-12:00")

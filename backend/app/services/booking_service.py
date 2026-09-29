@@ -90,6 +90,10 @@ UNASSIGNED_REMINDER_HORIZON_HOURS = 24  # ...but only once its slot starts withi
 LATE_START_NUDGE_MINUTES = 5  # nudge both captain and manager this often once the slot's start time has passed with no heading-out
 LATE_START_MANAGER_REPEAT_MINUTES = 15  # ...but the manager's (in-app) repeat of that alert at most this often
 
+# "Only N left" shows on a slot only when it's truly scarce (founder:
+# 5 left isn't news, 2 left is).
+LOW_SLOT_THRESHOLD = 2
+
 # Flags whose own resolution IS the captain continuing to work the job —
 # blocking on them (the way _ensure_no_open_issue does by default) would
 # stop a captain from doing the exact thing that clears the flag. Mirrors
@@ -2724,7 +2728,7 @@ class BookingService:
         """Customer-facing availability for one center/date — deliberately
         never returns the raw total capacity (see the "status"/"remaining"
         shape below), only ever the exact wording the UI needs. remaining
-        is populated ONLY when status is "low" (<=5 left) or "full" (0);
+        is populated ONLY when status is "low" (<= LOW_SLOT_THRESHOLD left) or "full" (0);
         callers must never infer total capacity from any combination of
         these fields."""
         center = await self.center_repo.find_by_id(service_center_id)
@@ -2778,7 +2782,7 @@ class BookingService:
 
             if cutoff_passed or is_closed or remaining_actual <= 0:
                 status, remaining = "full", 0
-            elif remaining_actual <= 5:
+            elif remaining_actual <= LOW_SLOT_THRESHOLD:
                 status, remaining = "low", remaining_actual
             else:
                 status, remaining = "available", None

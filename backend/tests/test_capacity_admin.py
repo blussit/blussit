@@ -64,7 +64,8 @@ async def test_admin_can_increase_capacity_and_it_applies_immediately(rig, clean
     await bs.set_slot_capacity(rig["center_id"], date_str, "09:00-12:00", capacity=10, is_closed=None)
     slots = await bs.available_slots(rig["center_id"], date_str)
     slot = next(s for s in slots if s["key"] == "09:00-12:00")
-    assert slot["status"] == "low" and slot["remaining"] == 5
+    # 5 of 10 left isn't scarce — no count shown until 2 or fewer remain.
+    assert slot["status"] == "available" and slot["remaining"] is None
 
 
 @pytest.mark.asyncio

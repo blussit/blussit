@@ -453,9 +453,8 @@ async def test_cash_button_promotes_an_awaiting_payment_booking(db, cleanup, rig
     bs = BookingService(db)
     when = (now_ist().date() + timedelta(days=2)).isoformat()
     slots = await bs.available_slots(rig["center_id"], when)
-    # "low" (<=5 left) is still genuinely bookable — only "full" (0 left)
-    # isn't. This rig's default_slot_capacity=5 means every fresh slot
-    # reports "low", never "available". Skip rather than raising
+    # "low" (<=2 left) is still genuinely bookable — only "full" (0 left)
+    # isn't. Skip rather than raising
     # StopIteration out of a coroutine — see test_online_payment_gate.py.
     slot = next((s["key"] for s in slots if s["status"] != "full"), None)
     if slot is None:
