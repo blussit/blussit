@@ -801,7 +801,10 @@ class BookingService:
         # the trip (the first), added AFTER any discount so no coupon or plan
         # ever reduces it.
         carries_trip = not _group or bool(_group.get("charge_travel"))
-        travel = await self.pricing_service.travel_quote(distance_km) if visit_terms["charges_travel"] and carries_trip else None
+        travel = None
+        if visit_terms["charges_travel"] and carries_trip:
+            charge_km, charge_source = await self.charge_distance_km(service_center, address, distance_km)
+            travel = {**await self.pricing_service.travel_quote(charge_km), "source": charge_source}
         travel_charge = float(travel["charge"]) if travel else 0.0
 
         tax_amount = 0.0
@@ -906,6 +909,7 @@ class BookingService:
             "tax_amount": tax_amount,
             "travel_charge": travel_charge,
             "travel_charge_km": travel["distance_km"] if travel else None,
+            "travel_charge_source": travel["source"] if travel else None,
             "prepaid_only": prepaid,
             "total_amount": total_amount,
             "coupon_code": payload.coupon_code if not payload.subscription_id else None,
@@ -2522,8 +2526,9 @@ class BookingService:
 
         travel = None
         if terms["charges_travel"] and address:
-            _, distance_km = await self._resolve_service_center(address, allow_pinless=True)
-            travel = await self.pricing_service.travel_quote(distance_km)
+            center, distance_km = await self._resolve_service_center(address, allow_pinless=True)
+            charge_km, _source = await self.charge_distance_km(center, address, distance_km)
+            travel = await self.pricing_service.travel_quote(charge_km)
         travel_charge = float(travel["charge"]) if travel else 0.0
 
         for row in line_rows:
@@ -5538,6 +5543,19 @@ class BookingService:
             f"slots:{service_center_id}:{date_str}",
             {"type": "changed", "channel": f"slots:{service_center_id}:{date_str}", "service_center_id": service_center_id, "date": date_str},
         )
+
+    async def charge_distance_km(self, center: dict | None, address: dict | None, straight_km: float) -> tuple[float, str]:
+        """The distance a customer's distance charge is priced on: the ROAD
+        distance from the center to their pin (route_service.charge_road_km,
+        cached so quote and booking agree). A pinless address keeps the
+        straight-line estimate it was matched on."""
+        from app.services.route_service import charge_road_km
+
+        c_lat, c_lng = self._center_coords(center)
+        road = await charge_road_km(self.db, c_lat, c_lng, (address or {}).get("latitude"), (address or {}).get("longitude"))
+        if not road:
+            return float(straight_km or 0.0), "straight_line"
+        return float(road["km"]), road["source"]
 
     @staticmethod
     def _center_coords(center: dict | None) -> tuple[float | None, float | None]:

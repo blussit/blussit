@@ -256,6 +256,8 @@ async def create_indexes() -> None:
     # self-delete at their own expiry instant (TTL 0 on expires_at).
     await db.otp_requests.create_index("identifier")
     await db.otp_requests.create_index("expires_at", expireAfterSeconds=0)
+    # Road-distance cache for the customer distance charge (route_service).
+    await db.road_distance_cache.create_index("expires_at", expireAfterSeconds=0)
 
     await db.inventory.create_index("service_center_id")
 

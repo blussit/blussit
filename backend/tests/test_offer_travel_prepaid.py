@@ -546,3 +546,89 @@ async def test_visitor_stats_shape_and_periods(db, cleanup):
     # The public beacon has its own bucket, ahead of the catch-all.
     prefixes = [r[0] for r in RULES]
     assert prefixes.index("/api/v1/analytics/visit") < prefixes.index("/api/v1/")
+
+
+# ------------------------------------------------- road distance (Google)
+
+
+class _FakeRoutes:
+    """Stands in for Google's Routes API: every route is `meters` long."""
+
+    def __init__(self, meters: int | None = 9600, status: int = 200):
+        self.meters, self.status, self.calls = meters, status, 0
+
+    async def post(self, url, headers=None, json=None):
+        import httpx
+
+        self.calls += 1
+        body = {"routes": [{"distanceMeters": self.meters, "duration": "900s"}]} if self.meters else {"routes": []}
+        return httpx.Response(self.status, json=body, request=httpx.Request("POST", url))
+
+
+@pytest.fixture
+async def google_roads(db, monkeypatch):
+    from app.core.config import settings
+    from app.services import route_service
+
+    fake = _FakeRoutes()
+    monkeypatch.setattr(settings, "GOOGLE_MAPS_SERVER_KEY", "test-key")
+    monkeypatch.setattr(route_service, "shared_client", lambda name, timeout: fake)
+    await db.road_distance_cache.delete_many({})  # earlier tests cached straight-line fallbacks
+    yield fake
+    await db.road_distance_cache.delete_many({})
+
+
+async def test_charge_distance_is_by_road_and_asked_once_per_address(db, google_roads):
+    from app.services.route_service import charge_road_km
+
+    first = await charge_road_km(db, 22.68, 75.86, 22.74, 75.86)
+    again = await charge_road_km(db, 22.68, 75.86, 22.74, 75.86)
+    assert first == again == {"km": 9.6, "source": "google"}
+    assert google_roads.calls == 1, "the second quote comes from the cache, not Google"
+    await charge_road_km(db, 22.68, 75.86, 22.75, 75.86)  # a different address asks again
+    assert google_roads.calls == 2
+
+
+async def test_booking_and_quote_charge_the_road_distance(rig, cleanup, google_roads):
+    # 7.4 km in a straight line, 9.6 km by road: (9.6 - 5) x ₹2 = ₹9.20 -> ₹9.
+    customer, address_id = await _customer(rig, cleanup)
+    address = await rig["db"].addresses.find_one({"_id": ObjectId(address_id)})
+    quote = await BookingService(rig["db"]).quote_visit(
+        customer_id=str(customer["_id"]), phone=customer["phone"], lines=[_line(rig, "travel")], address=address,
+    )
+    assert quote["travel"]["distance_km"] == 9.6 and quote["travel_charge"] == 9
+
+    booking = (await _quick(rig, customer, address_id, [_line(rig, "travel")]))["bookings"][0]
+    stored = await rig["db"].bookings.find_one({"_id": ObjectId(booking["id"])})
+    assert stored["travel_charge"] == 9.0 and stored["travel_charge_km"] == 9.6
+    assert stored["travel_charge_source"] == "google"
+    assert stored["total_amount"] == 309.0  # exactly what the quote showed
+
+    async with _client() as client:
+        res = await client.post(
+            "/api/v1/service-zones/coverage-check",
+            json={"latitude": address["latitude"], "longitude": address["longitude"]},
+        )
+    data = res.json()["data"]
+    assert data["distance_km"] == 9.6 and data["travel"]["charge"] == 9
+
+
+async def test_google_down_falls_back_to_straight_line_briefly(db, google_roads):
+    from datetime import timezone
+
+    from app.services.route_service import charge_road_km
+
+    google_roads.status, google_roads.meters = 500, None
+    lat2 = 22.68 + 7.4 / KM_PER_DEG_LAT
+    result = await charge_road_km(db, 22.68, 75.86, lat2, 75.86)
+    assert result["source"] == "straight_line" and 7.3 < result["km"] < 7.5
+    cached = await db.road_distance_cache.find_one({})
+    ttl = cached["expires_at"].replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+    assert ttl.total_seconds() <= 600, "a fallback is only kept for minutes, so Google gets asked again soon"
+
+
+async def test_pinless_address_keeps_the_straight_line_estimate(rig):
+    km, source = await BookingService(rig["db"]).charge_distance_km(
+        await rig["db"].service_centers.find_one({"_id": ObjectId(rig["center_id"])}), {"pincode": "452188"}, 3.2,
+    )
+    assert (km, source) == (3.2, "straight_line")

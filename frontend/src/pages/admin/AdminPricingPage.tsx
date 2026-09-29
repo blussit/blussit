@@ -270,7 +270,7 @@ export default function AdminPricingPage() {
               placeholder={String(config?.customer_free_km ?? "")}
               value={freeKm}
               onChange={(e) => setFreeKm(e.target.value)}
-              hint={`Now ${config?.customer_free_km ?? "—"} km from the center at no charge`}
+              hint={`Now ${config?.customer_free_km ?? "—"} km by road from the center at no charge`}
             />
             <Input
               label="₹ per km after that"

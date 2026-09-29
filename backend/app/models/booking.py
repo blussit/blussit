@@ -132,10 +132,13 @@ class BookingModel(BusinessRecordBase):
     discount_amount: float = 0
     tax_amount: float = 0
     # Customer distance charge, once per visit on its first car, already
-    # inside total_amount; travel_charge_km is the distance it was priced on
-    # (travel_distance_km below is the separate road-distance estimate).
+    # inside total_amount; travel_charge_km is the ROAD distance it was
+    # priced on (route_service.charge_road_km — "google", or
+    # "straight_line" when Google was unavailable / the address had no pin).
+    # travel_distance_km below is the captain's traffic-aware ETA estimate.
     travel_charge: float = 0
     travel_charge_km: Optional[float] = None
+    travel_charge_source: Optional[str] = None
     # A prepaid_only service (not plan-covered) is on this visit: online only.
     prepaid_only: bool = False
     total_amount: float = 0

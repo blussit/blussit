@@ -76,11 +76,13 @@ async def coverage_check(payload: CoverageCheckRequest, db: AsyncIOMotorDatabase
     from app.services.pricing_service import PricingService
 
     loc = center.get("location") or {}
+    # What a visit here pays IF it includes a charges_travel service — by
+    # ROAD, the same (cached) distance create_booking charges, so the
+    # wizard never guesses.
+    charge_km, _source = await BookingService(db).charge_distance_km(center, fake_address, distance_km)
     return success({
         "covered": True,
         "center": {"id": str(center["_id"]), "name": center.get("name"), "city": loc.get("city"), "state": loc.get("state")},
-        "distance_km": distance_km,
-        # What a visit here pays IF it includes a charges_travel service —
-        # the same quote create_booking applies, so the wizard never guesses.
-        "travel": await PricingService(db).travel_quote(distance_km),
+        "distance_km": charge_km,
+        "travel": await PricingService(db).travel_quote(charge_km),
     })
