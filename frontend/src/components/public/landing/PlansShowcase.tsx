@@ -1,24 +1,23 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Check } from "lucide-react";
+import { ArrowRight, Crown, Droplet, Car, CalendarCheck, Users, CalendarClock, FileText } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { subscriptionApi } from "../../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
 import { useAuth } from "../../../context/AuthContext";
 import { CustomPlanEnquiryModal } from "../../shared/CustomPlanEnquiryModal";
 import { passHeadlinePrice } from "../../../lib/passPricing";
 import { bikeTypeIds } from "../../../lib/serviceMix";
-import { INR, SectionHeader, SectionShell } from "./shared";
+import { INR } from "./shared";
 import type { Service } from "../../../types";
 
+const MONTHLY_IMG = "/plans-card1.png";
+const CUSTOM_IMG = "/plans-card2.png";
+
 /**
- * Two cards, always (founder call): the monthly pass, and "something else".
- * A pass is bought for ONE car and covers ONE wash, so the price on a card
- * can only ever be a "from" — the real figure is quoted at purchase, once
- * the buyer has named the car and the wash.
- *
- * Anyone the standard pass doesn't fit — a fleet, a different rhythm — goes
- * to the second card rather than off the site.
+ * Two cards, always: the monthly pass (bigger, highlighted), and "something else".
+ * A pass is bought for ONE car and covers ONE wash, so the price is only a "from".
  */
 export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string; showEmpty?: boolean }) {
   const navigate = useNavigate();
@@ -38,33 +37,13 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
 
   if (!isLoading && active.length === 0 && !showEmpty) return null;
 
-  // A guest comes back to the passes after logging in (LoginPage honours
-  // state.from.pathname for customers) instead of landing on the dashboard.
   const choose = () =>
     user?.role === "customer" ? navigate("/app/subscriptions") : navigate("/login", { state: { from: { pathname: "/app/subscriptions" } } });
 
-  // "Two cards, always" (founder call): ONE pass card, whatever the exact
-  // washes/vehicle-types behind it — never one card per plan document. An
-  // admin may model the pass as several plan docs (one per vehicle type or
-  // wash), so this collapses all of them into a single "Monthly Pass" tile
-  // quoting the cheapest combination across every one of them, instead of
-  // showing a separate, narrower, oddly-named card per document.
-  //
-  // This card is explicitly framed as "one CAR per pass" (see the copy
-  // below) — a bike wash riding on the same plan document is a much
-  // cheaper, unrelated product and would otherwise drag the headline
-  // price down to a number no car owner (the audience this card is
-  // written for) can actually get. Bike-only vehicle types are excluded
-  // here so the price always reflects an actual car wash (e.g. a
-  // Hatchback Jet Wash), matching what the card lists and promises; bike
-  // owners still see accurate bike pricing on the real purchase page.
+  // Bike-only vehicle types are excluded so the headline always reflects a car wash.
   const bikeIds = bikeTypeIds(vehicleTypes);
 
-  // The headline number (see passHeadlinePrice) is deliberately always
-  // the Waterless Service × Hatchback price — pulled live from whatever
-  // the admin has set under Subscription Plans, the same figure shown on
-  // the customer's own "Get a pass" purchase page, never a different
-  // wash's price even if one happens to be priced cheaper.
+  // Headline = Waterless Service × Hatchback price (see passHeadlinePrice).
   const fromPrices = active.map((plan) => passHeadlinePrice(plan, services, vehicleTypes)).filter((n): n is number => n != null);
   const from = fromPrices.length ? Math.min(...fromPrices) : null;
   const washes = Array.from(
@@ -77,67 +56,113 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
     )
   );
   const maxWashesAMonth = Math.max(0, ...active.map((p) => p.total_service_count || 0));
+  const washesLine = maxWashesAMonth > 0 ? `Up to ${maxWashesAMonth} washes a month` : "Washes every month";
 
   return (
-    <SectionShell id={id} className="bg-white">
-      <SectionHeader
-        title="Monthly pass"
-        subtitle="One car, one wash, one monthly price. Book whenever you need it."
-      />
-
-      <div className="mt-8 grid grid-cols-1 gap-5 sm:mt-10 sm:grid-cols-2">
-        {isLoading ? (
-          <div className="h-[320px] animate-pulse rounded-2xl border border-card-border bg-white" aria-hidden="true" />
-        ) : (
-          <div className="flex flex-col rounded-2xl border border-black bg-black p-6 text-white sm:p-7">
-            <h3 className="font-display text-[22px] font-bold leading-tight">Monthly pass</h3>
-
-            <div className="mt-5 flex flex-wrap items-baseline gap-x-2">
-              {from != null && <span className="text-[13px] text-white/70">From</span>}
-              <span className="font-display text-[34px] font-bold leading-none">{from != null ? INR(from) : "—"}</span>
-              <span className="text-[13px] text-white/70">per month</span>
-            </div>
-            <p className="mt-2 text-[14px] text-white/70">
-              {maxWashesAMonth > 0 ? `Up to ${maxWashesAMonth} washes a month` : "Washes every month"} · price depends on your car and wash
-            </p>
-
-            <ul className="mt-5 space-y-2 text-[14px]">
-              {washes.length > 0 && <PlanLine dark>Choose one: {washes.join(", ")}</PlanLine>}
-              <PlanLine dark>One car per pass</PlanLine>
-              <PlanLine dark>At your doorstep, whenever you book</PlanLine>
-            </ul>
-
-            <button
-              type="button"
-              onClick={choose}
-              className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gold py-3 text-[14px] font-bold text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-gold-dark hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)]"
-            >
-              Get this pass
-              <ArrowRight className="h-4 w-4" />
-            </button>
+    <section id={id || "plans"} className="bg-white pt-4 pb-4 md:pt-6 md:pb-6 lg:pt-8 lg:pb-8">
+      <div className="mx-auto w-full max-w-[1400px] px-5 sm:px-6">
+        {/* Header */}
+        <div className="flex flex-col text-left">
+          <div>
+            <span className="inline-block rounded-full bg-[#EEF4FF] px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#1677FF]">
+              Monthly pass
+            </span>
           </div>
-        )}
-
-        {/* Always present, even with no plans configured — it's the route
-            for everyone the standard pass can't serve. */}
-        <div className="flex flex-col rounded-2xl border border-card-border bg-white p-6 text-black sm:p-7">
-          <h3 className="font-display text-[22px] font-bold leading-tight">Custom plan</h3>
-          <p className="mt-5 text-[14px] leading-relaxed text-neutral-600">
-            More cars, more washes, or a fixed time every week? Tell us what you need and we'll price it for you.
+          <h2 className="mt-2.5 font-display text-[24px] font-extrabold leading-[1.15] text-[#071A3D] sm:text-[28px] lg:text-[32px]">
+            Keep Your Car Clean, <span className="text-[#1677FF]">Every Month.</span>
+          </h2>
+          <p className="mt-2 max-w-[680px] text-[14px] text-[#64748B] sm:text-[15px]">
+            Save more with our convenient monthly car care plans. Hassle-free, doorstep service.
           </p>
-          <ul className="mb-6 mt-5 space-y-2 text-[14px]">
-            <PlanLine dark={false}>Any number of vehicles</PlanLine>
-            <PlanLine dark={false}>Your own schedule</PlanLine>
-            <PlanLine dark={false}>We call you back with a price</PlanLine>
-          </ul>
-          <button
-            type="button"
-            onClick={() => setEnquiryOpen(true)}
-            className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-xl border border-black py-3 text-[14px] font-bold text-black transition-colors hover:bg-black hover:text-white"
-          >
-            Request a custom plan
-            <ArrowRight className="h-4 w-4" />
-          </button>
+        </div>
+
+        {/* Cards — left (monthly) is bigger & highlighted */}
+        <div className="mt-6 lg:mt-8 grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[1.35fr_1fr] lg:gap-6">
+          {isLoading ? (
+            <div className="h-[380px] animate-pulse rounded-[22px] border border-[#E4E9F0] bg-white" aria-hidden="true" />
+          ) : (
+            <div className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#BBD6FB] bg-white text-[#071A3D] shadow-[0_16px_44px_rgba(22,119,255,0.16)] sm:flex-row lg:min-h-[400px]">
+              <span className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-[#FDE9A6] px-3 py-1 text-[11px] font-bold text-[#071A3D] shadow-sm">
+                <Crown className="h-3.5 w-3.5" strokeWidth={2.5} />
+                Most Popular
+              </span>
+
+              <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[50%] sm:flex-none sm:p-6">
+                <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[26px]">Monthly Pass</h3>
+                <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
+
+                <div className="mt-4 flex items-baseline gap-1.5">
+                  {from != null && <span className="text-[12px] text-[#64748B]">From</span>}
+                  <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">
+                    {from != null ? INR(from) : "?"}
+                  </span>
+                  <span className="text-[13px] text-[#64748B]">/ month</span>
+                </div>
+
+                <ul className="mb-5 mt-5 space-y-3">
+                  <PlanLine
+                    Icon={Droplet}
+                    title="Choose your service"
+                    sub={washes.length > 0 ? washes.join(", ") : "Pick the wash that fits your car"}
+                  />
+                  <PlanLine Icon={Car} title="One car per pass" sub={washesLine} />
+                  <PlanLine Icon={CalendarCheck} title="At your doorstep" sub="Book anytime, we come to you" />
+                </ul>
+
+                <button
+                  type="button"
+                  onClick={choose}
+                  className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-full bg-[#FBBF24] py-3 text-[14.5px] font-bold text-[#071A3D] shadow-[0_6px_16px_rgba(251,191,36,0.32)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_22px_rgba(251,191,36,0.42)]"
+                >
+                  Subscribe Now
+                  <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
+                </button>
+              </div>
+
+              <div
+                className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[58%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)]"
+              >
+                <div
+                  className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
+                  style={{ backgroundImage: `url(${MONTHLY_IMG})` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Custom plan */}
+          <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:min-h-[400px]">
+            <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6">
+              <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[24px]">Custom Plan</h3>
+              <p className="mt-1 text-[13px] leading-snug text-[#64748B]">
+                More cars, more washes, or a fixed time every week? Tell us what you need and we'll create a plan for you.
+              </p>
+
+              <ul className="mb-5 mt-5 space-y-3">
+                <PlanLine Icon={Users} title="Any number of vehicles" sub="Personal or business fleets" />
+                <PlanLine Icon={CalendarClock} title="Your own schedule" sub="Weekly, bi-weekly or custom" />
+                <PlanLine Icon={FileText} title="We call you back" sub="With the best price for your needs" />
+              </ul>
+
+              <button
+                type="button"
+                onClick={() => setEnquiryOpen(true)}
+                className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-full border border-[#1677FF]/50 bg-white py-3 text-[14.5px] font-bold text-[#1677FF] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#F4F8FF]"
+              >
+                Request Custom Plan
+                <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
+              </button>
+            </div>
+
+            <div
+                className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)]"
+              >
+                <div
+                  className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
+                  style={{ backgroundImage: `url(${CUSTOM_IMG})` }}
+                />
+              </div>
+          </div>
         </div>
       </div>
 
@@ -147,15 +172,20 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
         defaultName={user?.full_name}
         defaultPhone={user?.phone}
       />
-    </SectionShell>
+    </section>
   );
 }
 
-function PlanLine({ dark, children }: { dark: boolean; children: React.ReactNode }) {
+function PlanLine({ Icon, title, sub }: { Icon: LucideIcon; title: string; sub: string }) {
   return (
-    <li className="flex items-start gap-2">
-      <Check className={`mt-[3px] h-4 w-4 shrink-0 ${dark ? "text-white" : "text-black"}`} strokeWidth={2.5} />
-      <span className="min-w-0">{children}</span>
+    <li className="flex items-center gap-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#EEF4FF]">
+        <Icon className="h-[18px] w-[18px] text-[#1677FF]" strokeWidth={1.8} />
+      </span>
+      <span className="min-w-0 leading-tight">
+        <span className="block text-[13.5px] font-bold text-[#071A3D]">{title}</span>
+        <span className="mt-0.5 block text-[12px] text-[#64748B]">{sub}</span>
+      </span>
     </li>
   );
 }

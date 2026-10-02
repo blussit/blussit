@@ -147,21 +147,21 @@ export default function LoginPage() {
   };
 
   const inputClass =
-    "h-[44px] w-full rounded-[9px] border border-[#D9DDE3] bg-white px-4 text-[13px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10";
+    "h-[44px] w-full rounded-[9px] border border-[#D8E6F7] bg-white px-4 text-[13px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#1677FF] focus:ring-4 focus:ring-[#1677FF]/10";
   const ctaClass =
-    "group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] disabled:cursor-not-allowed disabled:opacity-60";
+    "group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#1677FF] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(22,119,255,0.18)] transition-all hover:bg-[#1268E8] disabled:cursor-not-allowed disabled:opacity-60";
 
   return (
     <motion.main
       initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: "easeOut" }}
-      className="flex min-h-dvh flex-col bg-[#FDF9EE] text-[#111111]"
+      className="flex min-h-dvh flex-col bg-[#F6FAFF] text-[#0B1F4B]"
     >
       <PublicNavbar />
 
       <section className="flex flex-1 items-center justify-center px-4 py-10">
-        <div className="w-full max-w-[420px] rounded-[20px] border border-[#ECE7D8] bg-white px-6 py-8 shadow-[0_16px_46px_rgba(39,33,20,0.08)] sm:px-8 sm:py-9">
+        <div className="w-full max-w-[420px] rounded-[20px] border border-[#DCEBFF] bg-white px-6 py-8 shadow-[0_16px_46px_rgba(20,92,160,0.10)] sm:px-8 sm:py-9">
           <Link to="/" aria-label="Blussit home" className="mb-6 flex w-full flex-col items-center">
             <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[142px] object-contain" />
             <span className="mt-0.5 whitespace-nowrap text-[7px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
@@ -172,7 +172,7 @@ export default function LoginPage() {
           {!staff ? (
             <>
               <div className="mb-6 text-center">
-                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">
+                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0B1F4B]">
                   {otpStep === "phone" ? "Welcome Back!" : "Enter Your Code"}
                 </h1>
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
@@ -185,7 +185,7 @@ export default function LoginPage() {
               {otpStep === "phone" ? (
                 <form onSubmit={sendCode}>
                   <label className="block">
-                    <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Mobile number</span>
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Mobile number</span>
                     <input
                       type="tel"
                       inputMode="numeric"
@@ -217,14 +217,14 @@ export default function LoginPage() {
                       <span className="flex items-center gap-3">
                         <button
                           type="button"
-                          className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50"
+                          className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50"
                           onClick={() => void sendCode(undefined, channel === "widget" ? ["widget", "backend"] : ["backend", "widget"])}
                           disabled={isLoading}
                         >
                           Resend code
                         </button>
                         {channel === "backend" && smsAvailable && (
-                          <button type="button" className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
+                          <button type="button" className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
                             Get it by SMS
                           </button>
                         )}
@@ -243,13 +243,13 @@ export default function LoginPage() {
 
               <p className="mt-4 text-center text-[12px] text-[#737B88]">
                 New here? No sign-up needed —{" "}
-                <Link to="/book" className="font-semibold text-[#D99700] hover:text-[#B87900]">
+                <Link to="/book" className="font-semibold text-[#1677FF] hover:text-[#0F5FD1]">
                   just book a wash
                 </Link>{" "}
                 and your account is created for you.
               </p>
               <p className="mt-2 text-center text-[11px] text-[#9AA1AD]">
-                <button type="button" onClick={() => setStaff(true)} className="underline underline-offset-2 hover:text-[#111]">
+                <button type="button" onClick={() => setStaff(true)} className="underline underline-offset-2 hover:text-[#1677FF]">
                   Staff login
                 </button>
               </p>
@@ -257,16 +257,16 @@ export default function LoginPage() {
           ) : (
             <>
               <div className="mb-6 text-center">
-                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">Staff Login</h1>
+                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0B1F4B]">Staff Login</h1>
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">Admin, manager and captain accounts.</p>
               </div>
               <form onSubmit={staffSubmit}>
                 <label className="block">
-                  <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Email or phone</span>
+                  <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Email or phone</span>
                   <input type="text" value={identifier} onChange={(e) => setIdentifier(e.target.value)} required autoComplete="username" placeholder="Enter email or phone number" className={inputClass} />
                 </label>
                 <label className="mt-3 block">
-                  <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Password</span>
+                  <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Password</span>
                   <div className="relative">
                     <input
                       type={showPassword ? "text" : "password"}
@@ -283,7 +283,7 @@ export default function LoginPage() {
                   </div>
                 </label>
                 <div className="mt-3 text-right">
-                  <Link to="/forgot-password" className="text-[12.5px] font-semibold text-[#D99400] transition-colors hover:text-[#B87800]">
+                  <Link to="/forgot-password" className="text-[12.5px] font-semibold text-[#1677FF] transition-colors hover:text-[#0F5FD1]">
                     Forgot Password?
                   </Link>
                 </div>
@@ -293,7 +293,7 @@ export default function LoginPage() {
                 </button>
               </form>
               <p className="mt-4 text-center text-[11px] text-[#9AA1AD]">
-                <button type="button" onClick={() => setStaff(false)} className="underline underline-offset-2 hover:text-[#111]">
+                <button type="button" onClick={() => setStaff(false)} className="underline underline-offset-2 hover:text-[#1677FF]">
                   Customer login (OTP)
                 </button>
               </p>

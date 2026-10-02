@@ -52,7 +52,7 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
       <SectionHeader title="What customers say" subtitle="Real doorstep washes, in their own words." />
 
       {/* Auto-advancing swipe row on phones, grid from tablet up */}
-      <AutoRail className="mt-8 sm:mt-10" gridClassName="sm:grid-cols-2 lg:grid-cols-3 lg:gap-5">
+      <AutoRail className="mt-6 lg:mt-8" gridClassName="sm:grid-cols-2 lg:grid-cols-3 lg:gap-5">
         {reviews.map((r) => (
           <figure
             key={r.id}

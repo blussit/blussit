@@ -2,14 +2,14 @@ import { type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
-import { LandingHero } from "../../components/public/LandingSections";
+import { LandingHero } from "../../components/public/LandingHeroNew";
 import { ServicesShowcase } from "../../components/public/landing/ServicesShowcase";
 import { HowItWorksStrip } from "../../components/public/landing/HowItWorksStrip";
 import { PlansShowcase } from "../../components/public/landing/PlansShowcase";
 import { VideoReviews } from "../../components/public/landing/VideoReviews";
 import { ReviewsShowcase } from "../../components/public/landing/ReviewsShowcase";
 import { FaqSection } from "../../components/public/landing/FaqSection";
-import { LaunchOfferPopup, LaunchOfferStrip, usePromotedOffer } from "../../components/public/LaunchOfferPopup";
+import { LaunchOfferPopup, usePromotedOffer } from "../../components/public/LaunchOfferPopup";
 import { PageSeo } from "../../components/shared/PageSeo";
 import { useAuth } from "../../context/AuthContext";
 
@@ -42,7 +42,6 @@ export default function LandingPage() {
     <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
       <PageSeo path="/" />
       <PublicNavbar />
-      {offer && <LaunchOfferStrip offer={offer} onClaim={claimOffer} />}
       {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
       <LandingHero onBook={bookService} />
       <ServicesShowcase limit={6} />

@@ -23,10 +23,8 @@ export default function BookPage() {
     <div className="min-h-screen bg-white" style={themeScope}>
       <PageSeo path="/book" />
       <PublicNavbar />
-      <div className="bg-white pb-12 pt-8 sm:pt-12">
-        <div className="container-page">
-          <QuickBookFlow mode={user?.role === "customer" ? "customer" : "public"} />
-        </div>
+      <div className="w-full">
+        <QuickBookFlow mode={user?.role === "customer" ? "customer" : "public"} />
       </div>
       <PublicFooter />
     </div>

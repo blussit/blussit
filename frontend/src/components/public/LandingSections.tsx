@@ -59,10 +59,11 @@ const IMG = {
    behavior cycled images by index, so e.g. Bike Wash could show a car).
    Anything without a match keeps the index-cycled fallback. */
 const SERVICE_IMAGE_MAP: [RegExp, string][] = [
-  [/waterless/i, "/service-waterless.webp"],
+  [/waterless/i, "waterless.png"],
+  [/deep cleaning/i, "deep-cleaning.png"],
   [/deep/i, "/service-deepclean.webp"],
-  [/jet/i, "/service-jet.webp"],
-  [/bike/i, "/service-bike.webp"],
+  [/jet/i, "jet-wash.png"],
+  [/bike/i, "bike-wash.png"],
 ];
 
 function serviceImageFor(name: string | undefined, index: number): string {

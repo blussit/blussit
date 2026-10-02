@@ -29,7 +29,7 @@ function BlussitLogo() {
       />
 
       <span
-        className="mt-1.5 whitespace-nowrap text-[6.5px] font-semibold tracking-[0.12em] text-[var(--color-gold)] leading-none sm:text-[7px]"
+        className="mt-1.5 whitespace-nowrap text-[6.5px] font-semibold tracking-[0.12em] text-[#FBBF24] leading-none sm:text-[7px]"
         style={{
           fontFamily: "'Montserrat', sans-serif",
           WebkitFontSmoothing: "antialiased",
@@ -102,7 +102,7 @@ export function PublicNavbar() {
         transition-all duration-500
         ${
           scrolled
-            ? "bg-white/85 backdrop-blur-xl shadow-[0_8px_30px_rgba(49,45,38,0.08)] border-b border-[#E1D7C4]/70 py-3"
+            ? "bg-white/85 backdrop-blur-xl shadow-[0_8px_30px_rgba(49,45,38,0.08)] border-b border-[#D9E8FF]/70 py-3"
             : "bg-white/95 backdrop-blur-md border-b border-black/5 py-5"
         }
       `}
@@ -120,8 +120,8 @@ export function PublicNavbar() {
               type="button"
               onClick={() => setContactOpen(true)}
               className="
-                text-sm font-semibold text-black/70
-                hover:text-[var(--color-gold)]
+                text-sm font-semibold text-[#071A3D]
+                hover:text-[#1677FF]
                 transition-colors
                 relative
                 cursor-pointer
@@ -131,7 +131,7 @@ export function PublicNavbar() {
                 after:left-0
                 after:h-[2px]
                 after:w-0
-                after:bg-[var(--color-gold)]
+                after:bg-[#1677FF]
                 after:rounded-full
                 after:transition-all
                 after:duration-300
@@ -143,8 +143,8 @@ export function PublicNavbar() {
             </button>
           ) : (
             <a key={link.label} href={link.href} className="
-              text-sm font-semibold text-black/70 hover:text-[var(--color-gold)] transition-colors relative
-              after:content-[''] after:absolute after:-bottom-1.5 after:left-0 after:h-[2px] after:w-0 after:bg-[var(--color-gold)] after:rounded-full after:transition-all after:duration-300 hover:after:w-full 
+              text-sm font-semibold text-[#071A3D] hover:text-[#1677FF] transition-colors relative
+              after:content-[''] after:absolute after:-bottom-1.5 after:left-0 after:h-[2px] after:w-0 after:bg-[#1677FF] after:rounded-full after:transition-all after:duration-300 hover:after:w-full 
             ">{link.label}</a>
           ))}
         </nav>
@@ -157,12 +157,12 @@ export function PublicNavbar() {
               className="
                 group inline-flex cursor-pointer items-center gap-2
                 rounded-[10px]
-                bg-[var(--color-gold)]
+                bg-[#FBBF24] text-[#071A3D]
                 px-6 py-2.5
-                text-sm font-bold text-white
+                text-sm font-bold text-[#071A3D]
                 transition-all duration-200
                 hover:-translate-y-0.5
-                hover:bg-[#D99A00]
+                hover:bg-[#FBBF24]
                 
               "
             >
@@ -183,14 +183,14 @@ export function PublicNavbar() {
                 className="
                   cursor-pointer
                   rounded-[10px]
-                  border border-black/15
+                  border border-[#D9E8FF]
                   px-5 py-2.5
                   text-sm font-semibold
-                  text-black/80
+                  text-[#071A3D]
                   transition-all duration-200
-                  hover:border-[var(--color-gold)]/50
-                  hover:text-[#A87400]
-                  hover:bg-[#FFF4CD]/30
+                  hover:border-[#FBBF24]/50
+                  hover:text-[#1677FF]
+                  hover:bg-[#F5F9FF]/30
                 "
               >
                 {authLabel}
@@ -201,12 +201,12 @@ export function PublicNavbar() {
                 className="
                   group inline-flex cursor-pointer items-center gap-2
                   rounded-[10px]
-                  bg-[var(--color-gold)]
+                  bg-[#FBBF24] text-[#071A3D]
                   px-6 py-2.5
-                  text-sm font-bold text-white
+                  text-sm font-bold text-[#071A3D]
                   transition-all duration-200
                   hover:-translate-y-0.5
-                  hover:bg-[#D99A00]
+                  hover:bg-[#FBBF24]
                   
                 "
               >
@@ -224,32 +224,48 @@ export function PublicNavbar() {
           )}
         </div>
 
-        {/* Mobile Menu Button */}
-        <button
-          className="
-            lg:hidden
-            flex items-center justify-center
-            h-10 w-10
-            rounded-xl
-            border border-[#E1D7C4]/80
-            bg-white/60
-            backdrop-blur-lg
-            text-[#312D26]
-            shadow-[0_4px_16px_rgba(49,45,38,0.06)]
-            transition-all duration-200
-            hover:bg-[#FFF4CD]/60
-            hover:border-[var(--color-gold)]/40
-          "
-          onClick={() => setOpen((o) => !o)}
-          aria-label="Toggle menu"
-          aria-expanded={open}
-        >
-          {open ? (
-            <X className="h-5 w-5" />
-          ) : (
-            <Menu className="h-5 w-5" />
+        {/* Mobile Action + Menu */}
+        <div className="flex items-center gap-3 lg:hidden">
+          {!isAuthenticated && (
+            <a
+              href={bookHref}
+              className="
+                flex items-center gap-1.5
+                rounded-full
+                bg-[#FBBF24] text-[#071A3D]
+                px-4 py-2
+                text-[13px] font-bold text-[#071A3D]
+                shadow-sm
+              "
+            >
+              Book Now <ArrowRight className="h-3.5 w-3.5" />
+            </a>
           )}
-        </button>
+          <button
+            className="
+              flex items-center justify-center
+              h-10 w-10
+              rounded-xl
+              border border-[#D9E8FF]/80
+              bg-white/60
+              backdrop-blur-lg
+              text-[#071A3D]
+              shadow-[0_4px_16px_rgba(49,45,38,0.06)]
+              transition-all duration-200
+              hover:bg-[#F5F9FF]/60
+              hover:border-[#FBBF24]/40
+            "
+            onClick={() => setOpen((o) => !o)}
+            aria-label="Toggle menu"
+            aria-expanded={open}
+          >
+            {open ? (
+              <X className="h-5 w-5" />
+            ) : (
+              <Menu className="h-5 w-5" />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Mobile Glass Menu */}
@@ -268,8 +284,8 @@ export function PublicNavbar() {
         z-50
         lg:hidden
         rounded-2xl
-        border border-[#E1D7C4]/70
-        bg-[#FFFCF5]/90
+        border border-[#D9E8FF]/70
+        bg-white/90
         backdrop-blur-xl
         shadow-[0_20px_50px_rgba(49,45,38,0.14)]
         p-3
@@ -294,11 +310,11 @@ export function PublicNavbar() {
                 py-3
                 text-base
                 font-semibold
-                text-[#312D26]
+                text-[#071A3D]
                 transition-all
                 duration-200
-                hover:bg-[#FFF4CD]
-                hover:text-[#A87400]
+                hover:bg-[#F5F9FF]
+                hover:text-[#1677FF]
                 cursor-pointer
               "
             >
@@ -306,7 +322,7 @@ export function PublicNavbar() {
             </button>
           ) : (
             <a key={link.label} href={link.href} onClick={() => setOpen(false)} className="
-              flex w-full items-center justify-center rounded-xl px-5 py-3 text-base font-semibold text-[#312D26] transition-all duration-200 hover:bg-[#FFF4CD] hover:text-[#A87400]
+              flex w-full items-center justify-center rounded-xl px-5 py-3 text-base font-semibold text-[#071A3D] transition-all duration-200 hover:bg-[#F5F9FF] hover:text-[#1677FF]
             ">{link.label}</a>
           ))}
         </div>
@@ -325,15 +341,15 @@ export function PublicNavbar() {
               className="
                 w-full
                 rounded-xl
-                bg-[var(--color-gold)]
+                bg-[#FBBF24] text-[#071A3D]
                 px-5
                 py-3
                 text-sm
                 font-bold
-                text-white
+                text-[#071A3D]
                 transition-all
                 duration-200
-                hover:bg-[#D99A00]
+                hover:bg-[#FBBF24]
                 
               "
             >
@@ -350,17 +366,17 @@ export function PublicNavbar() {
                   w-full
                   rounded-xl
                   border
-                  border-[#E1D7C4]
+                  border-[#D9E8FF]
                   bg-white/70
                   px-5
                   py-3
                   text-sm
                   font-bold
-                  text-[#312D26]
+                  text-[#071A3D]
                   transition-all
                   duration-200
-                  hover:border-[var(--color-gold)]
-                  hover:bg-[#FFF4CD]/60
+                  hover:border-[#FBBF24]
+                  hover:bg-[#F5F9FF]/60
                 "
               >
                 {authLabel}
@@ -376,16 +392,16 @@ export function PublicNavbar() {
                   justify-center
                   gap-2
                   rounded-xl
-                  bg-[var(--color-gold)]
+                  bg-[#FBBF24] text-[#071A3D]
                   px-5
                   py-3
                   text-sm
                   font-bold
-                  text-white
+                  text-[#071A3D]
                   transition-all
                   duration-200
                   hover:-translate-y-0.5
-                  hover:bg-[#D99A00]
+                  hover:bg-[#FBBF24]
                   
                 "
               >

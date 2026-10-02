@@ -11,8 +11,9 @@ const ACRONYMS = new Set(["suv", "xuv", "ev", "upi", "otp", "id"]);
 
 export function titleCase(value: string | null | undefined): string {
   if (!value) return "";
-  return value
-    .replace(/\bundebody\b/gi, "underbody")
+  let str = value.replace(/\bundebody\b/gi, "underbody");
+  if (/bike\/scooty wash/i.test(str)) str = "Bike Wash";
+  return str
     .split(/(\s+|[-/])/)
     .map((part) => {
       if (/^\s+$|^[-/]$/.test(part)) return part;
@@ -33,7 +34,7 @@ export function SectionShell({
   children: ReactNode;
 }) {
   return (
-    <section id={id} className={`py-12 sm:py-16 lg:py-20 ${className}`}>
+    <section id={id} className={`pt-4 pb-4 md:pt-6 md:pb-6 lg:pt-8 lg:pb-8 ${className}`}>
       <div className="container-page">{children}</div>
     </section>
   );
@@ -51,11 +52,11 @@ export function SectionHeader({
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div className="max-w-xl">
-        <h2 className="font-display text-[28px] font-bold leading-[1.1] tracking-tight text-black sm:text-[36px]">
+        <h2 className="font-display text-[28px] font-bold leading-[1.1] tracking-tight text-[#071A3D] sm:text-[36px]">
           {title}
         </h2>
         {subtitle && (
-          <p className="mt-2 text-[15px] leading-relaxed text-neutral-600 sm:text-[16px]">
+          <p className="mt-2 text-[15px] leading-relaxed text-[#64748B] sm:text-[16px]">
             {subtitle}
           </p>
         )}
@@ -205,13 +206,14 @@ const LOCAL_IMAGES = {
 export function serviceImage(s: { name: string; image?: string | null }, index: number): string {
   if (s.image) return s.image;
   const n = s.name.toLowerCase();
-  if (/waterless/.test(n)) return LOCAL_IMAGES.waterless;
-  if (/bike|scooter|two.?wheeler|chain/.test(n)) return LOCAL_IMAGES.bike;
+  if (/waterless/.test(n)) return "waterless.png";
+  if (/deep cleaning/.test(n)) return "deep-cleaning.png";
+  if (/bike|scooter|two.?wheeler|chain/.test(n)) return "bike-wash.png";
   if (/dashboard/.test(n)) return LOCAL_IMAGES.dashboard;
   if (/wax|polish|ceramic|coat|paint/.test(n)) return LOCAL_IMAGES.polish;
   if (/deep|detail|interior|vacuum|seat|cabin|sanit/.test(n)) return LOCAL_IMAGES.interior;
-  if (/star|foam/.test(n)) return LOCAL_IMAGES.foam;
-  if (/jet|exterior|wash|clean/.test(n)) return LOCAL_IMAGES.jet;
+  if (/star|foam/.test(n)) return "/star.png";
+  if (/jet|exterior|wash|clean/.test(n)) return "jet-wash.png";
   const all = Object.values(LOCAL_IMAGES);
   return all[index % all.length];
 }

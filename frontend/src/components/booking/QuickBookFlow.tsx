@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { BadgeCheck, Banknote, CheckCircle2, Copy, CreditCard, Gift, Info, MapPin, Plus, Trash2, ShieldCheck } from "lucide-react";
+import { Calendar, BadgeCheck, Banknote, CheckCircle2, Copy, CreditCard, Gift, Info, MapPin, Plus, Trash2, ShieldCheck, Leaf, Clock } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
 import { bookingApi, type BookingQuotePayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
 import { addressApi } from "../../api/profile";
@@ -30,11 +30,6 @@ import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption
 /**
  * THE booking flow (2026-09 quick-booking model) — two steps, no account;
  * anonymous bookings end with a one-time-code popup (BookingOtpModal):
- *
- *   1. What are we washing?  pick a vehicle type, how many, one service
- *      (+ add-ons); "Add another vehicle" for a different type on the
- *      same visit ("Bike ×2 + SUV ×1").
- *   2. Where & when?         pin the address, pick a slot, name + phone,
  *      how to pay → Book (→ verify the number with an OTP if not signed in).
  *
  * One component, three seats:
@@ -153,6 +148,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
   // null = nothing chosen yet (a default may be preselected), "" = "New address".
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
+  const [wizardStep, setWizardStep] = useState(1);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
   const [mapsUp, setMapsUp] = useState(true);
   const [typedAddress, setTypedAddress] = useState(false); // manager: type instead of pin
@@ -744,10 +740,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
   const otherVehicles = added.reduce((n, d) => n + d.count, 0);
   const pickType = (typeId: string) => {
-    // Default the service (a deep-linked one when offered for this type) so
-    // the dropdown pick is already a bookable line.
+    // Only auto-select if there is a deep-linked preferredBase, otherwise leave it empty
     const groups = baseGroups(services, typeId);
-    const first = (groups.find((g) => g.key === preferredBase) || groups[0])?.key ?? null;
+    const first = groups.find((g) => g.key === preferredBase)?.key ?? null;
     setDraft({ typeId, count: 1, base: first, addons: [] });
   };
   const setCount = (next: number) => {
@@ -1245,6 +1240,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     </div>
   );
 
+  // Generate dates for the horizontal selector
+  const availableDates = useMemo(() => {
+    const start = new Date(`${todayIST()}T00:00:00`);
+    const horizon = Math.max(1, Math.min(policy?.max_advance_days || 7, 14));
+    const days = [];
+    for (let i = 0; i < horizon; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      days.push({ iso, dateObj: d });
+    }
+    return days;
+  }, [policy]);
+
+  const hasServiceSelected = !!(draft.typeId && draft.base) || added.length > 0;
+  const hasValidLocation = coverage === "covered";
+  const hasSlotSelected = !!slot;
+
   return (
     <>
     {needsOtp && (
@@ -1264,492 +1277,514 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         }}
       />
     )}
-    <WizardShell
-      title={isLog ? "Log A Completed Job" : isManager ? "New Booking" : "Book Your Doorstep Wash"}
-      steps={isLog ? LOG_STEPS : STEPS}
-      current={step}
-      onStepClick={(i) => i < step && setStep(i)}
-      footer={footer}
-    >
-      {/* ---------------- STEP 1 ---------------- */}
-      {step === 0 && (
-        <div className="space-y-5">
-          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[0]} />
-
-          {planIssue && (
-            <p role="status" className="flex items-start gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-3 text-sm text-gray-700">
-              <Info className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-              <span>{planIssue}</span>
+    
+    <div className="min-h-screen bg-[#F6FAFE] pb-16 font-sans">
+      
+      {/* FULL-WIDTH HERO SECTION */}
+      <div 
+        className="relative w-[100vw] ml-[calc(50%-50vw)] bg-cover bg-[position:center_right] sm:bg-[position:80%_center] bg-no-repeat -mt-4 sm:-mt-8" 
+        style={{ backgroundImage: 'url(/booking.png)' }}
+      >
+        {/* Overlay to ensure text readability on left side */}
+        <div 
+          className="absolute inset-0 z-0 pointer-events-none" 
+          style={{ background: 'linear-gradient(to right, rgba(255,255,255,0.72) 0%, rgba(255,255,255,0.52) 20%, rgba(255,255,255,0.25) 38%, rgba(255,255,255,0.05) 55%, rgba(255,255,255,0) 70%)' }}
+        ></div>
+        
+        {/* Constrain content to align with booking area below */}
+        <div className="relative z-10 mx-auto max-w-[1400px] w-full px-4 sm:px-6 lg:px-[24px] pt-[36px] sm:pt-[44px] pb-[20px] sm:pb-[28px]">
+          <div className="w-full sm:w-[50%]">
+            <span className="mb-2 block text-[11px] font-bold uppercase tracking-widest text-[#1677F2]">
+              PREMIUM DOORSTEP CAR CARE
+            </span>
+            <h1 className="mb-3 text-[38px] sm:text-[50px] font-extrabold leading-[1.0] tracking-tight">
+              <span className="text-[#0B1B3A]">Book Your</span><br/>
+              <span className="text-[#1677F2]">Car Wash</span>
+            </h1>
+            <p className="text-[15px] sm:text-[18px] text-[#334155] font-semibold mb-5">
+              Quick. Easy. At your doorstep in Indore.
             </p>
-          )}
-
-          {/* Vehicles already on the visit */}
-          {added.length > 0 && (
-            <div className="rounded-xl border border-[#F3E5B5] p-3.5">
-              <p className="text-sm font-medium text-gray-600">
-                On this visit · {totalVehicles} of {maxVehicles}
-              </p>
-              <div className="mt-2 space-y-1.5">
-                {added.map((d, i) => {
-                  const li = lines.findIndex((x) => x.draft === d);
-                  const l = lines[li];
-                  if (!l) return null;
-                  const cost = lineCost(li);
-                  return (
-                    <div key={`${d.typeId}-${i}`} className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate text-gray-600">
-                        <span className="font-medium text-black">{lineLabel(l)}</span>
-                        {l.addons.length ? ` + ${l.addons.map((x) => titleCase(x.name)).join(", ")}` : ""}
-                      </span>
-                      <span className="font-mono-num shrink-0 text-gray-600">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : `₹${cost}`}</span>
-                      <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-xs font-semibold text-gray-500 underline underline-offset-2 hover:text-black">
-                        Edit
-                      </button>
-                      <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-gray-400 hover:text-black">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+            
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-4 mt-2">
+               <div className="flex items-center gap-1.5">
+                 <div className="w-[18px] h-[18px] rounded-full bg-green-50 flex items-center justify-center text-green-600"><Leaf className="w-2.5 h-2.5"/></div>
+                 <span className="text-[12px] font-semibold text-[#0B1B3A]">Waterless Options</span>
+               </div>
+               <div className="flex items-center gap-1.5">
+                 <div className="w-[18px] h-[18px] rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><Clock className="w-2.5 h-2.5"/></div>
+                 <span className="text-[12px] font-semibold text-[#0B1B3A]">On-Time Service</span>
+               </div>
+               <div className="flex items-center gap-1.5">
+                 <div className="w-[18px] h-[18px] rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><ShieldCheck className="w-2.5 h-2.5"/></div>
+                 <span className="text-[12px] font-semibold text-[#0B1B3A]">Trusted Professionals</span>
+               </div>
             </div>
-          )}
+          </div>
+        </div>
+      </div>
 
-          {/* The editor: one vehicle at a time */}
-          <div className="space-y-5">
-            {added.length > 0 && (
-              <p className="text-sm font-medium text-black">
-                Vehicle {added.length + 1}
-                {!draft.typeId && <span className="font-normal text-gray-500"> · optional</span>}
-              </p>
-            )}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-              <Select label="Vehicle type" value={draft.typeId} onChange={(e) => pickType(e.target.value)}>
-                <option value="">Select vehicle type</option>
-                {types.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </Select>
-              {draft.typeId && (
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-2.5 sm:h-[46px]">
-                  <span className="text-sm text-gray-600">How many?</span>
-                  <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
+      {/* BOOKING AREA CONTAINER */}
+      <div className="mx-auto max-w-[1100px] w-[calc(100%-32px)] sm:w-[calc(100%-48px)] pt-6 sm:pt-8">
+        
+        {/* BOOKING AREA GRID */}
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(340px,0.9fr)] gap-5 items-start">
+          
+          {/* LEFT: PROGRESSIVE BOOKING FLOW */}
+          <div className="space-y-4 sm:space-y-5">
+            
+              {wizardStep === 1 && (
+                <div className="space-y-4 sm:space-y-5 animate-in fade-in slide-in-from-left-4 duration-300">
+             {/* STEP 1 & 2: CAR TYPE & SERVICE */}
+             <div className="space-y-4 rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="flex items-center gap-2 mb-2">
+                   <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><BadgeCheck className="h-4 w-4" /></div>
+                   <h2 className="text-[20px] sm:text-[22px] font-bold text-[#0B1B3A]">Service Details</h2>
                 </div>
-              )}
-            </div>
-
-            {draft.typeId &&
-              editing &&
-              (servicesLoading ? (
-                <p className="text-sm text-gray-500">Loading services…</p>
-              ) : editingGroups.length === 0 ? (
-                <p className="text-sm text-gray-500">No services for this vehicle yet.</p>
-              ) : (
-                <>
-                  <div>
-                    <p className={SECTION_LABEL}>Service</p>
-                    {/* Every option shows what it includes, so the customer
-                        compares before tapping — not after. */}
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {editingGroups.map((g) => {
-                        const selected = draft.base === g.key;
-                        const shown = unit(g.primary, draft.typeId);
-                        const { price, original } = priceForType(g.primary, draft.typeId);
-                        // A first-wash price is struck against the regular one, else against the MRP.
-                        const struck = shown < price ? price : original;
-                        const pct = discountPercent(shown, struck);
-                        const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag;
-                        const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
-                        const inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
-                        const inc = parseIncludes(g.primary.description);
-                        const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
+                
+                {planIssue && (
+                  <p role="status" className="flex items-start gap-2 rounded-[14px] border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+                    <span>{planIssue}</span>
+                  </p>
+                )}
+                
+                {added.length > 0 && (
+                  <div className="rounded-[16px] border border-gray-100 bg-[#F8FAFC] p-4 mb-4">
+                    <p className="text-[13px] font-semibold text-[#0B1B3A] mb-2">On this visit · {totalVehicles} of {maxVehicles}</p>
+                    <div className="space-y-2">
+                      {added.map((d, i) => {
+                        const li = lines.findIndex((x) => x.draft === d);
+                        const l = lines[li];
+                        if (!l) return null;
+                        const cost = lineCost(li);
                         return (
-                          <button
-                            key={g.key}
-                            type="button"
-                            onClick={() => pickBase(g.key)}
-                            aria-pressed={selected}
-                            className={`rounded-xl px-3.5 py-3 text-left ${choiceClass(selected)}`}
-                          >
-                            <span className="flex items-start justify-between gap-3">
-                              <span className="text-sm font-semibold text-black">{titleCase(g.label)}</span>
-                              <span className="shrink-0 text-right">
-                                {struck != null && <span className="mr-1 text-xs text-gray-400 line-through">₹{struck}</span>}
-                                <span className="font-mono-num text-sm font-bold text-black">₹{shown}</span>
-                              </span>
+                          <div key={`${d.typeId}-${i}`} className="flex items-center gap-3 text-sm bg-white p-3 rounded-[16px] border border-gray-100 shadow-[0_4px_10px_rgba(15,35,70,0.03)]">
+                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EBF4FF] text-[#1677F2]">
+                              <BadgeCheck className="h-4 w-4" />
+                            </div>
+                            <span className="min-w-0 flex-1 truncate text-gray-600">
+                              <span className="font-semibold text-gray-900">{lineLabel(l)}</span>
+                              {l.addons.length ? ` + ${l.addons.map((x) => titleCase(x.name)).join(", ")}` : ""}
                             </span>
-                            {(pct != null || offerTag || inPlan || shown < price) && (
-                              <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                <DiscountBadge percent={pct} />
-                                <OfferTag label={offerTag} />
-                                {shown < price && <span className="text-[11px] text-gray-500">First wash</span>}
-                                {inPlan && (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-black">
-                                    <BadgeCheck className="h-3 w-3" /> In {isCustomer ? "your" : "their"} plan
-                                  </span>
-                                )}
-                              </span>
-                            )}
-                            {items.length > 0 && (
-                              <ul className="mt-2 space-y-0.5">
-                                {items.map((it) => (
-                                  <li key={it} className="flex items-start gap-1.5 text-xs text-gray-600">
-                                    <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-black" />
-                                    <span>{it}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                          </button>
+                            <span className="font-mono-num shrink-0 font-semibold text-[#0B1B3A]">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : `₹${cost}`}</span>
+                            <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-[13px] font-semibold text-[#1677F2] hover:text-blue-800">Edit</button>
+                            <button type="button" onClick={() => removeAdded(i)} className="shrink-0 text-[#94A3B8] hover:text-red-500"><Trash2 className="h-4 w-4" /></button>
+                          </div>
                         );
                       })}
                     </div>
                   </div>
+                )}
 
-                  {editing.base && editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
-                    <div>
-                      <p className={SECTION_LABEL}>Add-ons</p>
-                      <div className="flex flex-wrap gap-2">
-                        {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
-                          const on = draft.addons.includes(a.id);
-                          const per = unit(a, draft.typeId);
-                          const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
-                          return (
-                            <button
-                              key={a.id}
-                              type="button"
-                              onClick={() => toggleAddon(a.id)}
-                              aria-pressed={on}
-                              className={`rounded-full px-3 py-1.5 text-xs font-medium ${choiceClass(on)}`}
-                            >
-                              + {titleCase(a.name)} · ₹{per}
-                              {perBike ? "/bike" : ""}
-                            </button>
-                          );
-                        })}
-                      </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+                  {/* STEP 1: CAR TYPE */}
+                  <div className="w-full">
+                     <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Car Type</p>
+                     <div className="rounded-[14px] border border-gray-200 bg-white h-[56px] flex items-center px-3 transition-colors focus-within:border-[#1677F2] focus-within:ring-1 focus-within:ring-[#1677F2]">
+                         <select className="w-full bg-transparent p-0 text-[14px] font-semibold text-[#0B1B3A] focus:outline-none border-none ring-0 h-full cursor-pointer"
+                           value={draft.typeId} onChange={(e) => pickType(e.target.value)}>
+                           <option value="">Select car type</option>
+                           {types.map((t) => (
+                             <option key={t.id} value={t.id}>{t.name}</option>
+                           ))}
+                         </select>
+                     </div>
+                  </div>
+                  {/* STEP 2: SERVICE (Disabled until car type is selected) */}
+                  <div className="w-full">
+                    <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Service</p>
+                    <div className={`rounded-[14px] border h-[56px] flex items-center px-3 transition-colors ${draft.typeId ? "border-gray-200 bg-white focus-within:border-[#1677F2] focus-within:ring-1 focus-within:ring-[#1677F2]" : "border-transparent bg-[#F8FAFC] opacity-70"}`}>
+                        <select className="w-full bg-transparent p-0 text-[14px] font-semibold text-[#0B1B3A] focus:outline-none border-none ring-0 h-full cursor-pointer disabled:cursor-not-allowed"
+                          value={draft.base || ""} onChange={(e) => pickBase(e.target.value)} disabled={!draft.typeId || editingGroups.length === 0}>
+                           <option value="">{servicesLoading ? "Loading..." : !draft.typeId ? "Select car type first" : "Select service"}</option>
+                           {editingGroups.map((g) => (
+                             <option key={g.key} value={g.key}>{titleCase(g.label)}</option>
+                           ))}
+                        </select>
                     </div>
-                  )}
-                </>
-              ))}
-
-            {/* A different type on the same visit */}
-            {totalVehicles < maxVehicles && (
-              <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
-                <Plus className="h-4 w-4" /> Add another vehicle
-              </Button>
-            )}
-            {!types.length && <p className="text-sm text-gray-500">Loading vehicle types…</p>}
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- STEP 2 ---------------- */}
-      {step === 1 && (
-        <div className="space-y-6">
-          {planIntroNode}
-          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[1]} description={isLog ? "Saved as done — no captain or photos needed." : undefined} />
-
-          {/* Who — a signed-in customer books as themselves, unless the
-              account has no phone yet (Google sign-in) and we still need one
-              for the captain and the WhatsApp updates. */}
-          {isCustomer && user && user.phone ? (
-            <p className="text-sm text-gray-600">
-              Booking as <span className="font-semibold text-black">{user.full_name}</span> · {user.phone}
-            </p>
-          ) : isManager ? (
-            <CustomerNamePhoneFields
-              name={name}
-              phone={phone}
-              onChangeName={(v) => {
-                setName(v);
-                pickCustomer(null);
-              }}
-              onChangePhone={(v) => {
-                setPhone(v);
-                pickCustomer(null);
-              }}
-              onPick={(c) => pickCustomer(c.id)}
-              nameError={fieldErrors.name}
-              phoneError={fieldErrors.phone}
-              phoneInputRef={phoneRef}
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Input label="Your name" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
-              <Input
-                ref={phoneRef}
-                label="Mobile number"
-                value={phone}
-                inputMode="numeric"
-                onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
-                error={fieldErrors.phone}
-                placeholder="10-digit mobile"
-                hint="Booking updates come on WhatsApp."
-              />
-            </div>
-          )}
-
-          {isLog && (
-            <div className="space-y-6">
-              <Input label="Where was it done?" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />
-                <Input type="time" label="Time" min={logRangeOk ? logOpens : undefined} max={logRangeOk ? logLatest : undefined} value={logTime} onChange={(e) => setLogTime(e.target.value)} error={fieldErrors.time} />
-              </div>
-
-              <Input
-                label="Discount given (₹, optional)"
-                inputMode="numeric"
-                value={discount}
-                onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="0"
-                error={fieldErrors.discount}
-                hint={discountNum > 0 && discountNum <= displayTotal ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.` : undefined}
-              />
-
-              {planTogglesNode}
-
-              {finalTotal > 0 && (
-                <div>
-                  <p className={SECTION_LABEL}>How was it paid?</p>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {(
-                      [
-                        { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you" },
-                        { id: "online", icon: CreditCard, title: "Online / UPI", sub: "To the business account" },
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setPaymentMethod(opt.id)}
-                        aria-pressed={paymentMethod === opt.id}
-                        className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(paymentMethod === opt.id)}`}
-                      >
-                        <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-                        <span>
-                          <span className="block text-sm font-semibold text-black">{opt.title}</span>
-                          <span className="block text-xs text-gray-500">{opt.sub}</span>
-                        </span>
-                      </button>
-                    ))}
                   </div>
                 </div>
-              )}
+             </div>
 
-              <Input label="Note (optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
+             {/* STEP 3 & ADD-ONS */}
+             {draft.typeId && draft.base && editing && (
+               <>
+               <div className="grid grid-cols-1 lg:grid-cols-[1fr_0.8fr] gap-4">
+                 {/* SERVICE CARD */}
+                 <div className="rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300 flex flex-col justify-center">
+                  {editingGroups.filter(g => g.key === draft.base).map(g => {
+                     const shown = unit(g.primary, draft.typeId);
+                     const { price, original } = priceForType(g.primary, draft.typeId);
+                     const struck = shown < price ? price : original;
+                     const pct = discountPercent(shown, struck);
+                     const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag;
+                     const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
+                     const inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
+                     const inc = parseIncludes(g.primary.description);
+                     const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
+                     return (
+                        <div key={g.key} className="flex-1 w-full">
+                           <div className="flex items-start justify-between gap-3 mb-2">
+                             <div>
+                               <div className="flex items-center gap-2">
+                                 <span className="text-[18px] font-bold text-[#0B1B3A]">{titleCase(g.label)}</span>
+                                 {(pct != null) && <span className="text-[11px] font-bold text-[#1677F2] bg-[#EBF4FF] px-2 py-0.5 rounded-full">{pct}% OFF</span>}
+                               </div>
+                               {(offerTag || inPlan || shown < price) && (
+                                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                   {offerTag && <OfferTag label={offerTag} />}
+                                   {shown < price && <span className="text-[11px] font-semibold text-[#64748B]">First wash</span>}
+                                   {inPlan && <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#1677F2]"><BadgeCheck className="h-3 w-3" /> In plan</span>}
+                                 </div>
+                               )}
+                             </div>
+                             <div className="text-right">
+                               <div className="font-mono-num text-[22px] font-bold text-[#0B1B3A]">₹{shown}</div>
+                               {struck != null && <div className="text-[12px] font-semibold text-[#94A3B8] line-through">₹{struck}</div>}
+                             </div>
+                           </div>
+                           {items.length > 0 && (
+                             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+                               {items.map((it) => (
+                                 <div key={it} className="flex items-center gap-1.5 text-[13px] font-medium text-[#64748B]">
+                                   <CheckCircle2 className="h-[14px] w-[14px] text-[#1677F2]" />
+                                   <span>{it}</span>
+                                 </div>
+                               ))}
+                             </div>
+                           )}
+                           
+                           <div className="mt-4 flex items-center gap-3 pt-3 border-t border-gray-100">
+                             <span className="text-[13px] font-semibold text-[#64748B]">Number of vehicles:</span>
+                             <div className="rounded-[12px] border border-gray-200 bg-white h-[40px] flex items-center px-1">
+                                <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
+                             </div>
+                           </div>
+                        </div>
+                     )
+                  })}
+               </div>
 
-              <Switch
-                checked={sendWhatsApp}
-                onChange={setSendWhatsApp}
-                label="Tell the customer on WhatsApp"
-                description="One message saying the service is done."
-              />
-            </div>
-          )}
+                 {/* ADD-ONS (Optional) */}
+                 {editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
+                   <div className="rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300 flex flex-col justify-center">
+                 <p className="mb-2 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Add-ons</p>
+                 <div className="flex flex-wrap gap-2">
+                   {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
+                     const on = draft.addons.includes(a.id);
+                     const per = unit(a, draft.typeId);
+                     const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
+                     return (
+                       <button
+                         key={a.id}
+                         type="button"
+                         onClick={() => toggleAddon(a.id)}
+                         aria-pressed={on}
+                         className={`rounded-[12px] px-3 py-1.5 text-[13px] font-medium transition-colors border ${
+                           on ? "border-[#1677F2] bg-[#1677F2] text-white" : "border-gray-200 bg-white text-[#0B1B3A] hover:border-gray-300"
+                         }`}
+                       >
+                         + {titleCase(a.name)} · ₹{per}
+                         {perBike ? "/bike" : ""}
+                       </button>
+                     );
+                   })}
+                 </div>
+               </div>
+             )}
+             </div>
+             
+             {/* ACTIONS ROW */}
+             <div className="flex flex-col sm:flex-row justify-between items-center gap-3 mt-4 pt-2">
+               {totalVehicles < maxVehicles ? (
+                 <Button type="button" variant="outline" className="w-full sm:w-auto text-[13px] h-10 font-semibold rounded-[12px] bg-white border-gray-200" disabled={!draftReady} onClick={addAnother}>
+                   <Plus className="h-4 w-4 mr-1.5" /> Add another vehicle
+                 </Button>
+               ) : (
+                 <div />
+               )}
 
-          {!isLog && (
-          <>
-          {/* Where */}
-          <div className="space-y-3">
-            <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
-              <MapPin className="h-3.5 w-3.5" /> Address
-            </p>
-            {!!savedAddresses?.length && (
-              <div className="flex flex-wrap gap-2">
-                {savedAddresses.map((a) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={() => void chooseSavedAddress(a)}
-                    aria-pressed={savedAddressId === a.id}
-                    className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
+               {draftReady && (
+                  <button 
+                    type="button" 
+                    onClick={() => setWizardStep(2)} 
+                    className="w-full sm:w-auto px-12 h-[44px] bg-[#FBBF24] text-[#0B1B3A] text-[15px] font-bold rounded-[12px] hover:bg-[#F59E0B] transition-colors shadow-sm ml-auto"
                   >
-                    <span className="block font-semibold text-black">{a.label}</span>
-                    <span className="block truncate text-xs text-gray-500">
-                      {a.line1} · {a.pincode}
-                    </span>
+                    Continue
                   </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSavedAddressId("");
-                    setPinned(null);
-                    resetCoverage();
-                  }}
-                  aria-pressed={savedAddressId === ""}
-                  className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
-                >
-                  + New address
-                </button>
-              </div>
-            )}
-
-            {!savedAddressId && usingPin && <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => void onPin(v)} />}
-            {!savedAddressId && (isManager || !mapsUp) && (
-              <div className="space-y-3">
-                {isManager && mapsUp && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTypedAddress((v) => !v);
-                      setPinned(null);
-                      resetCoverage();
-                    }}
-                    className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black"
-                  >
-                    {typedAddress ? "Pin on the map instead" : "Type the address instead"}
-                  </button>
-                )}
-                {!usingPin && (
-                  <>
-                    <Input
-                      label="Address"
-                      value={line1}
-                      onChange={(e) => setLine1(e.target.value)}
-                      error={fieldErrors.address}
-                      placeholder="House / flat, street, area"
-                      hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
-                    />
-                    <Input
-                      label="Pincode"
-                      value={pincode}
-                      maxLength={10}
-                      inputMode="numeric"
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        setPincode(value);
-                        setCoverage("idle");
-                        latestPincode.current = "";
-                        // A full pincode is checked the moment it is typed — no
-                        // need to tap away first; the slots open right under it.
-                        if (/^\d{6}$/.test(value.trim())) void checkPincode(value.trim());
-                      }}
-                      onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && void checkPincode(pincode.trim())}
-                      error={fieldErrors.pincode}
-                      placeholder="E.g. 452001"
-                    />
-                  </>
-                )}
-              </div>
-            )}
-
-            {coverage === "checking" && (
-              <p className="flex items-center gap-1.5 text-xs text-gray-500">
-                <Spinner className="h-3.5 w-3.5" /> Checking your area…
-              </p>
-            )}
-            {coverage === "covered" && (
-              <p className="flex items-start gap-1.5 text-xs text-gray-600">
-                <BadgeCheck className="mt-px h-3.5 w-3.5 shrink-0 text-black" />
-                <span>
-                  <span className="font-medium text-black">We serve this area.</span>
-                  {pinned && <> {pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")} — drag the pin if this isn't your exact gate.</>}
-                </span>
-              </p>
-            )}
-            {coverage === "uncovered" && (
-              <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
-            )}
-            {fieldErrors.location && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.location}</p>}
-          </div>
-
-          {/* When */}
-          {coverage === "covered" && (
-            <div className="space-y-2">
-              <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} enableHold />
-              {(fieldErrors.date || fieldErrors.slot) && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.date || fieldErrors.slot}</p>}
-            </div>
-          )}
-
-          {/* The pass summary on top already says the pass is used. */}
-          {!(planIntroNode && lines.length === 1) && planTogglesNode}
-
-          {/* How to pay */}
-          {payable > 0 && (
-            <div>
-              <p className={SECTION_LABEL}>Payment</p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {payOptions
-                  .filter((opt) => !onlineOnly || opt.id === "online")
-                  .map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setPaymentMethod(opt.id)}
-                      aria-pressed={payMethod === opt.id}
-                      className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(payMethod === opt.id)}`}
-                    >
-                      <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-                      <span>
-                        <span className="block text-sm font-semibold text-black">{opt.title}</span>
-                        <span className="block text-xs text-gray-500">{opt.sub}</span>
-                      </span>
-                    </button>
-                  ))}
-              </div>
-              {onlineOnly && <p className="mt-2 text-xs text-gray-500">{onlineReason}</p>}
-            </div>
-          )}
-
-          {isManager && payable > 0 && (
-            <div className="max-w-sm">
-              <Input
-                label="Coupon code (optional)"
-                value={couponCode}
-                maxLength={20}
-                onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                error={fieldErrors.couponCode || liveQuote?.coupon_error || undefined}
-              />
-            </div>
-          )}
-
-          {/* Optional extras */}
-          <div>
-            <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black">
-              {moreOpen ? "Hide note and second contact" : "Add a note or second contact"}
-            </button>
-            {moreOpen && (
-              <div className="mt-3 space-y-3">
-                <Input label="Note for the captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. basement parking, gate B" />
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Input label="Second contact name" value={altName} onChange={(e) => setAltName(e.target.value)} />
-                  <Input
-                    label="Second contact number"
-                    value={altPhone}
-                    inputMode="numeric"
-                    onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))}
-                    error={fieldErrors.altPhone}
-                  />
+               )}
+             </div>
+             </>
+             )}
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+              {wizardStep === 2 && (
+                <div className="space-y-4 sm:space-y-5 animate-in fade-in slide-in-from-right-4 duration-300">
 
-          <ServicePrepNotice services={allServices} />
-          </>
-          )}
+                 <button 
+                   type="button" 
+                   onClick={() => setWizardStep(1)} 
+                   className="flex items-center text-[14px] font-semibold text-[#64748B] hover:text-[#0B1B3A] transition-colors mb-2"
+                 >
+                   ← Back to Service Details
+                 </button>
+             {/* STEP 7: CONTACT INFORMATION */}
+             
+               <div className="rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300 space-y-4">
+                 <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><BadgeCheck className="h-4 w-4" /></div>
+                    <h2 className="text-[20px] sm:text-[22px] font-bold text-[#0B1B3A]">Contact Details</h2>
+                 </div>
+                 
+                 {isCustomer && user && user.phone ? (
+                   <div className="flex items-center gap-3 bg-white p-3 rounded-[14px] border border-gray-100 mt-2 shadow-sm">
+                      <div className="w-10 h-10 rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2] font-semibold text-[14px]">{user.full_name?.charAt(0) || "U"}</div>
+                      <div>
+                        <p className="text-[12px] font-semibold text-[#64748B]">Booking as</p>
+                        <p className="text-[15px] font-semibold text-[#0B1B3A]">{user.full_name} <span className="font-normal text-gray-400 mx-1">·</span> {user.phone}</p>
+                      </div>
+                   </div>
+                 ) : isManager ? (
+                   <div className="mt-2"><CustomerNamePhoneFields name={name} phone={phone} onChangeName={(v) => { setName(v); pickCustomer(null); }} onChangePhone={(v) => { setPhone(v); pickCustomer(null); }} onPick={(c) => pickCustomer(c.id)} nameError={fieldErrors.name} phoneError={fieldErrors.phone} phoneInputRef={phoneRef} /></div>
+                 ) : (
+                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 mt-2">
+                     <div>
+                       <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Your Name</p>
+                       <Input maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="Enter your name" className="h-[46px] text-[14px] rounded-[14px]" />
+                     </div>
+                     <div>
+                       <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Mobile Number</p>
+                       <Input ref={phoneRef} value={phone} inputMode="numeric" onChange={(e) => setPhone(cleanMobileInput(e.target.value))} error={fieldErrors.phone} placeholder="10-digit mobile" className="h-[46px] text-[14px] rounded-[14px]" />
+                     </div>
+                   </div>
+                 )}
+               </div>
+
+             {/* STEP 4: WHERE SECTION */}
+             {hasServiceSelected && (
+               <div className="rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300 space-y-4">
+                 <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><MapPin className="h-4 w-4" /></div>
+                    <h2 className="text-[20px] sm:text-[22px] font-bold text-[#0B1B3A]">Where should we wash your car?</h2>
+                 </div>
+                 
+                 {!!savedAddresses?.length && (
+                   <div className="flex flex-wrap gap-2 pt-2">
+                     {savedAddresses.map((a) => (
+                       <button key={a.id} type="button" onClick={() => void chooseSavedAddress(a)} aria-pressed={savedAddressId === a.id} className={`rounded-[14px] px-4 py-2.5 text-left border transition-all ${savedAddressId === a.id ? "border-[#1677F2] bg-[#F0F7FF] ring-1 ring-[#1677F2]" : "border-gray-200 bg-white hover:border-[#1677F2]"}`}>
+                         <span className="block font-semibold text-[14px] text-[#0B1B3A]">{a.label}</span>
+                         <span className="block truncate text-[12px] font-medium text-[#64748B] mt-0.5">{a.line1} · {a.pincode}</span>
+                       </button>
+                     ))}
+                     <button type="button" onClick={() => { setSavedAddressId(""); setPinned(null); resetCoverage(); }} aria-pressed={savedAddressId === ""} className={`rounded-[14px] px-4 py-2.5 text-[13px] font-semibold border transition-all flex items-center gap-1.5 ${savedAddressId === "" ? "border-[#1677F2] bg-[#F0F7FF] ring-1 ring-[#1677F2] text-[#1677F2]" : "border-transparent bg-[#F8FAFC] text-[#64748B] hover:bg-gray-100"}`}><Plus className="h-4 w-4" /> New</button>
+                   </div>
+                 )}
+
+                 {!savedAddressId && usingPin && <div className="mt-2"><LocationPicker value={pinned} onChange={(v) => void onPin(v)} /></div>}
+                 
+                 {!savedAddressId && (isManager || !mapsUp) && (
+                   <div className="space-y-3 mt-2">
+                     {isManager && mapsUp && <button type="button" onClick={() => { setTypedAddress((v) => !v); setPinned(null); resetCoverage(); }} className="text-[13px] font-semibold text-[#1677F2] hover:text-blue-800 transition-colors">{typedAddress ? "Pin on the map instead" : "Type the address instead"}</button>}
+                     {!usingPin && (
+                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_160px]">
+                         <div>
+                           <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Address</p>
+                           <Input value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="Enter your complete address" className="h-[46px] text-[14px] rounded-[14px]" />
+                         </div>
+                         <div>
+                           <p className="mb-1.5 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Pincode</p>
+                           <Input value={pincode} maxLength={10} inputMode="numeric" onChange={(e) => {
+                               const value = e.target.value; setPincode(value); setCoverage("idle"); latestPincode.current = "";
+                               if (/^\d{6}$/.test(value.trim())) void checkPincode(value.trim());
+                             }} onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && void checkPincode(pincode.trim())} error={fieldErrors.pincode} placeholder="Enter pincode" className="h-[46px] text-[14px] rounded-[14px]" />
+                         </div>
+                       </div>
+                     )}
+                   </div>
+                 )}
+
+                 {coverage === "checking" && <div className="flex items-center gap-2 p-3 rounded-[12px] bg-[#F0F7FF] text-[#1677F2] border border-[#EBF4FF] mt-2"><Spinner className="h-[18px] w-[18px]" /> <span className="text-[13px] font-semibold">Checking your area...</span></div>}
+                 {coverage === "uncovered" && <div className="mt-2"><CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} /></div>}
+                 {fieldErrors.location && <p className="text-[13px] font-semibold text-red-500 mt-1">{fieldErrors.location}</p>}
+               </div>
+             )}
+
+             {/* STEP 5 & 6: DATE/TIME & AVAILABLE SLOTS */}
+             {hasServiceSelected && (
+               <div className="rounded-[20px] bg-white p-4 sm:p-5 shadow-[0_4px_20px_rgba(15,35,70,0.06)] border border-gray-100 animate-in fade-in slide-in-from-bottom-4 duration-300 space-y-5" id="slots-section">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center text-[#1677F2]"><Calendar className="h-4 w-4" /></div>
+                    <h2 className="text-[20px] sm:text-[22px] font-bold text-[#0B1B3A]">When should we come?</h2>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Input 
+                       type="date" 
+                       label="Date"
+                       value={date} 
+                       onChange={(e) => { setDate(e.target.value); setSlot(""); }}
+                       min={(() => {
+                         const d = new Date();
+                         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                       })()}
+                       max={(() => {
+                         const d = new Date();
+                         d.setDate(d.getDate() + 14);
+                         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                       })()}
+                       placeholder="Select date"
+                       className="h-[52px] text-[15px] font-medium text-[#0B1B3A] rounded-[14px] !border-gray-200 shadow-sm"
+                    />
+                  </div>
+
+                  {date && (
+                    <div className="pt-2">
+                      <label className="mb-3 block text-sm font-semibold text-[#0B1B3A]">Time Slot</label>
+                      <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} enableHold hideDate={true} />
+                      {(fieldErrors.date || fieldErrors.slot) && <p className="text-[13px] font-semibold text-red-500 mt-2">{fieldErrors.date || fieldErrors.slot}</p>}
+                    </div>
+                  )}
+               </div>
+             )}
+
+             {/* Payment & Extras */}
+                 {!(planIntroNode && lines.length === 1) && planTogglesNode}
+                 {payable > 0 && (
+                   <div className="pt-4 mt-2">
+                     <p className="mb-2 text-[12px] font-semibold text-[#64748B] uppercase tracking-wide">Payment Method</p>
+                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                       {payOptions.filter((opt) => !onlineOnly || opt.id === "online").map((opt) => (
+                           <button key={opt.id} type="button" onClick={() => setPaymentMethod(opt.id)} aria-pressed={payMethod === opt.id} className={`flex items-center gap-3 rounded-[14px] p-3 text-left border transition-all ${payMethod === opt.id ? "border-[#1677F2] bg-[#F0F7FF] ring-1 ring-[#1677F2]" : "border-gray-200 bg-white hover:border-[#1677F2]"}`}>
+                             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${payMethod === opt.id ? "bg-[#1677F2] text-white" : "bg-[#F8FAFC] text-[#64748B]"}`}><opt.icon className="h-4 w-4" /></div>
+                             <div>
+                               <span className={`block text-[14px] font-semibold ${payMethod === opt.id ? "text-[#0B1B3A]" : "text-[#0B1B3A]"}`}>{opt.title}</span>
+                               <span className="block text-[12px] text-[#64748B]">{opt.sub}</span>
+                             </div>
+                           </button>
+                       ))}
+                     </div>
+                   </div>
+                 )}
+                 <div>
+                   <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-[13px] font-semibold text-[#1677F2] hover:text-blue-800 transition-colors mt-2">
+                     {moreOpen ? "Hide note and second contact" : "+ Add a note or second contact"}
+                   </button>
+                   {moreOpen && (
+                     <div className="mt-3 space-y-3 p-4 rounded-[16px] bg-[#F8FAFC] border border-gray-100 animate-in fade-in slide-in-from-top-2">
+                       <Input label="Note for the captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. basement parking, gate B" className="h-[46px] text-[14px] rounded-[14px]" />
+                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                         <Input label="Second contact name" value={altName} onChange={(e) => setAltName(e.target.value)} className="h-[46px] text-[14px] rounded-[14px]" />
+                         <Input label="Second contact number" value={altPhone} inputMode="numeric" onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))} error={fieldErrors.altPhone} className="h-[46px] text-[14px] rounded-[14px]" />
+                       </div>
+                     </div>
+                   )}
+                 </div>
+                </div>
+              )}
+          </div>
+          
+          {/* RIGHT: COMPACT BOOKING SUMMARY */}
+          <div className="sticky top-[88px] rounded-[24px] border border-gray-100 bg-white p-5 sm:p-6 shadow-[0_4px_20px_rgba(15,35,70,0.06)] h-max">
+             <h3 className="text-[20px] font-bold text-[#0B1B3A] mb-5">Booking Summary</h3>
+             
+             {/* Dynamic Summary Layout */}
+             <div className="space-y-4 mb-6">
+                {/* Always show vehicle & service initially, or placeholder if empty */}
+                <div className="flex items-start gap-3">
+                   <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center shrink-0 text-[#1677F2]"><CheckCircle2 className="w-4 h-4"/></div>
+                   <div>
+                     <p className="text-[12px] font-semibold text-[#64748B]">Vehicle & Service</p>
+                     <p className={`text-[14px] font-semibold ${summary ? "text-[#0B1B3A]" : "text-gray-400"}`}>{summary || "Pending selection"}</p>
+                   </div>
+                </div>
+                
+                {/* Progressively show Location */}
+                {hasServiceSelected && !isLog && (
+                  <div className="flex items-start gap-3 animate-in fade-in duration-300">
+                     <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center shrink-0 text-[#1677F2]"><MapPin className="w-4 h-4"/></div>
+                     <div>
+                       <p className="text-[12px] font-semibold text-[#64748B]">Location</p>
+                       <p className={`text-[14px] font-semibold line-clamp-2 ${savedAddressId || line1 || pinned ? "text-[#0B1B3A]" : "text-gray-400"}`}>
+                         {savedAddressId && savedAddresses ? savedAddresses.find(a => a.id === savedAddressId)?.label || savedAddresses.find(a => a.id === savedAddressId)?.line1 : pinned ? pinned.formatted || pinned.area || "Selected on map" : line1 ? `${line1}, ${pincode}` : "Pending address"}
+                       </p>
+                     </div>
+                  </div>
+                )}
+                
+                {/* Progressively show Date & Time */}
+                {hasValidLocation && !isLog && (
+                  <div className="flex items-start gap-3 animate-in fade-in duration-300">
+                     <div className="w-8 h-8 rounded-full bg-[#EBF4FF] flex items-center justify-center shrink-0 text-[#1677F2]"><CheckCircle2 className="w-4 h-4 opacity-50"/></div>
+                     <div>
+                       <p className="text-[12px] font-semibold text-[#64748B]">Date & Time</p>
+                       <p className={`text-[14px] font-semibold ${date && slot ? "text-[#0B1B3A]" : "text-gray-400"}`}>
+                         {date && slot ? `${new Date(date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} at ${slot}` : "Pending slot selection"}
+                       </p>
+                     </div>
+                  </div>
+                )}
+             </div>
+
+             <div className="border-t border-gray-100 pt-4 space-y-2 mb-6">
+               {billRows.length > 0 && billRows.map((r) => (
+                 <div key={r.label} className="flex justify-between text-[13px] text-[#64748B]">
+                   <span>{r.label}</span>
+                   <span className="font-semibold text-[#0B1B3A]">{r.value}</span>
+                 </div>
+               ))}
+               
+               <div className="flex items-end justify-between pt-1 mt-1">
+                 <span className="font-semibold text-[#64748B] text-[14px]">Total Price</span>
+                 <span className="text-right">
+                   {struckTotal != null && <span className="mr-1.5 text-[12px] font-semibold text-gray-400 line-through">₹{struckTotal}</span>}
+                   <span className={`font-bold text-[28px] ${shownTotal > 0 ? "text-[#0B1B3A]" : "text-gray-400"}`}>₹{shownTotal || 0}</span>
+                 </span>
+               </div>
+             </div>
+
+             {(error || quoteError) && <p className="text-center text-[13px] font-semibold text-red-500 mb-3">{error || quoteError}</p>}
+             
+             {step1Ready && step2Ready ? (
+                <button
+                  className="w-full rounded-[14px] bg-[#E8A900] h-[52px] text-[16px] font-bold text-white shadow-[0_4px_14px_rgba(232,169,0,0.25)] transition-transform hover:scale-[1.02] active:scale-[0.98] disabled:opacity-70 disabled:hover:scale-100 flex items-center justify-center gap-2"
+                  disabled={submitting}
+                  onClick={() => void submit()}
+                >
+                  {submitting ? <Spinner className="h-5 w-5 text-white" /> : null}
+                  {isLog ? "Save As Done" : !isManager && payable > 0 && payMethod === "online" ? "Book And Pay →" : "Continue →"}
+                </button>
+             ) : (
+                <button
+                  className="w-full rounded-[14px] bg-[#F1F5F9] h-[52px] text-[16px] font-semibold text-[#94A3B8] cursor-not-allowed"
+                  disabled
+                >
+                  Complete details
+                </button>
+             )}
+          </div>
         </div>
-      )}
-    </WizardShell>
-    <Modal open={!!sentLink} onClose={() => navigate("/manager/bookings")} title="Booking created" maxWidth="max-w-md">
+      </div>
+    </div>
+    
+    <Modal open={!!sentLink} onClose={() => navigate("/manager/bookings")} title="Booking created" maxWidth="max-w-sm">
       {sentLink && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600">
-            {sentLink.numbers} · payment link sent to the customer on WhatsApp. It confirms once paid.
-          </p>
-          <div className="flex items-center gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-2.5">
-            <span className="font-mono-num min-w-0 flex-1 truncate text-sm text-black">{sentLink.link}</span>
-            <Button size="sm" variant="outline" onClick={() => void copyLink()}>
-              <Copy className="h-3.5 w-3.5" /> {copied ? "Copied" : "Copy"}
+        <div className="space-y-4 p-2 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#F0FDF4]">
+            <CheckCircle2 className="h-6 w-6 text-[#22C55E]" />
+          </div>
+          <div>
+            <h3 className="text-[18px] font-bold text-[#0B1B3A] mb-1">Link Sent Successfully</h3>
+            <p className="text-[13px] text-[#64748B]">
+              {sentLink.numbers} · payment link sent to the customer on WhatsApp. It confirms once paid.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 rounded-[14px] border border-gray-200 bg-[#F8FAFC] p-3 text-left">
+            <span className="font-mono-num min-w-0 flex-1 truncate text-[13px] font-medium text-[#0B1B3A]">{sentLink.link}</span>
+            <Button size="sm" variant="outline" onClick={() => void copyLink()} className="shrink-0 rounded-[10px] h-8 text-[12px]">
+              <Copy className="h-3 w-3 mr-1" /> {copied ? "Copied" : "Copy"}
             </Button>
           </div>
-          <Button variant="info" className="w-full font-semibold" onClick={() => navigate("/manager/bookings")}>
+          <Button variant="info" className="w-full font-bold rounded-[14px] h-[44px]" onClick={() => navigate("/manager/bookings")}>
             Done
           </Button>
         </div>

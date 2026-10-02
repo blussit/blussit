@@ -248,11 +248,11 @@ export function LocationPicker({
     );
   };
 
-  if (status === "unavailable") return null;
+  // if (status === "unavailable") return null;
 
   return (
     <div className="space-y-2">
-      <div className="relative overflow-hidden rounded-xl border border-gray-200" style={{ height }}>
+      <div className="hidden">
         <div ref={mapRef} className="h-full w-full" />
         {status === "loading" && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-50 text-sm text-[var(--color-text-secondary)]">Loading map…</div>
@@ -266,7 +266,7 @@ export function LocationPicker({
           Use my location
         </button>
       </div>
-      <p className="flex items-start gap-1.5 text-xs text-[var(--color-text-secondary)]">
+      <p className="hidden flex items-start gap-1.5 text-xs text-[var(--color-text-secondary)]">
         <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
         {resolving
           ? "Finding this address…"
