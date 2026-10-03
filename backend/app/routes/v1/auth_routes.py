@@ -210,9 +210,15 @@ async def set_password(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """The mandatory first-password gate (must_change_password accounts) —
-    no current password needed, identity was already proven."""
-    await AuthService(db).set_initial_password(current_user.id, payload.new_password)
-    return success({}, message="Password set — you're all set")
+    no current password needed, identity was already proven. Every other
+    session is signed out; this device gets a fresh pair to keep going."""
+    service = AuthService(db)
+    await service.set_initial_password(current_user.id, payload.new_password)
+    tokens = service._issue_tokens(await service.users.find_by_id(current_user.id))
+    return success(
+        {"access_token": tokens["access_token"], "refresh_token": tokens["refresh_token"], "token_type": "bearer"},
+        message="Password set — you're all set",
+    )
 
 
 # ---- Google sign-in + Maps public config ----------------------------------

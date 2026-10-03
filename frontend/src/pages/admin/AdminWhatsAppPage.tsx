@@ -26,13 +26,13 @@ export default function AdminWhatsAppPage() {
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">WhatsApp</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Customer conversations, templates and messaging health.</p>
         </div>
-        <div className="flex gap-1 rounded-xl bg-white p-1 shadow-[var(--shadow-soft)]">
+        <div className="flex max-w-full gap-1 overflow-x-auto rounded-xl border border-[#E4E9F1] bg-white p-1">
           {TABS.map((t) => (
             <button
               key={t.key}
               type="button"
               onClick={() => setParams(t.key === "inbox" ? {} : { tab: t.key })}
-              className={`rounded-lg px-3.5 py-1.5 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[var(--color-primary)] text-white" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-primary-light)]"}`}
+              className={`shrink-0 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[var(--color-primary)] text-white" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-primary-light)]"}`}
             >
               {t.label}
             </button>

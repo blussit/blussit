@@ -276,6 +276,7 @@ export const bookingApi = {
   all: (params?: {
     status?: string; service_center_id?: string; page?: number; page_size?: number;
     period?: string; start?: string; end?: string; date_field?: "created" | "completed";
+    service_id?: string; vehicle_type?: string; source?: string;
   }) => apiClient.get<ApiPaginated<Booking>>("/bookings", { params }).then((r) => r.data),
 
   get: (id: string) => apiClient.get<ApiSuccess<Booking>>(`/bookings/${id}`).then((r) => r.data.data),
@@ -311,7 +312,7 @@ export const bookingApi = {
   cancelGroup: (groupId: string, reason: string) =>
     apiClient.post<ApiSuccess<{ cancelled_count: number }>>(`/bookings/group/${groupId}/cancel`, { reason }).then((r) => r.data.data),
 
-  /** Several of the customer's own vehicles washed on ONE visit: one
+  /** Several of the customer's own vehicles wash on ONE visit: one
    *  address, one slot, one captain, one payment — and ONE slot seat,
    *  because it's a single trip. */
   createGroup: (payload: {

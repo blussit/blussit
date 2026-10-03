@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Loader2, LocateFixed, MapPin, Search } from "lucide-react";
 import { ensureGoogleMaps, getLib, reverseGeocode as googleReverseGeocode } from "../../lib/googleMaps";
+import { MENU_PANEL } from "../ui/fieldStyles";
 
 // Leaflet's default marker icon references image paths that don't resolve
 // correctly through bundlers — pointing at the CDN copies sidesteps needing
@@ -210,24 +211,24 @@ function LeafletMapPicker({
     <div className="space-y-2">
       <div className="flex gap-2">
         <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5F6878]" />
           <input
-            className="w-full rounded-xl border border-gray-300 py-2.5 pl-9 pr-9 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            className="h-11 w-full rounded-[12px] border border-[#E4E9F1] bg-white pl-9 pr-9 text-sm text-[#0E1A33] placeholder:text-[#9AA3B2] transition-[border-color,box-shadow] hover:border-[#C9D6EA] focus:border-[#0A66F0] focus:outline-none focus:ring-[3px] focus:ring-[#0A66F0]/15 focus-visible:outline-none"
             placeholder="Search for an address…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
           {searching && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-gray-400" />}
           {results.length > 0 && (
-            <div className="absolute z-[1000] mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-lg">
+            <div className={`absolute z-[1000] mt-1 w-full overflow-hidden ${MENU_PANEL}`}>
               {results.map((r, i) => (
                 <button
                   key={i}
                   type="button"
                   onClick={() => selectResult(r)}
-                  className="flex w-full items-start gap-2 border-b border-gray-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-gray-50"
+                  className="flex w-full items-start gap-2 border-b border-[#EEF2F7] px-3 py-2 text-left text-xs text-[#0E1A33] transition-colors last:border-0 hover:bg-[#F3F6FA]"
                 >
-                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
+                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0A66F0]" />
                   {r.display_name}
                 </button>
               ))}
@@ -242,7 +243,7 @@ function LeafletMapPicker({
             className="flex shrink-0 items-center gap-1.5 rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-gray-50 disabled:opacity-60"
           >
             {locating ? <Loader2 className="h-4 w-4 animate-spin" /> : <LocateFixed className="h-4 w-4 text-[var(--color-primary)]" />}
-            <span className="hidden sm:inline">Use my location</span>
+            <span className="hidden sm:inline">Use My Location</span>
           </button>
         )}
       </div>
@@ -405,7 +406,7 @@ function GoogleMapPicker({
             className="flex shrink-0 items-center gap-1.5 rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-gray-50 disabled:opacity-60"
           >
             {locating ? <Loader2 className="h-4 w-4 animate-spin" /> : <LocateFixed className="h-4 w-4 text-[var(--color-primary)]" />}
-            <span className="hidden sm:inline">Use my location</span>
+            <span className="hidden sm:inline">Use My Location</span>
           </button>
         )}
       </div>

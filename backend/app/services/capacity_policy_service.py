@@ -40,6 +40,7 @@ from app.utils.serializers import serialize_doc, serialize_list
 
 class CapacityPolicyService:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.repo = CapacityPolicyRepository(db)
         self.center_repo = ServiceCenterRepository(db)
         # Only used to re-sync ALREADY-INITIALIZED slot_capacity/daily_capacity
@@ -50,7 +51,14 @@ class CapacityPolicyService:
         self.daily_capacity_repo = DailyCapacityRepository(db)
 
     async def _resolve_slots(self, center: dict) -> list[str]:
-        duration = center.get("slot_duration_minutes") or 180
+        # Same fallback the booking side uses for real slots (the platform
+        # "Slot length" setting) — a hard-coded 180 here saved per-slot
+        # numbers under keys that matched no real slot once that changed.
+        duration = center.get("slot_duration_minutes")
+        if not duration:
+            from app.services.booking_policy_service import BookingPolicyService
+
+            duration = (await BookingPolicyService(self.db).get_policy()).get("slot_duration_minutes") or 180
         raw = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
         return [s["key"] for s in raw]
 
@@ -165,6 +173,12 @@ class CapacityPolicyService:
         if effective_date < today:
             raise BadRequestException("Effective date can't be in the past")
 
+        # A cancelled change used to stay behind as a soft-deleted row that
+        # the unique (center, effective_date) index still counts — scheduling
+        # that date again was a 500. Clear any such tombstone first.
+        await self.repo.collection.delete_many(
+            {"service_center_id": service_center_id, "effective_date": effective_date, "is_deleted": True}
+        )
         existing = await self.repo.find_for_date(service_center_id, effective_date)
         slot_keys = await self._resolve_slots(center)
         distribution = dict(slot_distribution or {})

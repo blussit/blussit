@@ -74,6 +74,33 @@ logger = logging.getLogger(__name__)
 # Razorpay's own floor — anything below is refused before we even call them.
 MIN_ORDER_PAISE = 100
 
+# The most a MANAGER may knock off a plan they sell by hand ("₹ off" on the
+# Sell-a-plan form). An admin may go up to the full price; coupons are
+# admin-made and carry their own limits.
+MANAGER_MAX_PLAN_DISCOUNT_PERCENT = 50
+
+
+def manual_plan_discount(amount: float, base_price: float, actor_role: str) -> float:
+    """The rupees-off a manager/admin typed for a hand-sold plan, checked
+    server-side: never negative, never more than the plan's price, and —
+    for a manager — at most MANAGER_MAX_PLAN_DISCOUNT_PERCENT of it.
+    Refuses with a clear message rather than silently clamping, so the
+    number the manager typed is never quietly changed under them."""
+    amount = float(amount or 0)
+    if amount <= 0:
+        return 0.0
+    base_price = float(base_price or 0)
+    if amount > base_price:
+        raise BadRequestException(f"The discount can't be more than the plan price (₹{base_price:g}).")
+    if actor_role != "admin":
+        cap = float(int(base_price * MANAGER_MAX_PLAN_DISCOUNT_PERCENT / 100))
+        if amount > cap:
+            raise BadRequestException(
+                f"You can give at most {MANAGER_MAX_PLAN_DISCOUNT_PERCENT}% off a plan — up to ₹{cap:g} on this one. "
+                "Ask an admin for a bigger discount."
+            )
+    return amount
+
 # Auto-pay (Razorpay Subscriptions) mapping from OUR billing cycle to
 # Razorpay's (period, interval) pair, plus how many cycles the mandate is
 # authorised for. Razorpay caps total_count per period, so these stay well
@@ -219,6 +246,13 @@ class PaymentService:
             amount_paise, description, reference = await self._booking_order(customer_id, payload)
         elif payload.purpose == "booking_group":
             amount_paise, description, reference = await self._booking_group_order(customer_id, payload)
+        elif payload.purpose == "society":
+            from app.services.society_service import SocietyService
+
+            code = "".join((payload.society_coupon_code or "").split()).upper() or None
+            amount_paise, description, reference = await SocietyService(self.db).payment_quote(
+                customer_id, payload.society_enrollment_id, payload.society_renewal, coupon_code=code if payload.society_renewal else None,
+            )
         else:
             amount_paise, description, reference = await self._subscription_order(customer_id, payload)
             if payload.auto_pay:
@@ -248,7 +282,7 @@ class PaymentService:
                     "amount": amount_paise,
                     "currency": "INR",
                     "receipt": reference["receipt"],
-                    "notes": {"purpose": payload.purpose, **{k: v for k, v in reference.items() if k not in ("receipt", "booking_ids")}},
+                    "notes": {"purpose": payload.purpose, **{k: v for k, v in reference.items() if k not in ("receipt", "booking_ids", "society_subscription_ids")}},
                 }
             )
         except Exception as exc:  # SDK raises its own error hierarchy — surface a clean 400/500 story
@@ -406,7 +440,7 @@ class PaymentService:
             order, payload.razorpay_payment_id, via="verify", signature=payload.razorpay_signature
         )
         if result["status"] != "paid":
-            raise BadRequestException(PLAN_ATTENTION_MESSAGE if result["purpose"] == "subscription" else ATTENTION_MESSAGE)
+            raise BadRequestException(PLAN_ATTENTION_MESSAGE if result["purpose"] in ("subscription", "society") else ATTENTION_MESSAGE)
         if result["purpose"] == "subscription":
             result["first_confirmation"] = await self._first_client_confirmation(order["_id"])
         return result
@@ -441,6 +475,14 @@ class PaymentService:
                 settled, failed = await self._settle_booking_group(claimed, claimed["razorpay_order_id"], payment_id)
                 ok = not failed
                 result.update(booking_group_id=claimed["booking_group_id"], settled_count=settled)
+            elif purpose == "society":
+                from app.services.society_service import SocietyService
+
+                outcome = await SocietyService(self.db).on_order_paid(claimed)
+                ok = outcome["ok"]
+                result["society_enrollment_id"] = claimed.get("society_enrollment_id")
+                if not ok:
+                    await self._flag_order_attention({"_id": claimed["_id"]}, "paid, but the society plan couldn't be activated/renewed — check it")
             else:
                 sub = await self._activate_order_subscription(claimed)
                 ok = sub is not None
@@ -461,7 +503,7 @@ class PaymentService:
         if not fresh:
             raise NotFoundException("Payment order not found")
         result: dict = {"purpose": fresh.get("purpose"), "already_processed": True}
-        for key in ("booking_id", "booking_group_id", "subscription_id"):
+        for key in ("booking_id", "booking_group_id", "subscription_id", "society_enrollment_id"):
             if fresh.get(key):
                 result[key] = fresh[key]
         if fresh.get("razorpay_payment_id") and fresh["razorpay_payment_id"] != payment_id and fresh.get("status") in ("paid", "paid_attention"):
@@ -1152,7 +1194,7 @@ class PaymentService:
             return str(order["booking_number"])
         if order.get("purpose") == "booking" and order.get("receipt"):
             return str(order["receipt"])
-        return {"booking_group": "your visit", "subscription": "your plan"}.get(order.get("purpose") or "", "your booking")
+        return {"booking_group": "your visit", "subscription": "your plan", "society": "your society plan"}.get(order.get("purpose") or "", "your booking")
 
     async def _alert_attention(self, order: dict) -> None:
         """Money landed that couldn't be applied: every admin sees it in-app
@@ -1273,6 +1315,8 @@ class PaymentService:
     async def _target_still_payable(self, doc: dict) -> bool:
         if doc.get("purpose") == "subscription":
             return True
+        if doc.get("purpose") == "society":
+            return await self._society_order_still_payable(doc)
         if doc.get("purpose") == "booking_group":
             query: dict = {"booking_group_id": doc.get("booking_group_id")}
         else:
@@ -1282,6 +1326,30 @@ class PaymentService:
         return await self.booking_repo.collection.count_documents({
             **query, "is_deleted": {"$ne": True}, "status": {"$ne": "cancelled"}, "payment_status": {"$ne": PaymentStatus.PAID.value},
         }) > 0
+
+    async def _society_order_still_payable(self, doc: dict) -> bool:
+        """A society order is worth CAPTURING only while what it pays for
+        still exists unchanged: a first payment while the request is open at
+        the revision that was priced, a renewal while the plan is active and
+        one of its passes isn't cancelled. Otherwise the authorised money is
+        left for Razorpay to refund on its own (never captured into a
+        parked refund case for a withdrawn / cash-paid / resubmitted one)."""
+        from app.services.society_service import OPEN_STATUSES
+
+        eid = str(doc.get("society_enrollment_id") or "")
+        if not ObjectId.is_valid(eid):
+            return False
+        enrollment = await self.db.society_enrollments.find_one({"_id": ObjectId(eid), "is_deleted": {"$ne": True}})
+        if not enrollment:
+            return False
+        if doc.get("society_renewal"):
+            if enrollment.get("status") != "active":
+                return False
+            sub_ids = [ObjectId(str(x)) for x in doc.get("society_subscription_ids") or [] if ObjectId.is_valid(str(x))]
+            return bool(sub_ids) and await self.db.user_subscriptions.count_documents(
+                {"_id": {"$in": sub_ids}, "status": {"$ne": "cancelled"}}
+            ) > 0
+        return enrollment.get("status") in OPEN_STATUSES and int(enrollment.get("revision") or 1) == int(doc.get("society_revision") or 1)
 
     async def _settle_open_payments(self, booking_ids: list[str], group_id: str | None = None) -> bool:
         """Before a NEW order is minted: did an earlier checkout or link for
@@ -1480,7 +1548,7 @@ class PaymentService:
             "confirming": bool(doc.get("settling")),
             "failure_reason": (doc.get("last_failure") or {}).get("description"),
         }
-        for field in ("booking_id", "booking_group_id", "subscription_id"):
+        for field in ("booking_id", "booking_group_id", "subscription_id", "society_enrollment_id"):
             if doc.get(field):
                 result[field] = doc[field]
         if status == "paid" and doc.get("purpose") == "subscription" and doc.get("subscription_id"):
@@ -1913,8 +1981,11 @@ class PaymentService:
             "cash_count": row.get("cash_count") or 0,
         }
 
+        open_orders = await self.orders.find({"status": "paid_attention", "resolved_at": None}).sort("flagged_at", -1).to_list(length=50)
+        names = await self._attention_names(open_orders)
         attention = [
             {
+                **names.get(str(o["_id"]), {}),
                 "id": str(o["_id"]),
                 "reason": o.get("attention_reason"),
                 "booking_number": o.get("booking_number") or (o.get("receipt") if o.get("purpose") == "booking" else None) or o.get("booking_id"),
@@ -1927,9 +1998,34 @@ class PaymentService:
                 "gateway_ref": o.get("razorpay_order_id") or o.get("razorpay_link_id") or o.get("razorpay_subscription_id") or o.get("parent_order_id"),
                 "flagged_at": _iso(o.get("flagged_at")),
             }
-            for o in await self.orders.find({"status": "paid_attention", "resolved_at": None}).sort("flagged_at", -1).to_list(length=50)
+            for o in open_orders
         ]
         return {"rows": out_rows, "totals": self._round_row(totals), "subscriptions": subscriptions, "attention": attention}
+
+    async def _attention_names(self, orders: list[dict]) -> dict[str, dict]:
+        """plan_name / vehicle_type_name / service_name for each parked
+        payment, so the admin sees WHAT the money was for ("Monthly Shine ·
+        Hatchback · Star Wash"). Three batched lookups over the (≤50) rows."""
+
+        async def names(collection, ids) -> dict[str, str]:
+            oids = [ObjectId(i) for i in {i for i in ids if isinstance(i, str) and i} if ObjectId.is_valid(i)]
+            if not oids:
+                return {}
+            return {str(d["_id"]): d.get("name") or "" for d in await collection.find({"_id": {"$in": oids}}, {"name": 1}).to_list(length=len(oids))}
+
+        plans, types, services = await asyncio.gather(
+            names(self.db.subscription_plans, [o.get("plan_id") for o in orders]),
+            names(self.db.vehicle_types, [o.get("vehicle_type") for o in orders]),
+            names(self.db.services, [o.get("service_id") for o in orders]),
+        )
+        return {
+            str(o["_id"]): {
+                "plan_name": plans.get(o.get("plan_id") or ""),
+                "vehicle_type_name": types.get(o.get("vehicle_type") or ""),
+                "service_name": services.get(o.get("service_id") or ""),
+            }
+            for o in orders
+        }
 
     async def resolve_attention(self, order_id: str, actor_id: str, note: str) -> dict:
         """An admin has refunded / activated / otherwise handled a parked
@@ -2279,7 +2375,7 @@ class PaymentService:
     # In every case the amount is resolved SERVER-SIDE from the plan/quote —
     # the manager only ever picks the discount, never types the final price.
 
-    async def manager_subscription_preview(self, payload) -> dict:
+    async def manager_subscription_preview(self, payload, *, actor_role: str = "manager") -> dict:
         """Read-only price for the manager's offer form — no customer
         required yet, no side effects, nothing created. Mirrors exactly
         what manager_subscription_offer will charge, so the number the
@@ -2302,6 +2398,8 @@ class PaymentService:
             "coupon_error": None,
             "customer_exists": False,
             "already_has_pass": False,
+            # The most "₹ off" this actor may type (see manual_plan_discount).
+            "max_discount": float(base_price) if actor_role == "admin" else float(int(base_price * MANAGER_MAX_PLAN_DISCOUNT_PERCENT / 100)),
         }
         customer_id = None
         if payload.customer_phone:
@@ -2328,11 +2426,13 @@ class PaymentService:
                 result["coupon_valid"] = False
                 result["coupon_error"] = exc.message if isinstance(exc, AppException) else "Invalid coupon code"
         elif payload.discount_amount:
-            result["discount"] = min(float(payload.discount_amount), base_price)
+            result["discount"] = manual_plan_discount(payload.discount_amount, base_price, actor_role)
         result["final_price"] = round(base_price - result["discount"], 2)
         return result
 
-    async def manager_subscription_offer(self, actor_id: str, payload, *, actor_center_id: str | None = None) -> dict:
+    async def manager_subscription_offer(
+        self, actor_id: str, payload, *, actor_center_id: str | None = None, actor_role: str = "manager",
+    ) -> dict:
         """Creates the customer (if needed) and either a payment link, an
         auto-pay mandate, or an immediate cash-paid subscription. Every
         branch re-validates from scratch — the preview above is advisory
@@ -2341,11 +2441,16 @@ class PaymentService:
         from app.schemas.subscription_schema import SubscribeRequest
         from app.services.subscription_service import UserSubscriptionService
 
+        subs = UserSubscriptionService(self.db)
+        plan, _service, base_price = await subs.resolve_service_price(payload.plan_id, payload.vehicle_type, payload.service_id)
+        if not payload.recurring and not payload.coupon_code:
+            # Refuse an over-the-limit discount before a customer profile is
+            # created for it (the real figure is re-derived below).
+            manual_plan_discount(payload.discount_amount, base_price, actor_role)
+
         customer = await AuthService(self.db).ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
         customer_id = str(customer["_id"])
 
-        subs = UserSubscriptionService(self.db)
-        plan, _service, base_price = await subs.resolve_service_price(payload.plan_id, payload.vehicle_type, payload.service_id)
         # The exact same eligibility gate a self-serve purchase runs through
         # (plan active, valid tier, no duplicate pass on this vehicle type +
         # service) — checked NOW, before any link/mandate/money moves, and
@@ -2384,7 +2489,7 @@ class PaymentService:
                 raise BadRequestException("This customer already has a pending or paid offer using this coupon.")
             coupon_code = payload.coupon_code
         elif payload.discount_amount:
-            discount = min(float(payload.discount_amount), base_price)
+            discount = manual_plan_discount(payload.discount_amount, base_price, actor_role)
         final_price = round(base_price - discount, 2)
 
         if payload.payment_method == "cash":
@@ -2572,7 +2677,9 @@ class PaymentService:
         except Exception:  # noqa: BLE001
             logger.exception("Could not send the subscription payment link to customer %s", customer_id)
 
-    async def void_manager_subscription_offer(self, order_id: str, actor_id: str) -> dict:
+    async def void_manager_subscription_offer(
+        self, order_id: str, actor_id: str, actor_role: str = "admin", actor_center_id: str | None = None,
+    ) -> dict:
         """Cancels a still-pending manager-issued link or mandate — the
         customer changed their mind, or the manager made a mistake. Only
         ever touches an order that hasn't been paid yet (guarded on
@@ -2588,6 +2695,12 @@ class PaymentService:
         again). Money in is settled properly instead of cancelled."""
         order = await self.orders.find_one({"_id": ObjectId(order_id)}) if ObjectId.is_valid(order_id) else None
         if not order or order.get("purpose") != "subscription" or order.get("channel") not in ("manager", "manager_cash"):
+            raise NotFoundException("Offer not found")
+        # A manager voids only THEIR center's offers — the order carries the
+        # center it was issued under (resolve_grant_center_id). One with no
+        # center is an admin's to clear; 404 rather than 403 so another
+        # center's order ids can't be probed.
+        if actor_role != "admin" and (not actor_center_id or order.get("service_center_id") != actor_center_id):
             raise NotFoundException("Offer not found")
         if order.get("status") != "created":
             raise BadRequestException("This offer isn't pending any more.")

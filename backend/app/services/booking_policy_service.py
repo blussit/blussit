@@ -98,7 +98,7 @@ DEFAULT_BOOKING_POLICY = {
     # back (default 30). Generous on purpose: a bank/UPI page can take a
     # while, and the customer can also switch the booking to cash instead.
     "payment_window_minutes": 30,
-    # How many vehicles one customer can have washed on a single visit.
+    # How many vehicles one customer can have wash on a single visit.
     # They share one slot seat: it's one trip to one address, so the travel
     # is paid and counted once (see create_booking_group).
     "max_vehicles_per_booking": 5,

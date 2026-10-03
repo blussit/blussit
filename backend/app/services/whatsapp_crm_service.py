@@ -680,6 +680,16 @@ class WhatsAppCrmService:
             "usage": usage.get(r["name"], 0), "synced_at": _iso(r.get("synced_at")),
         } for r in rows]
 
+    async def agent_sendable_templates(self) -> list[dict]:
+        """What an agent can actually send from the inbox: approved, not
+        switched off, no URL-button parameter and not an OTP template — the
+        agent send never fills those, so Meta rejects every such attempt."""
+        blocked = set(await self.db.whatsapp_templates.distinct("name", {"has_url_param": True}))
+        return [
+            t for t in await self.list_local_templates()
+            if t["status"] == "APPROVED" and not t["disabled"] and t["name"] not in blocked and t.get("category") != "AUTHENTICATION"
+        ]
+
     async def create_template(self, name: str, category: str, language: str, body: str, button_text: str | None, button_url: str | None) -> dict:
         if category not in ("UTILITY", "MARKETING", "AUTHENTICATION"):
             raise BadRequestException("Category must be UTILITY, MARKETING or AUTHENTICATION")

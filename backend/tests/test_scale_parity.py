@@ -416,6 +416,23 @@ async def _all_pages(fetch, page_size=7):
         page += 1
 
 
+# Display-only names added to the plan rows AFTER the legacy reference was
+# frozen (2026-10: "car type + service on every staff list"). Resolved from
+# ids already compared here, so parity strips them — only where the frozen
+# legacy row has no such key — and test_staff_car_type_service_names.py
+# pins their values.
+ADDED_DISPLAY_KEYS = ("vehicle_type", "vehicle_type_name", "service_id", "service_name")
+
+
+def _legacy_shape(new_rows, legacy_rows):
+    legacy_keys = set(legacy_rows[0]) if legacy_rows else set()
+    out = []
+    for row in new_rows:
+        assert all(k in row for k in ADDED_DISPLAY_KEYS), sorted(row)
+        out.append({k: v for k, v in row.items() if k in legacy_keys or k not in ADDED_DISPLAY_KEYS})
+    return out
+
+
 def _sorted_breakdown(rows, count_key):
     return sorted(rows, key=lambda r: (-r[count_key], r["plan_name"]))
 
@@ -438,7 +455,7 @@ async def test_center_subscription_overview_matches_legacy(db, dataset, status):
     assert_same(legacy["kpis"], out["kpis"])
     assert_same(_sorted_breakdown(legacy["plan_breakdown"], "active_count"), out["plan_breakdown"])
     keep = STATUS_PREDICATES.get(status) or (lambda r: r["status"] == "active" and r["days_left"] is not None and r["days_left"] <= 14)
-    assert_same([r for r in legacy["rows"] if keep(r)], rows)
+    assert_same([r for r in legacy["rows"] if keep(r)], _legacy_shape(rows, legacy["rows"]))
 
 
 @pytest.mark.asyncio
@@ -449,7 +466,7 @@ async def test_admin_subscription_overview_matches_legacy(db, dataset, status):
     out, rows = await _all_pages(lambda p, n: svc.admin_overview(page=p, page_size=n, status=status))
     assert_same(legacy["kpis"], out["kpis"])
     assert_same(_sorted_breakdown(legacy["plan_breakdown"], "count"), out["plan_breakdown"])
-    assert_same([r for r in legacy["rows"] if STATUS_PREDICATES[status](r)], rows)
+    assert_same([r for r in legacy["rows"] if STATUS_PREDICATES[status](r)], _legacy_shape(rows, legacy["rows"]))
 
 
 @pytest.mark.asyncio
@@ -477,4 +494,5 @@ async def test_center_plan_revenue_and_purchases_match_legacy(db, dataset, perio
         for page in (1, 2):
             legacy = await LegacySubscriptions(db).plan_purchases(s, e, page, 4, center)
             new = await UserSubscriptionService(db).plan_purchases(s, e, page, 4, center)
-            assert_same(list(legacy), list(new))
+            assert_same(legacy[0], _legacy_shape(new[0], legacy[0]))
+            assert legacy[1] == new[1]

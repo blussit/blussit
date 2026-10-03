@@ -5,12 +5,18 @@ import type { Address, Booking, Complaint, User, UserSubscription, Vehicle } fro
  *  names CRMService.get_customer_360 resolves server-side. */
 export type Customer360Booking = Booking & {
   vehicle_label?: string | null;
+  vehicle_type_name?: string | null;
   service_names?: string[];
   address_text?: string | null;
   service_center_name?: string | null;
 };
 
-export type Customer360Subscription = UserSubscription & { plan_name?: string };
+export type Customer360Subscription = UserSubscription & {
+  plan_name?: string;
+  /** Car type + the one wash a monthly pass covers. */
+  vehicle_type_name?: string | null;
+  service_name?: string | null;
+};
 export type Customer360Vehicle = Vehicle & { vehicle_type_name?: string | null };
 
 export interface Customer360 {

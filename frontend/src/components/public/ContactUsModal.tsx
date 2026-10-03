@@ -5,6 +5,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { contentApi } from "../../api/catalog";
 import { getErrorMessage } from "../../lib/api-client";
 import { openBlussitWhatsApp } from "./WhatsAppFloatingButton";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
+import { Select } from "../ui/Select";
 
 type ContactForm = {
   name: string;
@@ -40,7 +42,7 @@ const vehicleTypes = [
 
 const topics = [
   "General Enquiry",
-  "Book a Service",
+  "Book A Service",
   "Service Information",
   "Pricing",
   "Corporate / Bulk Enquiry",
@@ -98,12 +100,10 @@ export function ContactUsModal({
   const [submitError, setSubmitError] = useState("");
 
   const nameRef = useRef<HTMLInputElement>(null);
+  useBodyScrollLock(open);
 
   useEffect(() => {
     if (!open) return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
 
     const focusTimer = window.setTimeout(() => {
       nameRef.current?.focus();
@@ -118,7 +118,6 @@ export function ContactUsModal({
     window.addEventListener("keydown", onKeyDown);
 
     return () => {
-      document.body.style.overflow = previousOverflow;
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
 
@@ -194,6 +193,9 @@ export function ContactUsModal({
 
   const labelClass =
     "block text-[13px] font-semibold text-[#071A3D]";
+
+  // The shared themed dropdown, sized to sit level with the inputs above.
+  const selectClass = "!h-[46px] sm:!h-[48px]";
 
   const error = (message?: string) =>
     message && (
@@ -362,7 +364,7 @@ export function ContactUsModal({
                       sm:text-[26px]
                     "
                   >
-                    We&apos;re here to help.
+                    We&apos;re Here To Help.
                   </h2>
 
                   <p className="mt-1 text-[13px] leading-5 text-[#64748B]">
@@ -391,7 +393,7 @@ export function ContactUsModal({
                         }
                         autoComplete="name"
                         className={inputClass}
-                        placeholder="Enter your name"
+                        placeholder="Enter Your Name"
                       />
 
                       {error(errors.name)}
@@ -439,14 +441,15 @@ export function ContactUsModal({
                     <label className={labelClass}>
                       Vehicle Type
 
-                      <select
+                      <Select
                         value={form.vehicle_type}
                         onChange={(e) =>
                           update("vehicle_type", e.target.value)
                         }
-                        className={inputClass}
+                        wrapperClassName="mt-1"
+                        className={selectClass}
                       >
-                        <option value="">Select vehicle</option>
+                        <option value="">Select Vehicle</option>
 
                         {vehicleTypes.map((option) => (
                           <option
@@ -456,23 +459,24 @@ export function ContactUsModal({
                             {option}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </label>
                   </div>
 
                   {/* TOPIC */}
                   <label className={labelClass}>
-                    How can we help?{" "}
+                    How Can We Help?{" "}
                     <span className="text-[#E8A900]">*</span>
 
-                    <select
+                    <Select
                       value={form.topic}
                       onChange={(e) =>
                         update("topic", e.target.value)
                       }
-                      className={inputClass}
+                      wrapperClassName="mt-1"
+                      className={selectClass}
                     >
-                      <option value="">Select a topic</option>
+                      <option value="">Select A Topic</option>
 
                       {topics.map((option) => (
                         <option
@@ -482,7 +486,7 @@ export function ContactUsModal({
                           {option}
                         </option>
                       ))}
-                    </select>
+                    </Select>
 
                     {error(errors.topic)}
                   </label>
@@ -588,7 +592,7 @@ export function ContactUsModal({
                       <span>
                         Prefer WhatsApp?{" "}
                         <span className="font-semibold text-[#1677FF]">
-                          Chat with us →
+                          Chat With Us →
                         </span>
                       </span>
                     </button>

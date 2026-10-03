@@ -12,7 +12,7 @@ export function DataTable<T extends { id: string }>({
   columns,
   data,
   isLoading,
-  emptyTitle = "Nothing here yet",
+  emptyTitle = "Nothing Here Yet",
   emptyDescription,
   onRowClick,
 }: {
@@ -35,12 +35,12 @@ export function DataTable<T extends { id: string }>({
     // Console table: hairline yellow frame, quiet grey header, and a warm
     // row hover so a clickable row reads as clickable without borders or
     // shadows shouting on every line.
-    <div className="overflow-x-auto rounded-2xl border border-[#F3E5B5] bg-white">
+    <div className="overflow-x-auto rounded-2xl border border-[var(--color-card-border)] bg-white">
       <table className="w-full min-w-[640px] text-left text-sm">
         <thead>
-          <tr className="border-b border-[#F3E5B5]">
+          <tr className="border-b border-[var(--color-card-border)]">
             {columns.map((col) => (
-              <th key={col.header} className="px-4 py-3 text-xs font-medium text-gray-500">
+              <th key={col.header} className="px-4 py-3 text-xs font-medium text-[var(--ui-muted,#6b7280)]">
                 {col.header}
               </th>
             ))}
@@ -50,11 +50,11 @@ export function DataTable<T extends { id: string }>({
           {data.map((row) => (
             <tr
               key={row.id}
-              className={`border-b border-[#FAF3DF] last:border-0 transition-colors ${onRowClick ? "cursor-pointer hover:bg-[#FFFCF0]" : ""}`}
+              className={`border-b border-[var(--ui-row-line,#FAF3DF)] last:border-0 transition-colors ${onRowClick ? "cursor-pointer hover:bg-[var(--ui-row-hover,#FFFCF0)]" : ""}`}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
             >
               {columns.map((col) => (
-                <td key={col.header} className={`px-4 py-3.5 text-black ${col.className || ""}`}>
+                <td key={col.header} className={`px-4 py-3.5 text-[var(--ui-ink,#000)] ${col.className || ""}`}>
                   {col.accessor(row)}
                 </td>
               ))}

@@ -56,12 +56,12 @@ export function EditBookingModal({
         {booking?.booking_group_id && (
           <p className="-mt-1 text-xs text-gray-400">This visit has more than one vehicle — the notes and contact below apply to all of them.</p>
         )}
-        <Input label="Customer notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the captain should know" />
-        <Input label="Alternate contact name" value={altName} onChange={(e) => setAltName(e.target.value)} />
-        <Input label="Alternate contact phone" value={altPhone} onChange={(e) => setAltPhone(e.target.value)} placeholder="10-digit mobile" />
+        <Input label="Customer Notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything the captain should know" />
+        <Input label="Alternate Contact Name" value={altName} onChange={(e) => setAltName(e.target.value)} />
+        <Input label="Alternate Contact Phone" value={altPhone} onChange={(e) => setAltPhone(e.target.value)} placeholder="10-digit mobile" />
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
         <Button className="w-full" isLoading={mutation.isPending} onClick={() => mutation.mutate()}>
-          Save changes
+          Save Changes
         </Button>
       </div>
     </Modal>

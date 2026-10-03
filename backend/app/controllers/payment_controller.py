@@ -90,14 +90,16 @@ class PaymentController:
 
     # -- Manager selling a plan (WhatsApp link / auto-pay / cash) --------
 
-    async def manager_offer_preview(self, payload: ManagerSubscriptionPreviewRequest):
-        return success(await self.service.manager_subscription_preview(payload))
+    async def manager_offer_preview(self, current_user: CurrentUser, payload: ManagerSubscriptionPreviewRequest):
+        return success(await self.service.manager_subscription_preview(payload, actor_role=current_user.role))
 
     async def manager_offer_create(self, current_user: CurrentUser, payload: ManagerSubscriptionOfferRequest):
         from app.core.authz import resolve_grant_center_id
 
         center_id = resolve_grant_center_id(current_user.role, current_user.service_center_id, payload.service_center_id)
-        result = await self.service.manager_subscription_offer(current_user.id, payload, actor_center_id=center_id)
+        result = await self.service.manager_subscription_offer(
+            current_user.id, payload, actor_center_id=center_id, actor_role=current_user.role,
+        )
         await self.audit.log_action(
             current_user.id, current_user.role, "MANAGER_SUBSCRIPTION_OFFER", "payment_orders",
             result.get("order_id") or (result.get("subscription") or {}).get("id"),
@@ -114,6 +116,8 @@ class PaymentController:
         return success(result, message)
 
     async def manager_offer_void(self, current_user: CurrentUser, order_id: str):
-        result = await self.service.void_manager_subscription_offer(order_id, current_user.id)
+        result = await self.service.void_manager_subscription_offer(
+            order_id, current_user.id, current_user.role, current_user.service_center_id
+        )
         await self.audit.log_action(current_user.id, current_user.role, "MANAGER_SUBSCRIPTION_OFFER_VOIDED", "payment_orders", order_id)
         return success(result, "Offer cancelled" if result.get("voided") else "This offer was already settled or cancelled")

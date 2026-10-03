@@ -19,8 +19,20 @@ export function titleCase(value: string | null | undefined): string {
       if (/^\s+$|^[-/]$/.test(part)) return part;
       const lower = part.toLowerCase();
       if (ACRONYMS.has(lower)) return lower.toUpperCase();
-      return lower.charAt(0).toUpperCase() + lower.slice(1);
+      // "(sedan)" → "(Sedan)": skip a leading bracket or quote.
+      return lower.replace(/^([("“‘']*)(\p{L})/u, (_, lead: string, ch: string) => lead + ch.toUpperCase());
     })
+    .join("");
+}
+
+/** Title Case for admin-typed headings (FAQ questions): capitalises each
+ * word's first letter but keeps the rest as typed, so WhatsApp, OTP and
+ * BLUSSIT survive. Model codes ("i10"), emails and links are left alone. */
+export function headingCase(value: string | null | undefined): string {
+  if (!value) return "";
+  return value
+    .split(/(\s+)/)
+    .map((w) => (/@|:\/\/|^www\./i.test(w) ? w : w.replace(/^([("“‘']*)([a-z])(?!\d)/, (_, lead: string, ch: string) => lead + ch.toUpperCase())))
     .join("");
 }
 
@@ -112,7 +124,7 @@ export function priceView(p: Priced): PriceView {
     final: best.final,
     original: best.offer != null ? best.regular : best.mrp,
     varies: new Set(entries.map((e) => e.final)).size > 1,
-    offerLabel: best.offer != null ? "First booking offer" : null,
+    offerLabel: best.offer != null ? "First Booking Offer" : null,
   };
 }
 
@@ -206,14 +218,15 @@ const LOCAL_IMAGES = {
 export function serviceImage(s: { name: string; image?: string | null }, index: number): string {
   if (s.image) return s.image;
   const n = s.name.toLowerCase();
-  if (/waterless/.test(n)) return "waterless.png";
-  if (/deep cleaning/.test(n)) return "deep-cleaning.png";
-  if (/bike|scooter|two.?wheeler|chain/.test(n)) return "bike-wash.png";
+  // Service photos (assets/*.png, white frame cropped off, 960px WebP).
+  if (/waterless/.test(n)) return "/img/svc-waterless-960.webp";
+  if (/deep cleaning/.test(n)) return "/img/svc-deep-960.webp";
+  if (/bike|scooty|scooter|two.?wheeler|chain/.test(n)) return "/img/svc-bike-960.webp";
   if (/dashboard/.test(n)) return LOCAL_IMAGES.dashboard;
   if (/wax|polish|ceramic|coat|paint/.test(n)) return LOCAL_IMAGES.polish;
   if (/deep|detail|interior|vacuum|seat|cabin|sanit/.test(n)) return LOCAL_IMAGES.interior;
-  if (/star|foam/.test(n)) return "/star.png";
-  if (/jet|exterior|wash|clean/.test(n)) return "jet-wash.png";
+  if (/star|foam/.test(n)) return "/img/svc-star-960.webp";
+  if (/jet|exterior|wash|clean/.test(n)) return "/img/svc-jet-960.webp";
   const all = Object.values(LOCAL_IMAGES);
   return all[index % all.length];
 }
@@ -235,7 +248,7 @@ export function vehicleNames(ids: string[] | undefined, types: VehicleTypeOption
   if (!types?.length) return null;
   const mine = ids?.length ? types.filter((t) => ids.includes(t.id)) : types;
   if (!mine.length) return null;
-  const names = mine.map((t) => t.name);
+  const names = mine.map((t) => titleCase(t.name));
   if (names.length <= max) return names.join(", ");
   return `${names.slice(0, max).join(", ")} +${names.length - max} more`;
 }

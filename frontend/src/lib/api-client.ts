@@ -26,6 +26,16 @@ export const tokenStorage = {
   clear: () => {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(REFRESH_KEY);
+    // An unfinished booking (pin, phone, notes) belongs to whoever was
+    // signed in — never hand it to the next person on this device.
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
+        const key = sessionStorage.key(i);
+        if (key?.startsWith("blussit:quickbook:")) sessionStorage.removeItem(key);
+      }
+    } catch {
+      // storage blocked — nothing to clear
+    }
   },
 };
 
@@ -116,9 +126,32 @@ export interface ApiError {
   details?: Record<string, unknown>;
 }
 
+/** A 422 from the API says only "Request validation failed"; the useful
+ *  part is the first field error inside details.errors (pydantic's own
+ *  shape: loc + msg). Turns it into "Customer phone: Enter a valid
+ *  10-digit mobile number" so a form shows what to fix, not a shrug. */
+function validationMessage(data: ApiError): string | null {
+  const errors = (data.details as { errors?: { loc?: unknown[]; msg?: string }[] } | undefined)?.errors;
+  const first = Array.isArray(errors) ? errors[0] : undefined;
+  if (!first?.msg) return null;
+  const msg = first.msg.replace(/^Value error,\s*/i, "").replace(/^Assertion failed,\s*/i, "");
+  const field = (first.loc || []).filter((p) => typeof p === "string" && !["body", "query", "path"].includes(p as string)).pop() as
+    | string
+    | undefined;
+  if (!field) return msg;
+  const label = field.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  return `${label}: ${msg.charAt(0).toLowerCase()}${msg.slice(1)}`;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const data = error.response?.data as ApiError | undefined;
+    if (data?.error_code === "VALIDATION_ERROR") {
+      const detail = validationMessage(data);
+      if (detail) return detail;
+    }
+    if (error.response?.status === 429) return data?.message || "Too many requests — please wait a moment and try again.";
+    if (!error.response && error.code === "ERR_NETWORK") return "Can't reach the server — check your connection and try again.";
     return data?.message || error.message || "Something went wrong";
   }
   return "Something went wrong";

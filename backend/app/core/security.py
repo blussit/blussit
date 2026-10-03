@@ -7,6 +7,7 @@ freezes every request and WebSocket on the instance while it hashes. The
 sync versions remain for seed data and scripts.
 """
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -73,10 +74,16 @@ def create_access_token(subject: str, role: str, extra_claims: dict[str, Any] | 
     return create_token(subject, role, TokenType.ACCESS, extra_claims)
 
 
-def create_refresh_token(subject: str, role: str, token_version: int = 0) -> str:
+def create_refresh_token(subject: str, role: str, token_version: int = 0, family: str | None = None) -> str:
     # tv lets a password change (or forced logout) invalidate every
     # refresh token issued before it — see AuthService.refresh.
-    return create_token(subject, role, TokenType.REFRESH, {"tv": token_version})
+    # jti makes each refresh token single-use (rotation with reuse
+    # detection); fam ties a login's chain of rotated tokens together so a
+    # replayed one can kill exactly that chain (one device's session).
+    return create_token(
+        subject, role, TokenType.REFRESH,
+        {"tv": token_version, "jti": uuid.uuid4().hex, "fam": family or uuid.uuid4().hex},
+    )
 
 
 def decode_token(token: str) -> dict[str, Any]:

@@ -29,8 +29,12 @@ import { uploadApi } from "../../api/upload";
 import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
 import { useAuth } from "../../context/AuthContext";
+import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { validateIndianMobile } from "../../lib/validators";
 import { format, formatDateTime, formatSlot } from "../../lib/date";
+import { toTitle } from "../../lib/titleCase";
 import type { Booking, Review, User } from "../../types";
 
 const ACTIVE_JOB_STATUSES = ["assigned", "captain_on_the_way", "service_started"];
@@ -40,8 +44,8 @@ const emptyForm = { full_name: "", email: "", phone: "", password: "", photo_url
 const STATUS_COUNT_LABELS: Record<string, string> = {
   pending: "Pending",
   assigned: "Assigned",
-  captain_on_the_way: "On the way",
-  service_started: "In progress",
+  captain_on_the_way: "On The Way",
+  service_started: "In Progress",
   completed: "Completed",
   cancelled: "Cancelled",
   rescheduled: "Rescheduled",
@@ -51,7 +55,7 @@ const DETAIL_TABS = [
   { key: "overview", label: "Overview", icon: UserRound },
   { key: "kyc", label: "Verification", icon: BadgeCheck },
   { key: "attendance", label: "Attendance", icon: CalendarCheck },
-  { key: "jobs", label: "Jobs & reviews", icon: ClipboardList },
+  { key: "jobs", label: "Jobs & Reviews", icon: ClipboardList },
 ] as const;
 type DetailTab = (typeof DETAIL_TABS)[number]["key"];
 
@@ -62,10 +66,10 @@ function punctualityLabel(minutes: number | null | undefined): string | null {
 }
 
 const KYC_CHIP: Record<string, { label: string; cls: string }> = {
-  pending: { label: "Not verified", cls: "bg-gray-100 text-gray-600" },
-  submitted: { label: "KYC to review", cls: "bg-amber-100 text-amber-700" },
+  pending: { label: "Not Verified", cls: "bg-gray-100 text-gray-600" },
+  submitted: { label: "KYC To Review", cls: "bg-amber-100 text-amber-700" },
   verified: { label: "Verified", cls: "bg-green-100 text-green-700" },
-  rejected: { label: "KYC rejected", cls: "bg-red-100 text-red-700" },
+  rejected: { label: "KYC Rejected", cls: "bg-red-100 text-red-700" },
 };
 
 const mapsLink = (loc?: { latitude: number; longitude: number } | null) =>
@@ -113,10 +117,18 @@ export default function ManagerCaptainsPage() {
     queryFn: () => leaveApi.pendingForCenter(centerId, { page: 1, page_size: 50 }),
     enabled: !!centerId,
   });
+  const { push: pushToast } = useToast();
+  const confirm = useConfirm();
   const leaveReviewMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: "approved" | "rejected" }) => leaveApi.review(id, status),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["center-pending-leave", centerId] }),
+    onSuccess: (_d, v) => {
+      queryClient.invalidateQueries({ queryKey: ["center-pending-leave", centerId] });
+      pushToast({ tone: "success", title: v.status === "approved" ? "Leave approved" : "Leave rejected", message: "The captain has been told." });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't save that", message: getErrorMessage(err) }),
   });
+  // Only the row being decided shows a spinner — not every row at once.
+  const reviewingId = leaveReviewMutation.isPending ? leaveReviewMutation.variables?.id : undefined;
   const captainName = (id: string) => captains.find((c) => c.id === id)?.full_name || "Captain";
 
   // One performance card per captain — rating, jobs completed, punctuality
@@ -203,7 +215,7 @@ export default function ManagerCaptainsPage() {
       adminUserApi.createStaff({
         full_name: form.full_name,
         email: form.email || undefined,
-        phone: form.phone,
+        phone: validateIndianMobile(form.phone) || form.phone,
         password: form.password,
         role: "captain",
         photo_url: form.photo_url || undefined,
@@ -217,15 +229,28 @@ export default function ManagerCaptainsPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
-  const suspendMutation = useMutation({
-    mutationFn: (id: string) => adminUserApi.suspend(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["center-captains-page"] }),
+  // The manager-scoped status endpoint — the admin-only /users calls these
+  // used to make always answered 403 for a manager.
+  const statusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: "active" | "suspended" }) => staffDirectoryApi.setCaptainStatus(id, status),
+    onSuccess: (saved, v) => {
+      queryClient.invalidateQueries({ queryKey: ["center-captains-page"] });
+      queryClient.invalidateQueries({ queryKey: ["center-captains-list"] });
+      if (saved && detailFor?.id === saved.id) setDetailFor({ ...detailFor, ...saved });
+      pushToast({ tone: "success", title: v.status === "suspended" ? "Captain suspended" : "Captain reactivated" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't change the status", message: getErrorMessage(err) }),
   });
-
-  const reactivateMutation = useMutation({
-    mutationFn: (id: string) => adminUserApi.update(id, { status: "active" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["center-captains-page"] }),
-  });
+  const suspendCaptain = async (c: User) => {
+    if (
+      await confirm({
+        title: `Suspend ${c.full_name}?`,
+        message: "They're signed out at once and can't log in or take jobs until you reactivate them.",
+        tone: "danger",
+      })
+    )
+      statusMutation.mutate({ id: c.id, status: "suspended" });
+  };
 
   const openDetail = (c: User) => {
     setDetailFor(c);
@@ -242,27 +267,27 @@ export default function ManagerCaptainsPage() {
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Your service center's field team.</p>
         </div>
         <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add captain
+          <Plus className="h-4 w-4" /> Add Captain
         </Button>
       </div>
 
       {!!pendingLeave?.data.length && (
         <Card className="border-amber-200 bg-amber-50/40 p-4">
-          <p className="mb-3 text-sm font-bold text-amber-800">Leave requests waiting for you</p>
+          <p className="mb-3 text-sm font-bold text-amber-800">Leave Requests Waiting For You</p>
           <div className="space-y-2">
             {pendingLeave.data.map((l) => (
               <div key={l.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-100 bg-white p-3 text-sm">
                 <div className="min-w-0">
-                  <p className="font-semibold text-black">{captainName(l.captain_id)}</p>
+                  <p className="font-semibold text-[#0E1A33]">{captainName(l.captain_id)}</p>
                   <p className="text-xs text-[var(--color-text-secondary)]">
                     {l.start_date} → {l.end_date} · {l.reason}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">
-                  <Button size="sm" isLoading={leaveReviewMutation.isPending} onClick={() => leaveReviewMutation.mutate({ id: l.id, status: "approved" })}>
+                  <Button size="sm" isLoading={reviewingId === l.id && leaveReviewMutation.variables?.status === "approved"} disabled={!!reviewingId} onClick={() => leaveReviewMutation.mutate({ id: l.id, status: "approved" })}>
                     Approve
                   </Button>
-                  <Button size="sm" variant="outline" isLoading={leaveReviewMutation.isPending} onClick={() => leaveReviewMutation.mutate({ id: l.id, status: "rejected" })}>
+                  <Button size="sm" variant="outline" isLoading={reviewingId === l.id && leaveReviewMutation.variables?.status === "rejected"} disabled={!!reviewingId} onClick={() => leaveReviewMutation.mutate({ id: l.id, status: "rejected" })}>
                     Reject
                   </Button>
                 </div>
@@ -276,7 +301,7 @@ export default function ManagerCaptainsPage() {
       {isLoading ? (
         <PageLoader />
       ) : !captains.length ? (
-        <EmptyState icon={UserRound} title="No captains assigned yet" action={<Button onClick={() => setOpen(true)}>Add captain</Button>} />
+        <EmptyState icon={UserRound} title="No Captains Assigned Yet" action={<Button onClick={() => setOpen(true)}>Add Captain</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {captains.map((c, i) => {
@@ -294,7 +319,7 @@ export default function ManagerCaptainsPage() {
                     <div>
                       <p className="flex items-center gap-1.5 font-semibold text-[var(--color-text-primary)]">
                         {c.full_name}
-                        {c.employee_id && <span className="rounded-full bg-black px-1.5 py-0.5 font-mono-num text-[9px] font-bold text-white">{c.employee_id}</span>}
+                        {c.employee_id && <span className="whitespace-nowrap rounded-full bg-[#EEF3FA] px-1.5 py-0.5 font-mono-num text-[9px] font-bold text-[#0E1A33]">{c.employee_id}</span>}
                       </p>
                       <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
                         <StatusBadge status={c.status} />
@@ -335,34 +360,40 @@ export default function ManagerCaptainsPage() {
                     <Star className="h-3 w-3 fill-amber-400 text-amber-400" /> {perf?.average_rating ?? "—"} ({perf?.total_reviews ?? 0})
                   </Badge>
                   <Badge tone="neutral">
-                    <Briefcase className="h-3 w-3" /> {perf?.total_jobs_completed ?? 0} completed
+                    <Briefcase className="h-3 w-3" /> {perf?.total_jobs_completed ?? 0} Completed
                   </Badge>
                   {perf?.on_time_start_pct != null && (
-                    <Badge tone={perf.on_time_start_pct >= 80 ? "success" : "warning"}>{perf.on_time_start_pct}% on-time start</Badge>
+                    <Badge tone={perf.on_time_start_pct >= 80 ? "success" : "warning"}>{perf.on_time_start_pct}% On-Time Start</Badge>
                   )}
-                  {!!perf?.delayed_jobs && <Badge tone="warning">{perf.delayed_jobs} delayed job(s)</Badge>}
-                  {!!perf?.repeat_complaints && <Badge tone="error">{perf.repeat_complaints} complaint(s)</Badge>}
+                  {!!perf?.delayed_jobs && <Badge tone="warning">{perf.delayed_jobs} Delayed Job(s)</Badge>}
+                  {!!perf?.repeat_complaints && <Badge tone="error">{perf.repeat_complaints} Complaint(s)</Badge>}
                 </div>
                 {punctuality && <p className="mt-2 text-xs text-[var(--color-text-secondary)]">{punctuality}</p>}
                 {perf?.avg_service_minutes != null && (
                   <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                    Avg service time: {perf.avg_service_minutes} min
+                    Avg Service Time: {perf.avg_service_minutes} min
                     {perf.jobs_per_day != null ? ` · ${perf.jobs_per_day} jobs/day` : ""}
                   </p>
                 )}
-                <p className="mt-3 text-xs font-medium text-[var(--color-primary)]">Open full profile →</p>
+                <p className="mt-3 text-xs font-medium text-[var(--color-primary)]">Open Full Profile →</p>
               </Card>
             );
           })}
         </div>
       )}
 
-      <Modal open={open} onClose={() => setOpen(false)} title="Add captain">
+      <Modal open={open} onClose={() => setOpen(false)} title="Add Captain">
         <form
           className="space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
+            if (createMutation.isPending) return;
+            // The same rules the server applies — say so before the round trip.
+            if (form.full_name.trim().length < 2) return setError("Enter the captain's full name.");
+            if (!validateIndianMobile(form.phone)) return setError("Enter a valid 10-digit mobile number.");
+            if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) return setError("Enter a valid email or leave it blank.");
+            if (form.password.length < 8) return setError("The password needs at least 8 characters.");
             createMutation.mutate();
           }}
         >
@@ -385,7 +416,7 @@ export default function ManagerCaptainsPage() {
               )}
             </button>
             <div>
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">Profile photo</p>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">Profile Photo</p>
               <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                 Shown to customers on their booking once this captain is assigned. A clear face photo builds trust at the door.
               </p>
@@ -412,19 +443,19 @@ export default function ManagerCaptainsPage() {
             />
           </div>
 
-          <Input label="Full name" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} required />
+          <Input label="Full Name" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} required />
           <Input
-            label="Phone number"
+            label="Phone Number"
             value={form.phone}
             onChange={(e) => setForm({ ...form, phone: e.target.value })}
             placeholder="9876543210"
             hint="Required — job alerts and the customer's call button use this number."
             required
           />
-          <Input label="Email (optional)" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          <Input label="Email (Optional)" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
           <div className="flex items-end gap-2">
             <Input
-              label="Temporary password"
+              label="Temporary Password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
               hint="At least 8 characters — share it with the captain; they change it on first login."
@@ -436,12 +467,12 @@ export default function ManagerCaptainsPage() {
           </div>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" disabled={photoUploading || form.password.length < 8 || form.phone.trim().length < 10} isLoading={createMutation.isPending}>
-            Add captain
+            Add Captain
           </Button>
         </form>
       </Modal>
 
-      <Modal open={!!detailFor} onClose={() => setDetailFor(null)} title="Captain profile" maxWidth="max-w-3xl">
+      <Modal open={!!detailFor} onClose={() => setDetailFor(null)} title="Captain Profile" maxWidth="max-w-3xl">
         {detailFor && (() => {
           // Re-derive from the live roster rather than the snapshot captured
           // at click time, so the status/button here update immediately
@@ -458,7 +489,7 @@ export default function ManagerCaptainsPage() {
                     <p className="flex flex-wrap items-center gap-2 text-lg font-bold text-[var(--color-text-primary)]">
                       {live.full_name}
                       {live.employee_id && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-black px-2 py-0.5 font-mono-num text-[10px] font-bold text-white">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3FA] px-2 py-0.5 font-mono-num text-[10px] font-bold text-[#0E1A33]">
                           <IdCard className="h-3 w-3" /> {live.employee_id}
                         </span>
                       )}
@@ -492,11 +523,11 @@ export default function ManagerCaptainsPage() {
                   </div>
                 </div>
                 {live.status !== "suspended" ? (
-                  <Button size="sm" variant="outline" isLoading={suspendMutation.isPending} onClick={() => suspendMutation.mutate(live.id)}>
+                  <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => void suspendCaptain(live)}>
                     <UserX className="h-3.5 w-3.5" /> Suspend
                   </Button>
                 ) : (
-                  <Button size="sm" variant="outline" isLoading={reactivateMutation.isPending} onClick={() => reactivateMutation.mutate(live.id)}>
+                  <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => statusMutation.mutate({ id: live.id, status: "active" })}>
                     Reactivate
                   </Button>
                 )}
@@ -511,7 +542,7 @@ export default function ManagerCaptainsPage() {
                     onClick={() => setDetailTab(t.key)}
                     className={`flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
                       detailTab === t.key
-                        ? "border-black text-[var(--color-text-primary)]"
+                        ? "border-[#0A66F0] text-[#0A66F0]"
                         : "border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
                     }`}
                   >
@@ -525,9 +556,9 @@ export default function ManagerCaptainsPage() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     {[
-                      { label: "Jobs completed", value: detailPerf?.total_jobs_completed ?? "—" },
-                      { label: "On-time starts", value: detailPerf?.on_time_start_pct != null ? `${detailPerf.on_time_start_pct}%` : "—" },
-                      { label: "Avg service time", value: detailPerf?.avg_service_minutes != null ? `${detailPerf.avg_service_minutes} min` : "—" },
+                      { label: "Jobs Completed", value: detailPerf?.total_jobs_completed ?? "—" },
+                      { label: "On-Time Starts", value: detailPerf?.on_time_start_pct != null ? `${detailPerf.on_time_start_pct}%` : "—" },
+                      { label: "Avg Service Time", value: detailPerf?.avg_service_minutes != null ? `${detailPerf.avg_service_minutes} min` : "—" },
                       { label: "Complaints", value: detailPerf?.repeat_complaints ?? 0 },
                     ].map((s) => (
                       <div key={s.label} className="rounded-xl border border-gray-100 p-3 text-center">
@@ -543,7 +574,7 @@ export default function ManagerCaptainsPage() {
                   )}
                   {hasActiveJob ? (
                     <div>
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Live location</p>
+                      <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">Live Location</p>
                       <LiveCaptainMap captainId={live.id} initialLatitude={live.latitude} initialLongitude={live.longitude} initialCapturedAt={live.last_location_at} trail={trail} />
                     </div>
                   ) : (
@@ -555,7 +586,7 @@ export default function ManagerCaptainsPage() {
               {detailTab === "kyc" && (
                 <div>
                   {!kyc || kyc.status === "pending" ? (
-                    <EmptyState icon={ShieldAlert} title="No documents yet" description="The captain submits KYC from their own app (Profile → Verification). It'll land here for your review." />
+                    <EmptyState icon={ShieldAlert} title="No Documents Yet" description="The captain submits KYC from their own app (Profile → Verification). It'll land here for your review." />
                   ) : (
                     <div className="space-y-3 rounded-xl border border-gray-100 p-3.5">
                       <div className="flex flex-wrap items-center gap-2">
@@ -572,22 +603,22 @@ export default function ManagerCaptainsPage() {
                         )}
                         <div className="min-w-0 space-y-1.5">
                           <p><span className="text-[var(--color-text-secondary)]">Aadhaar:</span> <span className="font-mono-num">{kyc.aadhaar_number || "—"}</span>{" "}
-                            {kyc.aadhaar_doc_url && <a href={kyc.aadhaar_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">view doc</a>}
+                            {kyc.aadhaar_doc_url && <a href={kyc.aadhaar_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">View Doc</a>}
                           </p>
                           <p><span className="text-[var(--color-text-secondary)]">PAN:</span> <span className="font-mono-num">{kyc.pan_number || "—"}</span>{" "}
-                            {kyc.pan_doc_url && <a href={kyc.pan_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">view doc</a>}
+                            {kyc.pan_doc_url && <a href={kyc.pan_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">View Doc</a>}
                           </p>
-                          <p><span className="text-[var(--color-text-secondary)]">Local address:</span> {kyc.local_address || "—"}</p>
+                          <p><span className="text-[var(--color-text-secondary)]">Local Address:</span> {kyc.local_address || "—"}</p>
                           <p><span className="text-[var(--color-text-secondary)]">Permanent:</span> {kyc.same_as_local ? "Same as local" : kyc.permanent_address || "—"}</p>
                         </div>
                       </div>
-                      {kyc.review_note && <p className="text-xs text-[var(--color-text-secondary)]">Last review note: {kyc.review_note}</p>}
+                      {kyc.review_note && <p className="text-xs text-[var(--color-text-secondary)]">Last Review Note: {kyc.review_note}</p>}
                       <Input placeholder="Review note (required to reject)" value={kycNote} onChange={(e) => setKycNote(e.target.value)} />
                       {kycError && <p className="text-sm text-[var(--color-error)]">{kycError}</p>}
                       <div className="flex gap-2">
                         {kyc.status !== "verified" && (
                           <Button size="sm" className="flex-1" isLoading={kycReviewMutation.isPending} onClick={() => kycReviewMutation.mutate({ status: "verified" })}>
-                            <BadgeCheck className="h-3.5 w-3.5" /> Mark verified
+                            <BadgeCheck className="h-3.5 w-3.5" /> Mark Verified
                           </Button>
                         )}
                         <Button
@@ -598,7 +629,7 @@ export default function ManagerCaptainsPage() {
                           isLoading={kycReviewMutation.isPending}
                           onClick={() => kycReviewMutation.mutate({ status: "rejected" })}
                         >
-                          {kyc.status === "verified" ? "Reopen (reject)" : "Reject"}
+                          {kyc.status === "verified" ? "Reopen (Reject)" : "Reject"}
                         </Button>
                       </div>
                     </div>
@@ -611,7 +642,7 @@ export default function ManagerCaptainsPage() {
                   {attendanceLoading ? (
                     <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
                   ) : !attendance?.data.length ? (
-                    <EmptyState icon={CalendarCheck} title="No check-ins recorded yet" />
+                    <EmptyState icon={CalendarCheck} title="No Check-Ins Recorded Yet" />
                   ) : (
                     <div className="max-h-80 space-y-1.5 overflow-y-auto">
                       {attendance.data.map((a) => (
@@ -633,7 +664,7 @@ export default function ManagerCaptainsPage() {
                             )}
                             {a.worked_minutes != null && <span>· {Math.floor(a.worked_minutes / 60)}h {a.worked_minutes % 60}m</span>}
                           </span>
-                          <Badge tone={a.status === "present" ? "success" : "neutral"}>{a.status}</Badge>
+                          <Badge tone={a.status === "present" ? "success" : "neutral"}>{toTitle(a.status)}</Badge>
                         </div>
                       ))}
                     </div>
@@ -651,7 +682,7 @@ export default function ManagerCaptainsPage() {
                     <div className="mb-2 flex flex-wrap gap-1.5">
                       {Object.entries(detailPerf.booking_status_counts).map(([status, count]) => (
                         <Badge key={status} tone="neutral">
-                          {STATUS_COUNT_LABELS[status] || status}: {count}
+                          {STATUS_COUNT_LABELS[status] || toTitle(status)}: {count}
                         </Badge>
                       ))}
                     </div>
@@ -659,7 +690,7 @@ export default function ManagerCaptainsPage() {
                   {bookingsLoading || reviewsLoading ? (
                     <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
                   ) : !captainBookings.length ? (
-                    <EmptyState icon={ClipboardList} title="No bookings yet" />
+                    <EmptyState icon={ClipboardList} title="No Bookings Yet" />
                   ) : (
                     <div className="max-h-96 space-y-2 overflow-y-auto">
                       {captainBookings.map((b) => (
@@ -673,7 +704,7 @@ export default function ManagerCaptainsPage() {
           );
         })()}
       </Modal>
-      <Modal open={!!previewPhoto} onClose={() => setPreviewPhoto(null)} title={previewPhoto?.name || "Captain photo"} maxWidth="max-w-xl">
+      <Modal open={!!previewPhoto} onClose={() => setPreviewPhoto(null)} title={previewPhoto?.name || "Captain Photo"} maxWidth="max-w-xl">
         {previewPhoto && <img src={previewPhoto.url} alt={previewPhoto.name} className="max-h-[70vh] w-full rounded-xl object-contain" />}
       </Modal>
     </div>
@@ -709,7 +740,7 @@ function BookingWithReview({ booking, review, onOpen }: { booking: Booking; revi
             {Array.from({ length: 5 }).map((_, i) => (
               <Star key={i} className={`h-3 w-3 ${i < rating ? "fill-[var(--color-secondary)] text-[var(--color-secondary)]" : "text-gray-200"}`} />
             ))}
-            <span className="ml-1.5 text-xs text-[var(--color-text-secondary)]">Customer review</span>
+            <span className="ml-1.5 text-xs text-[var(--color-text-secondary)]">Customer Review</span>
           </div>
           {comment && <p className="mt-1 text-xs text-[var(--color-text-primary)]">{comment}</p>}
         </div>

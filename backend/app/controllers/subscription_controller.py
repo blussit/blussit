@@ -92,14 +92,18 @@ class UserSubscriptionController:
     async def list_mine(self, current_user: CurrentUser):
         return success(await self.service.list_my_subscriptions(current_user.id))
 
-    async def list_for_customer(self, customer_id: str):
-        return success(await self.service.list_for_customer(customer_id))
+    async def list_for_customer(self, customer_id: str, current_user: CurrentUser | None = None):
+        if current_user is None:
+            return success(await self.service.list_for_customer(customer_id))
+        return success(await self.service.list_for_customer(customer_id, current_user.role, current_user.service_center_id))
 
     async def center_overview(self, current_user: CurrentUser, service_center_id: str):
         return success(await self.service.center_overview(service_center_id, current_user.role, current_user.service_center_id))
 
-    async def usage_history(self, subscription_id: str):
-        return success(await self.service.usage_history(subscription_id))
+    async def usage_history(self, subscription_id: str, current_user: CurrentUser | None = None):
+        if current_user is None:
+            return success(await self.service.usage_history(subscription_id))
+        return success(await self.service.usage_history(subscription_id, current_user.role, current_user.service_center_id))
 
     async def subscribe(self, current_user: CurrentUser, payload: SubscribeRequest):
         result = await self.service.subscribe(current_user.id, payload)
@@ -146,6 +150,6 @@ class UserSubscriptionController:
     async def admin_overview(self):
         return success(await self.service.admin_overview())
 
-    async def plan_purchases(self, s, e, pagination: PaginationParams, service_center_id: str | None = None):
-        items, total = await self.service.plan_purchases(s, e, pagination.page, pagination.page_size, service_center_id)
+    async def plan_purchases(self, s, e, pagination: PaginationParams, service_center_id: str | None = None, extra: dict | None = None):
+        items, total = await self.service.plan_purchases(s, e, pagination.page, pagination.page_size, service_center_id, extra)
         return paginated(items, pagination.page, pagination.page_size, total)

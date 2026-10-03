@@ -49,7 +49,7 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
       <Helmet>
         <script type="application/ld+json">{JSON.stringify(jsonLd)}</script>
       </Helmet>
-      <SectionHeader title="What customers say" subtitle="Real doorstep washes, in their own words." />
+      <SectionHeader title="What Customers Say" subtitle="Real doorstep washes, in their own words." />
 
       {/* Auto-advancing swipe row on phones, grid from tablet up */}
       <AutoRail className="mt-6 lg:mt-8" gridClassName="sm:grid-cols-2 lg:grid-cols-3 lg:gap-5">

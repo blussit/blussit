@@ -16,6 +16,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
+from app.core.config import settings
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, PhoneNotVerifiedException, UnauthorizedException
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password_async, verify_password_async
 from app.models.enums import UserRole, UserStatus
@@ -173,6 +174,10 @@ class AuthService:
             "status": UserStatus.ACTIVE.value,
             "service_center_id": payload.service_center_id,
             "created_by": created_by,
+            # The creator chose (and knows) this password — like a
+            # temp-password customer, the new captain/manager must replace
+            # it on first login (MandatoryGates in every portal shell).
+            "must_change_password": True,
         })
         if payload.photo_url:
             # Same field UserUpdateRequest edits and the enriched booking's
@@ -327,14 +332,81 @@ class AuthService:
             raise UnauthorizedException("Your account has been suspended. Contact support.")
         if payload.get("tv", 0) != user.get("token_version", 0):
             raise UnauthorizedException("Session expired — please log in again.")
+        family = await self._spend_refresh_token(payload, refresh_token)
 
         access_token = create_access_token(
             str(user["_id"]),
             user["role"],
             {"service_center_id": user.get("service_center_id"), "tv": user.get("token_version", 0)},
         )
-        new_refresh = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0))
+        new_refresh = create_refresh_token(str(user["_id"]), user["role"], token_version=user.get("token_version", 0), family=family)
         return {"access_token": access_token, "refresh_token": new_refresh, "token_type": "bearer"}
+
+    # Two tabs (or a retried request) refreshing with the SAME token within
+    # this window is a benign race, not theft — both get a fresh pair.
+    REFRESH_REUSE_GRACE_SECONDS = 30
+
+    async def _spend_refresh_token(self, payload: dict, raw_token: str = "") -> str | None:
+        """Refresh-token rotation with reuse detection. Every refresh token
+        is single-use: spending it records its jti (TTL'd to the token's own
+        expiry). Presenting an already-spent one AFTER the grace window means
+        a copy of it is in someone else's hands — the whole chain (family)
+        is revoked, which logs out both the thief and that one device, and
+        the event is audit-logged. Other devices (other families) are
+        untouched. Returns the family the next token continues.
+
+        A legacy token minted before jti existed carries none: it is honoured
+        ONCE — keyed by a hash of the token itself — and its successor joins
+        a fresh family (they all expire within REFRESH_TOKEN_EXPIRE_DAYS of
+        this shipping). It used to be honoured every time it was shown, so a
+        stolen pre-rotation token kept minting fresh chains."""
+        jti, family = payload.get("jti"), payload.get("fam")
+        now = datetime.now(timezone.utc)
+        exp = payload.get("exp")
+        expires_at = datetime.fromtimestamp(exp, timezone.utc) if isinstance(exp, (int, float)) else now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        spent = self.db["spent_refresh_tokens"]
+        if not jti or not family:
+            import hashlib
+
+            legacy_id = "legacy:" + hashlib.sha256((raw_token or "").encode()).hexdigest()
+            try:
+                await spent.insert_one({"_id": legacy_id, "user_id": payload.get("sub"), "spent_at": now, "expires_at": expires_at})
+                return None
+            except DuplicateKeyError:
+                prior = await spent.find_one({"_id": legacy_id})
+            spent_at = (prior or {}).get("spent_at")
+            if spent_at is not None and spent_at.tzinfo is None:
+                spent_at = spent_at.replace(tzinfo=timezone.utc)
+            if spent_at is not None and now - spent_at <= timedelta(seconds=self.REFRESH_REUSE_GRACE_SECONDS):
+                return None
+            raise UnauthorizedException("Session expired — please log in again.")
+        families = self.db["refresh_token_families"]
+        if await families.find_one({"_id": family, "revoked": True}, {"_id": 1}):
+            raise UnauthorizedException("Session expired — please log in again.")
+        try:
+            await spent.insert_one({"_id": jti, "family": family, "user_id": payload.get("sub"), "spent_at": now, "expires_at": expires_at})
+            return family
+        except DuplicateKeyError:
+            prior = await spent.find_one({"_id": jti})
+        spent_at = (prior or {}).get("spent_at")
+        if spent_at is not None and spent_at.tzinfo is None:
+            spent_at = spent_at.replace(tzinfo=timezone.utc)
+        if spent_at is not None and now - spent_at <= timedelta(seconds=self.REFRESH_REUSE_GRACE_SECONDS):
+            return family
+        await families.update_one(
+            {"_id": family},
+            {"$set": {"revoked": True, "revoked_at": now, "user_id": payload.get("sub"),
+                      "expires_at": now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)}},
+            upsert=True,
+        )
+        from app.services.audit_service import AuditService
+
+        await AuditService(self.db).log_action(
+            payload.get("sub") or "", payload.get("role") or "", "REFRESH_TOKEN_REUSE", "auth", payload.get("sub"),
+            {"family": family, "first_spent_at": spent_at.isoformat() if spent_at else None},
+        )
+        logger.warning("Refresh token reuse detected for user %s — family %s revoked", payload.get("sub"), family)
+        raise UnauthorizedException("Session expired — please log in again.")
 
     async def logout(self, user_id: str) -> None:
         """Invalidates every refresh token the user holds (token_version
@@ -421,6 +493,8 @@ class AuthService:
         to send is rolled back (no cooldown, not counted), so the client can
         fall back to the MSG91 widget at once."""
         phone = validate_indian_mobile(phone) or phone
+        if settings.dev_tools_active:
+            return await self._issue_dev_otp(phone, purpose)
         channels = await self._otp_channels(phone)
         if not channels:
             raise BadRequestException(self._OTP_SEND_FAILED)
@@ -462,6 +536,24 @@ class AuthService:
             await self._release_otp_send(phone)
             raise BadRequestException(self._OTP_SEND_FAILED)
         return channel
+
+    async def _issue_dev_otp(self, phone: str, purpose: str) -> str:
+        """LOCAL TESTING ONLY (settings.dev_tools_active): the code is always
+        DEV_OTP_CODE, nothing is sent, and there's no cooldown or hourly cap
+        — every verify path below works unchanged against it."""
+        now = datetime.now(timezone.utc)
+        await self.otp_store.update_one(
+            {"_id": f"otp:{phone}"},
+            {"$set": {
+                "identifier": phone, "otp": settings.DEV_OTP_CODE, "purpose": purpose,
+                "expires_at": now + timedelta(minutes=self._OTP_TTL_MINUTES),
+                "last_sent_at": now, "attempts": 0, "verified": False,
+            }},
+            upsert=True,
+        )
+        await self.otp_store.delete_many({"identifier": phone, "_id": {"$ne": f"otp:{phone}"}})
+        logger.warning("DEV TOOLS: OTP for %s is %s (not sent)", phone, settings.DEV_OTP_CODE)
+        return "whatsapp"
 
     async def _claim_otp_send(self, phone: str) -> None:
         """Counts one code toward this phone's hourly allowance, or refuses.
@@ -773,14 +865,25 @@ class AuthService:
     async def set_initial_password(self, user_id: str, new_password: str) -> None:
         """Password setup WITHOUT the current password — allowed only while
         must_change_password is set (temp-password logins and OTP-logins,
-        which already proved identity). Clears the flag; keeps this
-        session alive (no token_version bump — it's the same person)."""
+        which already proved identity). Clears the flag and signs out every
+        OTHER session (token_version bump): whoever chose the temporary
+        password — the manager who created this captain, say — may have
+        logged in with it, and that session must not outlive the owner's
+        own password. The caller hands this device a fresh token pair."""
         user = await self.users.find_by_id(user_id)
         if not user:
             raise NotFoundException("User not found")
         if not user.get("must_change_password"):
             raise BadRequestException("Use the normal change-password option (current password required).")
-        await self.users.update_by_id(user_id, {"password_hash": await hash_password_async(new_password), "must_change_password": False})
+        claimed = await self.users.collection.update_one(
+            {"_id": ObjectId(user_id), "must_change_password": True},
+            {
+                "$set": {"password_hash": await hash_password_async(new_password), "must_change_password": False},
+                "$inc": {"token_version": 1},
+            },
+        )
+        if not claimed.modified_count:
+            raise BadRequestException("Use the normal change-password option (current password required).")
 
     def _issue_tokens(self, user: dict) -> dict:
         access_token = create_access_token(

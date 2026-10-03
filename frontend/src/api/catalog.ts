@@ -83,6 +83,20 @@ export const slotHoldApi = {
       .then((r) => r.data.data),
   release: (service_center_id: string, date: string, slot_key: string) =>
     apiClient.post("/bookings/hold/release", { service_center_id, date, slot_key, holder_key: getSlotHolderKey() }).catch(() => undefined),
+  /** The tab is closing: a keepalive fetch survives the page going away
+   *  (an XHR doesn't), so the seat is freed now instead of in 5 minutes. */
+  releaseOnExit: (service_center_id: string, date: string, slot_key: string) => {
+    try {
+      void fetch(`${apiClient.defaults.baseURL}/bookings/hold/release`, {
+        method: "POST",
+        keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service_center_id, date, slot_key, holder_key: getSlotHolderKey() }),
+      }).catch(() => undefined);
+    } catch {
+      // nothing to do — the hold simply lapses on its own
+    }
+  },
 };
 
 export const coverageApi = {

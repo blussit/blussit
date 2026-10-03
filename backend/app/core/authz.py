@@ -16,13 +16,31 @@ keeps the dependency direction one-way.
 from app.core.exceptions import BadRequestException, ForbiddenException
 
 
-def ensure_own_center(actor_role: str, actor_center_id: str | None, service_center_id: str) -> None:
+def ensure_own_center(actor_role: str, actor_center_id: str | None, service_center_id: str | None) -> None:
     """Admins bypass this — they're meant to act platform-wide. Everyone
-    else (manager, captain) must have a matching service_center_id."""
+    else (manager, captain) must have a matching service_center_id.
+
+    Fails CLOSED on a missing center on either side: a manager whose
+    account isn't linked to a center yet (None) used to "match" every
+    object that has no center either (None == None) — an unlinked manager
+    could reach unassigned captains' KYC, wallet and GPS. A center-scoped
+    object with no center belongs to the admin."""
     if actor_role == "admin":
         return
-    if actor_center_id != service_center_id:
+    if not actor_center_id or not service_center_id or actor_center_id != service_center_id:
         raise ForbiddenException("You don't have access to this service center")
+
+
+def manager_center_or_raise(actor_role: str, actor_center_id: str | None) -> str | None:
+    """The center a report/list is scoped to for this actor: a manager is
+    ALWAYS their own (never a client-supplied param), and a manager with no
+    center linked gets nothing rather than the platform-wide view an
+    unscoped (None) query would return. Admin -> None (caller decides)."""
+    if actor_role == "admin":
+        return None
+    if not actor_center_id:
+        raise ForbiddenException("Your account isn't linked to a service center yet — ask an admin to link one.")
+    return actor_center_id
 
 
 def resolve_grant_center_id(actor_role: str, actor_center_id: str | None, payload_center_id: str | None) -> str:

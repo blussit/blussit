@@ -44,8 +44,18 @@ async def get_current_user(
 ) -> CurrentUser:
     if credentials is None:
         raise UnauthorizedException("Missing authentication token")
+    return await resolve_access_token(credentials.credentials)
+
+
+async def resolve_access_token(token: str) -> CurrentUser:
+    """Access token -> the CURRENT user record. Shared by every REST route
+    (get_current_user) and the WebSocket endpoint, so both enforce the same
+    revocation rules: deleted/suspended accounts, token_version (logout,
+    password change/reset), and any change of role or center since the
+    token was minted. Role and center always come from the DB row, never
+    from the token's claims."""
     try:
-        payload = decode_token(credentials.credentials)
+        payload = decode_token(token)
     except ValueError as exc:
         raise UnauthorizedException(str(exc)) from exc
 

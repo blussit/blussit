@@ -1,4 +1,5 @@
 import type { SubscriptionPlan, UserSubscription } from "../../types";
+import { toTitle } from "../../lib/titleCase";
 
 /**
  * "Pay with a plan" picker — shared between the customer's own booking flow
@@ -39,7 +40,7 @@ export function SubscriptionPicker({
                   : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
               }`}
             >
-              {plan?.name || "Subscription"} · {sub.remaining_service_count} left
+              {toTitle(plan?.name) || "Subscription"} · {sub.remaining_service_count} Left
             </button>
           );
         })}

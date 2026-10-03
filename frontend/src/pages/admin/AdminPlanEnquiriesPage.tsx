@@ -4,6 +4,7 @@ import { Phone } from "lucide-react";
 import { adminPlanEnquiryApi } from "../../api/admin";
 import { Badge, Button, DataTable, Select } from "../../components/ui";
 import { formatDateTime } from "../../lib/date";
+import { toTitle } from "../../lib/titleCase";
 import type { PlanEnquiry } from "../../types";
 
 const STATUS_TONE: Record<PlanEnquiry["status"], "warning" | "info" | "neutral"> = {
@@ -28,7 +29,7 @@ export default function AdminPlanEnquiriesPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Custom plan requests</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Custom Plan Requests</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           "Request A Custom Plan" submissions from the Monthly Pass section — a fleet, an odd schedule, anything the standard pass doesn't fit.
         </p>
@@ -37,7 +38,7 @@ export default function AdminPlanEnquiriesPage() {
       <DataTable<PlanEnquiry>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle="No requests yet"
+        emptyTitle="No Requests Yet"
         emptyDescription="Custom-plan requests from the website will show up here."
         columns={[
           { header: "Name", accessor: (e) => e.name },
@@ -50,7 +51,7 @@ export default function AdminPlanEnquiriesPage() {
             ),
           },
           {
-            header: "What they need",
+            header: "What They Need",
             accessor: (e) => (
               <div className="max-w-sm text-xs">
                 <p className="font-medium text-[var(--color-text-primary)]">
@@ -75,9 +76,11 @@ export default function AdminPlanEnquiriesPage() {
             header: "Status",
             accessor: (e) => (
               <div className="flex items-center gap-2">
-                <Badge tone={STATUS_TONE[e.status]}>{e.status}</Badge>
+                <Badge tone={STATUS_TONE[e.status]}>{toTitle(e.status)}</Badge>
                 <Select
-                  className="!w-auto !py-1 text-xs"
+                  compact
+                  wrapperClassName="w-32"
+                  aria-label="Enquiry status"
                   value={e.status}
                   onChange={(ev) => statusMutation.mutate({ id: e.id, status: ev.target.value as PlanEnquiry["status"] })}
                 >

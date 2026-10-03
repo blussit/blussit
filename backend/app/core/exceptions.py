@@ -72,3 +72,11 @@ class PhoneNotVerifiedException(ForbiddenException):
 
     def __init__(self, message: str = "Please verify your phone number with an OTP before booking.", details: dict | None = None):
         super().__init__(message, details)
+
+
+class TooManyRequestsException(AppException):
+    status_code = 429
+    error_code = "RATE_LIMITED"
+
+    def __init__(self, message: str = "Too many requests — please wait a moment and try again.", details: dict | None = None):
+        super().__init__(message, details)

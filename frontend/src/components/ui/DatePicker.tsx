@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { FIELD_ERROR, FIELD_ICON, FIELD_LABEL, FIELD_PLACEHOLDER, MENU_PANEL, fieldBox } from "./fieldStyles";
 import { todayIST } from "../../lib/date";
 
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -56,7 +57,7 @@ export interface DatePickerProps {
 }
 
 // A calendar built entirely in-DOM, styled to match Select's trigger/panel
-// exactly (rounded-xl border, primary focus ring, rounded-lg items) — native
+// exactly (the shared v2 field box + menu panel from ./fieldStyles) — native
 // <input type="date"> hands its calendar popup to the OS/webview shell the
 // same way native <select> did, which is what made it render detached and
 // off-panel. This keeps everything anchored, themed, and on-screen.
@@ -165,7 +166,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={fieldId} className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
+        <label htmlFor={fieldId} className={FIELD_LABEL}>
           {label}
         </label>
       )}
@@ -178,27 +179,26 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
           aria-haspopup="dialog"
           aria-expanded={open}
           className={cn(
-            "flex w-full items-center justify-between gap-2 rounded-xl border bg-[var(--color-surface,#fff)] px-3.5 py-2.5 text-left text-sm transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)]",
-            disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:border-[var(--color-primary)]",
-            error ? "border-[var(--color-error)]" : "border-[#F3E5B5]",
+            fieldBox({ error, open, disabled }),
+            "flex items-center justify-between gap-2 pr-3 text-left",
+            !disabled && "cursor-pointer",
             className
           )}
         >
-          <span className={cn("truncate", value ? "text-[var(--color-text-primary)]" : "text-gray-400")}>
+          <span className={cn("truncate", !value && !disabled && FIELD_PLACEHOLDER)}>
             {value ? displayLabel(value) : placeholder}
           </span>
           <span className="flex shrink-0 items-center gap-1">
             {value && !required && (
               <X
-                className="h-3.5 w-3.5 text-gray-400 hover:text-[var(--color-text-primary)]"
+                className="h-3.5 w-3.5 text-[#5F6878] hover:text-[#0E1A33]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onChange("");
                 }}
               />
             )}
-            <Calendar className="h-4 w-4 text-gray-400" />
+            <Calendar className={cn(FIELD_ICON, open && "text-[#0A66F0]")} />
           </span>
         </button>
 
@@ -206,24 +206,24 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
           <div
             role="dialog"
             style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width }}
-            className="z-50 rounded-xl border border-[#F3E5B5] bg-white p-3 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18)]"
+            className={cn("z-50 p-3", MENU_PANEL)}
           >
             <div className="mb-2 flex items-center justify-between">
               <button
                 type="button"
                 onClick={() => goMonth(-1)}
-                className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 hover:text-[var(--color-text-primary)]"
+                className="rounded-lg p-1.5 text-[#5F6878] hover:bg-[#F3F6FA] hover:text-[#0E1A33]"
                 aria-label="Previous month"
               >
                 <ChevronLeft className="h-4 w-4" />
               </button>
-              <span className="text-sm font-medium text-[var(--color-text-primary)]">
+              <span className="text-sm font-semibold text-[#0E1A33]">
                 {MONTH_NAMES[viewM - 1]} {viewY}
               </span>
               <button
                 type="button"
                 onClick={() => goMonth(1)}
-                className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 hover:text-[var(--color-text-primary)]"
+                className="rounded-lg p-1.5 text-[#5F6878] hover:bg-[#F3F6FA] hover:text-[#0E1A33]"
                 aria-label="Next month"
               >
                 <ChevronRight className="h-4 w-4" />
@@ -232,7 +232,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
 
             <div className="grid grid-cols-7 gap-y-1 text-center">
               {WEEKDAY_LABELS.map((wd) => (
-                <span key={wd} className="text-xs font-medium text-gray-400">
+                <span key={wd} className="text-xs font-medium text-[#5F6878]">
                   {wd}
                 </span>
               ))}
@@ -251,12 +251,12 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
                     className={cn(
                       "mx-auto flex h-8 w-8 items-center justify-center rounded-lg text-sm transition-colors",
                       isDisabled
-                        ? "cursor-not-allowed text-gray-300"
+                        ? "cursor-not-allowed text-[#C3CAD6]"
                         : isSelected
-                          ? "bg-[var(--color-primary)] font-medium text-white"
+                          ? "bg-[#0A66F0] font-semibold text-white"
                           : isToday
-                            ? "border border-[var(--color-primary)] text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
-                            : "text-[var(--color-text-primary)] hover:bg-gray-100"
+                            ? "border border-[#0A66F0] font-medium text-[#0A66F0] hover:bg-[#E8F0FE]"
+                            : "text-[#0E1A33] hover:bg-[#F3F6FA]"
                     )}
                   >
                     {d}
@@ -265,7 +265,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
               })}
             </div>
 
-            <div className="mt-2 flex items-center justify-between border-t border-[#F3E5B5] pt-2">
+            <div className="mt-2 flex items-center justify-between border-t border-[#E4E9F1] pt-2">
               <button
                 type="button"
                 onClick={() => {
@@ -276,7 +276,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
                   onChange(todayKey);
                   setOpen(false);
                 }}
-                className="text-xs font-medium text-[var(--color-primary)] hover:underline"
+                className="text-xs font-semibold text-[#0A66F0] hover:underline"
               >
                 Today
               </button>
@@ -287,7 +287,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
                     onChange("");
                     setOpen(false);
                   }}
-                  className="text-xs font-medium text-gray-400 hover:text-[var(--color-text-primary)]"
+                  className="text-xs font-medium text-[#5F6878] hover:text-[#0E1A33]"
                 >
                   Clear
                 </button>
@@ -296,7 +296,7 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
           </div>
         )}
       </div>
-      {error && <p className="mt-1 text-xs text-[var(--color-error)]">{error}</p>}
+      {error && <p className={FIELD_ERROR}>{error}</p>}
     </div>
   );
 }

@@ -114,7 +114,7 @@ class BookingModel(BusinessRecordBase):
     # BookingService.find_bookings_late_to_start.
     late_start_reminder_sent_at: Optional[datetime] = None
 
-    # Several vehicles washed on ONE visit share a group id. They are real,
+    # Several vehicles wash on ONE visit share a group id. They are real,
     # separate bookings — each keeps its own plate verification, before/after
     # photos, pass redemption and review — but they were created together,
     # occupy ONE slot seat between them (same address, no travel in between),

@@ -7,8 +7,16 @@ class CreateOrderRequest(BaseModel):
     """The client only NAMES what it's paying for — the amount is always
     resolved server-side from the stored booking/plan (see
     PaymentService.create_order)."""
-    purpose: Literal["booking", "booking_group", "subscription"]
+    purpose: Literal["booking", "booking_group", "subscription", "society"]
     booking_id: Optional[str] = None
+    # Society plans (docs/SOCIETY_PLANS.md): the enrollment being paid for,
+    # and whether this is its next-cycle renewal. The amount comes from the
+    # enrollment's frozen per-car prices, never from the client.
+    society_enrollment_id: Optional[str] = None
+    society_renewal: bool = False
+    # Renewal only: a coupon the resident applied (validated server-side;
+    # a first payment uses the coupon frozen on the request).
+    society_coupon_code: Optional[str] = Field(default=None, max_length=30)
     # A multi-vehicle visit is paid for ONCE — the order covers every car on
     # it, and one verified signature settles them all.
     booking_group_id: Optional[str] = None

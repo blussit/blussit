@@ -45,6 +45,7 @@ export default function AdminHomepageSettingsPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["homepage-config"] });
+      queryClient.invalidateQueries({ queryKey: ["settings-history", "homepage_config"] });
       setSaved(true);
       setError("");
       setTimeout(() => setSaved(false), 2500);
@@ -57,17 +58,17 @@ export default function AdminHomepageSettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Homepage settings</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Homepage Settings</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           The hero badge, headline, subtext and promo banner on the landing page live here — saved changes appear on the site immediately.
         </p>
-        <SettingsHistory settingKey="homepage_config" labels={{ hero_badge_text: "Badge text", hero_headline: "Headline", hero_subtext: "Subtext", banner_active: "Banner shown", banner_text: "Banner text" }} />
+        <SettingsHistory settingKey="homepage_config" labels={{ hero_badge_text: "Badge Text", hero_headline: "Headline", hero_subtext: "Subtext", banner_active: "Banner Shown", banner_text: "Banner Text" }} />
       </div>
 
       <Card>
         <CardBody className="space-y-4">
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Hero section</h2>
-          <Input label="Badge text" value={form.hero_badge_text} onChange={(e) => setForm({ ...form, hero_badge_text: e.target.value })} />
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Hero Section</h2>
+          <Input label="Badge Text" value={form.hero_badge_text} onChange={(e) => setForm({ ...form, hero_badge_text: e.target.value })} />
           <Input label="Headline" value={form.hero_headline} onChange={(e) => setForm({ ...form, hero_headline: e.target.value })} />
           <Input label="Subtext" value={form.hero_subtext} onChange={(e) => setForm({ ...form, hero_subtext: e.target.value })} />
         </CardBody>
@@ -76,14 +77,14 @@ export default function AdminHomepageSettingsPage() {
       <Card>
         <CardBody className="space-y-3">
           <h2 className="flex items-center gap-2 font-semibold text-[var(--color-text-primary)]">
-            <Megaphone className="h-4 w-4" /> Promo banner
+            <Megaphone className="h-4 w-4" /> Promo Banner
           </h2>
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
             <input type="checkbox" checked={form.banner_active} onChange={(e) => setForm({ ...form, banner_active: e.target.checked })} />
-            Show a banner strip above the hero
+            Show A Banner Strip Above The Hero
           </label>
           <Input
-            label="Banner text"
+            label="Banner Text"
             value={form.banner_text}
             onChange={(e) => setForm({ ...form, banner_text: e.target.value })}
             placeholder="e.g. Diwali special — 20% off all combos this week"
@@ -95,7 +96,7 @@ export default function AdminHomepageSettingsPage() {
       {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
       {saved && <p className="text-sm text-[var(--color-success)]">Homepage settings updated.</p>}
       <Button isLoading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
-        <Save className="h-4 w-4" /> Save homepage settings
+        <Save className="h-4 w-4" /> Save Homepage Settings
       </Button>
     </div>
   );

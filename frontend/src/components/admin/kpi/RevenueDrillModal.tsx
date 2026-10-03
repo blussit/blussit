@@ -8,6 +8,7 @@ import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
 import { Pager } from "../../shared/ListControls";
 import { format, formatSlot } from "../../../lib/date";
 import { formatINR } from "./charts";
+import { bookingCarAndService, carAndService, toTitle } from "../../../lib/titleCase";
 import type { KpiPeriodParams } from "../../../api/admin";
 import type { Booking } from "../../../types";
 
@@ -98,13 +99,14 @@ export function RevenueDrillModal({
               <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">No completed washes in this period.</p>
             ) : (
               <div className="space-y-2">
-                <p className="text-xs text-gray-400">{bookings.data.meta.total} total</p>
+                <p className="text-xs text-gray-400">{bookings.data.meta.total} Total</p>
                 <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
                   {bookings.data.data.map((b) => (
                     <div key={b.id} className="px-3.5 py-2.5">
                       <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium text-black">{b.customer_name || "—"} · {b.booking_number}</p>
+                          <p className="truncate text-xs text-gray-600">{bookingCarAndService(b)}</p>
                           <p className="text-xs text-gray-500">{format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}</p>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
@@ -124,7 +126,7 @@ export function RevenueDrillModal({
             <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">No plans purchased in this period.</p>
           ) : (
             <div className="space-y-2">
-              <p className="text-xs text-gray-400">{plans.data.meta.total} total</p>
+              <p className="text-xs text-gray-400">{plans.data.meta.total} Total</p>
               <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
                 {plans.data.data.map((p) => (
                   <div key={p.id} className="px-3.5 py-2.5">
@@ -134,7 +136,10 @@ export function RevenueDrillModal({
                       className="flex w-full items-center justify-between gap-3 text-left"
                     >
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-black">{p.customer_name} · {p.plan_name}</p>
+                        <p className="truncate text-sm font-medium text-black">{toTitle(p.plan_name)} · {p.customer_name}</p>
+                        {(p.vehicle_type_name || p.service_name) && (
+                          <p className="truncate text-xs text-gray-600">{carAndService(p.vehicle_type_name, p.service_name)}</p>
+                        )}
                         <p className="text-xs text-gray-500">
                           {format(p.created_at)}
                           {p.payment_method ? ` · ${p.payment_method}` : ""}

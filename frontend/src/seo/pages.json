@@ -11,20 +11,6 @@
       "priority": "1.0"
     },
     {
-      "path": "/services",
-      "title": "Car Wash & Bike Wash Services in Indore | Blussit",
-      "description": "All doorstep car wash, bike wash and detailing services in Indore, with transparent pricing for every vehicle type. Book online in minutes — we come to you.",
-      "changefreq": "weekly",
-      "priority": "0.9"
-    },
-    {
-      "path": "/plans",
-      "title": "Car Wash Subscription Plans in Indore | Blussit",
-      "description": "Monthly, quarterly and yearly doorstep car wash plans in Indore. Fixed washes, fixed price, zero hassle — save more with a Blussit subscription.",
-      "changefreq": "weekly",
-      "priority": "0.9"
-    },
-    {
       "path": "/book",
       "title": "Book a Doorstep Car Wash Online | Blussit",
       "description": "Book a professional car or bike wash at your doorstep in Indore in under two minutes. Pick a slot, choose your service, and relax while we do the rest.",

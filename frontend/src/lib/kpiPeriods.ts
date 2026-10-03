@@ -7,16 +7,16 @@
 export const PERIODS = [
   { key: "today", label: "Today" },
   { key: "yesterday", label: "Yesterday" },
-  { key: "7d", label: "7 days" },
-  { key: "30d", label: "30 days" },
-  { key: "this_month", label: "This month" },
-  { key: "last_month", label: "Last month" },
+  { key: "7d", label: "Last 7 Days" },
+  { key: "30d", label: "Last 30 Days" },
+  { key: "this_month", label: "This Month" },
+  { key: "last_month", label: "Last Month" },
 ] as const;
 
 export type RevenueScope = "combined" | "bookings" | "plans";
 
 export const REVENUE_SCOPES: { key: RevenueScope; label: string }[] = [
   { key: "combined", label: "Bookings + Plans" },
-  { key: "bookings", label: "Bookings only" },
-  { key: "plans", label: "Plans only" },
+  { key: "bookings", label: "Bookings Only" },
+  { key: "plans", label: "Plans Only" },
 ];

@@ -39,7 +39,10 @@ class CouponCreateRequest(BaseModel):
 
 class CouponUpdateRequest(BaseModel):
     description: Optional[str] = None
-    value: Optional[float] = None
+    # Was missing: the admin form sends it on edit, pydantic dropped it and
+    # only `value` landed — "20%" edited to "flat ₹100" became 100% off.
+    coupon_type: Optional[CouponType] = None
+    value: Optional[float] = Field(default=None, ge=0)
     min_order_value: Optional[float] = None
     max_discount_amount: Optional[float] = None
     usage_limit_per_user: Optional[int] = None

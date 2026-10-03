@@ -39,7 +39,13 @@ export default function NotificationsPage() {
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Notifications</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{data?.unread_count || 0} unread</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => markAllReadMutation.mutate()}>
+        <Button
+          variant="outline"
+          size="sm"
+          isLoading={markAllReadMutation.isPending}
+          disabled={!data?.unread_count}
+          onClick={() => markAllReadMutation.mutate()}
+        >
           <BellOff className="h-4 w-4" /> Mark all read
         </Button>
       </div>
@@ -47,7 +53,7 @@ export default function NotificationsPage() {
       {isLoading ? (
         <PageLoader />
       ) : !data?.data.length ? (
-        <EmptyState icon={Bell} title="No notifications yet" />
+        <EmptyState icon={Bell} title="No Notifications Yet" />
       ) : (
         <div className="space-y-2">
           {data.data.map((n) => {

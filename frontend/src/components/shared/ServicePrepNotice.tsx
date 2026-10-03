@@ -17,7 +17,7 @@ export function ServicePrepNotice({ services, className = "" }: { services: Serv
       <span>
         Please keep water and a power point near the vehicle.{" "}
         <a href="/service-policy" target="_blank" rel="noreferrer" className="font-semibold text-black underline underline-offset-2">
-          Read more
+          Read More
         </a>
       </span>
     </p>

@@ -7,7 +7,9 @@ import { adminSubscriptionPlanApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { useToast } from "../../context/ToastContext";
 import { passFromPrice, passHeadlinePrice } from "../../lib/passPricing";
+import { toTitle } from "../../lib/titleCase";
 import type { SubscriptionPlan } from "../../types";
 
 const emptyForm = {
@@ -60,6 +62,7 @@ function totalOf(quotas: Record<string, string>): number {
 
 export default function AdminSubscriptionPlansPage() {
   const queryClient = useQueryClient();
+  const { push: pushToast } = useToast();
   const confirm = useConfirm();
   const { data, isLoading } = useQuery({ queryKey: ["admin-plans"], queryFn: () => subscriptionApi.plans(false) });
   const { data: categories } = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
@@ -102,7 +105,7 @@ export default function AdminSubscriptionPlansPage() {
       ) ?? 1;
     return {
       name: form.name,
-      description: form.description || undefined,
+      description: form.description.trim() || null,
       billing_cycle: form.billing_cycle,
       price: derivedPrice,
       plan_discount_percent: Number(form.plan_discount_percent) || 0,
@@ -137,16 +140,23 @@ export default function AdminSubscriptionPlansPage() {
   const toggleActiveMutation = useMutation({
     mutationFn: (p: SubscriptionPlan) => adminSubscriptionPlanApi.update(p.id, { is_active: !p.is_active }),
     onSuccess: invalidate,
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
+  // Refused (409) while customers still hold the plan — the message says
+  // to switch it off instead; it used to fail silently.
   const deleteMutation = useMutation({
     mutationFn: (id: string) => adminSubscriptionPlanApi.remove(id),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Plan deleted" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Can't delete this plan", message: getErrorMessage(err) }),
   });
 
-  const categoryName = (id: string) => categories?.find((c) => c.id === id)?.name || id;
-  const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
-  const serviceName = (id: string) => services.find((s) => s.id === id)?.name || id;
+  const categoryName = (id: string) => toTitle(categories?.find((c) => c.id === id)?.name) || id;
+  const vehicleTypeName = (id: string) => toTitle(vehicleTypes?.find((t) => t.id === id)?.name) || id;
+  const serviceName = (id: string) => toTitle(services.find((s) => s.id === id)?.name) || id;
 
   const toggleIncludedService = (id: string) => {
     setForm((f) => ({ ...f, included_service_ids: f.included_service_ids.includes(id) ? f.included_service_ids.filter((v) => v !== id) : [...f.included_service_ids, id] }));
@@ -167,7 +177,7 @@ export default function AdminSubscriptionPlansPage() {
     for (const [k, v] of Object.entries(plan.category_quotas || {})) quotas[k] = String(v);
     setForm({
       name: plan.name,
-      description: "",
+      description: plan.description || "",
       billing_cycle: plan.billing_cycle,
       service_pass_prices: flattenPassPrices(plan.service_pass_prices),
       plan_discount_percent: plan.plan_discount_percent != null ? String(plan.plan_discount_percent) : "",
@@ -185,22 +195,22 @@ export default function AdminSubscriptionPlansPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Subscription plans</h1>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Subscription Plans</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             Define what each plan actually covers — e.g. 4 normal washes + 1 deep clean + 1 foaming per month.
           </p>
         </div>
         <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add plan
+          <Plus className="h-4 w-4" /> Add Plan
         </Button>
       </div>
 
       <DataTable<SubscriptionPlan>
         isLoading={isLoading}
         data={data || []}
-        emptyTitle="No subscription plans yet"
+        emptyTitle="No Subscription Plans Yet"
         columns={[
-          { header: "Name", accessor: (p) => p.name },
+          { header: "Name", accessor: (p) => toTitle(p.name) },
           { header: "Cycle", accessor: (p) => <span className="capitalize">{p.billing_cycle}</span> },
           {
             header: "Price",
@@ -223,11 +233,11 @@ export default function AdminSubscriptionPlansPage() {
                   {p.total_service_count}× {p.included_service_ids.map(serviceName).join(", ")}
                 </span>
               ) : (
-                <span className="text-xs text-[var(--color-error)]">No service picked</span>
+                <span className="text-xs text-[var(--color-error)]">No Service Picked</span>
               ),
           },
           {
-            header: "Vehicle types",
+            header: "Vehicle Types",
             accessor: (p) => (p.vehicle_types?.length ? <span className="text-xs">{p.vehicle_types.map(vehicleTypeName).join(", ")}</span> : "All"),
           },
           {
@@ -254,7 +264,7 @@ export default function AdminSubscriptionPlansPage() {
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
                   onClick={async () => {
-                    if (await confirm({ title: `Delete "${p.name}"?`, message: "This cannot be undone.", tone: "danger" })) deleteMutation.mutate(p.id);
+                    if (await confirm({ title: `Delete "${toTitle(p.name)}"?`, message: "This cannot be undone.", tone: "danger" })) deleteMutation.mutate(p.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -265,7 +275,7 @@ export default function AdminSubscriptionPlansPage() {
         ]}
       />
 
-      <Modal open={open} onClose={closeModal} title={editing ? "Edit subscription plan" : "Add subscription plan"} maxWidth="max-w-xl">
+      <Modal open={open} onClose={closeModal} title={editing ? "Edit Subscription Plan" : "Add Subscription Plan"} maxWidth="max-w-xl">
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -274,19 +284,18 @@ export default function AdminSubscriptionPlansPage() {
             editing ? updateMutation.mutate() : createMutation.mutate();
           }}
         >
-          <Input label="Plan name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-          <Input label="Description (optional)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          <Input label="Plan Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          <Input label="Description (Optional)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
           <Select
-            label="Billing cycle"
+            label="Billing Cycle"
             value={form.billing_cycle}
             onChange={(e) => setForm({ ...form, billing_cycle: e.target.value as "monthly" | "quarterly" | "yearly" })}
           >
+            {/* Passes are monthly-only (the server refuses any other cycle). */}
             <option value="monthly">Monthly</option>
-            <option value="quarterly">Quarterly</option>
-            <option value="yearly">Yearly</option>
           </Select>
           <div className="rounded-xl border-2 border-dashed border-[var(--color-primary)]/40 p-4">
-            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Which washes this pass is sold for</p>
+            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Which Washes This Pass Is Sold For</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
               The buyer picks ONE of these at purchase, and that is the only wash the pass ever covers.
             </p>
@@ -300,7 +309,7 @@ export default function AdminSubscriptionPlansPage() {
                     form.included_service_ids.includes(s.id) ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600"
                   }`}
                 >
-                  {s.name}
+                  {toTitle(s.name)}
                 </button>
               ))}
             </div>
@@ -311,7 +320,7 @@ export default function AdminSubscriptionPlansPage() {
                 monthly price and is what the customer is charged. */}
             {!!form.included_service_ids.length && (
               <div className="mt-4 border-t border-gray-100 pt-3">
-                <p className="text-sm font-medium text-[var(--color-text-primary)]">Monthly price per wash</p>
+                <p className="text-sm font-medium text-[var(--color-text-primary)]">Monthly Price Per Wash</p>
                 <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
                   Leave blank to calculate it ({form.total_service_count} washes less the discount below). Type any figure.
                 </p>
@@ -321,7 +330,7 @@ export default function AdminSubscriptionPlansPage() {
                     const types = form.vehicle_types.length ? form.vehicle_types : (vehicleTypes || []).map((t) => t.id);
                     return (
                       <div key={sid}>
-                        <p className="mb-1 text-xs font-semibold text-black">{service?.name || sid}</p>
+                        <p className="mb-1 text-xs font-semibold text-black">{toTitle(service?.name) || sid}</p>
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                           {types.map((tid) => (
                             <Input
@@ -347,7 +356,7 @@ export default function AdminSubscriptionPlansPage() {
                 </div>
                 <div className="mt-3 max-w-[220px]">
                   <Input
-                    label="Pass discount (%)"
+                    label="Pass Discount (%)"
                     type="number"
                     min={0}
                     max={90}
@@ -360,7 +369,7 @@ export default function AdminSubscriptionPlansPage() {
             )}
             <div className="mt-3">
               <Input
-                label="Total visits included"
+                label="Total Visits Included"
                 type="number"
                 min={1}
                 value={form.total_service_count}
@@ -371,15 +380,15 @@ export default function AdminSubscriptionPlansPage() {
           </div>
 
           <div className="rounded-xl border border-dashed border-gray-300 p-4">
-            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Advanced: split by category instead (optional)</p>
+            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Advanced: Split By Category Instead (Optional)</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
               For a plan that mixes categories (e.g. 4 Normal Clean + 1 Deep Clean) rather than one fixed service — set counts
-              here and they override "Total visits included" above. Leave every category at 0 to use the simple total instead.
+              here and they override "Total Visits Included" above. Leave every category at 0 to use the simple total instead.
             </p>
             <div className="space-y-2">
               {(categories || []).map((c) => (
                 <div key={c.id} className="grid grid-cols-[1fr_100px] items-center gap-3">
-                  <span className="text-sm text-[var(--color-text-primary)]">{c.name}</span>
+                  <span className="text-sm text-[var(--color-text-primary)]">{toTitle(c.name)}</span>
                   <Input
                     type="number"
                     min={0}
@@ -390,11 +399,11 @@ export default function AdminSubscriptionPlansPage() {
                 </div>
               ))}
             </div>
-            <p className="mt-3 text-xs font-medium text-[var(--color-text-secondary)]">Total services included: {totalOf(form.category_quotas)}</p>
+            <p className="mt-3 text-xs font-medium text-[var(--color-text-secondary)]">Total Services Included: {totalOf(form.category_quotas)}</p>
           </div>
 
           <div>
-            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Eligible vehicle types</p>
+            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Eligible Vehicle Types</p>
             <div className="flex flex-wrap gap-2">
               {(vehicleTypes || []).map((t) => (
                 <button
@@ -405,7 +414,7 @@ export default function AdminSubscriptionPlansPage() {
                     form.vehicle_types.includes(t.id) ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600"
                   }`}
                 >
-                  {t.name}
+                  {toTitle(t.name)}
                 </button>
               ))}
             </div>
@@ -414,7 +423,7 @@ export default function AdminSubscriptionPlansPage() {
 
           {(data || []).filter((p) => p.id !== editing?.id).length > 0 && (
             <div>
-              <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Can upgrade to</p>
+              <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Can Upgrade To</p>
               <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
                 A subscriber on this plan can only upgrade to plans picked here — nothing is allowed by default.
               </p>
@@ -430,7 +439,7 @@ export default function AdminSubscriptionPlansPage() {
                         form.upgrade_to_plan_ids.includes(p.id) ? "bg-[var(--color-secondary)] text-white" : "bg-gray-100 text-gray-600"
                       }`}
                     >
-                      {p.name}
+                      {toTitle(p.name)}
                     </button>
                   ))}
               </div>
@@ -439,7 +448,7 @@ export default function AdminSubscriptionPlansPage() {
 
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
             <input type="checkbox" checked={form.is_popular} onChange={(e) => setForm({ ...form, is_popular: e.target.checked })} />
-            Mark as "Most popular"
+            Mark As "Most Popular"
           </label>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
@@ -448,7 +457,7 @@ export default function AdminSubscriptionPlansPage() {
             disabled={!form.included_service_ids.length}
             isLoading={createMutation.isPending || updateMutation.isPending}
           >
-            {editing ? "Save changes" : "Add plan"}
+            {editing ? "Save Changes" : "Add Plan"}
           </Button>
         </form>
       </Modal>

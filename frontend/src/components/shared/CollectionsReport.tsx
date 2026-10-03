@@ -4,6 +4,7 @@ import { AlertTriangle, IndianRupee } from "lucide-react";
 import { paymentApi, type CollectionsReport as Report } from "../../api/payment";
 import { Card, CardBody, CardHeader, Input } from "../ui";
 import { formatDateTime } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 
 /**
  * The money-acknowledgment ledger, shared by both oversight levels:
@@ -17,9 +18,9 @@ type PresetKey = "today" | "week" | "month" | "30d" | "custom";
 
 const PRESETS: { key: PresetKey; label: string }[] = [
   { key: "today", label: "Today" },
-  { key: "week", label: "This week" },
-  { key: "month", label: "This month" },
-  { key: "30d", label: "Last 30 days" },
+  { key: "week", label: "This Week" },
+  { key: "month", label: "This Month" },
+  { key: "30d", label: "Last 30 Days" },
 ];
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -88,7 +89,7 @@ export function CollectionsReportCard({
                 onClick={() => applyPreset(option.key)}
                 aria-pressed={preset === option.key}
                 className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
-                  preset === option.key ? "border-black bg-black text-white" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
+                  preset === option.key ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-primary)]" : "border-[var(--color-card-border)] text-[var(--color-text-secondary)] hover:border-gray-400"
                 }`}
               >
                 {option.label}
@@ -118,7 +119,7 @@ export function CollectionsReportCard({
           className="mb-3 text-xs text-[var(--color-text-secondary)]"
           title={'Paid bookings only. "Uncollected" = completed washes with no payment recorded yet.'}
         >
-          {PRESETS.find((option) => option.key === preset)?.label || "Selected range"}
+          {PRESETS.find((option) => option.key === preset)?.label || "Selected Range"}
         </p>
         {isLoading ? (
           <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
@@ -128,10 +129,10 @@ export function CollectionsReportCard({
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px] text-left text-sm">
               <thead>
-                <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-[var(--color-text-secondary)]">
+                <tr className="border-b border-gray-100 text-xs text-[var(--color-text-secondary)]">
                   <th className="py-2 pr-3 font-medium">{entityLabel}</th>
                   <th className="py-2 pr-3 font-medium">Washes</th>
-                  <th className="py-2 pr-3 font-medium">Plan washes</th>
+                  <th className="py-2 pr-3 font-medium">Plan Washes</th>
                   <th className="py-2 pr-3 font-medium">Cash</th>
                   <th className="py-2 pr-3 font-medium">Online</th>
                   <th className="py-2 font-medium">Uncollected</th>
@@ -141,8 +142,8 @@ export function CollectionsReportCard({
                 {rows.map((r) => (
                   <tr key={r.captain_id || r.service_center_id || "none"} className="border-b border-gray-50 last:border-0">
                     <td className="py-2.5 pr-3">
-                      <span className="font-medium text-[var(--color-text-primary)]">{r.captain_name || r.center_name || "—"}</span>
-                      {r.employee_id && <span className="ml-1.5 rounded-full bg-black px-1.5 py-0.5 font-mono-num text-[9px] font-bold text-white">{r.employee_id}</span>}
+                      <span className="font-medium text-[var(--color-text-primary)]">{(r.captain_id && r.captain_id !== "manager" ? r.captain_name : toTitle(r.captain_name)) || r.center_name || "—"}</span>
+                      {r.employee_id && <span className="ml-1.5 whitespace-nowrap rounded-full bg-[var(--ui-icon-bg,#000)] px-1.5 py-0.5 font-mono-num text-[9px] font-bold text-[var(--ui-ink,#fff)]">{r.employee_id}</span>}
                     </td>
                     <td className="py-2.5 pr-3 font-mono-num">{r.washes_count}</td>
                     <td className="py-2.5 pr-3 font-mono-num">{r.plan_washes_count}</td>
@@ -192,7 +193,7 @@ export function CollectionsReportCard({
         {!!data?.attention?.length && (
           <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
             <p className="mb-2 flex items-center gap-1.5 text-sm font-bold text-amber-800">
-              <AlertTriangle className="h-4 w-4" /> Payments needing attention ({data.attention.length})
+              <AlertTriangle className="h-4 w-4" /> Payments Needing Attention ({data.attention.length})
             </p>
             <div className="space-y-1.5">
               {data.attention.map((a, i) => (
@@ -221,12 +222,17 @@ function AttentionRow({ item, queryKey }: { item: NonNullable<Report["attention"
     <div className="text-xs text-amber-900">
       <p>
         <span className="font-mono-num font-bold">₹{item.amount}</span>
-        {item.booking_number ? ` · ${item.booking_number}` : item.purpose === "subscription" ? " · subscription" : ""} — {item.reason}
+        {item.booking_number
+          ? ` · ${item.booking_number}`
+          : item.purpose === "subscription"
+            ? ` · ${[toTitle(item.plan_name) || "Plan", carAndService(item.vehicle_type_name, item.service_name)].filter(Boolean).join(" · ")}`
+            : ""}{" "}
+        — {item.reason}
         {item.flagged_at ? ` (${formatDateTime(item.flagged_at)})` : ""}
         {item.payment_id ? <span className="font-mono-num"> · {item.payment_id}</span> : null}
         {item.id && !open && (
           <button type="button" className="ml-2 font-semibold underline" onClick={() => setOpen(true)}>
-            Mark resolved
+            Mark Resolved
           </button>
         )}
       </p>

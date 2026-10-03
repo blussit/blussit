@@ -11,13 +11,15 @@ import {
   ArrowLeft, Bot, Check, CheckCheck, ChevronDown, CircleAlert, FileText,
   Info, MapPin, MessageSquarePlus, Paperclip, Search, Send, User, X,
 } from "lucide-react";
-import { Badge, Button, Spinner } from "../../ui";
+import { Badge, Button, Select, Spinner } from "../../ui";
+import { MENU_ITEM, MENU_ITEM_IDLE, MENU_PANEL } from "../../ui/fieldStyles";
 import { whatsappCrmApi, type WaConversation, type WaMessage } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
 import { NewConversationModal, SendTemplateModal } from "./modals";
 import { CustomerDetailDrawer } from "../../shared/CustomerDetailDrawer";
 import { useDebouncedValue } from "../../shared/ListControls";
 import { formatClockIST, formatSlot } from "../../../lib/date";
+import { toTitle } from "../../../lib/titleCase";
 
 const FILTERS = [
   { key: "all", label: "All" },
@@ -25,10 +27,10 @@ const FILTERS = [
   { key: "open", label: "Open" },
   { key: "pending", label: "Pending" },
   { key: "resolved", label: "Resolved" },
-  { key: "mine", label: "Assigned to me" },
-  { key: "booking", label: "Booking related" },
+  { key: "mine", label: "Assigned To Me" },
+  { key: "booking", label: "Booking Related" },
   { key: "complaint", label: "Complaint" },
-  { key: "new_customer", label: "New customer" },
+  { key: "new_customer", label: "New Customer" },
 ];
 
 function timeLabel(iso: string | null): string {
@@ -138,7 +140,7 @@ export function InboxView({ initialActive = null }: { initialActive?: string | n
                 {c.has_active_booking && <span className="rounded-full bg-sky-50 px-1.5 py-0.5 text-[9px] font-semibold text-sky-700">BOOKING</span>}
                 {c.bot_paused && <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700">AGENT</span>}
                 {c.tags.slice(0, 2).map((t) => (
-                  <span key={t} className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-medium text-gray-600">{t}</span>
+                  <span key={t} className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-medium text-gray-600">{toTitle(t)}</span>
                 ))}
               </div>
             </button>
@@ -146,7 +148,7 @@ export function InboxView({ initialActive = null }: { initialActive?: string | n
           {hasNextPage && (
             <div className="p-3">
               <Button size="sm" variant="outline" className="w-full" isLoading={isFetchingNextPage} onClick={() => fetchNextPage()}>
-                Load older conversations
+                Load Older Conversations
               </Button>
             </div>
           )}
@@ -324,7 +326,7 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
           </div>
         ) : (
           <Button className="w-full" variant="secondary" onClick={() => setTemplateOpen(true)}>
-            Select an approved template to start the conversation
+            Select An Approved Template To Start The Conversation
           </Button>
         )}
       </div>
@@ -347,15 +349,18 @@ function HeaderActions({ waId, conversation, onToggleProfile }: { waId: string; 
 
   return (
     <div className="relative flex items-center gap-1">
-      <select
+      <Select
+        compact
+        wrapperClassName="hidden w-[9rem] sm:block"
+        className="!h-8 !text-xs"
         title="Assign conversation"
+        aria-label="Assign conversation"
         value={conversation?.assigned_to || ""}
         onChange={(e) => assign.mutate(e.target.value || null)}
-        className="hidden max-w-[9rem] rounded-lg border border-gray-200 px-1.5 py-1 text-[11px] text-gray-600 outline-none sm:block"
       >
         <option value="">Unassigned</option>
         {(agents || []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-      </select>
+      </Select>
       {conversation?.crm_status !== "resolved" ? (
         <button type="button" onClick={() => setStatus.mutate("resolved")} className="hidden rounded-lg bg-green-50 px-2 py-1 text-[11px] font-semibold text-green-700 hover:bg-green-100 sm:block">
           Resolve
@@ -372,11 +377,11 @@ function HeaderActions({ waId, conversation, onToggleProfile }: { waId: string; 
         <ChevronDown className="h-4 w-4" />
       </button>
       {menuOpen && (
-        <div className="absolute right-0 top-9 z-30 w-48 rounded-xl border border-gray-100 bg-white p-1 shadow-lg" onMouseLeave={() => setMenuOpen(false)}>
-          <MenuBtn onClick={() => { setStatus.mutate("pending"); setMenuOpen(false); }}>Mark as pending</MenuBtn>
-          <MenuBtn onClick={() => { setStatus.mutate("open"); setMenuOpen(false); }}>Mark as open</MenuBtn>
+        <div className={`absolute right-0 top-9 z-30 w-52 p-1 ${MENU_PANEL}`} onMouseLeave={() => setMenuOpen(false)}>
+          <MenuBtn onClick={() => { setStatus.mutate("pending"); setMenuOpen(false); }}>Mark As Pending</MenuBtn>
+          <MenuBtn onClick={() => { setStatus.mutate("open"); setMenuOpen(false); }}>Mark As Open</MenuBtn>
           <MenuBtn onClick={() => { toggleBot.mutate(!conversation?.bot_paused); setMenuOpen(false); }}>
-            {conversation?.bot_paused ? "Hand back to booking bot" : "Pause booking bot here"}
+            {conversation?.bot_paused ? "Hand Back To Booking Bot" : "Pause Booking Bot Here"}
           </MenuBtn>
         </div>
       )}
@@ -386,7 +391,7 @@ function HeaderActions({ waId, conversation, onToggleProfile }: { waId: string; 
 
 function MenuBtn({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className="block w-full rounded-lg px-2.5 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50">
+    <button type="button" onClick={onClick} className={`block w-full text-left ${MENU_ITEM} ${MENU_ITEM_IDLE}`}>
       {children}
     </button>
   );
@@ -420,31 +425,76 @@ function Bubble({ m }: { m: WaMessage }) {
   );
 }
 
+/**
+ * The media route is admin-only and auth is header-only, so a plain
+ * <img src> / <a href> / <video src> at it always got a 401 (the browser
+ * never sends the bearer token). Fetch it through the authenticated API
+ * client as a blob and hand the element a local object URL instead.
+ */
+function useMediaBlobUrl(mediaId: string | undefined) {
+  const { data, isError } = useQuery({
+    queryKey: ["wa-media", mediaId],
+    queryFn: () => whatsappCrmApi.mediaBlob(mediaId!),
+    enabled: !!mediaId,
+    staleTime: Infinity,
+    gcTime: 10 * 60 * 1000,
+    retry: 1,
+  });
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    const objectUrl = URL.createObjectURL(data);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [data]);
+  return { url, failed: isError };
+}
+
+function MediaFallback({ label }: { label: string }) {
+  return <p className="italic text-gray-400">{label}</p>;
+}
+
 function MessageBody({ m }: { m: WaMessage }) {
+  const isMedia = !!m.media_id && (m.type === "image" || m.type === "document" || m.media_type === "document" || m.type === "video" || m.type === "audio");
+  const media = useMediaBlobUrl(isMedia ? m.media_id || undefined : undefined);
   if (m.type === "image" && m.media_id) {
+    if (media.failed) return <MediaFallback label="Photo couldn't be loaded" />;
     return (
-      <a href={whatsappCrmApi.mediaUrl(m.media_id)} target="_blank" rel="noreferrer">
-        <img src={whatsappCrmApi.mediaUrl(m.media_id)} alt="attachment" className="max-h-56 rounded-lg" loading="lazy" />
+      <a href={media.url || undefined} target="_blank" rel="noreferrer">
+        {media.url ? (
+          <img src={media.url} alt="attachment" className="max-h-56 rounded-lg" />
+        ) : (
+          <span className="block h-32 w-44 animate-pulse rounded-lg bg-black/5" aria-label="Loading photo" />
+        )}
         {m.text && !m.text.startsWith("📷") && <p className="mt-1 whitespace-pre-wrap">{m.text}</p>}
       </a>
     );
   }
   if ((m.type === "document" || m.media_type === "document") && m.media_id) {
     return (
-      <a href={whatsappCrmApi.mediaUrl(m.media_id)} target="_blank" rel="noreferrer" className="flex items-center gap-2 rounded-lg bg-black/5 px-2 py-1.5">
+      <a
+        href={media.url || undefined}
+        download={m.filename || undefined}
+        target="_blank"
+        rel="noreferrer"
+        aria-disabled={!media.url}
+        className={`flex items-center gap-2 rounded-lg bg-black/5 px-2 py-1.5 ${media.url ? "" : "pointer-events-none opacity-60"}`}
+      >
         <FileText className="h-4 w-4 shrink-0" />
-        <span className="truncate text-xs font-medium">{m.filename || "Document"}</span>
+        <span className="truncate text-xs font-medium">{media.failed ? "Document unavailable" : m.filename || "Document"}</span>
       </a>
     );
   }
   if ((m.type === "video" || m.type === "audio") && m.media_id) {
+    if (media.failed) return <MediaFallback label={m.type === "video" ? "Video couldn't be loaded" : "Voice note couldn't be loaded"} />;
+    if (!media.url) return <span className="block h-10 w-44 animate-pulse rounded-lg bg-black/5" />;
     const Tag = m.type === "video" ? "video" : "audio";
-    return <Tag src={whatsappCrmApi.mediaUrl(m.media_id)} controls className="max-h-56 max-w-full rounded-lg" />;
+    return <Tag src={media.url} controls className="max-h-56 max-w-full rounded-lg" />;
   }
   if (m.type === "location" && m.latitude != null) {
     return (
       <a href={`https://maps.google.com/?q=${m.latitude},${m.longitude}`} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-sky-700 underline">
-        <MapPin className="h-3.5 w-3.5" /> Shared location
+        <MapPin className="h-3.5 w-3.5" /> Shared Location
       </a>
     );
   }
@@ -483,7 +533,7 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
           <p className="text-sm font-bold text-[var(--color-text-primary)]">{c?.name || data.conversation.name}</p>
           <p className="text-xs text-[var(--color-text-secondary)]">+91 {data.conversation.phone}</p>
           <div className="mt-1.5 flex flex-wrap gap-1">
-            {s?.is_repeat ? <Badge tone="success">Repeat customer</Badge> : c ? <Badge tone="info">Customer</Badge> : <Badge tone="warning">No account</Badge>}
+            {s?.is_repeat ? <Badge tone="success">Repeat Customer</Badge> : c ? <Badge tone="info">Customer</Badge> : <Badge tone="warning">No Account</Badge>}
             {c && !c.phone_verified && <Badge tone="warning">Unverified</Badge>}
           </div>
         </div>
@@ -492,7 +542,7 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
           <PanelSection title="Vehicle">
             {data.vehicles.map((v, i) => (
               <p key={i} className="text-xs text-[var(--color-text-primary)]">
-                {v.brand} {v.model} {v.type ? `· ${v.type}` : ""}
+                {v.brand} {v.model} {v.type ? `· ${toTitle(v.type)}` : ""}
                 <span className="block font-mono-num text-[10px] text-[var(--color-text-secondary)]">{v.registration_number}</span>
               </p>
             ))}
@@ -500,9 +550,9 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
         )}
 
         {data.current_booking && (
-          <PanelSection title="Current booking">
-            <p className="text-xs font-semibold text-[var(--color-text-primary)]">{data.current_booking.booking_number} · {data.current_booking.status.replace(/_/g, " ")}</p>
-            <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.services.join(", ")}</p>
+          <PanelSection title="Current Booking">
+            <p className="text-xs font-semibold text-[var(--color-text-primary)]">{data.current_booking.booking_number} · {toTitle(data.current_booking.status)}</p>
+            <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.services.map(toTitle).join(", ")}</p>
             <p className="text-xs text-[var(--color-text-secondary)]">{data.current_booking.date} · {formatSlot(data.current_booking.slot)}</p>
             {data.current_booking.captain && <p className="text-xs text-[var(--color-text-secondary)]">Captain: {data.current_booking.captain}</p>}
             <p className="text-xs font-semibold text-[var(--color-text-primary)]">₹{data.current_booking.amount}</p>
@@ -515,9 +565,9 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
               <Fact label="Bookings" value={String(s.total_bookings)} />
               <Fact label="Completed" value={String(s.completed)} />
               <Fact label="Cancelled" value={String(s.cancelled)} />
-              <Fact label="Last service" value={s.last_service || "—"} />
-              <Fact label="Lifetime value" value={`₹${s.lifetime_value.toLocaleString("en-IN")}`} />
-              <Fact label="Avg rating" value={s.avg_rating_given ? `${s.avg_rating_given} ★` : "—"} />
+              <Fact label="Last Service" value={toTitle(s.last_service) || "—"} />
+              <Fact label="Lifetime Value" value={`₹${s.lifetime_value.toLocaleString("en-IN")}`} />
+              <Fact label="Avg Rating" value={s.avg_rating_given ? `${s.avg_rating_given} ★` : "—"} />
             </div>
           </PanelSection>
         )}
@@ -533,7 +583,7 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
                   onClick={() => setTags.mutate(on ? tags.filter((x) => x !== t) : [...tags, t])}
                   className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${on ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
                 >
-                  {t}
+                  {toTitle(t)}
                 </button>
               );
             })}
@@ -546,7 +596,7 @@ function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void })
             onClick={() => setCustomer360(c.id)}
             className="block w-full rounded-xl border border-[#F3E5B5] px-3 py-2 text-center text-xs font-semibold text-black hover:bg-[#FFFCF0]"
           >
-            Bookings, plans & history
+            Bookings, Plans & History
           </button>
         )}
         <CustomerDetailDrawer customerId={customer360} onClose={() => setCustomer360(null)} />

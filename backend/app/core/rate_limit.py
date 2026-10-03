@@ -53,7 +53,15 @@ RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/auth/booking-access", 20, 60, None),
     ("/api/v1/bookings/verify-phone/request", 30, 300, None),
     ("/api/v1/auth/login", 15, 60, None),
+    # Token refresh is cheap but is the one endpoint a stolen refresh token
+    # is replayed against; password changes verify a bcrypt hash per call.
+    ("/api/v1/auth/refresh", 60, 60, None),
+    ("/api/v1/auth/change-password", 10, 300, None),
+    ("/api/v1/auth/set-password", 10, 300, None),
     ("/api/v1/auth/register", 10, 300, None),
+    # Release first and roomier: freeing a seat must never be refused
+    # because the same visitor's holds/renewals used up the hold bucket.
+    ("/api/v1/bookings/hold/release", 60, 60, None),
     ("/api/v1/bookings/hold", 30, 60, None),
     # Money-moving and data-creating endpoints. Each create-order call mints
     # a real Razorpay order, and each booking reserves capacity — a flood of
@@ -72,7 +80,17 @@ RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/reviews", 15, 60, "POST"),
     # Public forms: junk-data buckets, same shape as coverage leads.
     ("/api/v1/subscriptions/enquiries", 6, 60, None),
+    # Public society form: the enroll POST creates a customer + request
+    # (after an OTP); reads are the form itself, re-asked as it reprices.
+    ("/api/v1/society-forms", 30, 60, "POST"),
+    ("/api/v1/society-forms", 60, 60, None),
     ("/api/v1/coverage-leads", 6, 60, None),
+    # Landing-page "bring Blussit to our society" request: a public write
+    # (junk-data bucket, deduped per phone + society for 24 h server-side).
+    ("/api/v1/society-leads", 6, 60, "POST"),
+    # A resident filing society issues — signed in, but each one alerts the
+    # managers, so a tap-happy loop mustn't flood them.
+    ("/api/v1/society-issues", 10, 60, "POST"),
     ("/api/v1/contact", 6, 60, None),
     # Public visitor beacon — one real ping per page load.
     ("/api/v1/analytics/visit", 20, 60, "POST"),
@@ -164,7 +182,10 @@ async def rate_limit_middleware(request: Request, call_next):
     for prefix, limit, window, method in RULES:
         if path.startswith(prefix) and (method is None or request.method == method):
             window_start = int(now // window) * window
-            key = (ip, prefix, window, window_start)
+            # The rule's method is part of the bucket: a POST-only rule and
+            # an any-method rule on the same prefix (/society-forms) must
+            # not share one counter. Indices 2/3 stay window/start (_sweep).
+            key = (ip, prefix, window, window_start, method)
             _WINDOWS[key] += 1
             if _WINDOWS[key] > limit:
                 return JSONResponse(

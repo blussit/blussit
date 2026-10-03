@@ -154,7 +154,6 @@ export function SlotPicker({
         <p className="text-xs text-[var(--color-text-secondary)]">Add your address to see the slots.</p>
       ) : !date ? null : (
         <div>
-          
           {isLoading ? (
             <p className="text-sm text-[var(--color-text-secondary)]">Loading slots…</p>
           ) : isError ? (
@@ -188,9 +187,13 @@ export function SlotPicker({
                     }`}
                   >
                     <span className="text-[13px] font-semibold whitespace-nowrap">
-                      {formatTime12(s.start)} - {formatTime12(s.end)}
+                      {formatTime12(s.start)} – {formatTime12(s.end)}
                     </span>
                     {disabled && <span className="text-[11px] font-medium text-red-400 mt-0.5">Full</span>}
+                    {/* The backend only sends a count when 2 or fewer are left. */}
+                    {s.status === "low" && s.remaining != null && (
+                      <span className="mt-0.5 text-[11px] font-semibold text-[#A15C00]">{s.remaining} Left</span>
+                    )}
                   </button>
                 );
               })}
@@ -200,7 +203,7 @@ export function SlotPicker({
           {enableHold && value && secondsLeft != null && secondsLeft > 0 && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-gray-500">
               <Timer className="h-3.5 w-3.5" />
-              Held for you · {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
+              Held For You · {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
             </p>
           )}
         </div>

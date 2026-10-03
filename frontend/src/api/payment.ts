@@ -25,7 +25,7 @@ export interface RazorpayOrder {
 
 export interface VerifyPaymentResult {
   status: "paid";
-  purpose: "booking" | "booking_group" | "subscription";
+  purpose: "booking" | "booking_group" | "subscription" | "society";
   /** The purchase set up a recurring mandate, not just one cycle. */
   auto_pay?: boolean;
   booking_id?: string;
@@ -40,7 +40,7 @@ export interface VerifyPaymentResult {
 /** An order's state as the server (asking Razorpay) sees it right now. */
 export interface PaymentStatusResult {
   status: "paid" | "pending" | "failed" | "needs_attention";
-  purpose: "booking" | "booking_group" | "subscription";
+  purpose: "booking" | "booking_group" | "subscription" | "society";
   confirming?: boolean;
   failure_reason?: string | null;
   booking_id?: string;
@@ -74,7 +74,7 @@ export interface PaymentFailureReport {
 }
 
 export const paymentApi = {
-  createOrder: (payload: { purpose: "booking" | "booking_group" | "subscription"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean }) =>
+  createOrder: (payload: { purpose: "booking" | "booking_group" | "subscription" | "society"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean; society_enrollment_id?: string; society_renewal?: boolean; society_coupon_code?: string }) =>
     apiClient.post<ApiSuccess<RazorpayOrder>>("/payments/create-order", payload).then((r) => r.data.data),
   verify: (payload: { razorpay_order_id?: string; razorpay_subscription_id?: string; razorpay_payment_id: string; razorpay_signature: string }) =>
     apiClient.post<ApiSuccess<VerifyPaymentResult>>("/payments/verify", payload).then((r) => r.data.data),
@@ -150,5 +150,9 @@ export interface CollectionsReport {
     payment_id?: string | null;
     gateway_ref?: string | null;
     flagged_at?: string | null;
+    /** What a parked PLAN payment was for. */
+    plan_name?: string | null;
+    vehicle_type_name?: string | null;
+    service_name?: string | null;
   }[];
 }

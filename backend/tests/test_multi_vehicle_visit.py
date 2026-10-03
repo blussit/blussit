@@ -174,7 +174,7 @@ async def test_the_same_car_cannot_be_added_twice(rig, db):
 
 
 async def test_a_failed_car_undoes_the_whole_visit(rig, db):
-    """All-or-nothing: a half-booked visit (two cars washed, one silently
+    """All-or-nothing: a half-booked visit (two cars wash, one silently
     missing) is worse than a clean failure, and the seat must go back."""
     bad = str(ObjectId())  # a vehicle this customer doesn't own
     with pytest.raises(Exception):
@@ -361,3 +361,131 @@ async def test_visit_read_is_scoped_and_redacted(rig, db, cleanup):
     cleanup.append(("users", {"_id": ObjectId(stranger)}))
     with pytest.raises(NotFoundException):
         await bs.get_booking_group(group_id, stranger, "customer", None)
+
+
+async def _visit_with_a_clash_on_car_three(rig, db, cleanup):
+    """A 3-car visit plus another job of the captain's that starts exactly
+    when car 3 would — car 1 fits, a later car doesn't."""
+    from app.services.booking_service import _resolve_estimated_start
+    from tests.factories import make_captain
+
+    result = await BookingService(db).create_booking_group(
+        rig["customer_id"],
+        BookingGroupCreateRequest(
+            vehicles=_cars(rig, 3), address_id=rig["address_id"],
+            scheduled_date=rig["when"], scheduled_slot=rig["slot"], payment_method="cash",
+        ),
+    )
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("notifications", {"user_id": captain_id}))
+    rows = sorted(
+        await db.bookings.find({"booking_group_id": result["booking_group_id"]}).to_list(length=10),
+        key=lambda r: r.get("group_offset_minutes", 0),
+    )
+    car3 = rows[2]
+    clash = {k: v for k, v in car3.items() if k not in ("_id", "booking_group_id", "group_offset_minutes")}
+    clash.update({
+        "booking_number": f"BK-CLASH-{ObjectId()}", "captain_id": captain_id, "status": "assigned",
+        "customer_id": str(ObjectId()), "visit_line_key": f"clash-{ObjectId()}",
+        "estimated_start_at": _resolve_estimated_start(car3, None),
+    })
+    inserted = await db.bookings.insert_one(clash)
+    cleanup.append(("bookings", {"_id": inserted.inserted_id}))
+    return result["booking_group_id"], captain_id
+
+
+async def test_a_clash_on_a_later_car_assigns_no_car_at_all(rig, db, cleanup):
+    """Used to: car 1 assigned, car 2 refused — a half-assigned visit."""
+    from app.schemas.booking_schema import BookingAssignCaptainRequest
+
+    group_id, captain_id = await _visit_with_a_clash_on_car_three(rig, db, cleanup)
+    with pytest.raises(BadRequestException, match="already scheduled"):
+        await BookingService(db).assign_captain_to_group(
+            group_id, BookingAssignCaptainRequest(captain_id=captain_id), "manager-id", "manager", rig["center_id"],
+        )
+    rows = await db.bookings.find({"booking_group_id": group_id}).to_list(length=10)
+    assert all(r["status"] == "pending" and not r.get("captain_id") for r in rows)
+    assert await db.notifications.count_documents({"user_id": captain_id}) == 0
+
+
+async def test_a_car_failing_mid_way_puts_the_earlier_cars_back(rig, db, cleanup, monkeypatch):
+    """The belt-and-braces path: if a car still fails after the dry run (a
+    race with another manager), the cars already moved are restored and
+    nobody is told about a job that didn't happen."""
+    from app.schemas.booking_schema import BookingAssignCaptainRequest
+
+    group_id, captain_id = await _visit_with_a_clash_on_car_three(rig, db, cleanup)
+    service = BookingService(db)
+
+    async def _skip_dry_run(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_precheck_group_conflicts", _skip_dry_run)
+    with pytest.raises(BadRequestException, match="already scheduled"):
+        await service.assign_captain_to_group(
+            group_id, BookingAssignCaptainRequest(captain_id=captain_id), "manager-id", "manager", rig["center_id"],
+        )
+    rows = await db.bookings.find({"booking_group_id": group_id}).to_list(length=10)
+    assert all(r["status"] == "pending" and not r.get("captain_id") and not r.get("estimated_start_at") for r in rows), rows
+    assert await db.notifications.count_documents({"user_id": captain_id}) == 0
+    undone = await db.booking_status_history.count_documents({
+        "booking_id": {"$in": [str(r["_id"]) for r in rows]}, "note": {"$regex": "^Assignment undone"},
+    })
+    assert undone >= 1
+
+
+async def test_a_whole_visit_assignment_announces_once(rig, db, cleanup):
+    from app.schemas.booking_schema import BookingAssignCaptainRequest
+    from tests.factories import make_captain
+
+    result = await BookingService(db).create_booking_group(
+        rig["customer_id"],
+        BookingGroupCreateRequest(
+            vehicles=_cars(rig, 3), address_id=rig["address_id"],
+            scheduled_date=rig["when"], scheduled_slot=rig["slot"], payment_method="cash",
+        ),
+    )
+    captain_id = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(captain_id)}))
+    cleanup.append(("notifications", {"user_id": {"$in": [captain_id, rig["customer_id"]]}}))
+    await BookingService(db).assign_captain_to_group(
+        result["booking_group_id"], BookingAssignCaptainRequest(captain_id=captain_id), "manager-id", "manager", rig["center_id"],
+    )
+    assert await db.notifications.count_documents({"user_id": captain_id, "title": {"$regex": "^New job"}}) == 1
+    assert await db.notifications.count_documents({"user_id": rig["customer_id"], "title": "Captain assigned"}) == 1
+
+
+async def test_reassigning_one_car_moves_the_whole_visit_or_nothing(rig, db, cleanup):
+    """Reassigning a car of an ASSIGNED visit used to move car 1 and then
+    loop the siblings — a clash on a later car left the visit split
+    between two captains."""
+    from app.schemas.booking_schema import BookingAssignCaptainRequest, ReassignCaptainRequest
+    from tests.factories import make_captain
+
+    group_id, busy_captain = await _visit_with_a_clash_on_car_three(rig, db, cleanup)
+    first_captain = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(first_captain)}))
+    service = BookingService(db)
+    await service.assign_captain_to_group(
+        group_id, BookingAssignCaptainRequest(captain_id=first_captain), "manager-id", "manager", rig["center_id"],
+    )
+    rows = sorted(await db.bookings.find({"booking_group_id": group_id}).to_list(length=10), key=lambda r: r.get("group_offset_minutes", 0))
+
+    with pytest.raises(BadRequestException, match="already scheduled"):
+        await service.reassign_captain(
+            str(rows[0]["_id"]), ReassignCaptainRequest(captain_id=busy_captain), "manager-id", "manager", rig["center_id"],
+        )
+    after = await db.bookings.find({"booking_group_id": group_id}).to_list(length=10)
+    assert all(r["captain_id"] == first_captain and r["status"] == "assigned" for r in after)
+
+    # A free captain takes every car of the visit in one go.
+    free_captain = await make_captain(db, rig["center_id"])
+    cleanup.append(("users", {"_id": ObjectId(free_captain)}))
+    cleanup.append(("notifications", {"user_id": {"$in": [first_captain, free_captain]}}))
+    await service.reassign_captain(
+        str(rows[1]["_id"]), ReassignCaptainRequest(captain_id=free_captain), "manager-id", "manager", rig["center_id"],
+    )
+    after = await db.bookings.find({"booking_group_id": group_id}).to_list(length=10)
+    assert all(r["captain_id"] == free_captain for r in after)
+    assert all(first_captain in (r.get("previous_captain_ids") or []) for r in after)

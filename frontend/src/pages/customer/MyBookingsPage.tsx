@@ -1,40 +1,52 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { CalendarPlus, ChevronRight, Gift, RotateCcw, Search, SlidersHorizontal, Sparkles, Star } from "lucide-react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { CalendarPlus, Gift, Sparkles, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
+import { vehicleTypeApi } from "../../api/catalog";
+import { visitCarDetail, visitServiceTitle, visitTypeLabel } from "../../components/customer/cars";
 import { reviewApi } from "../../api/engagement";
-import { Button, EmptyState, Input, PageLoader, Select, StatusBadge } from "../../components/ui";
+import { btn, card, PageHeader, Segmented, Skeleton, StatusChip } from "../../components/customer/ui";
 import { serviceImage } from "../../components/public/landing/shared";
-import { formatShortDate, formatSlot } from "../../lib/date";
-import { toSlabs, visitServiceLabel } from "../../lib/bookingGroups";
-import { vehicleLabel } from "../../lib/constants";
-import { customerStatusLabel } from "../../lib/customerStatus";
+import { formatDay, formatShortDate, formatSlot } from "../../lib/date";
+import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import type { Booking } from "../../types";
 
 const PAGE_SIZE = 20;
-const STATUS_OPTIONS = ["", "awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "completed", "cancelled", "rescheduled"];
+const FINISHED = ["completed", "cancelled"];
+type Tab = "upcoming" | "past";
+
+const whenKey = (slab: BookingSlab) => `${slab.primary.scheduled_date.slice(0, 10)} ${slab.primary.scheduled_slot}`;
 
 /**
- * The customer's bookings, newest booked first (the server's order), 20 at
- * a time with "Load more". Status filters on the server; search and dates
- * narrow what's loaded so far — and say so while older pages remain.
+ * The customer's bookings in two tabs. Upcoming: every open visit, soonest
+ * first, grouped by day ("Today", "Tomorrow", …). Past: finished and
+ * cancelled ones, newest first, with "Book again".
+ *
+ * Paged from the server 20 at a time (newest booked first) with "Load more";
+ * a multi-car visit is one card (toSlabs). Bookings open at most 7 days
+ * ahead, so upcoming ones are always among the newest — "Load more" only
+ * reaches further back into the past.
  */
 export default function MyBookingsPage() {
   const navigate = useNavigate();
-  const [status, setStatus] = useState("");
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [dateFrom, setDateFrom] = useState(""); // "YYYY-MM-DD"
-  const [dateTo, setDateTo] = useState("");
+  const [params, setParams] = useSearchParams();
+  const tab: Tab = params.get("tab") === "past" ? "past" : "upcoming";
+  const setTab = (next: Tab) => {
+    const p = new URLSearchParams(params);
+    if (next === "past") p.set("tab", "past");
+    else p.delete("tab");
+    setParams(p, { replace: true });
+  };
 
   const query = useInfiniteQuery({
-    queryKey: ["my-bookings", "list", status],
-    queryFn: ({ pageParam }) => bookingApi.myBookings({ status: status || undefined, page: pageParam, page_size: PAGE_SIZE }),
+    queryKey: ["my-bookings", "list", ""],
+    queryFn: ({ pageParam }) => bookingApi.myBookings({ page: pageParam, page_size: PAGE_SIZE }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.meta.page < last.meta.total_pages ? last.meta.page + 1 : undefined),
   });
   const total = query.data?.pages[0]?.meta.total ?? 0;
+  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
 
   // Every loaded page as one list — deduped, since a booking made while
   // paging shifts the server's pages by one.
@@ -51,289 +63,172 @@ export default function MyBookingsPage() {
     return all;
   }, [query.data]);
 
-  // The reviews for exactly the completed bookings on screen (the plain
-  // list stops at the newest 100) — powers the rating stars on those rows.
+  const slabs = useMemo(() => toSlabs(loaded), [loaded]);
+  const upcoming = useMemo(() => slabs.filter((s) => !FINISHED.includes(s.status)).sort((a, b) => whenKey(a).localeCompare(whenKey(b))), [slabs]);
+  const past = useMemo(() => slabs.filter((s) => FINISHED.includes(s.status)).sort((a, b) => whenKey(b).localeCompare(whenKey(a))), [slabs]);
+
+  // Upcoming, one group per day.
+  const days = useMemo(() => {
+    const groups: { day: string; slabs: BookingSlab[] }[] = [];
+    for (const slab of upcoming) {
+      const day = slab.primary.scheduled_date.slice(0, 10);
+      const last = groups[groups.length - 1];
+      if (last && last.day === day) last.slabs.push(slab);
+      else groups.push({ day, slabs: [slab] });
+    }
+    return groups;
+  }, [upcoming]);
+
+  // Ratings for exactly the completed bookings on screen.
   const completedIds = useMemo(() => loaded.filter((b) => b.status === "completed").map((b) => b.id), [loaded]);
   const { data: myReviews } = useQuery({
     queryKey: ["my-reviews", "for", completedIds.join(",")],
     queryFn: () => reviewApi.mine(completedIds),
-    enabled: completedIds.length > 0,
+    enabled: tab === "past" && completedIds.length > 0,
     placeholderData: keepPreviousData,
   });
   const reviewByBookingId = new Map((myReviews || []).map((r) => [r.booking_id, r]));
 
-  const q = search.trim().toLowerCase();
-  const narrowing = !!q || !!dateFrom || !!dateTo;
-  // Grouped BEFORE filtering, so a multi-car visit loaded across two pages
-  // is still one card, and a match on any car shows the whole visit.
-  const slabs = useMemo(() => {
-    return toSlabs(loaded).filter((slab) => {
-      if (q) {
-        const hay = slab.bookings
-          .flatMap((b) => [b.booking_number, b.combo_name || "", ...(b.service_names || [])])
-          .join(" ")
-          .toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      const day = slab.primary.scheduled_date.slice(0, 10);
-      if (dateFrom && day < dateFrom) return false;
-      if (dateTo && day > dateTo) return false;
-      return true;
-    });
-  }, [loaded, q, dateFrom, dateTo]);
+  const upcomingCard = (slab: BookingSlab) => {
+    const b = slab.primary;
+    const unpaid = slab.status === "awaiting_payment";
+    const planCovered = !!b.subscription_id || b.payment_method === "subscription";
+    // The service on its own line, then the car type (+ make/plate) — both stay readable at 390px.
+    const detail = [visitTypeLabel(slab, vehicleTypes), visitCarDetail(slab, vehicleTypes)].filter(Boolean).join(" · ");
+    return (
+      <div key={slab.key} className={`${card} flex items-start gap-3 p-4`}>
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] bg-[#E8F0FE] text-[#0A66F0]">
+          <CalendarPlus className="h-5 w-5" />
+        </span>
+        <Link to={`/app/bookings/${b.id}`} className="min-w-0 flex-1">
+          <p className="truncate tabular-nums text-[15px] font-bold text-[#0E1A33]">{formatSlot(b.scheduled_slot)}</p>
+          <p className="mt-0.5 truncate text-sm font-medium text-[#0E1A33]">{visitServiceTitle(slab)}</p>
+          {(detail || planCovered) && (
+            <p className="truncate text-[13px] text-[#5F6878]">
+              {detail}
+              {planCovered && (
+                <span className={`${detail ? "ml-1.5 " : ""}inline-flex items-center gap-0.5 align-[-2px] text-[#0A66F0]`}>
+                  <Gift className="h-3.5 w-3.5" /> On Your Plan
+                </span>
+              )}
+            </p>
+          )}
+          <StatusChip status={slab.status} className="mt-2" />
+        </Link>
+        <Link to={`/app/bookings/${b.id}`} className={btn(unpaid ? "primary" : "outline", "sm", "rounded-full")}>
+          {unpaid ? `Pay ₹${Math.round(slab.totalAmount)}` : "Details"}
+        </Link>
+      </div>
+    );
+  };
 
-  const activeFilters = (status ? 1 : 0) + (dateFrom ? 1 : 0) + (dateTo ? 1 : 0);
+  const pastCard = (slab: BookingSlab, i: number) => {
+    const b = slab.primary;
+    const firstService = (b.combo_name || b.service_names?.[0] || "").replace(/\s*×\d+$/, "");
+    const review = !slab.isVisit && b.status === "completed" ? reviewByBookingId.get(b.id) : undefined;
+    const given = review ? review.service_rating ?? review.captain_rating ?? review.rating ?? 0 : 0;
+    return (
+      <div key={slab.key} className={`${card} flex items-center gap-3 p-4`}>
+        <Link to={`/app/bookings/${b.id}`} className="flex min-w-0 flex-1 items-center gap-3">
+          {firstService ? (
+            <img src={serviceImage({ name: firstService }, i)} alt="" loading="lazy" className="h-12 w-12 shrink-0 rounded-[14px] object-cover" />
+          ) : (
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[14px] bg-[#EEF3FA] text-[#0E1A33]">
+              <Sparkles className="h-5 w-5" />
+            </span>
+          )}
+          <span className="min-w-0">
+            <span className="block truncate text-[13px] font-semibold text-[#5F6878]">
+              {formatShortDate(b.scheduled_date)} · {visitTypeLabel(slab, vehicleTypes)}
+            </span>
+            <span className="block truncate text-[15px] font-semibold text-[#0E1A33]">{visitServiceTitle(slab)}</span>
+            <span className="mt-1.5 flex flex-wrap items-center gap-2">
+              <StatusChip status={slab.status} />
+              {review ? (
+                <span className="inline-flex items-center gap-0.5" title={`You rated ${given}/5`}>
+                  {Array.from({ length: 5 }).map((_, si) => (
+                    <Star key={si} className={`h-3.5 w-3.5 ${si < given ? "fill-[#FFB800] text-[#FFB800]" : "text-[#D5DCE6]"}`} />
+                  ))}
+                </span>
+              ) : !slab.isVisit && b.status === "completed" ? (
+                <span className="text-xs font-semibold text-[#0A66F0] underline underline-offset-2">Rate</span>
+              ) : null}
+            </span>
+          </span>
+        </Link>
+        <button type="button" onClick={() => navigate(`/app/book?repeat=${b.id}`)} className={btn("primary", "sm", "rounded-full")}>
+          Book Again
+        </button>
+      </div>
+    );
+  };
+
+  const list = tab === "upcoming" ? upcoming : past;
   const more = !!query.hasNextPage;
 
-  const loadMore = (
-    <div className="flex flex-col items-center gap-1.5 pt-1">
-      <Button variant="outline" isLoading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
-        Load more
-      </Button>
-      <p className="text-xs text-gray-500">
-        Showing {loaded.length} of {total}
-      </p>
-    </div>
-  );
-
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="font-display text-2xl font-bold text-black">My bookings</h1>
-        <Button variant="info" onClick={() => navigate("/app/book")}>
-          <CalendarPlus className="h-4 w-4" /> Book a service
-        </Button>
-      </div>
+    <div className="mx-auto max-w-3xl space-y-5">
+      <PageHeader
+        title="Bookings"
+        right={
+          <Link to="/app/book" className={btn("soft", "sm")}>
+            <CalendarPlus className="h-4 w-4" /> Book A Wash
+          </Link>
+        }
+      />
 
-      {/* One search box + one Filters button — everything else lives
-          inside the panel, with a count chip when filters are active. */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex-1">
-            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-300" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Booking # or service"
-              aria-label="Search bookings"
-              className="w-full rounded-xl border border-[#F3E5B5] bg-white py-2.5 pl-10 pr-3 text-sm outline-none transition-colors placeholder:text-gray-400 focus:border-black"
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => setFiltersOpen((v) => !v)}
-            aria-expanded={filtersOpen}
-            className={`flex shrink-0 items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-semibold transition-colors ${
-              filtersOpen || activeFilters > 0
-                ? "border-black bg-[#FFF4CD] text-black"
-                : "border-[#F3E5B5] bg-white text-gray-600 hover:border-gray-300"
-            }`}
-          >
-            <SlidersHorizontal className="h-4 w-4" />
-            Filters
-            {activeFilters > 0 && (
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-black text-[11px] font-bold text-white">
-                {activeFilters}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {filtersOpen && (
-          <div className="rounded-2xl border border-[#F3E5B5] bg-white p-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
-                {STATUS_OPTIONS.map((s) => (
-                  <option key={s} value={s}>
-                    {s ? customerStatusLabel(s) || s.replace(/_/g, " ") : "All statuses"}
-                  </option>
-                ))}
-              </Select>
-              <div className="grid grid-cols-2 gap-3 sm:col-span-2">
-                <Input label="From" type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
-                <Input label="To" type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
-              </div>
-            </div>
-            {activeFilters > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  setStatus("");
-                  setDateFrom("");
-                  setDateTo("");
-                }}
-                className="mt-3 text-xs font-bold text-black hover:underline"
-              >
-                Clear all filters
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Search and dates only look at what's loaded — say so while there's more. */}
-        {narrowing && more && (
-          <p className="text-xs text-gray-500">
-            Searching your latest {loaded.length} bookings.{" "}
-            <button type="button" onClick={() => void query.fetchNextPage()} className="font-semibold text-black underline underline-offset-2">
-              Load older ones
-            </button>
-          </p>
-        )}
-      </div>
+      <Segmented
+        value={tab}
+        onChange={setTab}
+        options={[
+          { value: "upcoming", label: upcoming.length ? `Upcoming · ${upcoming.length}` : "Upcoming" },
+          { value: "past", label: "Past" },
+        ]}
+      />
 
       {query.isLoading ? (
-        <PageLoader />
+        <div className="space-y-3" aria-busy="true">
+          <Skeleton className="h-[118px]" />
+          <Skeleton className="h-[118px]" />
+        </div>
       ) : query.isError ? (
-        <EmptyState
-          title="Couldn't load your bookings"
-          action={
-            <Button variant="outline" onClick={() => void query.refetch()}>
-              Try again
-            </Button>
-          }
-        />
-      ) : !slabs.length ? (
-        <>
-          <EmptyState
-            title={narrowing && loaded.length ? "No matches in what's loaded" : "No bookings found"}
-            action={
-              <Button variant="info" onClick={() => navigate("/app/book")}>
-                Book a service
-              </Button>
-            }
-          />
-          {narrowing && more && loadMore}
-        </>
+        <div className={`${card} p-6 text-center`}>
+          <p className="text-sm text-[#5F6878]">Couldn't load your bookings.</p>
+          <button type="button" className={btn("outline", "sm", "mt-3")} onClick={() => void query.refetch()}>
+            Try Again
+          </button>
+        </div>
+      ) : !list.length && !(tab === "past" && more) ? (
+        <div className="rounded-2xl border border-dashed border-[#CFDCF0] bg-[#F7FAFF] px-6 py-10 text-center">
+          <p className="font-display text-base font-bold text-[#0E1A33]">{tab === "upcoming" ? "No Upcoming Washes" : "No Past Bookings Yet"}</p>
+          <p className="mt-1 text-sm text-[#5F6878]">{tab === "upcoming" ? "Book one in two quick steps." : "Your finished washes show up here."}</p>
+          <Link to="/app/book" className={btn("primary", "md", "mt-4")}>
+            Book A Wash
+          </Link>
+        </div>
+      ) : tab === "upcoming" ? (
+        <div className="space-y-5">
+          {days.map((g) => (
+            <section key={g.day}>
+              <h2 className="mb-2.5 text-sm font-bold text-[#0E1A33]">{formatDay(g.day)}</h2>
+              <div className="space-y-3">{g.slabs.map(upcomingCard)}</div>
+            </section>
+          ))}
+        </div>
       ) : (
         <div className="space-y-3">
-          {slabs.map((slab, i) => {
-            const b = slab.primary;
-            const serviceLabel = visitServiceLabel(slab);
-            // Same real shoot photo the landing uses for this service —
-            // matched by the first service's name; the size stays 44px.
-            const firstService = (b.combo_name || b.service_names?.[0] || "").replace(/\s*×\d+$/, "");
-            const isPlanBooking = b.payment_method === "subscription" || !!b.subscription_id;
-            // A finished or cancelled booking is the one a customer wants
-            // back — the shortcut sits on the row, and the wizard replays
-            // the car, service and address so only the date is left.
-            const canRebook = slab.status === "completed" || slab.status === "cancelled";
-            const openDetail = () => navigate(`/app/bookings/${b.id}`);
-            const review = !slab.isVisit && b.status === "completed" ? reviewByBookingId.get(b.id) : undefined;
-            const given = review ? review.service_rating ?? review.captain_rating ?? review.rating ?? 0 : 0;
-            // Each vehicle type once — the "2 vehicles" chip already counts them.
-            const vehicles = Array.from(new Set(slab.bookings.map(vehicleLabel))).join(" + ");
-            return (
-              <div
-                key={slab.key}
-                role="button"
-                tabIndex={0}
-                onClick={openDetail}
-                onKeyDown={(e) => {
-                  if (e.target !== e.currentTarget) return;
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    openDetail();
-                  }
-                }}
-                className="flex w-full cursor-pointer items-center gap-4 rounded-2xl border border-[#F3E5B5] bg-white p-4 text-left transition-all hover:shadow-[0_8px_24px_rgba(17,24,39,0.08)] sm:p-5"
-              >
-                {firstService ? (
-                  <img
-                    src={serviceImage({ name: firstService }, i)}
-                    alt=""
-                    loading="lazy"
-                    className="hidden h-11 w-11 shrink-0 rounded-xl object-cover sm:block"
-                  />
-                ) : (
-                  <span className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black sm:flex">
-                    <Sparkles className="h-5 w-5" />
-                  </span>
-                )}
-                <div className="min-w-0 flex-1">
-                  {/* The SERVICE leads the row — that's what the customer
-                      recognises; the booking id is reference data and sits
-                      underneath in small mono type. */}
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <p className="truncate text-sm font-bold text-black">{serviceLabel}</p>
-                    {slab.isVisit && (
-                      <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                        {slab.vehicleCount} vehicles
-                      </span>
-                    )}
-                    <p className="text-sm text-gray-600">
-                      {formatShortDate(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
-                    </p>
-                    {isPlanBooking && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                        <Gift className="h-3 w-3" /> Plan
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1.5 sm:hidden">
-                    <StatusBadge status={slab.status} label={customerStatusLabel(slab.status)} />
-                  </div>
-                  <p className="mt-1 truncate text-xs text-gray-400 sm:mt-0.5">
-                    <span className="font-mono-num">
-                      {slab.isVisit ? slab.bookings.map((x) => x.booking_number).join(" · ") : b.booking_number}
-                    </span>
-                    {vehicles ? ` · ${vehicles}` : ""}
-                    <span className="font-mono-num text-black md:hidden"> · ₹{Math.round(slab.totalAmount)}</span>
-                  </p>
-                  {/* Completed bookings carry their rating right on the row:
-                      filled stars for what they gave, or a "Rate" button that
-                      opens the booking — its page opens the rating window by
-                      itself when the booking is completed and unrated. */}
-                  {!slab.isVisit && b.status === "completed" && (
-                    review ? (
-                      <span className="mt-1.5 flex items-center gap-1" title={`You rated ${given}/5`}>
-                        {Array.from({ length: 5 }).map((_, si) => (
-                          <Star key={si} className={`h-3.5 w-3.5 ${si < given ? "fill-[#E8A900] text-[#E8A900]" : "text-gray-300"}`} />
-                        ))}
-                        <span className="ml-1 text-xs text-gray-500">You rated {given}/5</span>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openDetail();
-                        }}
-                        className="-ml-1 mt-1 inline-flex items-center gap-1 whitespace-nowrap rounded-full px-1 py-0.5 text-xs text-gray-600 hover:text-black"
-                      >
-                        {Array.from({ length: 5 }).map((_, si) => (
-                          <Star key={si} className="h-3.5 w-3.5 text-gray-300" />
-                        ))}
-                        <span className="ml-1 font-semibold underline underline-offset-2">Rate this wash</span>
-                      </button>
-                    )
-                  )}
-                </div>
-                <span className="hidden font-mono-num text-sm font-bold text-black md:block">₹{Math.round(slab.totalAmount)}</span>
-                <span className="hidden sm:inline-flex">
-                  <StatusBadge status={slab.status} label={customerStatusLabel(slab.status)} />
-                </span>
-                {canRebook && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/app/book?repeat=${b.id}`);
-                    }}
-                    title="Book this again"
-                    aria-label="Book this again"
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gray-300 px-2 py-1.5 text-xs font-medium text-black transition-colors hover:border-gray-400 hover:bg-gray-50 sm:px-3"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Book again</span>
-                  </button>
-                )}
-                <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
-              </div>
-            );
-          })}
+          {past.map(pastCard)}
           {more ? (
-            loadMore
+            <div className="flex flex-col items-center gap-1.5 pt-1">
+              <button type="button" className={btn("outline", "md")} disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
+                {query.isFetchingNextPage ? "Loading…" : "Load More"}
+              </button>
+              <p className="text-xs text-[#8A94A6]">
+                Loaded {loaded.length} of {total} bookings
+              </p>
+            </div>
           ) : (
-            loaded.length > PAGE_SIZE && <p className="pt-1 text-center text-xs text-gray-400">That's all {total} bookings.</p>
+            loaded.length > PAGE_SIZE && <p className="pt-1 text-center text-xs text-[#8A94A6]">That's all {total} bookings.</p>
           )}
         </div>
       )}

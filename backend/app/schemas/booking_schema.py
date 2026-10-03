@@ -83,9 +83,9 @@ class QuickAddress(BaseModel):
 class QuickBookingLine(BaseModel):
     """One vehicle TYPE on the visit: "2 SUVs, Foam Wash". quantity > 1
     becomes that many bookings, each with the same service(s)."""
-    vehicle_type: str = Field(min_length=1)
+    vehicle_type: str = Field(min_length=1, max_length=64)
     quantity: int = Field(default=1, ge=1, le=10)
-    service_ids: list[str] = Field(min_length=1)
+    service_ids: list[str] = Field(min_length=1, max_length=20)
     service_quantities: dict[str, int] = Field(default_factory=dict)
     # True (default — every existing caller keeps today's behavior:
     # self-serve booking, the WhatsApp bot, and a manager who didn't send
@@ -126,6 +126,15 @@ class QuickBookingRequest(BaseModel):
     phone_access_token: Optional[str] = Field(default=None, max_length=4000)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+
+    @field_validator("payment_method")
+    @classmethod
+    def _cash_or_online(cls, v: PaymentMethod) -> PaymentMethod:
+        # "subscription" is set by the server when a plan pays; a client
+        # sending it skipped the prepaid gate and settled as non-cash.
+        if v not in (PaymentMethod.CASH, PaymentMethod.ONLINE):
+            raise ValueError("Payment must be cash or online")
+        return v
 
     @field_validator("customer_phone")
     @classmethod
@@ -352,7 +361,7 @@ class GroupVehicleRequest(BaseModel):
 
 
 class BookingGroupCreateRequest(BaseModel):
-    """Several of one customer's vehicles washed on ONE visit: one address,
+    """Several of one customer's vehicles wash on ONE visit: one address,
     one slot, one captain, one payment. It takes ONE slot seat however many
     cars are on it — same address, so the travel happens once."""
 

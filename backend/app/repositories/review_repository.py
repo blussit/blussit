@@ -23,8 +23,8 @@ class ReviewRepository(BaseRepository):
     async def find_by_booking_id(self, booking_id: str) -> dict | None:
         return await self.find_one({"booking_id": booking_id})
 
-    async def list_all_for_admin(self, page: int, page_size: int, include_deleted: bool = False):
-        return await self.find_many({}, page=page, page_size=page_size, include_deleted=include_deleted)
+    async def list_all_for_admin(self, page: int, page_size: int, include_deleted: bool = False, filters: dict | None = None):
+        return await self.find_many(dict(filters or {}), page=page, page_size=page_size, include_deleted=include_deleted)
 
     async def average_rating_for_captain(self, captain_id: str) -> float:
         # $ifNull prefers the new captain_rating field, falling back to the

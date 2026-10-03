@@ -118,9 +118,10 @@ class LeaveService:
             raise NotFoundException("Leave request not found")
         # A manager may only review THEIR OWN captains' leave — resolve the
         # captain and center-scope, exactly like list_pending_for_center.
+        # Fails closed: a deleted / center-less captain's leave is the
+        # admin's to review, not any manager's.
         captain = await self.user_repo.find_by_id(leave["captain_id"])
-        if captain and captain.get("service_center_id"):
-            ensure_own_center(actor_role, actor_center_id, captain["service_center_id"])
+        ensure_own_center(actor_role, actor_center_id, (captain or {}).get("service_center_id"))
         # Claim the pending row atomically so two reviewers can't both win.
         data = {"status": payload.status.value, "review_note": payload.review_note, "reviewed_by": reviewer_id}
         updated = await self.repo.update_if(leave_id, {"status": "pending"}, data)

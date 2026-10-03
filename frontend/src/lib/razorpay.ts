@@ -169,7 +169,7 @@ async function paidAnyway(ref: Reference): Promise<PaymentStatusResult | null> {
 }
 
 export async function payWithRazorpay(
-  order: { purpose: "booking" | "booking_group" | "subscription"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean },
+  order: { purpose: "booking" | "booking_group" | "subscription" | "society"; booking_id?: string; booking_group_id?: string; plan_id?: string; vehicle_id?: string; service_id?: string; vehicle_type?: string; auto_pay?: boolean; society_enrollment_id?: string; society_renewal?: boolean; society_coupon_code?: string },
   prefill?: { name?: string | null; email?: string | null; contact?: string | null },
   /** Told what actually got created — auto-pay can silently degrade to a
    *  one-time purchase when the gateway won't set a mandate up. */

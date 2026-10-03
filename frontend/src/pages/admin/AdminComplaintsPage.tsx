@@ -7,6 +7,7 @@ import { ComplaintDetailDrawer } from "../../components/shared/ComplaintDetailDr
 import { normalisePhoneSearch, Pager, SearchBox, useDebouncedValue } from "../../components/shared/ListControls";
 import { format } from "../../lib/date";
 import type { Complaint } from "../../types";
+import { toTitle } from "../../lib/titleCase";
 
 const PRIORITY_TONE: Record<string, "error" | "warning" | "neutral"> = { urgent: "error", high: "error", medium: "warning", low: "neutral" };
 const PAGE_SIZE = 25;
@@ -21,6 +22,7 @@ const PAGE_SIZE = 25;
 export default function AdminComplaintsPage() {
   const [status, setStatus] = useState("");
   const [centerFilter, setCenterFilter] = useState("");
+  const [category, setCategory] = useState<"" | "society" | "booking">("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Complaint | null>(null);
@@ -28,11 +30,12 @@ export default function AdminComplaintsPage() {
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-for-complaints"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ["admin-complaints", status, centerFilter, debouncedSearch, page],
+    queryKey: ["admin-complaints", status, centerFilter, category, debouncedSearch, page],
     queryFn: () =>
       complaintApi.all({
         status: status || undefined,
         service_center_id: centerFilter || undefined,
+        category: category || undefined,
         search: debouncedSearch || undefined,
         page,
         page_size: PAGE_SIZE,
@@ -66,30 +69,30 @@ export default function AdminComplaintsPage() {
         />
         <div className="sm:max-w-xs">
           <Select
-            label="Filter by status"
+            label="Filter By Status"
             value={status}
             onChange={(e) => {
               setStatus(e.target.value);
               setPage(1);
             }}
           >
-            <option value="">All statuses</option>
+            <option value="">All Statuses</option>
             <option value="open">Open</option>
-            <option value="in_progress">In progress</option>
+            <option value="in_progress">In Progress</option>
             <option value="resolved">Resolved</option>
             <option value="closed">Closed</option>
           </Select>
         </div>
         <div className="sm:max-w-xs">
           <Select
-            label="Filter by service center"
+            label="Filter By Service Center"
             value={centerFilter}
             onChange={(e) => {
               setCenterFilter(e.target.value);
               setPage(1);
             }}
           >
-            <option value="">All service centers</option>
+            <option value="">All Service Centers</option>
             {(centers?.data || []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
@@ -97,19 +100,35 @@ export default function AdminComplaintsPage() {
             ))}
           </Select>
         </div>
+        <div className="sm:max-w-xs">
+          <Select
+            label="Type"
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value as "" | "society" | "booking");
+              setPage(1);
+            }}
+          >
+            <option value="">All Complaints</option>
+            <option value="booking">Booking Complaints</option>
+            <option value="society">Society Issues</option>
+          </Select>
+        </div>
       </div>
 
       <DataTable<Complaint>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle={debouncedSearch || status || centerFilter ? "No complaints match" : "No complaints"}
+        emptyTitle={debouncedSearch || status || centerFilter ? "No Complaints Match" : "No Complaints"}
         onRowClick={(c) => setSelected(c)}
         columns={[
           { header: "Subject", accessor: (c) => c.subject },
           { header: "Customer", accessor: (c) => c.customer_name || "—" },
-          { header: "Booking", accessor: (c) => <span className="font-mono-num">{c.booking_number || "—"}</span> },
-          { header: "Service center", accessor: (c) => c.service_center_name || "—" },
-          { header: "Priority", accessor: (c) => <Badge tone={PRIORITY_TONE[c.priority] || "neutral"}>{c.priority}</Badge> },
+          { header: "Booking", accessor: (c) => (c.category === "society"
+            ? <span className="text-xs font-semibold text-[#0A66F0]">Society · {c.society_name}{c.registration_number ? ` · ${c.registration_number}` : ""}</span>
+            : <span className="font-mono-num">{c.booking_number || "—"}</span>) },
+          { header: "Service Center", accessor: (c) => c.service_center_name || "—" },
+          { header: "Priority", accessor: (c) => <Badge tone={PRIORITY_TONE[c.priority] || "neutral"}>{toTitle(c.priority)}</Badge> },
           { header: "Raised", accessor: (c) => format(c.created_at) },
           { header: "Status", accessor: (c) => <StatusBadge status={c.status} /> },
         ]}

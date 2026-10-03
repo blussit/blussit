@@ -97,8 +97,25 @@ class ReviewService:
         items, total = await self.repo.list_public(page, page_size)
         return serialize_list(items), total
 
-    async def list_all_for_admin(self, page: int, page_size: int, include_deleted: bool = False):
-        items, total = await self.repo.list_all_for_admin(page, page_size, include_deleted)
+    async def list_all_for_admin(
+        self, page: int, page_size: int, include_deleted: bool = False,
+        service_center_id: str | None = None, captain_id: str | None = None, min_rating: int | None = None,
+    ):
+        """Filters run in the query (not on one fetched page) so an older
+        review is reachable at any volume. min_rating matches the captain
+        OR the service rating (legacy flat `rating` as the fallback)."""
+        filters: dict = {}
+        if service_center_id:
+            filters["service_center_id"] = service_center_id
+        if captain_id:
+            filters["captain_id"] = captain_id
+        if min_rating:
+            filters["$or"] = [
+                {"captain_rating": {"$gte": min_rating}},
+                {"service_rating": {"$gte": min_rating}},
+                {"captain_rating": None, "service_rating": None, "rating": {"$gte": min_rating}},
+            ]
+        items, total = await self.repo.list_all_for_admin(page, page_size, include_deleted, filters)
         return await self._enrich(items), total
 
     async def list_for_center(self, service_center_id: str, actor_role: str, actor_center_id: str | None, page: int, page_size: int):
@@ -187,7 +204,7 @@ class ReviewService:
         reviews = await self.repo.list_for_captain(captain_id)
         return serialize_list(reviews)
 
-    async def get_for_booking(self, booking_id: str, actor_id: str, actor_role: str) -> dict | None:
+    async def get_for_booking(self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None = None) -> dict | None:
         """The review for ONE booking, for inline display in a booking
         detail view (Section 13: manager/admin/captain shouldn't have to
         open a separate page to see what the customer said). None if the
@@ -199,6 +216,9 @@ class ReviewService:
         if not booking:
             raise NotFoundException("Booking not found")
         if actor_role not in {"admin", "manager"} and actor_id not in {booking.get("customer_id"), booking.get("captain_id")}:
+            raise NotFoundException("Booking not found")
+        # A manager sees reviews of THEIR center's bookings only.
+        if actor_role == "manager" and (not actor_center_id or booking.get("service_center_id") != actor_center_id):
             raise NotFoundException("Booking not found")
         review = await self.repo.find_by_booking_id(booking_id)
         return serialize_doc(review) if review else None

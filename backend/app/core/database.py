@@ -233,6 +233,13 @@ async def create_indexes() -> None:
     await db.audit_logs.create_index([("actor_id", 1), ("created_at", -1)])
     await db.audit_logs.create_index([("module", 1), ("created_at", -1)])
     await db.audit_logs.create_index("created_at")
+    # "What did anyone (incl. an admin working a center's queue) do in THIS
+    # center" — the audit page's center filter (AuditService attribution).
+    await db.audit_logs.create_index([("service_center_id", 1), ("created_at", -1)], sparse=True)
+    # Refresh-token rotation ledger (AuthService._spend_refresh_token): a
+    # spent jti only matters until the token itself would have expired.
+    await db.spent_refresh_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.refresh_token_families.create_index("expires_at", expireAfterSeconds=0)
 
     # Hot-path gap pack (these queries ran as full collection scans):
     # first-time-offer fraud checks on EVERY booking price...
@@ -481,4 +488,12 @@ async def create_indexes() -> None:
             await collection.create_index(keys, **options)
         except Exception as exc:  # an equivalent index under another name — degrade, don't die
             logger.warning("Index %s on %s skipped: %s", keys, collection.name, exc)
+
+    # Society plans (docs/SOCIETY_PLANS.md) keep their own index list.
+    from app.repositories.society_repository import ensure_society_indexes
+
+    try:
+        await ensure_society_indexes(db)
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("Society indexes skipped: %s", exc)
 

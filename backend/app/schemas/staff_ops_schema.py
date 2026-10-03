@@ -1,7 +1,7 @@
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.enums import AttendanceStatus, LeaveStatus
 
@@ -29,5 +29,7 @@ class LeaveRequestCreate(BaseModel):
 
 
 class LeaveReviewRequest(BaseModel):
-    status: LeaveStatus
-    review_note: Optional[str] = None
+    # "pending" is not a decision — accepting it told the captain "rejected"
+    # while the row stayed pending.
+    status: Literal[LeaveStatus.APPROVED, LeaveStatus.REJECTED]
+    review_note: Optional[str] = Field(None, max_length=500)

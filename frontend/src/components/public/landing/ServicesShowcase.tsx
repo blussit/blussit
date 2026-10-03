@@ -1,410 +1,346 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigationType, useNavigate } from "react-router-dom";
-import { ArrowRight, ChevronLeft, ChevronRight, Clock, Sparkles, Droplet, Leaf, Armchair, ShieldCheck, Check } from "lucide-react";
+import { useNavigate, useNavigationType } from "react-router-dom";
+import { Armchair, ArrowRight, ArrowUp, Bike, Car, Check, ChevronLeft, ChevronRight, Clock, Droplets, Leaf, Sparkles, type LucideIcon } from "lucide-react";
+import { scrollToSection } from "../../../lib/sections";
 import { useAuth } from "../../../context/AuthContext";
-import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
-import type { Service, VehicleTypeOption } from "../../../types";
-import {
-  INR,
-  groupServices,
-  priceView,
-  serviceImage,
-  titleCase,
-  vehicleLabel,
-  parseIncludes,
-  type ServiceGroup,
-} from "./shared";
+import { catalogApi } from "../../../api/catalog";
+import type { Service } from "../../../types";
+import { INR, groupServices, parseIncludes, priceView, serviceImage, titleCase, type ServiceGroup } from "./shared";
 
+const NAVY = "#0E1A33";
+const BLUE = "#0A66F0";
+const MUTED = "#5F6878";
 const LAST_SERVICE_KEY = "blussit:lastServiceCard";
+// Landing order (founder's call); anything else follows in admin order.
+const CARD_ORDER = [/deep clean/i, /waterless/i, /star/i, /jet/i, /bike|scooty|scooter/i];
+const cardRank = (name: string) => {
+  const i = CARD_ORDER.findIndex((re) => re.test(name));
+  return i === -1 ? CARD_ORDER.length : i;
+};
 
-export function ServicesShowcase({ limit, id, title, subtitle }: { limit?: number; id?: string; title?: string; subtitle?: string }) {
+/** `row`: one swipeable row — 4 cards per view on desktop, two-and-a-bit on
+ * a phone, with dots — and "View All Services" opens every service as a grid
+ * right here (there is no separate services page). Without `row`: the grid. */
+export function ServicesShowcase({ row, id, title, subtitle }: { row?: boolean; id?: string; title?: string; subtitle?: string }) {
+  const [expanded, setExpanded] = useState(false);
   const { data, isLoading } = useQuery({
     queryKey: ["public-services"],
     queryFn: () => catalogApi.services({ page_size: 100 }),
   });
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
-  const navType = useNavigationType();
+  const groups = groupServices((data?.data ?? []).filter((s) => s.is_active !== false))
+    .map((g, i) => ({ g, i }))
+    .sort((a, b) => cardRank(a.g.primary.name) - cardRank(b.g.primary.name) || a.i - b.i)
+    .map(({ g }) => g);
+  const shown = groups;
+  const asRow = !!row && !expanded;
 
-  const all = (data?.data ?? []).filter((s) => s.is_active !== false);
-  const groups = groupServices(all);
-  const shown = limit ? groups.slice(0, limit) : groups;
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Use refs instead of state to avoid React re-renders breaking the 60fps animation
-  const hoverRef = useRef(false);
-  const touchRef = useRef(false);
-  const manualRef = useRef(false);
-  const manualTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // We need 5 copies to ensure the user NEVER sees the end of the scroll width on ultra-wide screens
-  const displayItems = [...shown, ...shown, ...shown, ...shown, ...shown];
-
-  // Restoring Scroll Position Logic
-  const restoredRef = useRef(false);
-  useEffect(() => {
-    if (restoredRef.current || navType !== "POP" || !shown.length) return;
-    let lastId: string | null = null;
-    try {
-      lastId = sessionStorage.getItem(LAST_SERVICE_KEY);
-    } catch {
-      // ignore
-    }
-    if (!lastId) return;
-    const el = document.getElementById(`service-card-${lastId}`);
-    if (el) {
-      restoredRef.current = true;
-      el.scrollIntoView({ behavior: "auto", inline: "center", block: "nearest" });
-      
-      // Temporarily pause animation on restore so the user sees where they came from
-      manualRef.current = true;
-      if (manualTimeout.current) clearTimeout(manualTimeout.current);
-      manualTimeout.current = setTimeout(() => { manualRef.current = false; }, 2000);
-    }
-  }, [navType, shown.length]);
-
-  // Infinite Scroll Engine (Bulletproof Floating Point approach)
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || shown.length === 0) return;
-    
-    let animationId: number;
-    let lastTime = performance.now();
-    const speed = 0.045; // ~45px per second
-    const floatScroll = { current: 0 };
-    
-    let jumpDistance = 0;
-
-    const initTimer = setTimeout(() => {
-      if (!el || el.children.length < shown.length * 2) return;
-      const card0 = el.children[0] as HTMLElement;
-      const cardN = el.children[shown.length] as HTMLElement;
-      if (!card0 || !cardN) return;
-      
-      // The exact pixel width of ONE complete set of original cards
-      jumpDistance = cardN.offsetLeft - card0.offsetLeft;
-      
-      if (!restoredRef.current) {
-        floatScroll.current = jumpDistance;
-        el.scrollLeft = jumpDistance;
-      } else {
-        floatScroll.current = el.scrollLeft;
-      }
-
-      const loop = (time: number) => {
-        let delta = time - lastTime;
-        lastTime = time;
-        
-        // Cap delta at 30ms to prevent massive jumps when the browser tab is restored from background
-        if (delta > 30) delta = 16.66; 
-
-        const isPaused = hoverRef.current || touchRef.current || manualRef.current;
-
-        if (jumpDistance > 0 && el) {
-          if (!isPaused) {
-            // We accumulate in a float to bypass browser Math.floor truncation on el.scrollLeft assignment
-            floatScroll.current += speed * delta;
-            
-            // Core Infinite Loop Math
-            if (floatScroll.current >= jumpDistance * 2) {
-              floatScroll.current -= jumpDistance;
-            } else if (floatScroll.current <= 0) {
-              floatScroll.current += jumpDistance;
-            }
-            
-            el.scrollLeft = floatScroll.current;
-          } else {
-            // User is interacting. We must sync the float back to the DOM so it picks up exactly where they left it
-            floatScroll.current = el.scrollLeft;
-            
-            // Allow infinite loop wrap-around even when the user is manually dragging
-            if (el.scrollLeft >= jumpDistance * 2) {
-                el.scrollLeft -= jumpDistance;
-                floatScroll.current -= jumpDistance;
-            } else if (el.scrollLeft <= 0) {
-                el.scrollLeft += jumpDistance;
-                floatScroll.current += jumpDistance;
-            }
-          }
-        }
-
-        animationId = requestAnimationFrame(loop);
-      };
-
-      animationId = requestAnimationFrame(loop);
-    }, 300); 
-
-    return () => {
-      clearTimeout(initTimer);
-      cancelAnimationFrame(animationId);
-    };
-  }, [shown.length]);
-
-  const handleManualScroll = (direction: 'prev' | 'next') => {
-    manualRef.current = true;
-    if (manualTimeout.current) clearTimeout(manualTimeout.current);
-    manualTimeout.current = setTimeout(() => { manualRef.current = false; }, 800);
-
-    if (!scrollRef.current) return;
-    const cardWidth = scrollRef.current.firstElementChild?.clientWidth || 300;
-    const scrollAmount = direction === 'next' ? (cardWidth + 20) : -(cardWidth + 20);
-    scrollRef.current.scrollBy({ left: scrollAmount, behavior: "smooth" });
-  };
-
-  if (isLoading) return <SkeletonSection id={id} />;
+  if (isLoading) return <SkeletonSection id={id} asRow={!!row} />;
   if (shown.length === 0) return null;
 
   return (
-    <section id={id || "services"} className="relative w-full bg-white pt-4 pb-4 md:pt-6 md:pb-6 lg:pt-8 lg:pb-8 overflow-hidden">
-      <div className="mx-auto w-[calc(100%-32px)] sm:w-[calc(100%-80px)] max-w-[1380px]">
-        
-        {/* Header */}
-        <div className="mx-auto flex w-full flex-col sm:flex-row sm:items-end justify-between gap-5 sm:gap-8 px-1 lg:px-0">
-          <div className="flex flex-col text-left lg:shrink-0">
-            <div>
-              <span className="inline-block rounded-full bg-[#EEF4FF] px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.5px] text-[#1677FF]">
-                {subtitle || "OUR SERVICES"}
-              </span>
-            </div>
-            <h2 className="mt-3 font-display text-[28px] font-extrabold leading-[1.15] text-[#071A3D] sm:text-[34px] lg:text-[40px] lg:whitespace-nowrap">
-              {title ? title : (
+    <section id={id || "services"} className="bg-white pb-10 pt-6 md:pb-14 md:pt-8 lg:pt-14">
+      <div className="container-page">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-[14px] font-extrabold uppercase tracking-[0.1em] md:text-[15px]" style={{ color: BLUE }}>
+              Our services
+            </p>
+            {title && (
+              <h2
+                className="mt-2 font-display text-[23px] font-extrabold leading-[1.15] tracking-[-0.02em] sm:text-[30px] lg:text-[38px]"
+                style={{ color: NAVY }}
+              >
+                {title}
+              </h2>
+            )}
+            {subtitle && (
+              <p className="mt-2 max-w-[640px] text-[14px] leading-[1.55] md:text-[15px]" style={{ color: MUTED }}>
+                {subtitle}
+              </p>
+            )}
+          </div>
+          {row && (
+            <button
+              type="button"
+              onClick={() => {
+                setExpanded((v) => !v);
+                if (expanded) scrollToSection(id || "services");
+              }}
+              aria-expanded={expanded}
+              className="inline-flex shrink-0 items-center gap-1 text-[13px] font-semibold hover:underline md:text-[15px]"
+              style={{ color: BLUE }}
+            >
+              {expanded ? (
                 <>
-                  Choose the Right Care for{" "}
-                  <span className="relative inline-block text-[#1677FF]">
-                    Your Car.
-                    <svg
-                      viewBox="0 0 200 12"
-                      preserveAspectRatio="none"
-                      className="absolute -bottom-1.5 left-2 h-[8px] w-[75%]"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M2,8 C50,2 120,2 198,7"
-                        fill="none"
-                        stroke="#FACC15"
-                        strokeWidth="3"
-                        strokeLinecap="round"
-                      />
-                    </svg>
-                  </span>
+                  Show Less
+                  <ArrowUp className="h-4 w-4" strokeWidth={2.4} />
+                </>
+              ) : (
+                <>
+                  <span className="hidden sm:inline">View All Services</span>
+                  <span className="sm:hidden">View All</span>
+                  <ArrowRight className="h-4 w-4" strokeWidth={2.4} />
                 </>
               )}
-            </h2>
-            <p className="mt-[10px] text-[14px] leading-[1.5] text-[#64748B] sm:text-[15px]">
-              Premium cleaning and detailing services, tailored for your car.
-            </p>
-          </div>
-          
-          <Link
-            to="/services"
-            className="inline-flex shrink-0 items-center gap-1.5 text-[14px] font-semibold text-[#1677FF] transition-colors hover:text-[#071A3D] sm:text-[15px] sm:pb-[6px]"
-          >
-            View All Services
-            <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
-          </Link>
+            </button>
+          )}
         </div>
 
-        {/* Carousel Area */}
-        <div 
-          className="relative mt-6 lg:mt-8 w-full group/carousel"
-          onMouseEnter={() => { hoverRef.current = true; }}
-          onMouseLeave={() => { hoverRef.current = false; }}
-          onTouchStart={() => { touchRef.current = true; }}
-          onTouchEnd={() => { touchRef.current = false; }}
-        >
-          {/* Desktop Arrows */}
-          <button 
-            onClick={() => handleManualScroll('prev')} 
-            className="hidden lg:flex absolute -left-5 xl:-left-6 top-1/2 z-10 h-[44px] w-[44px] -translate-y-1/2 items-center justify-center rounded-full border border-[#E5E5E5] bg-white text-[#071A3D] shadow-[0_2px_8px_rgba(0,0,0,0.04)] transition-all hover:border-[#1677FF] hover:text-[#1677FF] active:scale-95"
-            aria-label="Previous service"
-          >
-            <ChevronLeft className="h-5 w-5" strokeWidth={2} />
-          </button>
-
-          <button 
-            onClick={() => handleManualScroll('next')} 
-            className="hidden lg:flex absolute -right-5 xl:-right-6 top-1/2 z-10 h-[44px] w-[44px] -translate-y-1/2 items-center justify-center rounded-full border border-[#E5E5E5] bg-white text-[#071A3D] shadow-[0_2px_8px_rgba(0,0,0,0.04)] transition-all hover:border-[#1677FF] hover:text-[#1677FF] active:scale-95"
-            aria-label="Next service"
-          >
-            <ChevronRight className="h-5 w-5" strokeWidth={2} />
-          </button>
-
-          {/* Scroller */}
-          <div 
-            ref={scrollRef}
-            className="flex w-full items-stretch gap-[16px] lg:gap-[20px] overflow-x-auto pb-[24px] pt-[8px] hide-scrollbar px-1 lg:px-0 cursor-grab active:cursor-grabbing"
-            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-          >
-            {displayItems.map((g, i) => (
-              <ServiceCard 
-                key={`${g.primary.id}-${i}`} 
-                group={g} 
-                index={i % shown.length} 
-                vehicleTypes={vehicleTypes} 
-              />
+        {asRow ? (
+          <ServiceRow groups={shown} />
+        ) : (
+          <div className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-5 lg:grid-cols-4">
+            {shown.map((g, i) => (
+              <ServiceCard key={g.primary.id} group={g} index={i} />
             ))}
           </div>
-        </div>
+        )}
       </div>
     </section>
   );
 }
 
-function ServiceCard({
-  group,
-  index,
-  vehicleTypes,
-}: {
-  group: ServiceGroup<Service>;
-  index: number;
-  vehicleTypes: VehicleTypeOption[] | undefined;
-}) {
-  const s = group.primary;
-  const pv = priceView(s);
-  const vehicle = vehicleLabel(s.vehicle_types, vehicleTypes) || "All Cars";
-  const { user } = useAuth();
-  const navigate = useNavigate();
-  
-  const bookHref = `${user?.role === "customer" ? "/app/book" : "/book"}?service=${encodeURIComponent(s.slug)}`;
+function ServiceRow({ groups }: { groups: ServiceGroup<Service>[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [page, setPage] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [canScroll, setCanScroll] = useState(false);
+  const navType = useNavigationType();
 
-  const handleBook = (e: React.MouseEvent) => {
-    e.preventDefault();
+  // Pages = how many "screens" of cards there are; recomputed on resize.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      const n = Math.max(1, Math.ceil(el.scrollWidth / el.clientWidth - 0.05));
+      setPages(n);
+      setCanScroll(el.scrollWidth > el.clientWidth + 4);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [groups.length]);
+
+  // Coming back from a booking page: put the card they opened back in view.
+  useEffect(() => {
+    if (navType !== "POP") return;
+    let lastId: string | null = null;
     try {
-      sessionStorage.setItem(LAST_SERVICE_KEY, s.id);
+      lastId = sessionStorage.getItem(LAST_SERVICE_KEY);
     } catch {
-      // ignore
+      /* storage blocked */
     }
-    navigate(bookHref);
+    if (lastId) document.getElementById(`service-card-${lastId}`)?.scrollIntoView({ behavior: "auto", inline: "start", block: "nearest" });
+  }, [navType]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    setPage(max <= 0 ? 0 : Math.round((el.scrollLeft / max) * (pages - 1)));
   };
 
-  const { items } = parseIncludes(s.description);
-  
-  let features = items.slice(0, 3).map(text => {
-    let Icon = Check;
-    const lower = text.toLowerCase();
-    if (lower.includes('waterless') || lower.includes('eco') || lower.includes('green')) Icon = Leaf;
-    else if (lower.includes('exterior') || lower.includes('wash') || lower.includes('foam') || lower.includes('rinse')) Icon = Droplet;
-    else if (lower.includes('interior') || lower.includes('vacuum') || lower.includes('seat') || lower.includes('mat')) Icon = Armchair;
-    else if (lower.includes('polish') || lower.includes('shine') || lower.includes('wax') || lower.includes('tyre')) Icon = Sparkles;
-    else if (lower.includes('protect') || lower.includes('coating')) Icon = ShieldCheck;
-    return { text, Icon };
-  });
-
-  if (features.length === 0) {
-    features = [
-      { text: "Premium Exterior Cleaning", Icon: Droplet },
-      { text: "Detailed Interior Vacuum", Icon: Armchair },
-      { text: "Dashboard & Tyre Polish", Icon: Sparkles },
-    ];
-  }
-
-  while (features.length < 3) {
-    features.push({ text: "-", Icon: Check });
-  }
+  const go = (dir: 1 | -1) => scrollRef.current?.scrollBy({ left: dir * scrollRef.current.clientWidth * 0.9, behavior: "smooth" });
 
   return (
-    <div
-      id={index === 0 ? `service-card-${s.id}` : undefined}
-      className="group relative flex h-auto w-[calc(100vw-32px)] shrink-0 flex-col overflow-hidden rounded-[16px] lg:rounded-[18px] border border-[#E6E8EC] bg-white shadow-[0_6px_24px_rgba(15,30,60,0.06)] transition-all duration-300 hover:-translate-y-[3px] hover:shadow-[0_8px_30px_rgba(15,30,60,0.08)] sm:w-[calc(50%-10px)] lg:w-[calc(25%-15px)]"
-    >
-      {/* Image Area */}
-      <div className="relative h-[220px] lg:h-[230px] w-full shrink-0 overflow-hidden bg-[#F8F9FA]">
-        <img
-          src={serviceImage(s, index)}
-          alt={titleCase(s.name)}
-          loading="lazy"
-          decoding="async"
-          className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.02]"
-        />
-        
-        {/* Duration Badge */}
-        <div className="absolute left-4 top-4 flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 shadow-sm">
-          <Clock className="h-[14px] w-[14px] text-[#071A3D]" strokeWidth={2.5} />
-          <span className="text-[12px] font-semibold text-[#071A3D]">
-            {s.duration_minutes || 45} MIN
-          </span>
-        </div>
-        
-        {pv.original && pv.original > pv.final && (
-           <div className="absolute right-4 top-4 rounded-full bg-[#E11D48] px-2.5 py-1 text-[11px] font-bold text-white shadow-sm">
-             {Math.round(((pv.original - pv.final) / pv.original) * 100)}% OFF
-           </div>
-        )}
-      </div>
-
-      {/* Content Area */}
-      <div className="flex flex-1 flex-col p-[20px] lg:p-[22px]">
-        <h3 className="text-[20px] lg:text-[22px] font-bold leading-snug text-[#071A3D]">
-          {titleCase(s.name)}
-        </h3>
-        
-        <p className="mt-1 mb-[16px] text-[14px] text-[#64748B]">
-          For {vehicle}
-        </p>
-
-        {/* Features List */}
-        <ul className="mb-[20px] flex flex-col gap-[8px] lg:gap-[10px]">
-          {features.map((feat, idx) => (
-            <li key={idx} className={`flex items-center gap-2.5 text-[13px] lg:text-[14px] leading-snug ${feat.text === "-" ? "invisible" : "text-[#475569]"}`}>
-              <feat.Icon className="h-[14px] w-[14px] shrink-0 text-[#1677FF]" strokeWidth={1.5} />
-              <span className="min-w-0 flex-1 truncate">{titleCase(feat.text)}</span>
-            </li>
-          ))}
-        </ul>
-
-        {/* Price & CTA pinned to bottom via mt-auto */}
-        <div className="mt-auto flex items-end justify-between gap-3 border-t border-[#F0F0F0] pt-[16px]">
-          <div className="flex flex-col">
-            <span className="text-[12px] font-medium text-[#64748B] mb-0.5">From</span>
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-[22px] lg:text-[24px] font-bold leading-none text-[#071A3D]">
-                {INR(pv.final)}
-              </span>
-              {pv.original != null && (
-                <span className="text-[12px] lg:text-[13px] font-medium text-[#94A3B8] line-through">
-                  {INR(pv.original)}
-                </span>
-              )}
-            </div>
+    <div className="relative mt-4 md:mt-5">
+      {canScroll && (
+        <>
+          <ArrowButton side="left" disabled={page === 0} onClick={() => go(-1)} />
+          <ArrowButton side="right" disabled={page >= pages - 1} onClick={() => go(1)} />
+        </>
+      )}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="hide-scrollbar -mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-4 pt-1 sm:mx-0 sm:gap-5 sm:px-0"
+        style={{ scrollPaddingInline: "16px" }}
+      >
+        {groups.map((g, i) => (
+          <div key={g.primary.id} className="w-[57%] shrink-0 snap-start sm:w-[calc((100%-40px)/3)] lg:w-[calc((100%-60px)/4)]">
+            <ServiceCard group={g} index={i} />
           </div>
-
-          <button
-            onClick={handleBook}
-            className="flex h-[38px] lg:h-[40px] items-center justify-center gap-1.5 rounded-[10px] lg:rounded-[12px] bg-[#FBBF24] px-[16px] lg:px-[18px] text-[14px] lg:text-[15px] font-semibold text-[#071A3D] transition-transform hover:-translate-y-0.5 active:translate-y-0"
-          >
-            Book Now
-            <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
-          </button>
-        </div>
+        ))}
       </div>
+      {pages > 1 && (
+        <div className="mt-2 flex justify-center gap-1.5 lg:hidden" aria-hidden="true">
+          {Array.from({ length: pages }, (_, i) => (
+            <span
+              key={i}
+              className="h-1.5 rounded-full transition-all"
+              style={{ width: i === page ? 18 : 6, backgroundColor: i === page ? BLUE : "#D5DDEA" }}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function SkeletonSection({ id }: { id?: string }) {
+function ArrowButton({ side, disabled, onClick }: { side: "left" | "right"; disabled: boolean; onClick: () => void }) {
+  const Icon = side === "left" ? ChevronLeft : ChevronRight;
   return (
-    <section id={id || "services"} className="relative w-full bg-white pt-[60px] pb-[10px] lg:pt-[70px] lg:pb-[10px] overflow-hidden">
-      <div className="mx-auto w-[calc(100%-32px)] sm:w-[calc(100%-80px)] max-w-[1380px]">
-        {/* Header Skeleton */}
-        <div className="mx-auto flex w-full flex-col sm:flex-row sm:items-end justify-between gap-5 sm:gap-8 px-1 lg:px-0 animate-pulse">
-          <div className="flex flex-col text-left">
-            <div className="mb-2 h-3 w-24 rounded bg-[#E8E8E8]" />
-            <div className="h-8 w-64 rounded bg-[#E8E8E8] sm:w-80" />
-          </div>
-          <div className="h-4 w-32 rounded bg-[#E8E8E8] pb-1" />
+    <button
+      type="button"
+      aria-label={side === "left" ? "Previous services" : "Next services"}
+      onClick={onClick}
+      disabled={disabled}
+      className={`absolute top-[38%] z-10 hidden h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-[#E4E9F1] bg-white shadow-[0_6px_18px_rgba(15,30,60,0.10)] transition-opacity disabled:pointer-events-none disabled:opacity-0 lg:flex ${
+        side === "left" ? "-left-5" : "-right-5"
+      }`}
+      style={{ color: BLUE }}
+    >
+      <Icon className="h-5 w-5" strokeWidth={2.6} />
+    </button>
+  );
+}
+
+/** One line of "what you get", from the admin description. */
+/** What the service includes, from the admin description: its list items
+ * (shown as ticks), or a single sentence when that's how it's written. */
+function included(description?: string | null): { items: string[]; summary: string | null } {
+  const { summary, items } = parseIncludes(description);
+  if (items.length) return { items: items.slice(0, 3), summary: null };
+  return { items: [], summary: summary || "Professional doorstep care for your vehicle." };
+}
+
+function serviceIcon(name: string): { Icon: LucideIcon; color: string } {
+  const n = name.toLowerCase();
+  if (/waterless|eco/.test(n)) return { Icon: Leaf, color: "#12A150" };
+  if (/bike|scooter/.test(n)) return { Icon: Bike, color: BLUE };
+  if (/interior|seat|vacuum/.test(n)) return { Icon: Armchair, color: BLUE };
+  if (/deep|detail|polish|wax/.test(n)) return { Icon: Sparkles, color: BLUE };
+  if (/jet|pressure/.test(n)) return { Icon: Droplets, color: BLUE };
+  return { Icon: Car, color: BLUE };
+}
+
+function ServiceCard({ group, index }: { group: ServiceGroup<Service>; index: number }) {
+  const s = group.primary;
+  const pv = priceView(s);
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const { Icon, color } = serviceIcon(s.name);
+  const includes = included(s.description);
+  const off = pv.original && pv.original > pv.final ? Math.round(((pv.original - pv.final) / pv.original) * 100) : null;
+  const tag = s.offer_tag?.trim();
+
+  const book = () => {
+    try {
+      sessionStorage.setItem(LAST_SERVICE_KEY, s.id);
+    } catch {
+      /* storage blocked */
+    }
+    navigate(`${user?.role === "customer" ? "/app/book" : "/book"}?service=${encodeURIComponent(s.slug)}`);
+  };
+
+  return (
+    <article
+      id={`service-card-${s.id}`}
+      onClick={book}
+      className="group flex h-full cursor-pointer flex-col overflow-hidden rounded-[16px] border border-[#EDF0F5] bg-white shadow-[0_6px_20px_rgba(15,30,60,0.06)] transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_12px_28px_rgba(15,30,60,0.10)] md:rounded-[18px]"
+    >
+      <div className="relative">
+        <div className="aspect-[16/10] w-full overflow-hidden bg-[#F3F6FA]">
+          <img
+            src={serviceImage(s, index)}
+            alt={titleCase(s.name)}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
+          />
         </div>
-        
-        {/* Carousel Skeleton */}
-        <div className="relative mt-[24px] lg:mt-[28px] w-full flex items-stretch gap-[16px] lg:gap-[20px] overflow-hidden px-1 lg:px-0">
-          {[1, 2, 3, 4].map(i => (
-            <div key={i} className="flex flex-col h-[520px] w-[calc(100vw-32px)] sm:w-[calc(50%-10px)] lg:w-[calc(25%-15px)] shrink-0 rounded-[16px] lg:rounded-[18px] border border-[#E6E8EC] bg-white animate-pulse">
-              <div className="h-[220px] lg:h-[230px] w-full bg-[#F8F9FA]" />
-              <div className="flex-1 p-[20px] lg:p-[22px]">
-                 <div className="h-6 w-3/4 rounded bg-[#F1F5F9] mb-2" />
-                 <div className="h-4 w-1/4 rounded bg-[#F1F5F9] mb-8" />
-                 <div className="h-4 w-full rounded bg-[#F1F5F9] mb-3" />
-                 <div className="h-4 w-full rounded bg-[#F1F5F9] mb-3" />
+        {(tag || off != null) && (
+          <div className="absolute left-2.5 right-2.5 top-2.5 flex items-start justify-between gap-1 sm:left-2 sm:right-2 sm:top-2 md:left-3 md:right-3 md:top-3">
+            {tag ? (
+              <span className="truncate rounded-full px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide sm:px-2 sm:py-0.5 sm:text-[9.5px] md:px-2.5 md:py-1 md:text-[10.5px]" style={{ backgroundColor: "#FFD21F", color: NAVY }}>
+                {tag}
+              </span>
+            ) : (
+              <span />
+            )}
+            {off != null && (
+              <span className="shrink-0 rounded-full bg-[#E11D48] px-2 py-0.5 text-[10px] font-extrabold text-white sm:px-2 sm:py-0.5 sm:text-[9.5px] md:px-2.5 md:py-1 md:text-[10.5px]">
+                {off}% OFF
+              </span>
+            )}
+          </div>
+        )}
+        <span className="absolute -bottom-[18px] left-3.5 flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-[0_4px_14px_rgba(15,30,60,0.14)] sm:-bottom-4 sm:left-3 sm:h-8 sm:w-8 md:-bottom-5 md:left-4 md:h-10 md:w-10">
+          <Icon className="h-[18px] w-[18px] sm:h-4 sm:w-4 md:h-5 md:w-5" style={{ color }} strokeWidth={2.2} />
+        </span>
+      </div>
+
+      <div className="flex flex-1 flex-col px-3.5 pb-3.5 pt-6 sm:px-3 sm:pb-3 sm:pt-6 md:px-4 md:pb-4 md:pt-7">
+        <h3 className="text-[16px] font-bold leading-snug sm:text-[15px] md:text-[17px]" style={{ color: NAVY }}>
+          {titleCase(s.name)}
+        </h3>
+        {includes.items.length ? (
+          <ul className="mt-2 space-y-1 sm:mt-2 sm:space-y-1 md:mt-2.5 md:space-y-1.5">
+            {includes.items.map((item) => (
+              <li key={item} className="flex items-start gap-1.5 text-[13px] leading-[1.35] sm:gap-1.5 sm:text-[12px] md:gap-2 md:text-[13.5px]" style={{ color: "#3A4456" }}>
+                <Check className="mt-[1px] h-3.5 w-3.5 shrink-0 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" style={{ color: BLUE }} strokeWidth={3} />
+                <span className="line-clamp-2 md:line-clamp-1">{titleCase(item)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1.5 line-clamp-2 text-[13px] leading-[1.45] sm:text-[12px] md:text-[13.5px]" style={{ color: MUTED }}>
+            {includes.summary}
+          </p>
+        )}
+        <p className="mt-2.5 flex items-center gap-1.5 text-[12px] sm:mt-2 sm:text-[11.5px] md:mt-3 md:text-[13px]" style={{ color: MUTED }}>
+          <Clock className="h-3.5 w-3.5 shrink-0 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" strokeWidth={2} />
+          {s.duration_minutes || 45} mins
+        </p>
+        <div className="mt-auto flex items-end justify-between gap-2 pt-3 sm:pt-3 md:pt-4">
+          {/* Original price struck out on top, the price you pay big and bold. */}
+          <div className="min-w-0 whitespace-nowrap leading-none">
+            {pv.original != null && pv.original > pv.final && (
+              <p className="mb-1 text-[13px] font-medium text-[#94A3B8] line-through sm:text-[12px] md:text-[14px]">{INR(pv.original)}</p>
+            )}
+            <p>
+              {pv.varies && (
+                <span className="mr-1 text-[12px] sm:text-[11px] md:text-[13px]" style={{ color: MUTED }}>
+                  From
+                </span>
+              )}
+              <span className="text-[22px] font-extrabold tracking-[-0.01em] sm:text-[20px] md:text-[26px]" style={{ color: NAVY }}>
+                {INR(pv.final)}
+              </span>
+            </p>
+          </div>
+          <span
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white transition-transform group-hover:translate-x-0.5 sm:h-8 sm:w-8 md:h-10 md:w-10"
+            style={{ backgroundColor: BLUE }}
+            aria-hidden="true"
+          >
+            <ArrowRight className="h-4 w-4 sm:h-4 sm:w-4 md:h-[18px] md:w-[18px]" strokeWidth={2.5} />
+          </span>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function SkeletonSection({ id, asRow }: { id?: string; asRow: boolean }) {
+  return (
+    <section id={id || "services"} className="bg-white py-10 md:py-14">
+      <div className="container-page animate-pulse">
+        <div className="h-3 w-24 rounded bg-[#EEF1F5]" />
+        <div className="mt-3 h-8 w-72 max-w-full rounded bg-[#EEF1F5]" />
+        <div className={`mt-8 gap-3 sm:gap-5 ${asRow ? "flex overflow-hidden" : "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4"}`}>
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className={`overflow-hidden rounded-[18px] border border-[#EDF0F5] ${asRow ? "w-[57%] shrink-0 sm:w-[calc((100%-40px)/3)] lg:w-[calc((100%-60px)/4)]" : ""}`}
+            >
+              <div className="aspect-[16/10] bg-[#F3F6FA]" />
+              <div className="space-y-2 p-4">
+                <div className="h-4 w-3/4 rounded bg-[#EEF1F5]" />
+                <div className="h-3 w-full rounded bg-[#EEF1F5]" />
+                <div className="h-3 w-1/2 rounded bg-[#EEF1F5]" />
               </div>
             </div>
           ))}

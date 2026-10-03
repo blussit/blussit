@@ -108,13 +108,13 @@ export function CustomPlanEnquiryModal({
             onChange={(e) => setForm({ ...form, preferred_time: e.target.value })}
           />
           <Input
-            label="Anything else (optional)"
+            label="Anything Else (Optional)"
             value={form.notes}
             onChange={(e) => setForm({ ...form, notes: e.target.value })}
           />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button className="w-full" disabled={!valid} isLoading={mutation.isPending} onClick={() => mutation.mutate()}>
-            Send request
+            Send Request
           </Button>
         </div>
       )}

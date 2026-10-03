@@ -22,7 +22,7 @@ export function StatCard({
   icon: Icon,
   to,
   onClick,
-  linkLabel = "View all",
+  linkLabel = "View All",
   tone = "default",
   className,
 }: {
@@ -43,7 +43,7 @@ export function StatCard({
   className?: string;
 }) {
   const valueTone = {
-    default: "text-black",
+    default: "text-[var(--ui-ink,#000)]",
     success: "text-[var(--color-success)]",
     warning: "text-amber-600",
     error: "text-[var(--color-error)]",
@@ -54,25 +54,25 @@ export function StatCard({
   const body = (
     <div
       className={cn(
-        "group relative flex h-full flex-col rounded-2xl border border-[#F3E5B5] bg-white p-5 transition-colors",
-        clickable && "hover:border-black",
+        "group relative flex h-full flex-col rounded-2xl border border-[var(--color-card-border)] bg-white p-5 transition-colors",
+        clickable && "hover:border-[var(--ui-hover-line,#000)]",
         className
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500">
+        <span className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--ui-muted,#6b7280)]">
           {Icon && <Icon className="h-3.5 w-3.5 shrink-0" />}
           {label}
           {labelAfter}
         </span>
         {clickable && (
-          <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-black opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100">
+          <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-[var(--ui-hover-line,#000)] opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100">
             {linkLabel} <ArrowRight className="h-3 w-3" />
           </span>
         )}
       </div>
       <p className={cn("font-mono-num mt-3 text-[28px] font-bold leading-none", valueTone)}>{value}</p>
-      {hint && <p className="mt-1.5 text-xs text-gray-400">{hint}</p>}
+      {hint && <p className="mt-1.5 text-xs text-[var(--ui-muted,#9ca3af)]">{hint}</p>}
     </div>
   );
 
@@ -112,12 +112,12 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-2xl border border-[#F3E5B5] bg-white", className)}>
+    <section className={cn("rounded-2xl border border-[var(--color-card-border)] bg-white", className)}>
       {(title || actions) && (
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[#F3E5B5] px-5 py-4">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-card-border)] px-5 py-4">
           <div className="min-w-0">
-            {title && <h2 className="font-semibold text-black">{title}</h2>}
-            {description && <p className="mt-0.5 text-xs text-gray-400">{description}</p>}
+            {title && <h2 className="font-semibold text-[var(--ui-ink,#000)]">{title}</h2>}
+            {description && <p className="mt-0.5 text-xs text-[var(--ui-muted,#9ca3af)]">{description}</p>}
           </div>
           {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
         </header>

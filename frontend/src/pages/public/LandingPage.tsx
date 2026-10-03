@@ -1,5 +1,5 @@
-import { type CSSProperties } from "react";
-import { useNavigate } from "react-router-dom";
+import { type CSSProperties, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
 import { LandingHero } from "../../components/public/LandingHeroNew";
@@ -9,18 +9,43 @@ import { PlansShowcase } from "../../components/public/landing/PlansShowcase";
 import { VideoReviews } from "../../components/public/landing/VideoReviews";
 import { ReviewsShowcase } from "../../components/public/landing/ReviewsShowcase";
 import { FaqSection } from "../../components/public/landing/FaqSection";
-import { LaunchOfferPopup, usePromotedOffer } from "../../components/public/LaunchOfferPopup";
+import { LaunchOfferPopup, useActiveOffers } from "../../components/public/LaunchOfferPopup";
+import { OfferBar } from "../../components/public/landing/OfferBar";
 import { PageSeo } from "../../components/shared/PageSeo";
 import { useAuth } from "../../context/AuthContext";
+import { scrollToSection } from "../../lib/sections";
 
 /**
- * Landing page, kept deliberately short: hero → services → how it works →
- * plans → video reviews → written reviews. The older sections (offers marquee, Why Blussit, premium
- * banner) still live in LandingSections.tsx if they are ever needed again.
+ * The whole public site in one page: hero → services → how it works →
+ * plans → video reviews → written reviews → FAQ. The navbar and footer jump
+ * to these sections (lib/sections.ts); /services and /plans redirect here.
  */
 export default function LandingPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
+
+  // Arriving with /#services, /#plans… (navbar or footer from another page,
+  // or an old /services link): jump there once the section has rendered,
+  // then once more after the sections above it have finished loading.
+  useEffect(() => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (!id) return;
+    let tries = 0;
+    let settle = 0;
+    const timer = window.setInterval(() => {
+      if (scrollToSection(id, "auto")) {
+        window.clearInterval(timer);
+        settle = window.setTimeout(() => scrollToSection(id, "auto"), 700);
+      } else if (++tries > 40) {
+        window.clearInterval(timer);
+      }
+    }, 75);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(settle);
+    };
+  }, [location.hash]);
   // A logged-in customer already has an account, saved vehicles/addresses —
   // send them straight to the after-login booking page instead of the
   // guest wizard (which exists only to let a not-yet-logged-in visitor
@@ -28,7 +53,8 @@ export default function LandingPage() {
   // practice, but the guest wizard remains a safe fallback for them too.
   const bookPath = user?.role === "customer" ? "/app/book" : "/book";
   const bookService = (slug?: string) => navigate(slug ? `${bookPath}?service=${encodeURIComponent(slug)}` : bookPath);
-  const offer = usePromotedOffer();
+  const offers = useActiveOffers();
+  const offer = offers[0] ?? null;
   const claimOffer = () => offer && bookService(offer.service.slug);
 
   const themeScope = {
@@ -42,12 +68,13 @@ export default function LandingPage() {
     <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
       <PageSeo path="/" />
       <PublicNavbar />
+      <OfferBar offers={offers} onBook={bookService} />
       {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
       <LandingHero onBook={bookService} />
-      <ServicesShowcase limit={6} />
+      <ServicesShowcase row />
       <HowItWorksStrip />
       <PlansShowcase />
-      <VideoReviews />
+      <VideoReviews id="reviews" />
       <ReviewsShowcase />
       <FaqSection />
       <PublicFooter />

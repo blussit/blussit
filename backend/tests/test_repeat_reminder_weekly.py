@@ -208,7 +208,7 @@ async def test_finder_uses_the_setting_as_cooldown_and_skips_who_it_should(db, c
     due = await customer(10)
     reminded_last_week = await customer(20, last_repeat_reminder_at=now - timedelta(days=8))
     skipped = {
-        "washed 5 days ago": await customer(5),
+        "wash 5 days ago": await customer(5),
         "reminded 3 days ago": await customer(20, last_repeat_reminder_at=now - timedelta(days=3)),
         "opted out": await customer(10, marketing_opt_out=True),
         "suspended": await customer(10, status="suspended"),
@@ -221,9 +221,9 @@ async def test_finder_uses_the_setting_as_cooldown_and_skips_who_it_should(db, c
     await db.user_subscriptions.insert_one({"customer_id": on_pass, "status": "active", "is_deleted": False,
                                             "remaining_service_count": 2, "end_date": now + timedelta(days=10)})
     skipped["holds a live pass"] = on_pass
-    never_washed = await make_customer(db)
-    cleanup.append(("users", {"_id": ObjectId(never_washed)}))
-    skipped["never had a wash"] = never_washed
+    never_wash = await make_customer(db)
+    cleanup.append(("users", {"_id": ObjectId(never_wash)}))
+    skipped["never had a wash"] = never_wash
 
     found = {str(u["_id"]) for u in await bs.find_customers_due_repeat_reminder(7, limit=5000)}
     # Reminded 8 days ago: due again on a weekly setting (the old hard-coded

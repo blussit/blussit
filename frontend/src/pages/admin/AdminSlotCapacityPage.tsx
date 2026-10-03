@@ -5,8 +5,9 @@ import { CalendarClock, ChevronLeft, Lock, Unlock, Wand2, X } from "lucide-react
 import { adminCapacityPolicyApi, adminServiceCenterApi, adminSlotCapacityApi } from "../../api/admin";
 import { Badge, Button, Card, Input, PageLoader } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
-import { format, todayIST, formatTime12 } from "../../lib/date";
+import { format, todayIST, formatTime12, formatSlot } from "../../lib/date";
 import { useConfirm } from "../../context/ConfirmContext";
+import { toTitle } from "../../lib/titleCase";
 
 type Section = "overview" | "policy";
 
@@ -34,9 +35,9 @@ export default function AdminSlotCapacityPage() {
     <div className="space-y-6">
       <div>
         <button onClick={() => navigate("/admin/service-centers")} className="mb-2 flex items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-          <ChevronLeft className="h-4 w-4" /> Service centers
+          <ChevronLeft className="h-4 w-4" /> Service Centers
         </button>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Capacity — {center?.name || "…"}</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Capacity — {toTitle(center?.name) || "…"}</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">The single place to manage this center's booking capacity.</p>
       </div>
 
@@ -51,7 +52,7 @@ export default function AdminSlotCapacityPage() {
           onClick={() => setSection("policy")}
           className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${section === "policy" ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
         >
-          Capacity policy & scheduling
+          Capacity Policy & Scheduling
         </button>
       </div>
 
@@ -120,7 +121,7 @@ function OverviewSection({ centerId }: { centerId: string }) {
           <table className="w-full min-w-[560px] text-left text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50/60">
-                <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Time slot</th>
+                <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Time Slot</th>
                 <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Capacity</th>
                 <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Booked</th>
                 <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Remaining</th>
@@ -202,7 +203,7 @@ function OverviewSection({ centerId }: { centerId: string }) {
       </Card>
       <p className="text-xs text-[var(--color-text-secondary)]">
         Edits here override just this one date's slot — they take effect immediately. To change the baseline every future date
-        starts out with, use "Capacity policy &amp; scheduling" above.
+        starts out with, use "Capacity Policy &amp; Scheduling" above.
       </p>
     </div>
   );
@@ -316,19 +317,19 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Card className="p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Current capacity</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Current Capacity</p>
           <p className="mt-1 font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">
-            {overview.current.max_bookings_per_day != null ? `${overview.current.max_bookings_per_day} / day` : "Not configured"}
+            {overview.current.max_bookings_per_day != null ? `${overview.current.max_bookings_per_day} / day` : "Not Configured"}
           </p>
-          <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Active today</p>
+          <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Active Today</p>
         </Card>
         <Card className={`p-4 ${overview.scheduled ? "border-[var(--color-primary)]" : ""}`}>
-          <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Scheduled capacity</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">Scheduled Capacity</p>
           {overview.scheduled ? (
             <>
               <p className="mt-1 font-mono-num text-2xl font-bold text-[var(--color-primary)]">{overview.scheduled.max_bookings_per_day} / day</p>
               <p className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
-                <CalendarClock className="h-3.5 w-3.5" /> Effective from {format(overview.scheduled.effective_date)}
+                <CalendarClock className="h-3.5 w-3.5" /> Effective From {format(overview.scheduled.effective_date)}
               </p>
               <div className="mt-2 flex gap-2">
                 <Button size="sm" variant="outline" onClick={editScheduled}>
@@ -339,7 +340,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
                   variant="ghost"
                   isLoading={cancelMutation.isPending}
                   onClick={async () => {
-                    if (await confirm({ title: "Cancel this scheduled capacity change?", tone: "danger" })) cancelMutation.mutate(overview.scheduled!.id);
+                    if (await confirm({ title: "Cancel This Scheduled Capacity Change?", tone: "danger" })) cancelMutation.mutate(overview.scheduled!.id);
                   }}
                 >
                   <X className="h-3.5 w-3.5" /> Cancel
@@ -353,14 +354,14 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
       </div>
 
       <Card className="p-5">
-        <p className="mb-1 text-sm font-semibold text-[var(--color-text-primary)]">{editingChangeId ? "Edit scheduled capacity change" : "Change capacity"}</p>
+        <p className="mb-1 text-sm font-semibold text-[var(--color-text-primary)]">{editingChangeId ? "Edit Scheduled Capacity Change" : "Change Capacity"}</p>
         <p className="mb-4 text-xs text-[var(--color-text-secondary)]">
           Set the maximum bookings this center should accept per day, and how those are split across its time slots.
         </p>
 
         <div className="space-y-4">
           <Input
-            label="Maximum daily bookings"
+            label="Maximum Daily Bookings"
             type="number"
             min={0}
             className="max-w-xs"
@@ -372,15 +373,15 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
 
           <div>
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">Slot capacity</p>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">Slot Capacity</p>
               <Button size="sm" variant="outline" onClick={() => autoDistribute(maxDailyNum)} disabled={!maxDailyNum}>
-                <Wand2 className="h-3.5 w-3.5" /> Auto-distribute
+                <Wand2 className="h-3.5 w-3.5" /> Auto-Distribute
               </Button>
             </div>
             <div className="space-y-2">
               {slotKeys.map((key) => (
                 <div key={key} className="flex items-center justify-between gap-3 rounded-lg border border-gray-100 p-2.5">
-                  <span className="font-mono-num text-sm text-[var(--color-text-primary)]">{key}</span>
+                  <span className="text-sm text-[var(--color-text-primary)]">{formatSlot(key)}</span>
                   <Input
                     type="number"
                     min={0}
@@ -404,10 +405,10 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
             <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">When should this apply?</p>
             <div className="flex flex-wrap gap-4">
               <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
-                <input type="radio" checked={applyMode === "immediate"} onChange={() => setApplyMode("immediate")} /> Apply immediately
+                <input type="radio" checked={applyMode === "immediate"} onChange={() => setApplyMode("immediate")} /> Apply Immediately
               </label>
               <label className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
-                <input type="radio" checked={applyMode === "future"} onChange={() => setApplyMode("future")} /> Apply from a specific date
+                <input type="radio" checked={applyMode === "future"} onChange={() => setApplyMode("future")} /> Apply From A Specific Date
               </label>
             </div>
             {applyMode === "future" && (
@@ -420,7 +421,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
             </p>
           </div>
 
-          <Input label="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Festival season ramp-up" />
+          <Input label="Note (Optional)" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Festival season ramp-up" />
 
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <div className="flex gap-2">
@@ -429,11 +430,11 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
               disabled={!maxDaily || totalMismatch}
               onClick={() => scheduleMutation.mutate()}
             >
-              {editingChangeId ? "Save changes" : applyMode === "immediate" ? "Apply now" : "Schedule change"}
+              {editingChangeId ? "Save Changes" : applyMode === "immediate" ? "Apply Now" : "Schedule Change"}
             </Button>
             {editingChangeId && (
               <Button variant="outline" onClick={resetForm}>
-                Cancel edit
+                Cancel Edit
               </Button>
             )}
           </div>
@@ -442,7 +443,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
 
       <Card className="overflow-hidden">
         <div className="border-b border-gray-100 px-5 py-3">
-          <p className="text-sm font-semibold text-[var(--color-text-primary)]">Capacity history</p>
+          <p className="text-sm font-semibold text-[var(--color-text-primary)]">Capacity History</p>
         </div>
         {!history?.length ? (
           <p className="p-5 text-sm text-[var(--color-text-secondary)]">No capacity changes recorded yet.</p>
@@ -451,8 +452,8 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
             <table className="w-full min-w-[520px] text-left text-sm">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50/60">
-                  <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Effective date</th>
-                  <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Daily max</th>
+                  <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Effective Date</th>
+                  <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Daily Max</th>
                   <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Status</th>
                   <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]">Note</th>
                   <th className="px-4 py-3 font-medium text-[var(--color-text-secondary)]"></th>
@@ -464,7 +465,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
                     <td className="px-4 py-3 font-mono-num">{format(h.effective_date)}</td>
                     <td className="px-4 py-3 font-mono-num">{h.max_bookings_per_day}</td>
                     <td className="px-4 py-3">
-                      <Badge tone={h.status === "active" ? "success" : h.status === "scheduled" ? "info" : "neutral"}>{h.status}</Badge>
+                      <Badge tone={h.status === "active" ? "success" : h.status === "scheduled" ? "info" : "neutral"}>{toTitle(h.status)}</Badge>
                     </td>
                     <td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]">{h.note || "—"}</td>
                     <td className="px-4 py-3">
@@ -474,7 +475,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
                           variant="ghost"
                           isLoading={cancelMutation.isPending}
                           onClick={async () => {
-                            if (await confirm({ title: "Cancel this scheduled capacity change?", tone: "danger" })) cancelMutation.mutate(h.id);
+                            if (await confirm({ title: "Cancel This Scheduled Capacity Change?", tone: "danger" })) cancelMutation.mutate(h.id);
                           }}
                         >
                           Cancel

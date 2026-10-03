@@ -2,9 +2,11 @@
 set -Eeuo pipefail
 
 # Deploy the existing backend configuration to Cloud Run.
-# The source env file is local-only and is ignored by git (backend/.env).
+# The source env file is local-only and is ignored by git: LIVE credentials
+# live in backend/.env.production (backend/.env.development is for local
+# testing and must never be deployed).
 
-ENV_FILE="${DEPLOY_ENV_FILE:-backend/.env}"
+ENV_FILE="${DEPLOY_ENV_FILE:-backend/.env.production}"
 SERVICE="${CLOUD_RUN_SERVICE:-blussit-api}"
 REGION="${CLOUD_RUN_REGION:-asia-south1}"
 PORT="${CLOUD_RUN_PORT:-8080}"
@@ -41,6 +43,16 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+
+# Production only: refuse anything that looks like the local test setup.
+[[ "${APP_ENV:-}" == "production" ]] || fail "$ENV_FILE must set APP_ENV=production (is this the development file?)"
+# Any spelling pydantic would read as true (True/1/yes/on), not just "true".
+case "$(printf '%s' "${DEV_TOOLS_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
+  true|1|yes|on|y|t) fail "DEV_TOOLS_ENABLED is for local testing only — remove it from $ENV_FILE" ;;
+esac
+case "${MONGO_URI:-}" in
+  *localhost*|*127.0.0.1*|*"[::1]"*|*host.docker.internal*) fail "MONGO_URI in $ENV_FILE points at a local database" ;;
+esac
 
 # Defaults mirror backend/app/core/config.py. Explicit values in ENV_FILE win.
 : "${APP_NAME:=Doorstep Vehicle Care Platform}"

@@ -7,6 +7,7 @@ import { normalisePhoneSearch, Pager, SearchBox, useDebouncedValue } from "../..
 import { useAuth } from "../../context/AuthContext";
 import { format } from "../../lib/date";
 import type { Complaint } from "../../types";
+import { toTitle } from "../../lib/titleCase";
 
 const PRIORITY_TONE: Record<string, "error" | "warning" | "neutral"> = { urgent: "error", high: "error", medium: "warning", low: "neutral" };
 const PAGE_SIZE = 20;
@@ -14,7 +15,7 @@ const PAGE_SIZE = 20;
 const STATUS_TABS = [
   { key: "", label: "All" },
   { key: "open", label: "Open" },
-  { key: "in_progress", label: "In progress" },
+  { key: "in_progress", label: "In Progress" },
   { key: "resolved", label: "Resolved" },
   { key: "closed", label: "Closed" },
 ];
@@ -31,15 +32,16 @@ export default function ManagerComplaintsPage() {
   const { user } = useAuth();
   const centerId = user?.service_center_id || "";
   const [status, setStatus] = useState("open");
+  const [category, setCategory] = useState<"" | "society">("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Complaint | null>(null);
   const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ["center-complaints-page", centerId, status, debouncedSearch, page],
+    queryKey: ["center-complaints-page", centerId, status, category, debouncedSearch, page],
     queryFn: () =>
-      complaintApi.forCenter(centerId, { status: status || undefined, search: debouncedSearch || undefined, page, page_size: PAGE_SIZE }),
+      complaintApi.forCenter(centerId, { status: status || undefined, category: category || undefined, search: debouncedSearch || undefined, page, page_size: PAGE_SIZE }),
     enabled: !!centerId,
     placeholderData: keepPreviousData,
   });
@@ -68,13 +70,27 @@ export default function ManagerComplaintsPage() {
                 setPage(1);
               }}
               className={`rounded-full border px-3 py-1 text-xs font-medium ${
-                status === t.key ? "border-2 border-black bg-[var(--color-primary-light)] text-black" : "border-gray-200 text-gray-500 hover:border-gray-300"
+                status === t.key ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border-gray-200 text-gray-500 hover:border-gray-300"
               }`}
             >
               {t.label}
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => {
+            setCategory((c) => (c ? "" : "society"));
+            setPage(1);
+          }}
+          aria-pressed={category === "society"}
+          data-testid="filter-society-issues"
+          className={`rounded-full border px-3 py-1 text-xs font-medium ${
+            category === "society" ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border-gray-200 text-gray-500 hover:border-gray-300"
+          }`}
+        >
+          Society Issues
+        </button>
         <SearchBox
           className="sm:ml-auto sm:w-80"
           value={search}
@@ -89,13 +105,15 @@ export default function ManagerComplaintsPage() {
       <DataTable<Complaint>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle={status === "open" && !debouncedSearch ? "No open complaints" : "No complaints match"}
+        emptyTitle={status === "open" && !debouncedSearch ? "No Open Complaints" : "No Complaints Match"}
         onRowClick={(c) => setSelected(c)}
         columns={[
           { header: "Subject", accessor: (c) => c.subject },
           { header: "Customer", accessor: (c) => c.customer_name || "—" },
-          { header: "Booking", accessor: (c) => <span className="font-mono-num">{c.booking_number || "—"}</span> },
-          { header: "Priority", accessor: (c) => <Badge tone={PRIORITY_TONE[c.priority] || "neutral"}>{c.priority}</Badge> },
+          { header: "Booking", accessor: (c) => (c.category === "society"
+            ? <span className="text-xs font-semibold text-[#0A66F0]">Society · {c.society_name}{c.registration_number ? ` · ${c.registration_number}` : ""}</span>
+            : <span className="font-mono-num">{c.booking_number || "—"}</span>) },
+          { header: "Priority", accessor: (c) => <Badge tone={PRIORITY_TONE[c.priority] || "neutral"}>{toTitle(c.priority)}</Badge> },
           { header: "Raised", accessor: (c) => format(c.created_at) },
           { header: "Status", accessor: (c) => <StatusBadge status={c.status} /> },
         ]}

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.review_controller import ReviewController
@@ -27,10 +29,20 @@ async def list_my_reviews(
 
 
 @router.get("/admin/all", dependencies=[Depends(require_admin)])
-async def list_all_reviews_for_admin(include_deleted: bool = False, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def list_all_reviews_for_admin(
+    include_deleted: bool = False,
+    service_center_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    captain_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    min_rating: Optional[int] = Query(None, ge=1, le=5),
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
     """Moderation/audit visibility — includes soft-deleted reviews when
-    include_deleted=true, unlike every other review listing."""
-    return await ReviewController(db).list_all_for_admin(pagination, include_deleted)
+    include_deleted=true, unlike every other review listing. Center /
+    captain / minimum-rating filters run server-side, paginated."""
+    return await ReviewController(db).list_all_for_admin(
+        pagination, include_deleted, service_center_id=service_center_id, captain_id=captain_id, min_rating=min_rating,
+    )
 
 
 @router.post("", dependencies=[Depends(require_customer)])

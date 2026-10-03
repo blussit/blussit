@@ -8,6 +8,7 @@ import { Plus, RefreshCw, Rocket, Search } from "lucide-react";
 import { Badge, Button, Card, CardBody, CardHeader, Input, Modal, Select, Spinner } from "../../ui";
 import { whatsappCrmApi } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
+import { toTitle } from "../../../lib/titleCase";
 import { TemplatePreview } from "./modals";
 import { useDebouncedValue } from "../../shared/ListControls";
 
@@ -20,7 +21,7 @@ const STATUS_VARIANT: Record<string, "success" | "warning" | "error" | "info" | 
 
 export function TemplatesView() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ["wa-templates"], queryFn: whatsappCrmApi.templates });
+  const { data, isLoading } = useQuery({ queryKey: ["wa-templates"], queryFn: () => whatsappCrmApi.templates() });
   const [category, setCategory] = useState("all");
   const [status, setStatus] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
@@ -49,19 +50,19 @@ export function TemplatesView() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
           <Select value={category} onChange={(e) => setCategory(e.target.value)}>
-            <option value="all">All categories</option>
+            <option value="all">All Categories</option>
             <option value="UTILITY">Utility</option>
             <option value="MARKETING">Marketing</option>
             <option value="AUTHENTICATION">Authentication</option>
           </Select>
           <Select value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="all">All statuses</option>
-            {Object.keys(STATUS_VARIANT).map((s) => <option key={s} value={s}>{s}</option>)}
+            <option value="all">All Statuses</option>
+            {Object.keys(STATUS_VARIANT).map((s) => <option key={s} value={s}>{toTitle(s.toLowerCase())}</option>)}
           </Select>
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" isLoading={sync.isPending} onClick={() => sync.mutate()}>
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Sync status
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Sync Status
           </Button>
           <Button
             variant="secondary"
@@ -69,10 +70,10 @@ export function TemplatesView() {
             onClick={() => bootstrap.mutate()}
             title="Submits every standard BLUSSIT template not already on WhatsApp yet, including the ones whose button links straight to the specific booking"
           >
-            <Rocket className="mr-1.5 h-3.5 w-3.5" /> Submit missing templates
+            <Rocket className="mr-1.5 h-3.5 w-3.5" /> Submit Missing Templates
           </Button>
           <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" /> Create template
+            <Plus className="mr-1.5 h-3.5 w-3.5" /> Create Template
           </Button>
         </div>
       </div>
@@ -87,8 +88,8 @@ export function TemplatesView() {
                   <p className="text-[10px] text-[var(--color-text-secondary)]">{t.language} · used {t.usage}×</p>
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
-                  <Badge tone={STATUS_VARIANT[t.status] || "neutral"}>{t.status}</Badge>
-                  {t.category && <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${t.category === "MARKETING" ? "bg-purple-50 text-purple-700" : t.category === "AUTHENTICATION" ? "bg-sky-50 text-sky-700" : "bg-gray-100 text-gray-600"}`}>{t.category}</span>}
+                  <Badge tone={STATUS_VARIANT[t.status] || "neutral"}>{toTitle(t.status.toLowerCase())}</Badge>
+                  {t.category && <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${t.category === "MARKETING" ? "bg-purple-50 text-purple-700" : t.category === "AUTHENTICATION" ? "bg-sky-50 text-sky-700" : "bg-gray-100 text-gray-600"}`}>{toTitle(t.category.toLowerCase())}</span>}
                 </div>
               </div>
               <p className="line-clamp-4 whitespace-pre-wrap rounded-lg bg-gray-50 p-2 text-xs text-gray-700">{t.body}</p>
@@ -102,7 +103,7 @@ export function TemplatesView() {
           </Card>
         ))}
       </div>
-      {rows.length === 0 && <p className="py-10 text-center text-sm text-[var(--color-text-secondary)]">No templates match — try "Sync status".</p>}
+      {rows.length === 0 && <p className="py-10 text-center text-sm text-[var(--color-text-secondary)]">No templates match — try "Sync Status".</p>}
 
       <CreateTemplateModal open={createOpen} onClose={() => setCreateOpen(false)} />
     </div>
@@ -119,21 +120,21 @@ function CreateTemplateModal({ open, onClose }: { open: boolean; onClose: () => 
     onError: (e) => setError(getErrorMessage(e)),
   });
   return (
-    <Modal open={open} onClose={onClose} title="Create template" maxWidth="max-w-xl">
+    <Modal open={open} onClose={onClose} title="Create Template" maxWidth="max-w-xl">
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <Input label="Name (lowercase_underscores)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <Select label="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-            <option value="UTILITY">Utility (operational)</option>
-            <option value="MARKETING">Marketing (needs opt-in)</option>
+            <option value="UTILITY">Utility (Operational)</option>
+            <option value="MARKETING">Marketing (Needs Opt-In)</option>
           </Select>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">Body — use {"{{1}}"}, {"{{2}}"}… for variables</label>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">Body — Use {"{{1}}"}, {"{{2}}"}… For Variables</label>
           <textarea value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} rows={5} className="w-full rounded-xl border border-gray-200 p-3 text-sm outline-none focus:border-[var(--color-primary)]" />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Button text (optional)" value={form.button_text} onChange={(e) => setForm({ ...form, button_text: e.target.value })} />
+          <Input label="Button Text (Optional)" value={form.button_text} onChange={(e) => setForm({ ...form, button_text: e.target.value })} />
           <Input label="Button URL" value={form.button_url} onChange={(e) => setForm({ ...form, button_url: e.target.value })} />
         </div>
         {form.body && (
@@ -148,7 +149,7 @@ function CreateTemplateModal({ open, onClose }: { open: boolean; onClose: () => 
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button isLoading={create.isPending} disabled={!form.name || form.body.length < 10} onClick={() => create.mutate()}>Submit for review</Button>
+          <Button isLoading={create.isPending} disabled={!form.name || form.body.length < 10} onClick={() => create.mutate()}>Submit For Review</Button>
         </div>
       </div>
     </Modal>
@@ -187,7 +188,7 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
                 <th className="py-2 pr-3 font-medium">Phone</th>
                 <th className="py-2 pr-3 font-medium">Status</th>
                 <th className="py-2 pr-3 font-medium">Tags</th>
-                <th className="py-2 pr-3 font-medium">Last message</th>
+                <th className="py-2 pr-3 font-medium">Last Message</th>
                 <th className="py-2 font-medium" />
               </tr>
             </thead>
@@ -198,11 +199,11 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
                   <td className="py-2.5 pr-3 font-mono-num text-xs">+91 {c.phone}</td>
                   <td className="py-2.5 pr-3 text-xs capitalize">{c.crm_status}</td>
                   <td className="py-2.5 pr-3">
-                    <div className="flex flex-wrap gap-1">{c.tags.slice(0, 3).map((t) => <span key={t} className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px]">{t}</span>)}</div>
+                    <div className="flex flex-wrap gap-1">{c.tags.slice(0, 3).map((t) => <span key={t} className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px]">{toTitle(t)}</span>)}</div>
                   </td>
                   <td className="max-w-[16rem] truncate py-2.5 pr-3 text-xs text-[var(--color-text-secondary)]">{c.last_message_text}</td>
                   <td className="py-2.5 text-right">
-                    <button type="button" onClick={() => onOpenChat(c.wa_id)} className="text-xs font-semibold text-[var(--color-primary)] underline">Open chat</button>
+                    <button type="button" onClick={() => onOpenChat(c.wa_id)} className="text-xs font-semibold text-[var(--color-primary)] underline">Open Chat</button>
                   </td>
                 </tr>
               ))}
@@ -213,7 +214,7 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
         {hasNextPage && (
           <div className="pt-3 text-center">
             <Button size="sm" variant="outline" isLoading={isFetchingNextPage} onClick={() => fetchNextPage()}>
-              Load more
+              Load More
             </Button>
           </div>
         )}
@@ -226,13 +227,13 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
 /* Campaigns (future marketing area — deliberately restrained)         */
 /* ------------------------------------------------------------------ */
 export function CampaignsView() {
-  const { data } = useQuery({ queryKey: ["wa-templates"], queryFn: whatsappCrmApi.templates });
+  const { data } = useQuery({ queryKey: ["wa-templates"], queryFn: () => whatsappCrmApi.templates() });
   const marketing = (data || []).filter((t) => t.category === "MARKETING");
   return (
     <div className="max-w-2xl space-y-4">
       <Card>
         <CardBody className="space-y-2 p-5">
-          <h3 className="text-sm font-bold text-[var(--color-text-primary)]">Marketing campaigns</h3>
+          <h3 className="text-sm font-bold text-[var(--color-text-primary)]">Marketing Campaigns</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
             Marketing messages are kept strictly separate from operational (utility) messages. They may only be sent to customers with
             marketing consent/opt-in, are billed at WhatsApp's marketing rate, and Meta frequency-caps them per user. Bulk campaign
@@ -245,7 +246,7 @@ export function CampaignsView() {
           <CardBody className="space-y-2 p-4">
             <div className="flex items-center justify-between">
               <p className="font-mono-num text-sm font-bold">{t.name}</p>
-              <Badge tone={t.status === "APPROVED" ? "success" : t.status === "DRAFT" ? "neutral" : "warning"}>{t.status}</Badge>
+              <Badge tone={t.status === "APPROVED" ? "success" : t.status === "DRAFT" ? "neutral" : "warning"}>{toTitle(t.status.toLowerCase())}</Badge>
             </div>
             <p className="whitespace-pre-wrap rounded-lg bg-gray-50 p-2 text-xs">{t.body}</p>
             {t.status === "DRAFT" && (
@@ -281,22 +282,22 @@ export function AnalyticsView() {
     { label: "Open", value: a.conversations.open },
     { label: "Resolved", value: a.conversations.resolved },
     { label: "Unread", value: a.conversations.unread },
-    { label: "Messages sent", value: a.messages.sent },
-    { label: "Messages received", value: a.messages.received },
-    { label: "Template messages", value: a.templates.sent },
-    { label: "Delivery rate", value: pct(a.templates.delivery_rate_pct) },
-    { label: "Read rate", value: pct(a.templates.read_rate_pct) },
-    { label: "Failure rate", value: pct(a.templates.failure_rate_pct) },
-    { label: "Avg first response", value: a.avg_first_response_minutes == null ? "—" : `${a.avg_first_response_minutes} min` },
-    { label: "Avg resolution", value: a.avg_resolution_hours == null ? "—" : `${a.avg_resolution_hours} h` },
+    { label: "Messages Sent", value: a.messages.sent },
+    { label: "Messages Received", value: a.messages.received },
+    { label: "Template Messages", value: a.templates.sent },
+    { label: "Delivery Rate", value: pct(a.templates.delivery_rate_pct) },
+    { label: "Read Rate", value: pct(a.templates.read_rate_pct) },
+    { label: "Failure Rate", value: pct(a.templates.failure_rate_pct) },
+    { label: "Avg First Response", value: a.avg_first_response_minutes == null ? "—" : `${a.avg_first_response_minutes} min` },
+    { label: "Avg Resolution", value: a.avg_resolution_hours == null ? "—" : `${a.avg_resolution_hours} h` },
   ];
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
         <Select value={String(days)} onChange={(e) => setDays(Number(e.target.value))}>
-          <option value="7">Last 7 days</option>
-          <option value="30">Last 30 days</option>
-          <option value="90">Last 90 days</option>
+          <option value="7">Last 7 Days</option>
+          <option value="30">Last 30 Days</option>
+          <option value="90">Last 90 Days</option>
         </Select>
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">

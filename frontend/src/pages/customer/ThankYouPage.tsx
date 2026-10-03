@@ -6,7 +6,9 @@ import { CheckCircle2, CreditCard, Gift, Home, LayoutDashboard, LogIn, ReceiptTe
 import { purchaseConfirmationApi } from "../../api/purchaseConfirmation";
 import { Button, Card, CardBody, PageLoader, Spinner } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
+import { useCustomerTheme } from "../../components/customer/useCustomerTheme";
 import { format, formatSlot } from "../../lib/date";
+import { titleCase } from "../../components/public/landing/shared";
 
 const ROLE_HOME: Record<string, string> = { customer: "/app", manager: "/manager", admin: "/admin", captain: "/captain" };
 
@@ -76,6 +78,7 @@ export default function ThankYouPage() {
   // Asked for auto-pay, but the gateway could only take a one-time payment.
   const autoPayFellBack = params.get("autopay") === "off";
   const shouldReduceMotion = useReducedMotion();
+  useCustomerTheme();
   const instant = location.state as
     | {
         type?: "booking" | "subscription";
@@ -112,14 +115,16 @@ export default function ThankYouPage() {
 
   const confirmed = confirmation || { type: instant?.type || "booking", payload: instant || {}, reference_id: "" };
   const isSubscription = confirmed.type === "subscription";
-  const serviceLabel = confirmed.payload.service_label;
+  // The booking flow's own label carries the car type ("Sedan · Star Wash");
+  // the server's ticket has only the service names, so it's the fallback.
+  const serviceLabel = (!isSubscription && instant?.service_label) || titleCase(confirmed.payload.service_label);
   const serviceCode = confirmed.payload.service_code || instant?.service_code || null;
   const paymentLink = confirmed.payload.payment_link || instant?.payment_link || null;
   // Awaiting payment is a fact about the booking, link or no link — a
   // failed link creation must never read as "confirmed".
   const awaitingPayment = !!(confirmed.payload.awaiting_payment ?? instant?.awaiting_payment);
   const totalAmount = confirmed.payload.total_amount ?? instant?.total_amount;
-  const heading = isSubscription ? "Your plan is active" : awaitingPayment ? "Pay to confirm" : "Booking confirmed";
+  const heading = isSubscription ? "Your Plan Is Active" : awaitingPayment ? "Pay To Confirm" : "Booking Confirmed";
   const when = confirmed.payload.scheduled_date
     ? `${format(confirmed.payload.scheduled_date)} · ${formatSlot(confirmed.payload.scheduled_slot)}`
     : "";
@@ -226,8 +231,8 @@ export default function ThankYouPage() {
                 animate="show"
                 className="mt-4 rounded-xl border border-[#F3E5B5] bg-white px-4 py-3"
               >
-                <p className="text-sm font-medium text-gray-500">Service code</p>
-                <p className="font-mono-num mt-1 text-3xl font-bold tracking-[0.3em] text-black">{serviceCode}</p>
+                <p className="text-sm font-medium text-gray-500">Service Code</p>
+                <p className="mt-1 tabular-nums text-3xl font-bold tracking-[0.3em] text-[#0A66F0]">{serviceCode}</p>
                 <p className="mt-1 text-xs text-gray-500">Share it with the captain on arrival.</p>
               </motion.div>
             )}
@@ -239,14 +244,14 @@ export default function ThankYouPage() {
                       href={paymentLink}
                       className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#E8A900] text-sm font-semibold text-white hover:bg-[#D99A00]"
                     >
-                      <CreditCard className="h-4 w-4" /> Pay {totalAmount ? `₹${totalAmount} ` : ""}now
+                      <CreditCard className="h-4 w-4" /> Pay {totalAmount ? `₹${totalAmount} ` : ""}Now
                     </a>
                     {/* This tab doesn't refresh itself after the link's own page takes the payment. */}
                     <p className="mt-2 text-xs text-gray-500">Already paid? It confirms automatically — no need to pay again.</p>
                   </>
                 ) : (
                   <p className="rounded-xl border border-[#F3E5B5] px-4 py-3 text-xs text-gray-600">
-                    Payment link unavailable right now. Open this booking under My bookings to pay.
+                    Payment link unavailable right now. Open this booking under My Bookings to pay.
                   </p>
                 )}
               </motion.div>
@@ -275,15 +280,15 @@ export default function ThankYouPage() {
                     className="w-full"
                     onClick={() => navigate(ROLE_HOME[user.role] || "/")}
                   >
-                    <LayoutDashboard className="h-4 w-4" /> Go to dashboard
+                    <LayoutDashboard className="h-4 w-4" /> Go To Dashboard
                   </Button>
                   {isSubscription ? (
                     <Button variant="outline" className="w-full" onClick={() => navigate("/app/subscriptions")}>
-                      <Gift className="h-4 w-4" /> View my plans
+                      <Gift className="h-4 w-4" /> View My Plans
                     </Button>
                   ) : (
                     <Button variant="outline" className="w-full" disabled={!confirmed.reference_id} onClick={() => navigate(`/app/bookings/${confirmed.reference_id}`)}>
-                      <ReceiptText className="h-4 w-4" /> View booking
+                      <ReceiptText className="h-4 w-4" /> View Booking
                     </Button>
                   )}
                 </>
@@ -292,10 +297,10 @@ export default function ThankYouPage() {
                   {/* Quick-booking accounts have no password — logging in is
                       a phone OTP, only if they ever want to see history. */}
                   <Button variant={awaitingPayment && paymentLink ? "outline" : "info"} className="w-full" onClick={() => navigate("/login")}>
-                    <LogIn className="h-4 w-4" /> Log in to track it
+                    <LogIn className="h-4 w-4" /> Log In To Track It
                   </Button>
                   <Button variant="ghost" className="w-full" onClick={() => navigate("/")}>
-                    <Home className="h-4 w-4" /> Back to website
+                    <Home className="h-4 w-4" /> Back To Website
                   </Button>
                 </>
               )}

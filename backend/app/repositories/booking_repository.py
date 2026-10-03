@@ -139,6 +139,85 @@ class BookingRepository(BaseRepository):
             return None
         return await self.find_one({**field_filter, "status": {"$nin": ["completed", "cancelled"]}})
 
+    # How far back the garage / address-reuse look into one customer's
+    # bookings: newest first on the (customer_id, created_at) index, then
+    # capped — a runaway account can never make either read unbounded.
+    CUSTOMER_HISTORY_SCAN = 300
+    OPEN_STATUSES = ("awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled")
+
+    async def recent_address_ids(self, customer_id: str, limit: int = 50) -> list[str]:
+        """The distinct addresses this customer's recent bookings used,
+        most recently used first."""
+        pipeline = [
+            {"$match": {"customer_id": customer_id, "is_deleted": {"$ne": True}}},
+            {"$sort": {"created_at": -1}},
+            {"$limit": self.CUSTOMER_HISTORY_SCAN},
+            {"$group": {"_id": "$address_id", "last": {"$max": "$created_at"}}},
+            {"$sort": {"last": -1}},
+            {"$limit": limit},
+        ]
+        rows = await self.collection.aggregate(pipeline).to_list(length=limit)
+        return [str(r["_id"]) for r in rows if r.get("_id")]
+
+    async def garage_groups(self, customer_id: str, today, limit: int = 50) -> list[dict]:
+        """One row per CAR this customer has booked, newest first — the
+        booking half of the garage (see app/services/garage_service.py).
+        A car is its vehicle record when the booking has one ("v:<id>"),
+        else its plate ("p:<plate>"), else just its vehicle type
+        ("t:<type>") — so a plateless XUV washed twice is one row.
+
+        Per car: the newest booking, the last completed wash day, how many
+        washes, the soonest open booking from `today` (naive IST midnight,
+        scheduled_date's own form) and the newest finished SINGLE-car
+        booking to replay for "Clean again" (completed ahead of cancelled).
+        `next` and `last_wash` carry their service_ids so the garage can name
+        the service without a request per car."""
+        as_str = lambda field: {"$ifNull": [{"$toString": field}, ""]}  # noqa: E731
+        vid, plate, vtype = as_str("$vehicle_id"), as_str("$vehicle_registration_number"), as_str("$vehicle_type")
+        completed = {"$eq": ["$status", "completed"]}
+        pipeline = [
+            {"$match": {"customer_id": customer_id, "is_deleted": {"$ne": True}}},
+            {"$sort": {"created_at": -1}},
+            {"$limit": self.CUSTOMER_HISTORY_SCAN},
+            {"$addFields": {"_car": {"$switch": {
+                "branches": [
+                    {"case": {"$gt": [{"$strLenCP": vid}, 0]}, "then": {"$concat": ["v:", vid]}},
+                    {"case": {"$gt": [{"$strLenCP": plate}, 0]}, "then": {"$concat": ["p:", plate]}},
+                ],
+                "default": {"$concat": ["t:", vtype]},
+            }}}},
+            {"$group": {
+                "_id": "$_car",
+                "vehicle_id": {"$first": "$vehicle_id"},
+                "vehicle_type": {"$first": "$vehicle_type"},
+                "vehicle_label": {"$first": "$vehicle_label"},
+                "plate": {"$max": "$vehicle_registration_number"},
+                "latest_at": {"$max": "$created_at"},
+                "last_booking_id": {"$first": "$_id"},
+                "last_washed_on": {"$max": {"$cond": [completed, "$scheduled_date", None]}},
+                "wash_count": {"$sum": {"$cond": [completed, 1, 0]}},
+                "next": {"$min": {"$cond": [
+                    {"$and": [{"$in": ["$status", list(self.OPEN_STATUSES)]}, {"$gte": ["$scheduled_date", today]}]},
+                    {"d": "$scheduled_date", "s": "$scheduled_slot", "id": "$_id", "svc": "$service_ids"},
+                    None,
+                ]}},
+                # The newest finished wash, with its services ("Last Washed 3 Oct · Star Wash").
+                "last_wash": {"$max": {"$cond": [
+                    completed,
+                    {"d": "$scheduled_date", "s": "$scheduled_slot", "id": "$_id", "svc": "$service_ids"},
+                    None,
+                ]}},
+                "repeat": {"$max": {"$cond": [
+                    {"$and": [{"$in": ["$status", ["completed", "cancelled"]]}, {"$not": [{"$ifNull": ["$booking_group_id", False]}]}]},
+                    {"done": {"$cond": [completed, 1, 0]}, "d": "$scheduled_date", "s": "$scheduled_slot", "id": "$_id"},
+                    None,
+                ]}},
+            }},
+            {"$sort": {"latest_at": -1}},
+            {"$limit": limit},
+        ]
+        return await self.collection.aggregate(pipeline).to_list(length=limit)
+
     async def list_subscription_bookings_for_center(self, service_center_id: str) -> list[dict]:
         """Every booking at this center paid for via a subscription — the raw
         data behind 'who at my store has a plan and has actually used it'."""

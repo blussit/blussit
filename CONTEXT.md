@@ -160,7 +160,7 @@ pending/assigned -> rescheduled -> back to pending/assigned
 4. **Captain verifies the vehicle.** A required step between heading-out and the
    before-photo — the captain types the registration number they actually see on the
    car. Mismatch blocks progress (they must release the job instead of forcing through).
-   This is the "washed the wrong car" fraud prevention.
+   This is the "wash the wrong car" fraud prevention.
 
 5. **Captain captures before-photo, service starts.** Camera-only (no gallery picker —
    enforced via `capture="environment"` on the file input), GPS-tagged. If the GPS is

@@ -7,8 +7,10 @@ import { CollectionsReportCard } from "../../components/shared/CollectionsReport
 import { SettingsHistory } from "../../components/admin/SettingsHistory";
 import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
+import { useToast } from "../../context/ToastContext";
 import { Badge, Button, Card, CardBody, DataTable, Input, PageLoader } from "../../components/ui";
 import { format } from "../../lib/date";
+import { toTitle } from "../../lib/titleCase";
 import type { BookingPolicy, PricingConfig, WithdrawalRequest } from "../../types";
 
 /**
@@ -48,35 +50,35 @@ interface PolicyField {
 
 const POLICY_GROUPS: { title: string; appliesTo: string; fields: PolicyField[] }[] = [
   {
-    title: "Booking & slots",
-    appliesTo: "Customer app · guest booking page · WhatsApp bot · manager bookings",
+    title: "Booking & Slots",
+    appliesTo: "Customer App · Guest Booking Page · WhatsApp Bot · Manager Bookings",
     fields: [
-      { key: "slot_duration_minutes", label: "Slot length", unit: "min", effect: "How long each bookable slot is. A center can override this with its own value.", min: 5 },
-      { key: "slot_booking_cutoff_minutes", label: "Booking cutoff", unit: "min before slot ends", effect: "A slot stops accepting bookings this close to its end.", min: 0 },
-      { key: "max_advance_days", label: "Advance window", unit: "days", effect: "How far ahead a customer can book (today included).", min: 1, max: 60 },
-      { key: "max_vehicles_per_booking", label: "Vehicles per visit", unit: "cars", effect: "How many of their cars a customer can add to one visit (one slot, one captain, one payment).", min: 1, max: 10 },
-      { key: "payment_window_minutes", label: "Online payment hold", unit: "min", effect: "How long an unpaid 'pay online' booking keeps its slot before it's released.", min: 5, max: 240 },
-      { key: "payment_reminder_minutes_before", label: "Payment reminder", unit: "min before the hold ends", effect: "One 'finish your payment' nudge, in-app and on WhatsApp. 0 turns it off.", min: 0, max: 120 },
+      { key: "slot_duration_minutes", label: "Slot Length", unit: "Min", effect: "How long each bookable slot is. A center can override this with its own value.", min: 5 },
+      { key: "slot_booking_cutoff_minutes", label: "Booking Cutoff", unit: "Min Before Slot Ends", effect: "A slot stops accepting bookings this close to its end.", min: 0 },
+      { key: "max_advance_days", label: "Advance Window", unit: "Days", effect: "How far ahead a customer can book (today included).", min: 1, max: 60 },
+      { key: "max_vehicles_per_booking", label: "Vehicles Per Visit", unit: "Cars", effect: "How many of their cars a customer can add to one visit (one slot, one captain, one payment).", min: 1, max: 10 },
+      { key: "payment_window_minutes", label: "Online Payment Hold", unit: "Min", effect: "How long an unpaid 'pay online' booking keeps its slot before it's released.", min: 5, max: 240 },
+      { key: "payment_reminder_minutes_before", label: "Payment Reminder", unit: "Min Before The Hold Ends", effect: "One 'finish your payment' nudge, in-app and on WhatsApp. 0 turns it off.", min: 0, max: 120 },
     ],
   },
   {
-    title: "Captain timing",
-    appliesTo: "Captain app · manager queue flags · captain pay",
+    title: "Captain Timing",
+    appliesTo: "Captain App · Manager Queue Flags · Captain Pay",
     fields: [
-      { key: "captain_travel_buffer_minutes", label: "Travel buffer", unit: "min", effect: "Blocked before and after each job so a captain isn't booked back-to-back across town.", min: 0 },
-      { key: "late_start_grace_minutes", label: "Late-start grace", unit: "min", effect: "Past the slot, a start within this is 'late' (25% fee penalty); beyond it 'very late' (50%).", min: 0 },
-      { key: "late_assignment_grace_minutes", label: "Last-minute assignment grace", unit: "min", effect: "A captain handed a job after its slot began gets this long to head out before he counts as late.", min: 0, max: 120 },
-      { key: "captain_start_lockout_hours", label: "Start lockout", unit: "hours after grace", effect: "After this the captain can't start at all — the manager must reschedule or reassign.", min: 1 },
-      { key: "arrival_to_start_tolerance_minutes", label: "Reached → started gap", unit: "min", effect: "Flags the manager when a captain has 'reached' but not started the wash within this.", min: 1 },
-      { key: "delay_tolerance_minutes", label: "Wash overrun tolerance", unit: "min", effect: "A wash running this far past its planned time is flagged as delayed.", min: 0 },
+      { key: "captain_travel_buffer_minutes", label: "Travel Buffer", unit: "Min", effect: "Blocked before and after each job so a captain isn't booked back-to-back across town.", min: 0 },
+      { key: "late_start_grace_minutes", label: "Late-Start Grace", unit: "Min", effect: "Past the slot, a start within this is 'late' (25% fee penalty); beyond it 'very late' (50%).", min: 0 },
+      { key: "late_assignment_grace_minutes", label: "Last-Minute Assignment Grace", unit: "Min", effect: "A captain handed a job after its slot began gets this long to head out before he counts as late.", min: 0, max: 120 },
+      { key: "captain_start_lockout_hours", label: "Start Lockout", unit: "Hours After Grace", effect: "After this the captain can't start at all — the manager must reschedule or reassign.", min: 1 },
+      { key: "arrival_to_start_tolerance_minutes", label: "Reached → Started Gap", unit: "Min", effect: "Flags the manager when a captain has 'reached' but not started the wash within this.", min: 1 },
+      { key: "delay_tolerance_minutes", label: "Wash Overrun Tolerance", unit: "Min", effect: "A wash running this far past its planned time is flagged as delayed.", min: 0 },
     ],
   },
   {
-    title: "Checks & reminders",
-    appliesTo: "Captain app · WhatsApp · customer notifications",
+    title: "Checks & Reminders",
+    appliesTo: "Captain App · WhatsApp · Customer Notifications",
     fields: [
-      { key: "photo_geofence_radius_m", label: "Photo geofence", unit: "metres", effect: "Before/after photos and the 'reached' tap taken farther than this from the address are flagged (never blocked).", min: 10 },
-      { key: "repeat_reminder_days", label: "'Time for a wash?' after", unit: "days", effect: "Days after a customer's last wash before a gentle reminder — only if nothing is booked and no pass is live, at most once a month.", min: 3, max: 365 },
+      { key: "photo_geofence_radius_m", label: "Photo Geofence", unit: "Metres", effect: "Before/after photos and the 'reached' tap taken farther than this from the address are flagged (never blocked).", min: 10 },
+      { key: "repeat_reminder_days", label: "'Time For A Wash?' After", unit: "Days", effect: "Days after a customer's last wash before a gentle reminder — only if nothing is booked and no pass is live, at most once a month.", min: 3, max: 365 },
     ],
   },
 ];
@@ -87,6 +89,7 @@ const POLICY_LABELS: Record<string, string> = Object.fromEntries(
 
 export default function AdminPricingPage() {
   const queryClient = useQueryClient();
+  const { push: pushToast } = useToast();
   const [perKm, setPerKm] = useState("");
   const [captainFee, setCaptainFee] = useState("");
   const [saved, setSaved] = useState(false);
@@ -185,6 +188,7 @@ export default function AdminPricingPage() {
   const reviewMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: "approved" | "rejected" | "paid" }) => walletApi.reviewWithdrawal(id, status),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["pending-withdrawals"] }),
+    onError: (e) => pushToast({ tone: "error", title: getErrorMessage(e) }),
   });
 
   // Instant on/off switches — deliberately not bundled into the "Save"
@@ -192,6 +196,8 @@ export default function AdminPricingPage() {
   const toggleMutation = useMutation({
     mutationFn: (patch: Partial<BookingPolicy>) => adminBookingPolicyApi.set(patch),
     onSuccess: invalidatePolicy,
+    // A refused switch used to just snap back with no explanation.
+    onError: (e) => pushToast({ tone: "error", title: getErrorMessage(e) }),
   });
 
   if (isLoading || policyLoading) return <PageLoader />;
@@ -202,7 +208,7 @@ export default function AdminPricingPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Settings & pricing</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Settings & Pricing</h1>
         <p className="mt-1 max-w-3xl text-sm text-[var(--color-text-secondary)]">
           Every value here is live across the whole system the moment you save it — customer app, guest booking page, WhatsApp bot,
           manager and captain panels all read the same rules. Each card shows who changed it last; open the history for every change.
@@ -212,42 +218,42 @@ export default function AdminPricingPage() {
       {/* ------------------------------------------------ Captain pay */}
       <Card>
         <CardBody>
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Captain pay</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Captain Pay</h2>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             What a captain earns per booking, frozen on each booking when it's created: travel (₹ per km from the center) plus a flat
             service fee. A service can set its own fee in the Services page; this is the default.
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input
-              label="Travel pay (₹ per km)"
+              label="Travel Pay (₹ Per Km)"
               type="number"
-              min={0}
+              min={1}
               placeholder={String(config?.per_km_rate ?? 0)}
               value={perKm}
               onChange={(e) => setPerKm(e.target.value)}
               hint={`Now ₹${config?.per_km_rate ?? 0}/km — paid once per visit, however many cars are on it`}
             />
             <Input
-              label="Service fee (₹ per booking)"
+              label="Service Fee (₹ Per Booking)"
               type="number"
               min={0}
               placeholder={String(config?.default_captain_service_fee ?? 0)}
               value={captainFee}
               onChange={(e) => setCaptainFee(e.target.value)}
-              hint={`Now ₹${config?.default_captain_service_fee ?? 0} per car washed, unless the service overrides it`}
+              hint={`Now ₹${config?.default_captain_service_fee ?? 0} per car wash, unless the service overrides it`}
             />
           </div>
           {error && <p className="mt-2 text-sm text-[var(--color-error)]">{error}</p>}
           {saved && <p className="mt-2 text-sm text-[var(--color-success)]">Captain pay updated.</p>}
           <Button className="mt-4" isLoading={saveMutation.isPending} disabled={!perKm && !captainFee} onClick={() => saveMutation.mutate()}>
-            <IndianRupee className="h-4 w-4" /> Save captain pay
+            <IndianRupee className="h-4 w-4" /> Save Captain Pay
           </Button>
           <SettingsHistory
             settingKey="pricing_config"
             labels={{
-              per_km_rate: "Travel pay ₹/km",
-              default_captain_service_fee: "Service fee ₹",
-              customer_free_km: "Customer free km",
+              per_km_rate: "Travel Pay ₹/km",
+              default_captain_service_fee: "Service Fee ₹",
+              customer_free_km: "Customer Free Km",
               customer_per_km_rate: "Customer ₹/km",
             }}
           />
@@ -257,13 +263,13 @@ export default function AdminPricingPage() {
       {/* ------------------------------------------------ Customer distance charge */}
       <Card>
         <CardBody>
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Customer distance charge</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Customer Distance Charge</h2>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             Applies only to services marked "Charge distance" in the Services page — once per visit, for the distance past the free km.
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input
-              label="Free km"
+              label="Free Km"
               type="number"
               min={0}
               step="any"
@@ -273,7 +279,7 @@ export default function AdminPricingPage() {
               hint={`Now ${config?.customer_free_km ?? "—"} km by road from the center at no charge`}
             />
             <Input
-              label="₹ per km after that"
+              label="₹ Per Km After That"
               type="number"
               min={0}
               step="any"
@@ -286,7 +292,7 @@ export default function AdminPricingPage() {
           {distanceError && <p className="mt-2 text-sm text-[var(--color-error)]">{distanceError}</p>}
           {distanceSaved && <p className="mt-2 text-sm text-[var(--color-success)]">Distance charge updated.</p>}
           <Button className="mt-4" isLoading={saveDistanceMutation.isPending} disabled={!freeKm && !customerRate} onClick={() => saveDistanceMutation.mutate()}>
-            <MapPin className="h-4 w-4" /> Save distance charge
+            <MapPin className="h-4 w-4" /> Save Distance Charge
           </Button>
         </CardBody>
       </Card>
@@ -294,7 +300,7 @@ export default function AdminPricingPage() {
       {/* ------------------------------------------------ Booking rules */}
       <Card>
         <CardBody>
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Booking rules</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Booking Rules</h2>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             Type a new value only where you want a change — empty boxes keep their current value, shown under each field.
           </p>
@@ -304,7 +310,7 @@ export default function AdminPricingPage() {
               <div key={group.title}>
                 <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
                   <h3 className="text-sm font-bold uppercase tracking-wide text-[var(--color-text-primary)]">{group.title}</h3>
-                  <span className="text-xs text-[var(--color-text-secondary)]">Applies to: {group.appliesTo}</span>
+                  <span className="text-xs text-[var(--color-text-secondary)]">Applies To: {group.appliesTo}</span>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   {group.fields.map((f) => (
@@ -328,20 +334,20 @@ export default function AdminPricingPage() {
           {policyError && <p className="mt-2 text-sm text-[var(--color-error)]">{policyError}</p>}
           {policySaved && <p className="mt-2 text-sm text-[var(--color-success)]">Booking rules updated — live everywhere.</p>}
           <Button className="mt-5" isLoading={savePolicyMutation.isPending} disabled={!dirtyCount} onClick={() => savePolicyMutation.mutate()}>
-            <Clock className="h-4 w-4" /> {dirtyCount ? `Save ${dirtyCount} change${dirtyCount > 1 ? "s" : ""}` : "Save booking rules"}
+            <Clock className="h-4 w-4" /> {dirtyCount ? `Save ${dirtyCount} Change${dirtyCount > 1 ? "s" : ""}` : "Save Booking Rules"}
           </Button>
 
           {/* Switches */}
           <div className="mt-6 space-y-3 border-t border-gray-100 pt-5">
             <Switch
-              label="'Time for a wash?' reminders"
+              label="'Time For A Wash?' Reminders"
               description="A gentle nudge after a customer's last wash (days set above). WhatsApp goes out only through the approved marketing template, never to opted-out customers."
               checked={policy?.repeat_reminder_enabled !== false}
               pending={toggleMutation.isPending}
               onChange={(v) => toggleMutation.mutate({ repeat_reminder_enabled: v })}
             />
             <Switch
-              label="Wallet balance gating"
+              label="Wallet Balance Gating"
               description="Blocks a captain below the minimum wallet balance from new assignments. Leave off until captains have a way to top up."
               checked={!!policy?.wallet_gating_enabled}
               pending={toggleMutation.isPending}
@@ -349,13 +355,13 @@ export default function AdminPricingPage() {
             />
           </div>
 
-          <SettingsHistory settingKey="booking_policy" labels={{ ...POLICY_LABELS, wallet_gating_enabled: "Wallet gating", repeat_reminder_enabled: "Repeat reminders" }} />
+          <SettingsHistory settingKey="booking_policy" labels={{ ...POLICY_LABELS, wallet_gating_enabled: "Wallet Gating", repeat_reminder_enabled: "Repeat Reminders" }} />
         </CardBody>
       </Card>
 
       {/* ------------------------------------------------ Money */}
       <CollectionsReportCard
-        title="Collections by center"
+        title="Collections By Center"
         entityLabel="Center"
         queryKey="admin-collections"
         fetcher={(params) => paymentApi.adminCollections(params)}
@@ -363,17 +369,17 @@ export default function AdminPricingPage() {
 
       <Card>
         <CardBody>
-          <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Pending withdrawal requests</h2>
+          <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Pending Withdrawal Requests</h2>
           <DataTable<WithdrawalRequest>
             data={withdrawals?.data ?? []}
             isLoading={withdrawalsLoading}
-            emptyTitle="No pending withdrawals"
+            emptyTitle="No Pending Withdrawals"
             emptyDescription="Captain withdrawal requests will show up here for review."
             columns={[
               { header: "Captain ID", accessor: (w) => <span className="font-mono-num text-xs">{w.captain_id}</span> },
               { header: "Amount", accessor: (w) => <span className="font-mono-num font-semibold">₹{w.amount}</span> },
               { header: "Requested", accessor: (w) => format(w.created_at) },
-              { header: "Status", accessor: (w) => <Badge tone="warning">{w.status}</Badge> },
+              { header: "Status", accessor: (w) => <Badge tone="warning">{toTitle(w.status)}</Badge> },
               {
                 header: "Action",
                 accessor: (w) => (

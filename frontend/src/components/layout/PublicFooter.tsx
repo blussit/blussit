@@ -30,20 +30,17 @@ const COLUMNS = [
   {
     title: "Services",
     links: [
-      { label: "All Services", href: "/services" },
-      { label: "Exterior Clean", href: "/services" },
-      { label: "Interior Clean", href: "/services" },
-      { label: "Other Services", href: "/services" },
+      { label: "All Services", href: "/#services" },
+      { label: "Exterior Clean", href: "/#services" },
+      { label: "Interior Clean", href: "/#services" },
+      { label: "Other Services", href: "/#services" },
     ],
   },
   {
     title: "Plans",
     links: [
-      // Three links all pointing at /plans, two of them naming products we
-      // don't sell (yearly plans are retired; "corporate" was never a
-      // thing). Two honest links instead.
-      { label: "Monthly Passes", href: "/plans" },
-      { label: "Custom Plan", href: "/plans" },
+      { label: "Monthly Passes", href: "/#plans" },
+      { label: "Custom Plan", href: "/#plans" },
     ],
   },
   {
@@ -99,7 +96,9 @@ export function PublicFooter() {
               <span className="block">Premium car wash at your doorstep.</span>
             </p>
 
-            {/* Social icons — only channels that actually exist. */}
+            {/* Social icons — only channels that actually exist. The `!`
+                shadows swap the global gold-CTA halo (index.css matches the
+                hover:bg-[#E8A900] class) for a soft blue one, here only. */}
             <div className="mt-5 flex items-center gap-2.5">
               {SOCIALS.map((social) => (
                 <a
@@ -114,9 +113,11 @@ export function PublicFooter() {
                     border border-[#DDDDDD]
                     text-[#555555]
                     transition-all duration-200
+                    !shadow-[0_12px_30px_-8px_rgba(10,102,240,0.42),0_3px_10px_rgba(10,102,240,0.16)]
                     hover:border-[#E8A900]
                     hover:bg-[#E8A900]
                     hover:text-[#111111]
+                    hover:!shadow-[0_16px_38px_-8px_rgba(10,102,240,0.52),0_4px_14px_rgba(10,102,240,0.22)]
                   "
                 >
                   <social.icon className="h-[14px] w-[14px]" />

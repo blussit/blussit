@@ -8,6 +8,7 @@ import { BookingDetailDrawer } from "./BookingDetailDrawer";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format, formatSlot } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -73,7 +74,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                     onClick={onClose}
                     className="flex items-center gap-1.5 rounded-full bg-[#E8A900] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#D99A00]"
                   >
-                    <CreditCard className="h-3.5 w-3.5" /> Sell a plan
+                    <CreditCard className="h-3.5 w-3.5" /> Sell A Plan
                   </Link>
                 )}
                 <button onClick={onClose} className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-black" aria-label="Close">
@@ -92,20 +93,23 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
             )}
 
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <Stat label="Total bookings" value={String(data.total_bookings)} />
-              <Stat label="Booking spend" value={`₹${data.lifetime_spend.toLocaleString()}`} />
-              <Stat label="Plan spend" value={`₹${data.lifetime_plan_spend.toLocaleString()}`} />
-              <Stat label="Total amount" value={`₹${data.lifetime_total_spend.toLocaleString()}`} />
+              <Stat label="Total Bookings" value={String(data.total_bookings)} />
+              <Stat label="Booking Spend" value={`₹${data.lifetime_spend.toLocaleString()}`} />
+              <Stat label="Plan Spend" value={`₹${data.lifetime_plan_spend.toLocaleString()}`} />
+              <Stat label="Total Amount" value={`₹${data.lifetime_total_spend.toLocaleString()}`} />
             </div>
 
             {data.subscriptions.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Plans</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Plans</p>
                 <div className="divide-y divide-[#FAF3DF] rounded-xl border border-[#F3E5B5]">
                   {data.subscriptions.map((s) => (
                     <div key={s.id} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-black">{s.plan_name}</p>
+                        <p className="truncate text-sm font-medium text-black">
+                          {toTitle(s.plan_name)}
+                          {carAndService(s.vehicle_type_name, s.service_name) ? ` · ${carAndService(s.vehicle_type_name, s.service_name)}` : ""}
+                        </p>
                         <p className="text-xs text-gray-500">
                           {s.remaining_service_count}/{s.total_service_count} washes left
                           {s.amount_paid != null ? ` · ₹${s.amount_paid} paid` : ""}
@@ -120,12 +124,12 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
 
             {data.vehicles.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Vehicles</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Vehicles</p>
                 <div className="flex flex-wrap gap-2">
                   {data.vehicles.map((v) => (
                     <span key={v.id} className="flex items-center gap-1.5 rounded-full border border-[#F3E5B5] bg-white px-3 py-1 text-xs text-black">
                       <Car className="h-3 w-3 text-gray-400" /> {v.brand} {v.model}
-                      {v.vehicle_type_name ? ` · ${v.vehicle_type_name}` : ""}
+                      {v.vehicle_type_name ? ` · ${toTitle(v.vehicle_type_name)}` : ""}
                       {v.registration_number ? ` · ${v.registration_number}` : ""}
                     </span>
                   ))}
@@ -134,7 +138,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
             )}
 
             <div className="mt-5">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              <p className="mb-2 text-xs font-semibold text-gray-500">
                 Bookings {data.bookings.length ? `(${data.bookings.length})` : ""}
               </p>
               {!data.bookings.length ? (
@@ -149,7 +153,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-black">
-                          {(b.service_names || []).join(", ") || "Service"} · {b.vehicle_label}
+                          {[toTitle(b.vehicle_type_name || b.vehicle_label), toTitle((b.service_names || []).join(", ")) || "Service"].filter(Boolean).join(" · ")}
                         </p>
                         <p className="flex items-center gap-1 text-xs text-gray-500">
                           <Calendar className="h-3 w-3" /> {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
@@ -170,7 +174,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
 
             {data.complaints.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Complaints</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Complaints</p>
                 <div className="flex flex-wrap gap-2">
                   {data.complaints.map((c) => (
                     <Badge key={c.id} tone={c.status === "resolved" || c.status === "closed" ? "neutral" : "warning"}>

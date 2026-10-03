@@ -1,11 +1,12 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Path, Query, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.core.responses import success
+from app.models.enums import BookingStatus
 
 from app.controllers.booking_controller import BookingController
 from app.core.dependencies import (
@@ -151,17 +152,20 @@ async def list_my_jobs(
 
 @router.get("/center/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
 async def list_for_center(
-    service_center_id: str,
-    status: Optional[str] = None,
-    period: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    date_field: str = "created",
-    scope: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    q: Optional[str] = None,
-    sort: Optional[str] = None,
+    service_center_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    # Typed at the door: an unknown status / sort / date used to be passed
+    # straight into the query (silently empty lists) or a strptime (500).
+    status: Optional[BookingStatus] = None,
+    period: Optional[Literal["today", "yesterday", "7d", "30d", "this_month", "last_month"]] = None,
+    start: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_field: Literal["created", "completed"] = "created",
+    # Unknown scopes answer 400 from center_queue_filters (existing contract).
+    scope: Optional[str] = Query(None, max_length=30),
+    date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    q: Optional[str] = Query(None, max_length=100),
+    sort: Optional[Literal["scheduled_asc", "scheduled_desc", "created_desc"]] = None,
     pagination: PaginationParams = Depends(),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
@@ -182,7 +186,7 @@ async def list_for_center(
 
     filters: dict = {}
     if status:
-        filters["status"] = status
+        filters["status"] = status.value
     _apply_period_filters(filters, period, start, end, date_field)
     try:
         queue = await center_queue_filters(db, scope=scope, date_from=date_from, date_to=date_to, search=q)
@@ -204,6 +208,9 @@ async def list_subscribers_for_center(
 async def list_all(
     status: Optional[str] = None,
     service_center_id: Optional[str] = None,
+    service_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    vehicle_type: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    source: Optional[str] = Query(None, pattern=r"^[a-z_]{2,20}$"),
     period: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -223,6 +230,14 @@ async def list_all(
         filters["status"] = status
     if service_center_id:
         filters["service_center_id"] = service_center_id
+    # The KPI explorer's chart drill-downs (KpiService.explorer): the same
+    # service / car-type / channel slice the clicked bar was built from.
+    if service_id:
+        filters["service_ids"] = service_id
+    if vehicle_type:
+        filters["vehicle_type"] = vehicle_type
+    if source:
+        filters["source"] = source
     _apply_period_filters(filters, period, start, end, date_field)
     return await BookingController(db).list_all(filters, pagination)
 
@@ -377,7 +392,7 @@ async def assign_captain_to_group(booking_group_id: str, payload: BookingAssignC
 
 @router.post("/group", dependencies=[Depends(require_customer)])
 async def create_booking_group(payload: BookingGroupCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Several of the caller's own vehicles washed on ONE visit — one
+    """Several of the caller's own vehicles wash on ONE visit — one
     address, one slot, one captain, one payment. Takes a single slot seat
     however many cars are on it, because it's a single trip."""
     return await BookingController(db).create_group(current_user, payload)
@@ -426,10 +441,13 @@ class SlotHoldRequest(BaseModel):
 
 
 @router.post("/hold")
-async def hold_slot(payload: SlotHoldRequest, db=Depends(get_db)):
+async def hold_slot(payload: SlotHoldRequest, request: Request, db=Depends(get_db)):
+    from app.core.rate_limit import _client_ip
     from app.services.booking_service import BookingService
 
-    return success(await BookingService(db).hold_slot(payload.holder_key, payload.service_center_id, payload.date, payload.slot_key))
+    return success(await BookingService(db).hold_slot(
+        payload.holder_key, payload.service_center_id, payload.date, payload.slot_key, client_ip=_client_ip(request),
+    ))
 
 
 @router.post("/hold/release")

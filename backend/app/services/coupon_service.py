@@ -44,8 +44,27 @@ class CouponService:
         created = await self.repo.create(doc)
         return serialize_doc(created)
 
+    # Optional limits an admin can remove again (sent as null).
+    _CLEARABLE = ("description", "max_discount_amount", "total_usage_limit")
+
     async def update(self, coupon_id: str, payload: CouponUpdateRequest) -> dict:
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k in self._CLEARABLE}
+        current = await self.repo.find_by_id(coupon_id)
+        if not current:
+            raise NotFoundException("Coupon not found")
+        # Validate the coupon as it WILL be, not just the fields sent — the
+        # same rules create enforces.
+        merged = {**current, **data}
+        kind = merged.get("offer_kind") or "standard"
+        ctype = merged.get("coupon_type")
+        ctype = ctype.value if hasattr(ctype, "value") else ctype
+        value = float(merged.get("value") or 0)
+        if kind == "standard" and value <= 0:
+            raise BadRequestException("Standard coupons need a discount value")
+        if ctype == CouponType.PERCENTAGE.value and value > 100:
+            raise BadRequestException("A percentage discount can't be more than 100%")
+        if merged.get("valid_from") and merged.get("valid_until") and from_stored(merged["valid_until"]) <= from_stored(merged["valid_from"]):
+            raise BadRequestException("The end date must be after the start date")
         if "eligible_service_keywords" in data:
             data["eligible_service_keywords"] = self._normalize_keywords(data.get("eligible_service_keywords"))
         if "free_addon_keywords" in data:

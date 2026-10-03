@@ -5,7 +5,7 @@ from bson import ObjectId
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException
 from app.models.enums import BillingCycle, SubscriptionStatus
 from app.repositories.catalog_repository import ServiceRepository
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
@@ -166,18 +166,30 @@ def _with_effective_statuses(subs: list[dict]) -> list[dict]:
     return [_with_effective_status(s) for s in subs]
 
 
+# Society plans (docs/SOCIETY_PLANS.md) live in subscription_plans with
+# plan_type "society". They're sold ONLY through a society enrollment —
+# never listed on the website and never bought through any general path.
+SOCIETY_PLAN_TYPE = "society"
+_NOT_SOCIETY = {"plan_type": {"$ne": SOCIETY_PLAN_TYPE}}
+
+
+def ensure_public_plan(plan: dict | None) -> None:
+    if plan and plan.get("plan_type") == SOCIETY_PLAN_TYPE:
+        raise NotFoundException("Subscription plan not found or inactive")
+
+
 class SubscriptionPlanService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = SubscriptionPlanRepository(db)
 
     async def list_all(self, active_only: bool = False) -> list[dict]:
-        filters = {"is_active": True} if active_only else None
+        filters = {"is_active": True, **_NOT_SOCIETY} if active_only else dict(_NOT_SOCIETY)
         items = await self.repo.find_all_no_paginate(filters, sort_by="display_order", sort_order=1)
         return serialize_list(items)
 
     async def get(self, plan_id: str) -> dict:
         plan = await self.repo.find_by_id(plan_id)
-        if not plan:
+        if not plan or plan.get("plan_type") == SOCIETY_PLAN_TYPE:
             raise NotFoundException("Subscription plan not found")
         return serialize_doc(plan)
 
@@ -205,7 +217,8 @@ class SubscriptionPlanService:
     async def update(self, plan_id: str, payload: SubscriptionPlanUpdateRequest) -> dict:
         if payload.billing_cycle is not None:
             self._ensure_monthly(payload.billing_cycle)
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        # description sent as null = cleared.
+        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k == "description"}
         if "name" in data:
             data["slug"] = slugify(data["name"])
         if "category_quotas" in data and data["category_quotas"]:
@@ -216,6 +229,20 @@ class SubscriptionPlanService:
         return serialize_doc(updated)
 
     async def delete(self, plan_id: str) -> None:
+        # A deleted plan disappears from every lookup (find_by_id skips
+        # tombstones): a live subscriber's auto-pay renewal would then find
+        # no plan and park the charge for refund, and Purchased plans would
+        # read "Unknown plan". Refuse while anyone still holds it — switching
+        # the plan off (is_active) stops new sales without breaking them.
+        holders = await self.repo.db.user_subscriptions.count_documents({
+            "plan_id": plan_id,
+            "is_deleted": {"$ne": True},
+            "$or": [{"status": {"$in": ["active", "paused"]}}, {"auto_renew": True, "status": {"$ne": "cancelled"}}],
+        })
+        if holders:
+            raise ConflictException(
+                f"{holders} customer(s) still hold this plan — switch it off instead (it stops new sales and keeps their plans working)."
+            )
         if not await self.repo.soft_delete(plan_id):
             raise NotFoundException("Subscription plan not found")
 
@@ -224,7 +251,12 @@ class SubscriptionPlanService:
         manager-safe half of `update` (which stays admin-only, full-edit):
         a manager can pull a plan off the shelf without being able to touch
         its price or included services. A subscription already bought on it
-        keeps working exactly as before; only new purchases refuse it."""
+        keeps working exactly as before; only new purchases refuse it.
+
+        Society plans are NOT reachable here: they're admin-owned (Society
+        plans page) and shared across centers — a manager pulling one would
+        block every society's renewals on it."""
+        ensure_public_plan(await self.repo.find_by_id(plan_id))
         updated = await self.repo.update_by_id(plan_id, {"is_active": False})
         if not updated:
             raise NotFoundException("Subscription plan not found")
@@ -242,7 +274,30 @@ class UserSubscriptionService:
 
     async def list_my_subscriptions(self, customer_id: str) -> list[dict]:
         subs = await self.repo.list_for_customer(customer_id, limit=CUSTOMER_LIST_LIMIT)
-        return await self._with_plan_names(_with_effective_statuses(subs))
+        return await self._with_society_labels(await self._with_plan_names(_with_effective_statuses(subs)))
+
+    async def _with_society_labels(self, subs: list[dict]) -> list[dict]:
+        """A society pass reads "<plan> — <society>" and carries the
+        society's name, so the customer's plan list labels it clearly."""
+        ids = list({s.get("society_id") for s in subs if s.get("society_id")})
+        if not ids:
+            return subs
+        rows = await self.repo.db.societies.find(
+            {"_id": {"$in": [ObjectId(i) for i in ids if ObjectId.is_valid(i)]}},
+            {"name": 1, "form_token": 1, "form_enabled": 1, "is_active": 1},
+        ).to_list(length=len(ids))
+        by_id = {str(r["_id"]): r for r in rows}
+        for s in subs:
+            society = by_id.get(s.get("society_id") or "")
+            if society:
+                s["society_name"] = society.get("name")
+                # Only a link that opens: a switched-off form or inactive
+                # society 404s, so the app books through /app/book instead.
+                live_link = society.get("form_token") and society.get("form_enabled", True) and society.get("is_active", True)
+                s["society_form_path"] = f"/society/{society.get('form_token')}" if live_link else None
+                if s.get("plan_name"):
+                    s["plan_name"] = f"{s['plan_name']} — {society.get('name')}"
+        return subs
 
     async def _with_plan_names(self, subs: list[dict]) -> list[dict]:
         """plan_name on each pass (one batched lookup), so the dashboard
@@ -255,11 +310,16 @@ class UserSubscriptionService:
             s.setdefault("plan_name", names.get(s.get("plan_id") or ""))
         return subs
 
-    async def list_for_customer(self, customer_id: str) -> list[dict]:
+    async def list_for_customer(self, customer_id: str, actor_role: str = "admin", actor_center_id: str | None = None) -> list[dict]:
         """Manager/admin-facing equivalent of list_my_subscriptions for an
         arbitrary customer — used by the manager booking flow and the
-        manager assign-a-plan action."""
+        manager assign-a-plan action. A manager sees the same slice the
+        customer 360 shows them (CRMService.get_customer_360): self-serve
+        plans (no center) and their own center's grants — never a plan
+        another center sold (amount, who collected the cash)."""
         subs = await self.repo.list_for_customer(customer_id, limit=CUSTOMER_LIST_LIMIT)
+        if actor_role != "admin":
+            subs = [x for x in subs if x.get("service_center_id") in (None, "") or (actor_center_id and x.get("service_center_id") == actor_center_id)]
         return _with_effective_statuses(subs)
 
     async def subscribe(
@@ -288,6 +348,7 @@ class UserSubscriptionService:
         plan = await self.plan_repo.find_by_id(payload.plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
+        ensure_public_plan(plan)
         if payload.vehicle_id:
             # Pass purchase: the car and the service are the whole spec, and
             # both are re-validated here BEFORE any money moves.
@@ -313,6 +374,7 @@ class UserSubscriptionService:
         plan = await self.plan_repo.find_by_id(plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
+        ensure_public_plan(plan)
         service = await self._resolve_pass_service(plan, vehicle_type, service_id)
         return plan, service, resolve_pass_price(plan, service, vehicle_type)
 
@@ -353,6 +415,7 @@ class UserSubscriptionService:
         plan = await self.plan_repo.find_by_id(plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
+        ensure_public_plan(plan)
 
         service: dict | None = None
         if vehicle_id:
@@ -436,16 +499,21 @@ class UserSubscriptionService:
             return None
         return await self.plan_repo.find_by_id(sub["plan_id"])
 
-    async def usage_history(self, subscription_id: str) -> dict:
+    async def usage_history(self, subscription_id: str, actor_role: str = "admin", actor_center_id: str | None = None) -> dict:
         """A manager/admin clicking one plan: every booking that actually
         SPENT a visit off it, most recent first — "when was it last used,
-        how many are left" made concrete instead of just a bare count."""
+        how many are left" made concrete instead of just a bare count.
+        A manager: only a self-serve plan or their own center's grant, and
+        only the visits their own center delivered."""
         sub = await self.repo.find_by_id(subscription_id)
         if not sub:
             raise NotFoundException("Subscription not found")
-        bookings = await self.repo.db.bookings.find(
-            {"subscription_id": subscription_id, "is_deleted": {"$ne": True}}
-        ).sort("scheduled_date", -1).to_list(length=200)
+        booking_match: dict = {"subscription_id": subscription_id, "is_deleted": {"$ne": True}}
+        if actor_role != "admin":
+            if not actor_center_id or sub.get("service_center_id") not in (None, "", actor_center_id):
+                raise NotFoundException("Subscription not found")
+            booking_match["service_center_id"] = actor_center_id
+        bookings = await self.repo.db.bookings.find(booking_match).sort("scheduled_date", -1).to_list(length=200)
         rows = [
             {
                 "booking_id": str(b["_id"]),
@@ -631,7 +699,9 @@ class UserSubscriptionService:
             # An auto-pay pass stays ACTIVE at 0 until the next charge
             # refills it: expiring it would let the customer buy a second
             # pass while the mandate keeps billing the first.
-            if new_remaining <= 0 and not renews_automatically(sub):
+            # A SOCIETY pass stays active at 0 premium washes too: its daily
+            # bucket washes run until end_date (docs/SOCIETY_PLANS.md).
+            if new_remaining <= 0 and not renews_automatically(sub) and not sub.get("society_id"):
                 update_data["status"] = SubscriptionStatus.EXPIRED.value
             # When a wash was last booked on it — the wash reminder leaves a
             # pass alone for a few days after.
@@ -771,6 +841,7 @@ class UserSubscriptionService:
         plan = await self.plan_repo.find_by_id(plan_id)
         if not plan or not plan.get("is_active"):
             raise NotFoundException("Subscription plan not found or inactive")
+        ensure_public_plan(plan)
         if vehicle_id:
             vehicle, service = await self._resolve_pass_target(customer_id, plan, vehicle_id, service_id)
             vt = vehicle.get("vehicle_type")
@@ -1025,8 +1096,10 @@ class UserSubscriptionService:
             raise ForbiddenException("This plan can't be upgraded to the one you picked — check what upgrades are available.")
 
         new_plan = await self.plan_repo.find_by_id(new_plan_id)
-        if not new_plan or not new_plan.get("is_active"):
+        if not new_plan or not new_plan.get("is_active") or new_plan.get("plan_type") == SOCIETY_PLAN_TYPE:
             raise NotFoundException("New plan not found or inactive")
+        if sub.get("society_id"):
+            raise BadRequestException("A society plan is changed by your society manager.")
 
         # No single vehicle to re-check against anymore — eligibility is
         # by type, verified again per-booking at plan_consumption time
@@ -1066,6 +1139,8 @@ class UserSubscriptionService:
         sub = await self.repo.find_by_id(subscription_id)
         if not sub or sub["customer_id"] != customer_id:
             raise NotFoundException("Subscription not found")
+        if sub.get("society_id"):
+            raise BadRequestException("A society plan is cancelled by your society manager — please call them.")
         # Cancelling the plan must also stop the money: an auto-pay mandate
         # left alive would keep charging a card the customer just killed.
         # Immediate (not at-cycle-end) — they asked for it to stop now.
@@ -1169,6 +1244,24 @@ class UserSubscriptionService:
             return {}
         return {str(p["_id"]): p.get("name") for p in await self.plan_repo.collection.find({"_id": {"$in": oids}}, {"name": 1}).to_list(length=len(oids))}
 
+    async def _type_and_service_names(self, type_ids, service_ids) -> tuple[dict[str, str], dict[str, str]]:
+        """Display names for one page of plan rows — the car type a pass
+        was bought for and the one wash it covers. Two batched lookups,
+        never one per row; a since-deleted type/service still resolves, so
+        an old sale keeps its label."""
+
+        async def names(collection, ids) -> dict[str, str]:
+            oids = [ObjectId(i) for i in {i for i in ids if isinstance(i, str) and i} if ObjectId.is_valid(i)]
+            if not oids:
+                return {}
+            docs = await collection.find({"_id": {"$in": oids}}, {"name": 1}).to_list(length=len(oids))
+            return {str(d["_id"]): d.get("name") or "" for d in docs}
+
+        type_names, service_names = await asyncio.gather(
+            names(self.vehicle_type_repo.collection, type_ids), names(self.service_repo.collection, service_ids)
+        )
+        return type_names, service_names
+
     async def _holders(self, subs: list[dict]) -> dict[str, dict]:
         ids = [ObjectId(s["customer_id"]) for s in subs if ObjectId.is_valid(s.get("customer_id") or "")]
         if not ids:
@@ -1239,10 +1332,9 @@ class UserSubscriptionService:
         }
 
         users = await self._holders(subs)
-        type_names = {
-            str(t["_id"]): t.get("name", "")
-            for t in await self.vehicle_type_repo.collection.find({}, {"name": 1}).to_list(length=200)
-        }
+        type_names, service_names = await self._type_and_service_names(
+            [s.get("vehicle_type") for s in subs], [s.get("service_id") for s in subs]
+        )
         rows = []
         for s in subs:
             holder = users.get(s["customer_id"], {})
@@ -1266,6 +1358,10 @@ class UserSubscriptionService:
                 "status": s.get("effective_status"),
                 "vehicle_type": s.get("vehicle_type"),
                 "vehicle_type_name": type_names.get(s.get("vehicle_type") or ""),
+                # The one wash a monthly pass covers (None on a legacy
+                # tier plan, which covers the plan's whole list).
+                "service_id": s.get("service_id"),
+                "service_name": service_names.get(s.get("service_id") or ""),
                 "purchased_price": s.get("purchased_price"),
                 "amount_paid": self._amount_paid(s),
                 "discount_amount": s.get("discount_amount"),
@@ -1323,6 +1419,9 @@ class UserSubscriptionService:
                 {"_id": {"$in": [ObjectId(c) for c in center_ids if ObjectId.is_valid(c)]}}, {"name": 1}
             ).to_list(length=200)
         } if center_ids else {}
+        type_names, service_names = await self._type_and_service_names(
+            [s.get("vehicle_type") for s in subs], [s.get("service_id") for s in subs]
+        )
         rows = []
         for s in subs:
             holder = users.get(s["customer_id"], {})
@@ -1334,6 +1433,10 @@ class UserSubscriptionService:
                 "plan_id": s.get("plan_id"),
                 "plan_name": plan_names.get(s.get("plan_id") or "") or "Unknown plan",
                 "status": s.get("effective_status"),
+                "vehicle_type": s.get("vehicle_type"),
+                "vehicle_type_name": type_names.get(s.get("vehicle_type") or ""),
+                "service_id": s.get("service_id"),
+                "service_name": service_names.get(s.get("service_id") or ""),
                 "amount_paid": self._amount_paid(s),
                 "discount_amount": s.get("discount_amount"),
                 "coupon_code": s.get("coupon_code"),
@@ -1396,6 +1499,7 @@ class UserSubscriptionService:
 
     async def plan_purchases(
         self, s: datetime, e: datetime, page: int, page_size: int, service_center_id: str | None = None,
+        extra: dict | None = None,
     ) -> tuple[list[dict], int]:
         """Every individual plan PAYMENT settled in the window — literally
         the same payment_orders match KpiService._plan_revenue sums, so
@@ -1407,8 +1511,12 @@ class UserSubscriptionService:
         disagree with the revenue tile if reused here).
 
         service_center_id (optional): scopes to one center's own sales —
-        a manager's own drill-down, resolved per order by _center_orders."""
-        match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
+        a manager's own drill-down, resolved per order by _center_orders.
+
+        extra (optional): equality filters on the order itself (plan_id /
+        service_id / vehicle_type) — the admin KPI explorer's plan chart
+        drill-down, same slice KpiService.explorer counted."""
+        match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}, **(extra or {})}
         if service_center_id is None:
             total = await self.repo.db.payment_orders.count_documents(match)
             orders = (
@@ -1449,6 +1557,34 @@ class UserSubscriptionService:
             if plan_ids
             else {}
         )
+        # Car type + the one wash the pass covers. Stamped on the order by
+        # every checkout path; an order that predates that (or a renewal
+        # ledger row) falls back to the subscription it settled into —
+        # one batched lookup for the whole page, only for the rows missing it.
+        missing_sub_ids = [
+            ObjectId(o["subscription_id"])
+            for o in orders
+            if (not o.get("vehicle_type") or not o.get("service_id")) and ObjectId.is_valid(o.get("subscription_id") or "")
+        ]
+        subs_by_id = (
+            {
+                str(sub["_id"]): sub
+                for sub in await self.repo.collection.find(
+                    {"_id": {"$in": missing_sub_ids}}, {"vehicle_type": 1, "service_id": 1}
+                ).to_list(length=len(missing_sub_ids))
+            }
+            if missing_sub_ids
+            else {}
+        )
+
+        def _pass_target(o: dict) -> tuple[str | None, str | None]:
+            sub = subs_by_id.get(o.get("subscription_id") or "", {})
+            return o.get("vehicle_type") or sub.get("vehicle_type"), o.get("service_id") or sub.get("service_id")
+
+        targets = {str(o["_id"]): _pass_target(o) for o in orders}
+        type_names, service_names = await self._type_and_service_names(
+            [t for t, _ in targets.values()], [sv for _, sv in targets.values()]
+        )
 
         # payment_orders.kind -> a label a manager/admin actually reads on
         # screen (never "manager_cash" verbatim).
@@ -1457,6 +1593,7 @@ class UserSubscriptionService:
         for o in orders:
             holder = users.get(o.get("customer_id") or "", {})
             plan = plans.get(o.get("plan_id") or "", {})
+            vehicle_type, service_id = targets[str(o["_id"])]
             rows.append(
                 serialize_doc(
                     {
@@ -1466,6 +1603,10 @@ class UserSubscriptionService:
                         "customer_phone": holder.get("phone"),
                         "plan_id": o.get("plan_id"),
                         "plan_name": plan.get("name", "Unknown plan"),
+                        "vehicle_type": vehicle_type,
+                        "vehicle_type_name": type_names.get(vehicle_type or ""),
+                        "service_id": service_id,
+                        "service_name": service_names.get(service_id or ""),
                         "amount": round((o.get("amount_paise") or 0) / 100, 2),
                         "discount": round((o.get("discount_paise") or 0) / 100, 2) if o.get("discount_paise") else None,
                         "coupon_code": o.get("coupon_code"),

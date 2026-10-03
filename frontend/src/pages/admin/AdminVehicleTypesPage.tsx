@@ -5,7 +5,9 @@ import { vehicleTypeApi } from "../../api/catalog";
 import { adminVehicleTypeApi, analyticsApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
+import { toTitle } from "../../lib/titleCase";
 import type { VehicleTypeOption } from "../../types";
 
 const emptyForm = { name: "", display_order: 0, is_active: true };
@@ -24,6 +26,7 @@ function Stat({ label, value, tone, icon }: { label: string; value: number | str
 
 export default function AdminVehicleTypesPage() {
   const queryClient = useQueryClient();
+  const { push: pushToast } = useToast();
   const confirm = useConfirm();
   const { data, isLoading } = useQuery({ queryKey: ["admin-vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
   const { data: breakdown } = useQuery({ queryKey: ["vehicle-type-breakdown"], queryFn: () => analyticsApi.vehicleTypeBreakdown() });
@@ -67,11 +70,13 @@ export default function AdminVehicleTypesPage() {
   const toggleActiveMutation = useMutation({
     mutationFn: (t: VehicleTypeOption) => adminVehicleTypeApi.update(t.id, { is_active: !t.is_active }),
     onSuccess: invalidate,
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => adminVehicleTypeApi.remove(id),
     onSuccess: invalidate,
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   const openEdit = (t: VehicleTypeOption) => {
@@ -84,23 +89,23 @@ export default function AdminVehicleTypesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Vehicle types</h1>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Vehicle Types</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             The body types services, combos, and subscription plans can be restricted to (Hatchback, Sedan, SUV, ...).
           </p>
         </div>
         <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add type
+          <Plus className="h-4 w-4" /> Add Type
         </Button>
       </div>
 
       <DataTable<VehicleTypeOption>
         isLoading={isLoading}
         data={data || []}
-        emptyTitle="No vehicle types yet"
+        emptyTitle="No Vehicle Types Yet"
         onRowClick={(t) => setStatsFor(t)}
         columns={[
-          { header: "Name", accessor: (t) => t.name },
+          { header: "Name", accessor: (t) => toTitle(t.name) },
           { header: "Order", accessor: (t) => t.display_order },
           { header: "Status", accessor: (t) => <Badge tone={t.is_active ? "success" : "neutral"}>{t.is_active ? "Active" : "Inactive"}</Badge> },
           {
@@ -118,7 +123,7 @@ export default function AdminVehicleTypesPage() {
                   variant="ghost"
                   isLoading={deleteMutation.isPending}
                   onClick={async () => {
-                    if (await confirm({ title: `Delete "${t.name}"?`, message: "Anything still restricted to it will need to be re-tagged.", tone: "danger" })) deleteMutation.mutate(t.id);
+                    if (await confirm({ title: `Delete "${toTitle(t.name)}"?`, message: "Anything still restricted to it will need to be re-tagged.", tone: "danger" })) deleteMutation.mutate(t.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -129,25 +134,25 @@ export default function AdminVehicleTypesPage() {
         ]}
       />
 
-      <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${statsFor.name} — bookings` : ""}>
+      <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${toTitle(statsFor.name)} — Bookings` : ""}>
         {statsFor && (() => {
           const s = breakdown?.find((b) => b.vehicle_type_id === statsFor.id);
           if (!s) return <p className="text-sm text-[var(--color-text-secondary)]">No bookings for this vehicle type yet.</p>;
           return (
             <div className="grid grid-cols-2 gap-3">
-              <Stat label="Total bookings" value={s.total_bookings} />
+              <Stat label="Total Bookings" value={s.total_bookings} />
               <Stat label="Completed" value={s.completed_bookings} />
               <Stat label="Delayed" value={s.delayed_count} tone={s.delayed_count > 0 ? "error" : undefined} />
-              <Stat label="Avg rating" value={s.avg_rating != null ? s.avg_rating.toFixed(1) : "—"} icon={<Star className="h-3.5 w-3.5 fill-[var(--color-secondary)] text-[var(--color-secondary)]" />} />
-              <Stat label="Avg service time" value={s.avg_service_minutes != null ? `${s.avg_service_minutes} min` : "—"} />
-              <Stat label="Avg travel time" value={s.avg_travel_minutes != null ? `${s.avg_travel_minutes} min` : "—"} />
-              <Stat label="Avg total job time" value={s.avg_total_minutes != null ? `${s.avg_total_minutes} min` : "—"} />
+              <Stat label="Avg Rating" value={s.avg_rating != null ? s.avg_rating.toFixed(1) : "—"} icon={<Star className="h-3.5 w-3.5 fill-[var(--color-secondary)] text-[var(--color-secondary)]" />} />
+              <Stat label="Avg Service Time" value={s.avg_service_minutes != null ? `${s.avg_service_minutes} min` : "—"} />
+              <Stat label="Avg Travel Time" value={s.avg_travel_minutes != null ? `${s.avg_travel_minutes} min` : "—"} />
+              <Stat label="Avg Total Job Time" value={s.avg_total_minutes != null ? `${s.avg_total_minutes} min` : "—"} />
             </div>
           );
         })()}
       </Modal>
 
-      <Modal open={open} onClose={closeModal} title={editing ? "Edit vehicle type" : "Add vehicle type"}>
+      <Modal open={open} onClose={closeModal} title={editing ? "Edit Vehicle Type" : "Add Vehicle Type"}>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -158,14 +163,14 @@ export default function AdminVehicleTypesPage() {
         >
           <Input label="Name" placeholder="e.g. XUV 7-Seater" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
           <Input
-            label="Display order"
+            label="Display Order"
             type="number"
             value={form.display_order}
             onChange={(e) => setForm({ ...form, display_order: Number(e.target.value) })}
           />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createMutation.isPending || updateMutation.isPending}>
-            {editing ? "Save changes" : "Add vehicle type"}
+            {editing ? "Save Changes" : "Add Vehicle Type"}
           </Button>
         </form>
       </Modal>

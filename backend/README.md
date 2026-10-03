@@ -31,6 +31,15 @@ API docs: `http://localhost:8000/api/docs`
 Default seeded super admin: `admin@doorstepvehiclecare.in` / `Admin@12345`
 (change this immediately in any real deployment).
 
+
+Profile	Login
+Admin	admin@doorstepvehiclecare.in / Admin@12345
+Manager	manager.indore@doorstepvehiclecare.in / Manager@12345
+Captain	captain.indore@doorstepvehiclecare.in / Captain@12345
+Customer (new)	9000000001 + OTP 123456
+Customer (has a plan)	9000000002 + OTP 123456
+Customer (has past wash)	9000000003 + OTP 123456
+
 ## Structure
 
 - `app/core` — config, database connection, security (JWT/hashing), RBAC dependencies, exceptions, response envelope

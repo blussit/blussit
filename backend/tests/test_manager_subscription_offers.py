@@ -363,9 +363,77 @@ async def test_discount_bringing_the_price_below_the_online_minimum_is_refused_n
     phone = "9333300005"
     _track(cleanup, phone)
     svc = PaymentService(rig["db"])
+    # Only an admin may discount a plan all the way down (a manager is
+    # capped at 50% — see test_manager_discount_is_capped_at_half_the_price).
     with pytest.raises(BadRequestException, match="minimum"):
-        await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, discount_amount=rig["base_price"]))
+        await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, discount_amount=rig["base_price"]), actor_role="admin")
     assert await rig["db"].payment_orders.count_documents({"customer_id": {"$exists": True}}) == 0
+
+
+async def test_manager_discount_is_capped_at_half_the_price(rig, cleanup):
+    """A manager's hand-typed "₹ off" can't exceed 50% of the plan (nor,
+    for anyone, the plan's own price) — refused with a clear message in the
+    preview AND at creation, before a customer profile or any order/plan
+    exists. An admin may go further."""
+    from app.services.payment_service import MANAGER_MAX_PLAN_DISCOUNT_PERCENT
+
+    phone = "9333300045"
+    _track(cleanup, phone)
+    svc = PaymentService(rig["db"])
+    base = rig["base_price"]
+    cap = int(base * MANAGER_MAX_PLAN_DISCOUNT_PERCENT / 100)
+    over = cap + 1
+
+    preview = await svc.manager_subscription_preview(
+        ManagerSubscriptionPreviewRequest(plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"], discount_amount=cap)
+    )
+    assert preview["max_discount"] == cap and preview["final_price"] == base - cap
+    with pytest.raises(BadRequestException, match="at most 50%"):
+        await svc.manager_subscription_preview(
+            ManagerSubscriptionPreviewRequest(plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"], discount_amount=over)
+        )
+    for method in ("link", "cash"):
+        with pytest.raises(BadRequestException, match="at most 50%"):
+            await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, payment_method=method, discount_amount=over))
+    assert not await rig["db"].users.find_one({"phone": phone})
+    # More than the plan's price is refused for everyone, never clamped.
+    with pytest.raises(BadRequestException, match="more than the plan price"):
+        await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, discount_amount=base + 1), actor_role="admin")
+
+    # Exactly at the cap goes through, and an admin may go past it.
+    result = await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, payment_method="cash", discount_amount=cap))
+    await _track_customer(cleanup, rig["db"], phone)
+    assert result["amount"] == base - cap
+    admin_preview = await svc.manager_subscription_preview(
+        ManagerSubscriptionPreviewRequest(plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"], discount_amount=over),
+        actor_role="admin",
+    )
+    assert admin_preview["discount"] == over and admin_preview["max_discount"] == base
+
+
+async def test_manager_cannot_grant_a_free_plan_or_stop_selling_one_over_http(rig, cleanup):
+    """/subscriptions/assign (a FREE grant) would be an uncapped discount,
+    and /discontinue is platform-wide — both are admin-only now."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    customer_id = await make_customer(rig["db"])
+    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
+    manager = _auth(rig["manager_id"], "manager", rig["center_id"])
+    body = {"customer_id": customer_id, "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/v1/subscriptions/assign", json=body, headers=manager)
+        assert res.status_code == 403
+        res = await client.post(f"/api/v1/subscription-plans/{rig['plan_id']}/discontinue", headers=manager)
+        assert res.status_code == 403
+        # Over HTTP the manager's role reaches the cap too.
+        res = await client.post("/api/v1/subscriptions/manager-offers/preview", json={
+            "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"], "discount_amount": rig["base_price"],
+        }, headers=manager)
+        assert res.status_code == 400 and "50%" in res.json()["message"]
+    assert await rig["db"].user_subscriptions.count_documents({"customer_id": customer_id}) == 0
+    assert (await rig["db"].subscription_plans.find_one({"_id": ObjectId(rig["plan_id"])}))["is_active"] is True
 
 
 async def test_a_customer_who_already_holds_the_pass_is_refused_before_any_link_or_money(rig, cleanup):
@@ -841,8 +909,10 @@ async def test_assign_with_no_manager_center_is_also_refused(rig, cleanup):
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     body = {"customer_id": customer_id, "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"]}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # The free grant is admin-only now — a manager (centerless or not)
+        # is refused at the door.
         res = await client.post("/api/v1/subscriptions/assign", json=body, headers=_auth(centerless_manager, "manager", None))
-        assert res.status_code == 400 and "service center" in res.json()["message"].lower()
+        assert res.status_code == 403
     assert await rig["db"].user_subscriptions.count_documents({"customer_id": customer_id}) == 0
 
 
@@ -925,6 +995,46 @@ async def test_customer_typeahead_matches_by_name_or_phone_customers_only(rig, c
     # accounts are excluded even if their name/phone happens to match.
     manager = await rig["db"].users.find_one({"_id": ObjectId(rig["manager_id"])})
     assert not any(u["id"] == rig["manager_id"] for u in await CRMService(rig["db"]).search_customers(manager["full_name"]))
+
+
+async def test_manager_typeahead_only_browses_their_own_centers_customers(rig, cleanup):
+    """Name search for a manager covers customers their center has served
+    (booking / granted plan); a full number still finds anyone (the phone-in
+    case); rows carry only id/name/phone. Admin searches everything."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+    from app.services.crm_service import CRMService
+
+    db = rig["db"]
+    served = await make_customer(db, name="Zorawar Scopecheck Served")
+    planned = await make_customer(db, name="Zorawar Scopecheck Planned")
+    stranger = await make_customer(db, name="Zorawar Scopecheck Stranger")
+    for cid in (served, planned, stranger):
+        cleanup.append(("users", {"_id": ObjectId(cid)}))
+    booking = await db.bookings.insert_one({
+        "booking_number": f"BK-TYPE-{ObjectId()}", "customer_id": served, "service_center_id": rig["center_id"],
+        "status": "completed", "is_deleted": False, "visit_line_key": f"tk-{ObjectId()}",
+    })
+    sub = await db.user_subscriptions.insert_one({"customer_id": planned, "service_center_id": rig["center_id"], "status": "active"})
+    cleanup.append(("bookings", {"_id": booking.inserted_id}))
+    cleanup.append(("user_subscriptions", {"_id": sub.inserted_id}))
+    crm = CRMService(db)
+
+    as_manager = await crm.search_customers("Scopecheck", 10, "manager", rig["center_id"])
+    assert {u["id"] for u in as_manager} == {served, planned}
+    assert all(set(u) == {"id", "full_name", "phone", "role"} for u in as_manager)
+    assert await crm.search_customers("Scopecheck", 10, "manager", None) == []
+    stranger_phone = (await db.users.find_one({"_id": ObjectId(stranger)}))["phone"]
+    assert [u["id"] for u in await crm.search_customers(stranger_phone, 10, "manager", rig["center_id"])] == [stranger]
+    assert stranger not in {u["id"] for u in await crm.search_customers(stranger_phone[:7], 10, "manager", rig["center_id"])}
+    assert {served, planned, stranger} <= {u["id"] for u in await crm.search_customers("Scopecheck", 10, "admin")}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get(
+            "/api/v1/crm/customers/typeahead", params={"q": "Scopecheck"}, headers=_auth(rig["manager_id"], "manager", rig["center_id"]),
+        )
+    assert res.status_code == 200 and {u["id"] for u in res.json()["data"]} == {served, planned}
 
 
 # ------------------------------------------------ admin links a manager's center

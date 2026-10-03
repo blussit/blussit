@@ -467,7 +467,19 @@ def _redact_financials(booking: dict, actor_role: str) -> dict:
     hidden = _CUSTOMER_HIDDEN_FIELDS if actor_role == "customer" else _CAPTAIN_HIDDEN_FIELDS
     for field in hidden:
         booking.pop(field, None)
+    if actor_role == "captain":
+        # The 4-digit service code is the CUSTOMER's proof that the captain
+        # is standing at the right car — a captain who can read it off his
+        # own app could "verify" an arrival without ever meeting anyone. He
+        # only needs to know which check to ask for (code vs. legacy plate).
+        booking["requires_service_code"] = bool(booking.pop("service_code", None))
     return booking
+
+
+def redact_for_captain(booking: dict) -> dict:
+    """What a captain's own action endpoints (heading, arrival, photos,
+    release, report-risk) send back — the same redaction as his job list."""
+    return _redact_financials(dict(booking), "captain")
 
 
 class BookingService:
@@ -751,6 +763,11 @@ class BookingService:
         else:
             service_center, distance_km = await self._resolve_service_center(address, allow_pinless=_allow_pinless)
             _ensure_within_advance_window(payload.scheduled_date, policy)
+            # A society pass's premium wash needs a day's notice on customer
+            # channels (docs/SOCIETY_PLANS.md) — staff are exempt.
+            from app.services.society_service import ensure_society_lead_time
+
+            await ensure_society_lead_time(self.db, payload.subscription_id, payload.scheduled_date, source)
         date_str = to_ist(payload.scheduled_date).strftime("%Y-%m-%d")
         slot_start, slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
         if not _completed_by and _slot_cutoff_passed(slot_end, policy):
@@ -1161,6 +1178,12 @@ class BookingService:
     ) -> None:
         """One short alert per manager: who, phone, what, when, where. Best
         effort — the booking is already committed, so nothing here may raise."""
+        from app.utils.quiet_alerts import manager_new_booking_alerts_muted
+
+        if manager_new_booking_alerts_muted():
+            # A society visit day the manager scheduled himself — he gets
+            # one line for the whole day instead (society_schedule_service).
+            return
         try:
             recipients = await self._manager_recipients(booking.get("service_center_id"), primary_manager_id)
             if not recipients:
@@ -1363,7 +1386,7 @@ class BookingService:
         ).to_list(length=100)
 
     async def create_booking_group(self, customer_id: str, payload: BookingGroupCreateRequest, source: str = "app", allow_pinless: bool = False, notify_background: bool = True) -> dict:
-        """Several of one customer's cars washed on ONE visit.
+        """Several of one customer's cars wash on ONE visit.
 
         Each car becomes a REAL booking — its own plate verification, its own
         before/after photos, its own pass redemption, its own review. What
@@ -1420,7 +1443,10 @@ class BookingService:
                     scheduled_slot=payload.scheduled_slot,
                     hold_key=payload.hold_key,
                     subscription_id=car.subscription_id,
-                    payment_method=payload.payment_method,
+                    # The visit's method is optional on the group request;
+                    # a single car's isn't (None is refused) — default it
+                    # the way a single booking does.
+                    payment_method=payload.payment_method or PaymentMethod.CASH,
                     # A coupon applies to the visit, not to every car on it.
                     coupon_code=payload.coupon_code if index == 0 else None,
                     customer_notes=payload.customer_notes,
@@ -1519,16 +1545,12 @@ class BookingService:
             address_id = payload.address_id
         else:
             addr = payload.address
-            existing = await self.address_repo.list_by_owner(customer_id)
-            match = next(
-                (a for a in existing if (a.get("line1") or "").strip().lower() == addr.line1.strip().lower() and (not addr.pincode or a.get("pincode") == addr.pincode)),
-                None,
-            )
+            # A returning customer's same place (saved, or used on an earlier
+            # booking) is reused — never a fresh copy per booking. Every car
+            # of the visit then shares this one address.
+            match, has_saved = await AddressService(self.db).find_same_place(customer_id, addr.model_dump())
             if match:
                 address_id = str(match["_id"])
-                # A pin the saved copy never had is worth keeping.
-                if addr.latitude is not None and match.get("latitude") is None:
-                    await self.address_repo.update_by_id(address_id, {"latitude": addr.latitude, "longitude": addr.longitude})
             else:
                 pincode = (addr.pincode or "").strip()
                 if not pincode:
@@ -1550,7 +1572,7 @@ class BookingService:
                         pincode=pincode,
                         latitude=addr.latitude,
                         longitude=addr.longitude,
-                        is_default=not existing,
+                        is_default=not has_saved,
                     ),
                 )
                 address_id = created_addr["id"]
@@ -1689,6 +1711,28 @@ class BookingService:
             if occupied >= int(seat.get("capacity") or 0):
                 raise BadRequestException("This slot just became fully booked — please pick another.")
 
+    async def staff_booking_center_id(self, *, address_id: str | None, address=None, allow_pinless: bool = True) -> str | None:
+        """Which center a staff-created booking would land in — resolved
+        exactly like the booking itself resolves it (_resolve_service_center
+        on the saved or typed address). Lets the controller refuse a
+        MANAGER booking into another center's slots before anything is
+        written. None when there's nothing to resolve yet (the create path
+        reports that itself)."""
+        if address is not None:
+            probe = {
+                "latitude": getattr(address, "latitude", None),
+                "longitude": getattr(address, "longitude", None),
+                "pincode": (getattr(address, "pincode", None) or "").strip(),
+            }
+        elif address_id:
+            probe = await self.address_repo.find_by_id(address_id)
+            if not probe:
+                return None
+        else:
+            return None
+        center, _ = await self._resolve_service_center(probe, allow_pinless=allow_pinless)
+        return str(center["_id"])
+
     async def _send_visit_payment_link(self, raw_cars: list[dict], customer: dict, source: str) -> str | None:
         """Mint one Razorpay link for a parked visit's unpaid cars and tell
         the customer (payment_pending). Best effort: None when the link
@@ -1785,18 +1829,21 @@ class BookingService:
 
         # -- where: typed text on the center's own pincode; no pin, no coverage check
         line1 = payload.address_line.strip()
-        existing = await self.address_repo.list_by_owner(customer_id)
-        match = next((a for a in existing if (a.get("line1") or "").strip().lower() == line1.lower()), None)
+        loc = center.get("location") or {}
+        # Same-place reuse on the text alone: the center's pincode is only a
+        # stand-in here, so it must not veto a saved copy's real pincode.
+        match, has_saved = await AddressService(self.db).find_same_place(
+            customer_id, {"line1": line1, "landmark": payload.landmark, "city": loc.get("city"), "state": loc.get("state")}
+        )
         if match:
             address_id = str(match["_id"])
         else:
-            loc = center.get("location") or {}
             created_addr = await AddressService(self.db).create(
                 customer_id,
                 AddressCreateRequest(
                     label="Home", line1=line1, landmark=payload.landmark,
                     city=loc.get("city") or "—", state=loc.get("state") or "—",
-                    pincode=str(loc.get("pincode") or "000000"), is_default=not existing,
+                    pincode=str(loc.get("pincode") or "000000"), is_default=not has_saved,
                 ),
             )
             address_id = created_addr["id"]
@@ -2264,8 +2311,10 @@ class BookingService:
 
         address_id = payload.address_id
         if payload.new_address:
-            created_address = await AddressService(self.db).create(payload.customer_id, payload.new_address)
-            address_id = created_address["id"]
+            # The customer's same place is reused, not copied (see find_same_place).
+            addresses = AddressService(self.db)
+            match, _ = await addresses.find_same_place(payload.customer_id, payload.new_address.model_dump())
+            address_id = str(match["_id"]) if match else (await addresses.create(payload.customer_id, payload.new_address))["id"]
 
         subscription_id = payload.subscription_id
         vehicle_type = payload.vehicle_type if not vehicle_id else None
@@ -2658,7 +2707,7 @@ class BookingService:
 
         existing = await self.repo.find_active_for_captain(captain_id, exclude_booking_id, session=session)
         if group_id:
-            # Cars washed on the SAME visit sit back to back at one address:
+            # Cars wash on the SAME visit sit back to back at one address:
             # there is no travel between them, so requiring a travel gap
             # would make a captain conflict with himself and no multi-car
             # visit could ever be assigned. They also can't overlap — each
@@ -2925,9 +2974,21 @@ class BookingService:
                 break
         return released
 
-    async def hold_slot(self, holder_id: str, service_center_id: str, date_str: str, slot_key: str) -> dict:
+    # Holds are a checkout courtesy, never a way to empty a slot: one
+    # browser holds one seat at a time, one address at most a few, and
+    # holds together may only take part of a slot's seats — the rest stay
+    # bookable however many holds anyone mints (the endpoint is public).
+    MAX_HOLDS_PER_IP = 5
+
+    @staticmethod
+    def _hold_cap(capacity: int) -> int:
+        capacity = int(capacity or 0)
+        return capacity if capacity <= 1 else max(1, capacity // 2)
+
+    async def hold_slot(self, holder_id: str, service_center_id: str, date_str: str, slot_key: str, client_ip: str | None = None) -> dict:
         """Acquires (or renews) a temporary hold on one slot unit."""
         from bson import ObjectId as _OID
+        from app.core.exceptions import TooManyRequestsException
 
         if not _OID.is_valid(service_center_id):
             raise NotFoundException("Service center not found")
@@ -2945,7 +3006,9 @@ class BookingService:
             raise BadRequestException("Invalid date")
         policy = await self.policy_service.get_policy()
         _ensure_within_advance_window(parsed_date, policy)
-        _resolve_slot_window(center, parsed_date, slot_key, policy)  # raises on an invented key
+        _slot_start, slot_end = _resolve_slot_window(center, parsed_date, slot_key, policy)  # raises on an invented key
+        if _slot_cutoff_passed(slot_end, policy):
+            raise BadRequestException("This slot is no longer available to book — please pick another slot.")
         slot_filter = self._hold_filter(service_center_id, date_str, slot_key)
         await self._sweep_holds(slot_filter)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.HOLD_MINUTES)
@@ -2957,14 +3020,31 @@ class BookingService:
         if renewed:
             return {"held": True, "renewed": True, "expires_at": expires_at.isoformat(), "hold_seconds": self.HOLD_MINUTES * 60}
 
+        # One seat per browser: claiming a new one gives back any other.
+        for other in await self.db.slot_holds.find({"holder_id": holder_id}).to_list(length=20):
+            await self.release_hold(holder_id, other["service_center_id"], other["date"], other["slot_key"])
+        if client_ip and await self.db.slot_holds.count_documents(
+            {"client_ip": client_ip, "expires_at": {"$gt": datetime.now(timezone.utc)}}
+        ) >= self.MAX_HOLDS_PER_IP:
+            raise TooManyRequestsException("Too many times are being held from this connection — please book or wait a few minutes.")
+
         default_capacity = await self._default_slot_capacity(center, date_str, slot_key)
         slot_doc = await self.slot_capacity_repo.get_or_init(
             slot_filter, {"capacity": default_capacity, "booked_count": 0, "held_count": 0, "is_closed": False}
         )
         if slot_doc.get("is_closed"):
             raise BadRequestException("This slot has been closed for booking — please pick another.")
+        hold_cap = self._hold_cap(slot_doc.get("capacity", default_capacity))
+        held_now = int(slot_doc.get("held_count") or 0)
+        if held_now + int(slot_doc.get("booked_count") or 0) >= int(slot_doc.get("capacity", default_capacity) or 0):
+            raise BadRequestException("This slot just became fully booked — please pick another.")
+        if held_now >= hold_cap:
+            # Others are mid-checkout on the seats holds may take — no hold
+            # now, but the slot itself stays bookable (the booking checks
+            # real capacity). 429 = "no hold", not "slot gone".
+            raise TooManyRequestsException("Others are booking this time right now — you can still book it.")
         claimed = await self.slot_capacity_repo.increment_if(
-            {**slot_filter, "is_closed": False},
+            {**slot_filter, "is_closed": False, "held_count": {"$not": {"$gte": hold_cap}}},
             {"held_count": 1},
             expr_guard=["$lt", self._OCCUPIED_EXPR, "$capacity"],
         )
@@ -2972,7 +3052,7 @@ class BookingService:
             raise BadRequestException("This slot just became fully booked — please pick another.")
         try:
             await self.db.slot_holds.insert_one({
-                **slot_filter, "holder_id": holder_id,
+                **slot_filter, "holder_id": holder_id, "client_ip": client_ip,
                 "created_at": datetime.now(timezone.utc), "expires_at": expires_at,
             })
         except DuplicateKeyError:
@@ -3186,6 +3266,25 @@ class BookingService:
         addresses = {str(a["_id"]): a for a in await self.address_repo.find_by_ids(list(address_ids))}
         services = {str(s["_id"]): s for s in await self.service_repo.find_by_ids(list(service_ids))} if service_ids else {}
         combos = {str(c["_id"]): c for c in await self.combo_repo.find_by_ids(list(combo_ids))} if combo_ids else {}
+        # The car TYPE name ("Sedan") on every row — staff lists show it
+        # even for an older saved-vehicle booking whose label is "Brand
+        # Model". One batched lookup; a retired type still resolves.
+        type_ids = {b.get("vehicle_type") for b in bookings if b.get("vehicle_type")}
+        type_ids.update(v.get("vehicle_type") for v in vehicles.values() if v.get("vehicle_type"))
+        type_oids = [ObjectId(t) for t in type_ids if isinstance(t, str) and ObjectId.is_valid(t)]
+        type_names = (
+            {
+                str(t["_id"]): t.get("name")
+                for t in await self.vehicle_type_repo.collection.find({"_id": {"$in": type_oids}}, {"name": 1}).to_list(length=len(type_oids))
+            }
+            if type_oids
+            else {}
+        )
+        # A wash on a society pass reads "Star Wash · Society plan (Green
+        # Acres)" everywhere a booking is listed (docs/SOCIETY_PLANS.md).
+        from app.services.society_service import society_names_for_subscriptions, society_plan_label
+
+        society_of = await society_names_for_subscriptions(self.repo.db, [b.get("subscription_id") for b in bookings if b.get("subscription_id")])
 
         results = []
         for booking in bookings:
@@ -3235,6 +3334,11 @@ class BookingService:
                     "label": booking.get("vehicle_label") or "Vehicle",
                 }
             )
+            doc["vehicle_type_name"] = (
+                type_names.get(booking.get("vehicle_type") or "")
+                or type_names.get((vehicle or {}).get("vehicle_type") or "")
+                or (booking.get("vehicle_label") if not vehicle else None)
+            )
             doc["address_snapshot"] = (
                 {
                     "line1": address.get("line1"),
@@ -3260,6 +3364,11 @@ class BookingService:
                     for sid in (booking.get("service_ids") or [])
                     if sid in services
                 ] or None
+            society = society_of.get(booking.get("subscription_id") or "")
+            if society:
+                doc["society_id"] = society["society_id"]
+                doc["society_name"] = society["society_name"]
+                doc["plan_label"] = society_plan_label(society["society_name"])
             results.append(doc)
         return results
 
@@ -3475,38 +3584,135 @@ class BookingService:
         if not fresh and not mismatched:
             raise BadRequestException("Every vehicle on this visit is already assigned to this captain.")
 
-        assigned = []
-        announced = False
-        for booking in fresh:
-            assigned.append(
-                await self.assign_captain(
-                    str(booking["_id"]),
-                    # Only the FIRST car processed may carry a manager-chosen
-                    # start time; the rest follow their own offset, or the
-                    # whole visit would pile onto one instant.
-                    payload if not announced else BookingAssignCaptainRequest(captain_id=payload.captain_id),
-                    assigned_by,
-                    actor_role,
-                    actor_center_id,
-                    _group_pass=True,
-                    _announce=not announced,
+        # ALL-OR-NOTHING. Each car has its own staggered start, so a captain
+        # free for car 1 can still clash with another job by car 3 — and a
+        # plain loop then left the visit half-assigned (two people at one
+        # gate, or one car nobody comes for). So: every car's schedule is
+        # checked BEFORE anything is written; if a car still fails mid-way
+        # (a race with another manager), the cars already moved are put
+        # back exactly as they were; and the one "new job" announcement is
+        # sent only once the WHOLE visit is on this captain.
+        policy = await self.policy_service.get_policy()
+        await self._precheck_group_conflicts(fresh, mismatched, payload, actor_role, actor_center_id, policy)
+
+        assigned: list[dict] = []
+        moved: list[dict] = []  # pre-write snapshots of cars this call actually moved
+        try:
+            for index, booking in enumerate(fresh):
+                assigned.append(
+                    await self.assign_captain(
+                        str(booking["_id"]),
+                        # Only the FIRST car may carry a manager-chosen start
+                        # time; the rest follow their own offset, or the
+                        # whole visit would pile onto one instant.
+                        payload if index == 0 else BookingAssignCaptainRequest(captain_id=payload.captain_id),
+                        assigned_by,
+                        actor_role,
+                        actor_center_id,
+                        _group_pass=True,
+                        _announce=False,
+                    )
                 )
-            )
-            announced = True
-        for booking in mismatched:
-            assigned.append(
-                await self.reassign_captain(
-                    str(booking["_id"]),
-                    ReassignCaptainRequest(captain_id=payload.captain_id),
-                    assigned_by,
-                    actor_role,
-                    actor_center_id,
-                    _group_pass=True,
-                    _announce=not announced,
+                moved.append(booking)
+            for index, booking in enumerate(mismatched):
+                assigned.append(
+                    await self.reassign_captain(
+                        str(booking["_id"]),
+                        ReassignCaptainRequest(
+                            captain_id=payload.captain_id,
+                            estimated_start_at=payload.estimated_start_at if (index == 0 and not fresh) else None,
+                        ),
+                        assigned_by,
+                        actor_role,
+                        actor_center_id,
+                        _group_pass=True,
+                        _announce=False,
+                    )
                 )
-            )
-            announced = True
+                moved.append(booking)
+        except Exception:
+            await self._undo_group_assignment(moved, payload.captain_id, assigned_by)
+            raise
+
+        captain = await self.user_repo.find_by_id(payload.captain_id)
+        await self._announce_captain_assigned((fresh or mismatched)[0], payload.captain_id, captain or {}, tell_customer=bool(fresh))
         return {"booking_group_id": booking_group_id, "assigned_count": len(assigned), "bookings": assigned}
+
+    async def _precheck_group_conflicts(
+        self, fresh: list[dict], mismatched: list[dict], payload: BookingAssignCaptainRequest,
+        actor_role: str, actor_center_id: str | None, policy: dict,
+    ) -> None:
+        """Read-only dry run of every car's schedule check (the only check
+        that differs car to car — each starts at its own offset) so a
+        clash on car 3 refuses the visit before car 1 is touched."""
+        for index, booking in enumerate([*fresh, *mismatched]):
+            ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+            requested = payload.estimated_start_at if index == 0 else None
+            start = _resolve_estimated_start(booking, requested)
+            end = start + timedelta(minutes=booking.get("duration_minutes", 60))
+            conflict = await self._captain_conflict(
+                payload.captain_id, start, end, str(booking["_id"]), policy, group_id=booking.get("booking_group_id"),
+            )
+            if conflict:
+                raise BadRequestException(
+                    f"This captain is already scheduled for booking {conflict['booking_number']} around this time "
+                    f"(including travel buffer) — pick a different captain or time. No car on this visit was assigned."
+                )
+
+    _ASSIGNMENT_FIELDS = (
+        "captain_id", "status", "estimated_start_at", "assigned_at", "previous_captain_ids",
+        "issue_flag", "issue_resolved", "resolved_issue_flag", "self_assigned",
+    )
+
+    async def _undo_group_assignment(self, moved: list[dict], captain_id: str, actor_id: str) -> None:
+        """Puts cars this call already moved back exactly as they were —
+        only while they still carry THIS assignment (never clobbering a
+        change someone else made since). Best effort per car."""
+        for snapshot in moved:
+            booking_id = str(snapshot["_id"])
+            restore = {f: snapshot[f] for f in self._ASSIGNMENT_FIELDS if f in snapshot}
+            unset = {f: "" for f in self._ASSIGNMENT_FIELDS if f not in snapshot}
+            update: dict = {"$set": restore}
+            if unset:
+                update["$unset"] = unset
+            try:
+                res = await self.repo.collection.update_one(
+                    {"_id": snapshot["_id"], "captain_id": captain_id, "status": BookingStatus.ASSIGNED.value}, update,
+                )
+                if res.modified_count:
+                    await self._record_history(
+                        booking_id, BookingStatus(snapshot["status"]), actor_id,
+                        "Assignment undone — the rest of this visit couldn't be given to the same captain",
+                    )
+                    restored = await self.repo.find_by_id(booking_id)
+                    if restored:
+                        await self._broadcast_booking_changed(restored)
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not undo the half-done group assignment of booking %s", booking_id)
+
+    async def _announce_captain_assigned(self, booking: dict, captain_id: str, captain: dict, *, tell_customer: bool) -> None:
+        """One "new job" for the trip, labelled as the trip — the captain
+        (and, for a first assignment, the customer) hear it once however
+        many cars are on it."""
+        cars = await self._visit_cars(booking)
+        label = await self._visit_label(cars)
+        reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
+        booking_id = str(booking["_id"])
+        await self.notifications.notify(
+            captain_id,
+            f"New job — {label}",
+            f"{format_slot_12h(booking.get('scheduled_slot'))} on {to_ist(booking['scheduled_date']).strftime('%d %b')} ({reference})",
+            NotificationType.BOOKING,
+            booking_id,
+        )
+        if tell_customer:
+            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
+            await self.notifications.notify(
+                booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
+                NotificationType.BOOKING, booking_id,
+                wa_event="captain_assigned",
+                wa_params=[captain.get("full_name", "Your captain"), wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
+            )
 
     async def assign_captain(
         self,
@@ -3608,25 +3814,7 @@ class BookingService:
         updated = await self.repo.find_by_id(booking_id)
         await self._record_history(booking_id, BookingStatus.ASSIGNED, assigned_by, f"Assigned to captain {captain['full_name']}")
         if _announce:
-            # One "new job" for the trip, labelled as the trip — the captain
-            # and the customer each hear it once however many cars are on it.
-            cars = await self._visit_cars(booking)
-            label = await self._visit_label(cars)
-            reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
-            await self.notifications.notify(
-                payload.captain_id,
-                f"New job — {label}",
-                f"{format_slot_12h(booking.get('scheduled_slot'))} on {to_ist(booking['scheduled_date']).strftime('%d %b')} ({reference})",
-                NotificationType.BOOKING,
-                booking_id,
-            )
-            wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code = await self._wa_details(booking, cars)
-            await self.notifications.notify(
-                booking["customer_id"], "Captain assigned", "A captain has been assigned to your booking.",
-                NotificationType.BOOKING, booking_id,
-                wa_event="captain_assigned",
-                wa_params=[captain.get("full_name", "Your captain"), wa_services, wa_reference, wa_date, wa_slot, wa_vehicle, wa_code],
-            )
+            await self._announce_captain_assigned(booking, payload.captain_id, captain, tell_customer=True)
         await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
@@ -3647,6 +3835,18 @@ class BookingService:
         if booking["status"] not in {BookingStatus.PENDING.value, BookingStatus.ASSIGNED.value}:
             raise BadRequestException("This booking cannot be reassigned in its current state")
         _ensure_transition_allowed(booking["status"], BookingStatus.ASSIGNED.value)
+        if booking.get("booking_group_id") and not _group_pass:
+            # One trip, one captain: reassigning a car of a visit moves the
+            # whole visit — through the group path, so it's all-or-nothing
+            # (a clash on car 3 used to leave cars 1-2 with the new captain
+            # and car 3 with the old one).
+            result = await self.assign_captain_to_group(
+                booking["booking_group_id"],
+                BookingAssignCaptainRequest(captain_id=payload.captain_id, estimated_start_at=payload.estimated_start_at),
+                actor_id, actor_role, actor_center_id,
+            )
+            mine = next((b for b in result["bookings"] if b.get("id") == booking_id), None)
+            return mine or serialize_doc(await self.repo.find_by_id(booking_id))
 
         policy = await self.policy_service.get_policy()
         _ensure_schedulable(booking, policy)
@@ -3721,31 +3921,10 @@ class BookingService:
 
         updated = await self.repo.find_by_id(booking_id)
         await self._record_history(booking_id, BookingStatus.ASSIGNED, actor_id, f"Reassigned to captain {captain['full_name']}")
-        if not _group_pass:
-            # One trip, one captain: the other cars on the visit move with
-            # this one. Each goes through the same guarded path (conflict
-            # check, state check) with its own staggered start; the visit's
-            # single notification fires from THIS call, not from theirs.
-            for sib in await self._visit_siblings(booking):
-                if sib.get("status") not in {BookingStatus.PENDING.value, BookingStatus.ASSIGNED.value}:
-                    continue
-                if sib.get("captain_id") == payload.captain_id:
-                    continue
-                await self.reassign_captain(
-                    str(sib["_id"]), ReassignCaptainRequest(captain_id=payload.captain_id),
-                    actor_id, actor_role, actor_center_id, _group_pass=True, _announce=False,
-                )
+        # (A car of a multi-car visit never gets here un-grouped — see the
+        # delegation to assign_captain_to_group above.)
         if _announce:
-            cars = await self._visit_cars(booking)
-            label = await self._visit_label(cars)
-            reference = self._visit_numbers(cars) if len(cars) > 1 else booking["booking_number"]
-            await self.notifications.notify(
-                payload.captain_id,
-                f"New job — {label}",
-                f"{format_slot_12h(booking.get('scheduled_slot'))} on {to_ist(booking['scheduled_date']).strftime('%d %b')} ({reference})",
-                NotificationType.BOOKING,
-                booking_id,
-            )
+            await self._announce_captain_assigned(booking, payload.captain_id, captain, tell_customer=False)
         # Whoever is actually displaced from THIS car deserves to know,
         # independent of whether this call also carries the visit's one
         # "New job" notice — a captain who loses a booking to a visit-wide
@@ -4570,6 +4749,12 @@ class BookingService:
         # around them just because it's editing an existing booking
         # instead of creating a new one.
         _ensure_within_advance_window(payload.scheduled_date, policy)
+        if actor_role == "customer":
+            # A society premium wash keeps its day's notice when moved too —
+            # otherwise booking tomorrow and rescheduling to today skips it.
+            from app.services.society_service import ensure_society_lead_time
+
+            await ensure_society_lead_time(self.db, booking.get("subscription_id"), payload.scheduled_date, "app")
         new_slot_start, new_slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
         if _slot_cutoff_passed(new_slot_end, policy):
             raise BadRequestException("This slot is no longer available to book — please pick another slot.")
@@ -5249,7 +5434,7 @@ class BookingService:
                 continue
             if booking.get("booking_group_id"):
                 # Every car on a visit is "on the way" from the one departure,
-                # and stays so while the earlier cars are washed. He has
+                # and stays so while the earlier cars are wash. He has
                 # reached the address if ANY car on it has been reached.
                 cars = await self._visit_cars(booking)
                 if any(c.get("vehicle_verified") or c.get("service_started_at") or c.get("status") == BookingStatus.COMPLETED.value for c in cars):

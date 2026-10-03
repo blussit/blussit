@@ -11,7 +11,11 @@ export function ConfirmDialog() {
   const { request, respond } = useConfirmDialogState();
   const tone = request?.tone ?? "danger";
 
+  // Its own stacking layer above every page modal (all z-50): a confirm
+  // asked from inside an open modal (e.g. the garage's "plate is on another
+  // account") must sit on top of it, not hidden underneath.
   return (
+    <div className="relative z-[60]">
     <Modal open={!!request} onClose={() => respond(false)} title={request?.title ?? ""}>
       {request && (
         <div className="space-y-4">
@@ -32,5 +36,6 @@ export function ConfirmDialog() {
         </div>
       )}
     </Modal>
+    </div>
   );
 }

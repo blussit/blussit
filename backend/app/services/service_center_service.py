@@ -1,6 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.repositories.service_center_repository import ServiceCenterRepository
 from app.schemas.service_center_schema import ServiceCenterCreateRequest, ServiceCenterUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
@@ -30,8 +30,21 @@ class ServiceCenterService:
         created = await self.repo.create(doc)
         return serialize_doc(created)
 
+    # Optional fields an admin can clear again (sent as null): unassigning
+    # the manager stops that person's new-booking WhatsApps for this center.
+    _CLEARABLE = ("manager_id", "contact_phone", "contact_email", "slot_duration_minutes")
+
     async def update(self, center_id: str, payload: ServiceCenterUpdateRequest) -> dict:
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k in self._CLEARABLE}
+        if data.get("manager_id"):
+            from bson import ObjectId
+
+            manager = (
+                await self.repo.db.users.find_one({"_id": ObjectId(data["manager_id"]), "role": "manager", "is_deleted": {"$ne": True}}, {"_id": 1})
+                if ObjectId.is_valid(data["manager_id"]) else None
+            )
+            if not manager:
+                raise BadRequestException("Pick a manager account for this center.")
         updated = await self.repo.update_by_id(center_id, data)
         if not updated:
             raise NotFoundException("Service center not found")

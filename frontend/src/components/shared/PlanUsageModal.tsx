@@ -14,7 +14,7 @@ export function PlanUsageModal({ subscriptionId, onClose }: { subscriptionId: st
   });
 
   return (
-    <Modal open={!!subscriptionId} onClose={onClose} title="Plan usage">
+    <Modal open={!!subscriptionId} onClose={onClose} title="Plan Usage">
       {isLoading || !data ? (
         <PageLoader />
       ) : (
@@ -27,7 +27,7 @@ export function PlanUsageModal({ subscriptionId, onClose }: { subscriptionId: st
               </p>
             </div>
             <div className="rounded-xl border border-[#F3E5B5] bg-white p-3">
-              <p className="text-[11px] font-medium text-gray-500">Last used</p>
+              <p className="text-[11px] font-medium text-gray-500">Last Used</p>
               <p className="mt-0.5 text-sm font-semibold text-black">{data.last_used_at ? format(data.last_used_at) : "Never yet"}</p>
             </div>
           </div>

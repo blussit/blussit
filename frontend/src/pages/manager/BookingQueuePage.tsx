@@ -5,8 +5,9 @@ import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock,
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
-import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
+import { bookingServiceLabel, toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
+import { toTitle } from "../../lib/titleCase";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
@@ -53,11 +54,11 @@ const STATUS_FILTERS = [
   // Never in the assignment queue (they aren't confirmed bookings) — this
   // filter exists so a manager can FIND one when a customer rings up
   // saying they booked and you can't see it.
-  { label: "Payment pending", value: "awaiting_payment" },
+  { label: "Payment Pending", value: "awaiting_payment" },
   { label: "Pending", value: "pending" },
   { label: "Assigned", value: "assigned" },
-  { label: "On the way", value: "captain_on_the_way" },
-  { label: "In progress", value: "service_started" },
+  { label: "On The Way", value: "captain_on_the_way" },
+  { label: "In Progress", value: "service_started" },
   { label: "Completed", value: "completed" },
   { label: "Cancelled", value: "cancelled" },
   { label: "Rescheduled", value: "rescheduled" },
@@ -85,10 +86,16 @@ const PRIORITY_OPTIONS: ("high" | "medium" | "low")[] = ["high", "medium", "low"
 const PAGE_SIZE = 100;
 const nextPage = (last: ApiPaginated<Booking>) => (last.meta.page < last.meta.total_pages ? last.meta.page + 1 : undefined);
 
+/** "Sedan · Star Wash" — staff always see the car TYPE with the wash. */
 function bookingLabel(b: Booking): string {
-  if (b.combo_name) return b.combo_name;
-  if (b.service_names?.length) return b.service_names.join(", ");
-  return "Service";
+  const car = toTitle(b.vehicle_type_name || b.vehicle_label);
+  const service = toTitle(bookingServiceLabel(b));
+  return car ? `${car} · ${service}` : service;
+}
+
+/** One line per visit: every car on it, each with its own wash. */
+function slabLabel(slab: BookingSlab): string {
+  return slab.isVisit ? slab.bookings.map(bookingLabel).join(" + ") : bookingLabel(slab.primary);
 }
 
 /** The single clear answer to "what's going on with this booking" — blank
@@ -106,11 +113,11 @@ function WhatHappened({ booking }: { booking: Booking }) {
     if (isOpenIssue(booking)) {
       return (
         <span className="flex items-center gap-1 text-xs font-medium text-amber-700">
-          <AlertTriangle className="h-3 w-3" /> {label} — needs action
+          <AlertTriangle className="h-3 w-3" /> {label} — Needs Action
         </span>
       );
     }
-    return <span className="text-xs text-[var(--color-text-secondary)]">{label} — resolved</span>;
+    return <span className="text-xs text-[var(--color-text-secondary)]">{label} — Resolved</span>;
   }
   return null;
 }
@@ -245,7 +252,15 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     if (id === user?.id) return `${user?.full_name || "You"} (you)`;
     return captains?.data.find((c) => c.id === id)?.full_name || "—";
   };
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["center-bookings"] });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["center-bookings"] });
+    queryClient.invalidateQueries({ queryKey: ["manager-dashboard"] });
+  };
+  // Every modal shares one `error` line — a fresh modal starts without the
+  // last one's failure.
+  useEffect(() => {
+    setError("");
+  }, [reschedulingBooking, resolvingBooking, cancellingBooking]);
 
   // Excludes anything already flagged (isOpenIssue) — once the automated
   // sweep has flagged a booking (e.g. its window fully expired with no
@@ -380,6 +395,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const priorityMutation = useMutation({
     mutationFn: ({ id, priority }: { id: string; priority: "high" | "medium" | "low" }) => bookingApi.updatePriority(id, priority),
     onSuccess: invalidate,
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't change the priority", message: getErrorMessage(err) }),
   });
 
   const prioritySelector = (b: Booking) => (
@@ -393,7 +409,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             e.stopPropagation();
             if (p !== b.priority) priorityMutation.mutate({ id: b.id, priority: p });
           }}
-          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors disabled:opacity-50 ${
+          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize transition-colors disabled:opacity-50 ${
             b.priority === p
               ? p === "high"
                 ? "bg-[var(--color-error)] text-white"
@@ -410,12 +426,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   );
 
   const resolveMutation = useMutation({
-    mutationFn: () => bookingApi.resolveIssue(resolvingBooking!.id, resolveNote || undefined),
+    // The server requires a reason (3–300 characters) — the old "optional"
+    // field sent nothing and every blank resolve failed with a 422.
+    mutationFn: () => bookingApi.resolveIssue(resolvingBooking!.id, resolveNote.trim()),
     onSuccess: () => {
       invalidate();
       setResolvingBooking(null);
       setResolveNote("");
+      setError("");
+      pushToast({ tone: "success", title: "Issue resolved" });
     },
+    onError: (err) => setError(getErrorMessage(err)),
   });
 
   const markDoneMutation = useMutation({
@@ -426,7 +447,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       // The queue AND the dashboard tiles / KPIs (their keys share the
       // "center-bookings-" / "manager-kpi" prefixes) move with a done job.
       queryClient.invalidateQueries({
-        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|center-captains)/.test(q.queryKey[0]),
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|manager-dashboard|center-captains)/.test(q.queryKey[0]),
       });
       pushToast({
         tone: "success",
@@ -513,7 +534,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
       {needsCaptain(b) && (
         <Button size="sm" onClick={() => openAssign(b, false)}>
-          Assign captain
+          Assign Captain
         </Button>
       )}
       {canReassign(b) && (
@@ -523,7 +544,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       )}
       {canMarkDone(b) && (
         <Button size="sm" variant="outline" onClick={() => openMarkDone(b)}>
-          <ClipboardCheck className="h-3.5 w-3.5" /> Mark done
+          <ClipboardCheck className="h-3.5 w-3.5" /> Mark Done
         </Button>
       )}
       {isOpenIssue(b) && (
@@ -572,12 +593,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Booking queue</h1>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Booking Queue</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Assign captains and handle anything that needs your attention.</p>
         </div>
-        <Button onClick={() => navigate("/manager/log-job")}>
-          <ClipboardCheck className="h-4 w-4" /> Log a done job
-        </Button>
+        {/* Manager-only: the admin's center view (centerIdOverride) can't
+            use /manager/log-job, and the server logs a job into the
+            MANAGER's own center (require_manager). */}
+        {!centerIdOverride && (
+          <Button onClick={() => navigate("/manager/log-job")}>
+            <ClipboardCheck className="h-4 w-4" /> Log A Done Job
+          </Button>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -587,7 +613,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             view === "attention" ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
           }`}
         >
-          Needs attention
+          Needs Attention
           {attentionTotal > 0 && (
             <span className={`ml-2 rounded-full px-2 py-0.5 text-xs ${view === "attention" ? "bg-white/20" : "bg-gray-300"}`}>
               {attentionTotal}
@@ -603,7 +629,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             view === "late_starts" ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
           }`}
         >
-          Late starts
+          Late Starts
           {newLateStartsCount > 0 && (
             <span className={`ml-2 rounded-full px-2 py-0.5 text-xs ${view === "late_starts" ? "bg-white/20" : "bg-gray-300"}`}>
               {newLateStartsCount}
@@ -616,15 +642,15 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             view === "all" ? "bg-[var(--color-primary)] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
           }`}
         >
-          All bookings
+          All Bookings
         </button>
       </div>
 
       {view === "attention" ? (
         <div className="space-y-8">
           <section>
-            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
-              <CalendarClock className="h-4 w-4" /> New bookings — need a captain ({newBookings.length})
+            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--color-text-secondary)]">
+              <CalendarClock className="h-4 w-4" /> New Bookings — Need A Captain ({newBookings.length})
             </h2>
             {!isLoading && newBookings.length === 0 ? (
               <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">Nothing waiting on assignment.</p>
@@ -647,8 +673,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                           {/* One trip, several cars — dispatching them
                               separately would send two captains to one gate. */}
                           {slab.isVisit && (
-                            <span className="rounded-full bg-black px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
-                              1 visit · {slab.vehicleCount} vehicles
+                            <span className="rounded-full bg-[#EEF3FA] px-2 py-0.5 text-[10px] font-bold text-[#0E1A33]">
+                              1 Visit · {slab.vehicleCount} Vehicles
                             </span>
                           )}
                         </p>
@@ -683,7 +709,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                         </p>
                       )}
                       <p className="flex items-center gap-1">
-                        <Sparkles className="h-3 w-3" /> {bookingLabel(b)}
+                        <Sparkles className="h-3 w-3 shrink-0" /> <span className="min-w-0">{slabLabel(slab)}</span>
                       </p>
                     </div>
                     <div className="mt-3">{bookingActions(b)}</div>
@@ -695,8 +721,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           </section>
 
           <section>
-            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-amber-700">
-              <AlertTriangle className="h-4 w-4" /> Flagged issues ({openIssues.length})
+            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-amber-700">
+              <AlertTriangle className="h-4 w-4" /> Flagged Issues ({openIssues.length})
             </h2>
             {!isLoading && openIssues.length === 0 ? (
               <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">No open issues right now.</p>
@@ -711,6 +737,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
+                        <p className="mt-0.5 text-xs font-medium text-[var(--color-text-primary)]">{bookingLabel(b)}</p>
                         <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                           {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
                         </p>
@@ -733,7 +760,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
 
           {attentionQuery.hasNextPage && (
             <Button variant="outline" className="w-full" isLoading={attentionQuery.isFetchingNextPage} onClick={() => void attentionQuery.fetchNextPage()}>
-              Show more ({attentionTotal - attentionItems.length} not shown)
+              Show More ({attentionTotal - attentionItems.length} not shown)
             </Button>
           )}
         </div>
@@ -743,7 +770,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             <div className="flex flex-wrap gap-3">
               <div className="w-48">
                 <Select label="Month" value={lateStartMonth} onChange={(e) => setLateStartMonth(e.target.value)}>
-                  <option value="">All months</option>
+                  <option value="">All Months</option>
                   {lateStartMonths.map((key) => (
                     <option key={key} value={key}>
                       {monthLabel(key)}
@@ -753,7 +780,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               </div>
               <div className="w-48">
                 <Select label="Captain" value={lateStartCaptainId} onChange={(e) => setLateStartCaptainId(e.target.value)}>
-                  <option value="">All captains</option>
+                  <option value="">All Captains</option>
                   {lateStartCaptainIds.map((id) => (
                     <option key={id} value={id}>
                       {captainName(id)}
@@ -782,6 +809,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
+                      <p className="mt-0.5 text-xs font-medium text-[var(--color-text-primary)]">{bookingLabel(b)}</p>
                       <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                         {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
                       </p>
@@ -791,11 +819,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                   <div className="mt-2 flex items-center gap-1.5 text-xs font-medium">
                     <Clock className={`h-3.5 w-3.5 ${b.captain_start_stage === "severely_late" ? "text-[var(--color-error)]" : "text-amber-700"}`} />
                     <span className={b.captain_start_stage === "severely_late" ? "text-[var(--color-error)]" : "text-amber-700"}>
-                      {b.captain_start_stage === "severely_late" ? "Started significantly late" : "Started late"}
+                      {b.captain_start_stage === "severely_late" ? "Started Significantly Late" : "Started Late"}
                       {b.late_penalty_pct ? ` — ${b.late_penalty_pct}% pay penalty applied` : ""}
                     </span>
                   </div>
-                  {isOpenIssue(b) && <p className="mt-1 text-xs text-amber-700">Still flagged — needs action</p>}
+                  {isOpenIssue(b) && <p className="mt-1 text-xs text-amber-700">Still Flagged — Needs Action</p>}
                   <div className="mt-3">{bookingActions(b)}</div>
                 </Card>
               ))}
@@ -803,7 +831,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           )}
           {lateQuery.hasNextPage && (
             <Button variant="outline" className="w-full" isLoading={lateQuery.isFetchingNextPage} onClick={() => void lateQuery.fetchNextPage()}>
-              Show older late starts
+              Show Older Late Starts
             </Button>
           )}
         </div>
@@ -835,7 +863,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             onDateToChange={setDateTo}
           />
 
-          {/* One row per VISIT — several cars washed on one trip are one
+          {/* One row per VISIT — several cars wash on one trip are one
               booking to assign, reschedule or cancel. Every action below
               still fires on a single underlying car id (slab.primary),
               because the backend itself converges the whole visit onto
@@ -847,7 +875,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           <DataTable<BookingSlab & { id: string }>
             isLoading={allQuery.isLoading}
             data={toSlabs(allItems).map((slab) => ({ ...slab, id: slab.key }))}
-            emptyTitle="No bookings"
+            emptyTitle="No Bookings"
             onRowClick={(slab) => setSelectedBooking(slab.primary)}
             columns={[
               {
@@ -857,10 +885,10 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                     <span className="font-mono-num">{slab.isVisit ? slab.bookings.map((b) => b.booking_number).join(" · ") : slab.primary.booking_number}</span>
                     {slab.isVisit && (
                       <span
-                        title="Several vehicles washed on one visit — one trip, one captain, one payment"
-                        className="rounded-full bg-gray-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white"
+                        title="Several vehicles wash on one visit — one trip, one captain, one payment"
+                        className="rounded-full bg-[#EEF3FA] px-1.5 py-0.5 text-[9px] font-bold text-[#0E1A33]"
                       >
-                        {slab.vehicleCount} vehicles
+                        {slab.vehicleCount} Vehicles
                       </span>
                     )}
                   </span>
@@ -868,14 +896,14 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               },
               { header: "Customer", accessor: (slab) => slab.primary.customer_name || "—" },
               {
-                header: "Vehicle & service",
+                header: "Vehicle & Service",
                 accessor: (slab) =>
                   slab.isVisit ? (
                     <ul className="space-y-0.5 text-xs">
                       {slab.bookings.map((b, i) => (
                         <li key={b.id}>
                           <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
-                          {vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {b.combo_name || b.service_names?.join(", ") || "—"}</span>
+                          {toTitle(b.vehicle_type_name) || vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {toTitle(bookingServiceLabel(b, "—"))}</span>
                         </li>
                       ))}
                     </ul>
@@ -887,7 +915,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               { header: "Captain", accessor: (slab) => captainName(slab.primary.captain_id) },
               { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
               { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
-              { header: "What happened", accessor: (slab) => <WhatHappened booking={slab.primary} /> },
+              { header: "What Happened", accessor: (slab) => <WhatHappened booking={slab.primary} /> },
               { header: "", accessor: (slab) => bookingActions(actionTarget(slab)) },
             ]}
           />
@@ -909,16 +937,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
         </div>
       )}
 
-      <Modal open={!!assigningBooking} onClose={() => setAssigningBooking(null)} title={isReassign ? "Reassign captain" : "Assign captain"}>
+      <Modal open={!!assigningBooking} onClose={() => setAssigningBooking(null)} title={isReassign ? "Reassign Captain" : "Assign Captain"}>
         <div className="space-y-4">
           {assigningBooking && assigningBooking.captain_id !== user?.id && (
             <Button
               variant="outline"
               className="w-full"
               isLoading={selfAssignMutation.isPending}
+              disabled={assignMutation.isPending}
               onClick={() => selfAssignMutation.mutate()}
             >
-              Deliver this myself
+              Deliver This Myself
             </Button>
           )}
           {assigningBooking && (
@@ -934,16 +963,16 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button
             className="w-full"
-            disabled={!captainId || (isReassign && captainId === assigningBooking?.captain_id)}
+            disabled={!captainId || (isReassign && captainId === assigningBooking?.captain_id) || selfAssignMutation.isPending}
             isLoading={assignMutation.isPending}
             onClick={() => assignMutation.mutate()}
           >
-            {isReassign ? "Confirm reassignment" : "Confirm assignment"}
+            {isReassign ? "Confirm Reassignment" : "Confirm Assignment"}
           </Button>
         </div>
       </Modal>
 
-      <Modal open={!!reschedulingBooking} onClose={() => setReschedulingBooking(null)} title="Reschedule booking">
+      <Modal open={!!reschedulingBooking} onClose={() => setReschedulingBooking(null)} title="Reschedule Booking">
         <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
           This clears the current captain and issue flag, and moves the booking to a new time — you'll need to assign a captain
           again afterward.
@@ -952,38 +981,46 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           <SlotPicker serviceCenterId={reschedulingBooking?.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button className="w-full" disabled={!newDate || !newSlot} isLoading={rescheduleMutation.isPending} onClick={() => rescheduleMutation.mutate()}>
-            Confirm reschedule
+            Confirm Reschedule
           </Button>
         </div>
       </Modal>
 
-      <Modal open={!!resolvingBooking} onClose={() => setResolvingBooking(null)} title="Resolve issue">
+      <Modal open={!!resolvingBooking} onClose={() => setResolvingBooking(null)} title="Resolve Issue">
         <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
           Clears the flag without reassigning or rescheduling — e.g. you called the captain and confirmed things are on track.
         </p>
-        <Input label="Note (optional)" value={resolveNote} onChange={(e) => setResolveNote(e.target.value)} placeholder="Called captain, on the way now" />
-        <Button className="mt-4 w-full" isLoading={resolveMutation.isPending} onClick={() => resolveMutation.mutate()}>
-          Mark resolved
+        <Input
+          label="What Did You Do?"
+          value={resolveNote}
+          maxLength={300}
+          onChange={(e) => setResolveNote(e.target.value)}
+          placeholder="Called captain, on the way now"
+          hint="A short note (at least 3 characters) — it stays on the booking's history."
+        />
+        {error && <p className="mt-2 text-sm text-[var(--color-error)]">{error}</p>}
+        <Button className="mt-4 w-full" disabled={resolveNote.trim().length < 3} isLoading={resolveMutation.isPending} onClick={() => resolveMutation.mutate()}>
+          Mark Resolved
         </Button>
       </Modal>
 
-      <Modal open={!!doneBooking} onClose={closeDone} title={doneBooking?.booking_group_id ? "Mark visit as done" : "Mark as done"}>
+      <Modal open={!!doneBooking} onClose={closeDone} title={doneBooking?.booking_group_id ? "Mark Visit As Done" : "Mark As Done"}>
         {doneBooking && (
           <div className="space-y-4">
             <p className="text-sm text-[var(--color-text-secondary)]">
-              You did <span className="font-mono-num font-semibold text-black">{doneVisit.map((x) => x.booking_number).join(" + ")}</span> yourself, so it closes right away — no photos needed.
+              You did <span className="font-mono-num font-semibold text-[#0E1A33]">{doneVisit.map((x) => x.booking_number).join(" + ")}</span> yourself, so it closes right away — no photos needed.
               {doneBooking.booking_group_id && " Every vehicle on this visit is closed together."}
               {doneBooking.captain_id && " The assigned captain is released and earns nothing for it."}
             </p>
             {doneUnpaid && (
-              <p className="rounded-xl bg-[#FAFAFA] p-3 text-xs text-gray-600">
-                Payment is recorded as <span className="font-semibold text-black">collected in cash by you</span>.
+              <p className="rounded-xl bg-[#F7F9FC] p-3 text-xs text-gray-600">
+                Payment is recorded as <span className="font-semibold text-[#0E1A33]">collected in cash by you</span>.
               </p>
             )}
             <Switch
               checked={doneWhatsApp}
               onChange={setDoneWhatsApp}
-              label="Tell the customer on WhatsApp"
+              label="Tell The Customer On WhatsApp"
               description={`They get one message${doneBooking.customer_phone ? ` on +91 ${doneBooking.customer_phone.replace(/^\+?91/, "")}` : ""} saying the service is done. Nothing else is sent.`}
             />
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
@@ -992,14 +1029,14 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                 Back
               </Button>
               <Button className="flex-1" isLoading={markDoneMutation.isPending} onClick={() => markDoneMutation.mutate()}>
-                <ClipboardCheck className="h-4 w-4" /> Mark as done
+                <ClipboardCheck className="h-4 w-4" /> Mark As Done
               </Button>
             </div>
           </div>
         )}
       </Modal>
 
-      <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel visit" : "Cancel booking"}>
+      <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel Visit" : "Cancel Booking"}>
         <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
           {cancellingBooking?.booking_group_id
             ? "This cancels every vehicle on this visit outright — the customer and captain (if assigned) are notified."
@@ -1009,6 +1046,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
           rows={3}
           placeholder="Reason (min 3 characters)"
+          maxLength={300}
           value={cancelReason}
           onChange={(e) => setCancelReason(e.target.value)}
         />
@@ -1024,7 +1062,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             disabled={cancelReason.trim().length < 3}
             onClick={() => cancelMutation.mutate()}
           >
-            Cancel booking
+            Cancel Booking
           </Button>
         </div>
       </Modal>

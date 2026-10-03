@@ -181,7 +181,7 @@ export interface BookingPolicy {
   slot_booking_cutoff_minutes: number;
   // How far ahead bookings/holds are accepted (days from today, inclusive).
   max_advance_days: number;
-  /** How many vehicles one customer can have washed on a single visit. */
+  /** How many vehicles one customer can have wash on a single visit. */
   max_vehicles_per_booking?: number;
   /** Minutes an online-pay booking is held before its slot is released. */
   payment_window_minutes?: number;
@@ -332,7 +332,7 @@ export interface EquipmentUsed {
 
 export interface Booking {
   id: string;
-  /** Several cars washed on ONE visit share this. Null on a single booking. */
+  /** Several cars wash on ONE visit share this. Null on a single booking. */
   booking_group_id?: string | null;
   /** Minutes after the slot start this car begins — 0 for the first. */
   group_offset_minutes?: number;
@@ -450,8 +450,14 @@ export interface Booking {
   /** Denormalized on every new booking (quick-booking model). */
   vehicle_type?: string | null;
   vehicle_label?: string | null;
+  /** Car TYPE name ("Sedan") on every enriched booking — even an older
+   *  saved-vehicle one whose label is "Brand Model". */
+  vehicle_type_name?: string | null;
   /** 4-digit code the captain asks for on arrival — one per visit. */
   service_code?: string | null;
+  /** Captain reads only: the code itself is never sent to a captain —
+   *  this says whether to ask the customer for it (else legacy plate). */
+  requires_service_code?: boolean;
   travel_distance_km?: number | null;
   travel_eta_minutes?: number | null;
   address_snapshot?: {
@@ -465,6 +471,11 @@ export interface Booking {
   } | null;
   service_names?: string[] | null;
   combo_name?: string | null;
+  /** A wash on a society pass: "Society plan (Green Acres)" reads after
+   *  the service (docs/SOCIETY_PLANS.md). */
+  society_id?: string | null;
+  society_name?: string | null;
+  plan_label?: string | null;
 }
 
 export interface CaptainWallet {
@@ -591,6 +602,14 @@ export interface UserSubscription {
   assigned_by?: string | null;
   cash_collected_by?: string | null;
   cash_collected_at?: string | null;
+  /** Society pass (docs/SOCIETY_PLANS.md): daily bucket washes + a premium
+   *  quota. Managed by the society manager — no cancel/upgrade/auto-pay;
+   *  booking and renewal happen on the society page (`society_form_path`). */
+  society_id?: string | null;
+  society_name?: string | null;
+  society_form_path?: string | null;
+  /** Bucket-wash days per 30-day cycle (society passes only). */
+  bucket_days?: number | null;
 }
 
 export interface ServiceCenter {
@@ -621,6 +640,8 @@ export interface ServiceCenter {
 export interface ComplaintReply {
   author_id: string;
   author_role: string;
+  /** Who wrote it (staff name) — set on replies posted since 2026-10. */
+  author_name?: string | null;
   message: string;
   created_at: string;
 }
@@ -643,6 +664,15 @@ export interface Complaint {
   booking_number?: string | null;
   customer_name?: string | null;
   service_center_name?: string | null;
+  // A society resident's issue (docs/SOCIETY_PLANS.md §9): tagged with the
+  // society, its preset type and the car — no booking.
+  category?: "society" | null;
+  society_id?: string | null;
+  society_name?: string | null;
+  issue_type?: string | null;
+  issue_label?: string | null;
+  registration_number?: string | null;
+  flat?: string | null;
 }
 
 export interface Review {

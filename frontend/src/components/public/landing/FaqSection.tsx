@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Helmet } from "react-helmet-async";
 import { contentApi } from "../../../api/catalog";
-import { SectionShell } from "./shared";
+import { SectionShell, headingCase } from "./shared";
 
 /**
  * Admin-managed FAQ section.
@@ -49,7 +49,9 @@ export function FaqSection({ id = "faq" }: { id?: string }) {
           Frequently Asked{" "}
           <span className="relative inline-block text-[#1677FF]">
             Questions
-            <span className="absolute -bottom-2 left-0 h-[3px] w-full rounded-full bg-[#E8A900]" />
+            <svg viewBox="0 0 200 12" preserveAspectRatio="none" className="absolute -bottom-1.5 left-2 h-[8px] w-[75%]" aria-hidden="true">
+              <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FACC15" strokeWidth="3" strokeLinecap="round" />
+            </svg>
           </span>
         </h2>
 
@@ -91,7 +93,7 @@ export function FaqSection({ id = "faq" }: { id?: string }) {
                 group-open:text-[#1677FF]
               "
             >
-              {f.question}
+              {headingCase(f.question)}
 
               <span
                 className="

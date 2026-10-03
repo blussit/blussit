@@ -9,7 +9,7 @@ import { PageSeo } from "../../components/shared/PageSeo";
  */
 const SECTIONS: { title: string; body: string[] }[] = [
   {
-    title: "What we collect",
+    title: "What We Collect",
     body: [
       "Your name, phone number and email address.",
       "Your vehicle details, such as type, brand, model and registration number.",
@@ -21,7 +21,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "How we use it",
+    title: "How We Use It",
     body: [
       "To create and manage your bookings.",
       "To send captains to the right address.",
@@ -32,7 +32,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "WhatsApp and service providers",
+    title: "WhatsApp And Service Providers",
     body: [
       "When you message us or receive WhatsApp updates, WhatsApp Business Platform / Meta processes your phone number, message content and message status.",
       "Razorpay processes online payments. Blussit does not store your full card, UPI or bank details.",
@@ -42,7 +42,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "Retention and protection",
+    title: "Retention And Protection",
     body: [
       "We keep booking, payment and service records as long as needed for service, accounts, disputes and legal reasons.",
       "We may keep support and WhatsApp history so our team can understand previous requests.",
@@ -51,7 +51,7 @@ const SECTIONS: { title: string; body: string[] }[] = [
     ],
   },
   {
-    title: "Your choices",
+    title: "Your Choices",
     body: [
       "You can edit your vehicles, addresses and profile from your account at any time.",
       "You can ask us to delete your account or personal data by emailing contact.blussit@gmail.com, messaging us on WhatsApp, or using the contact form.",

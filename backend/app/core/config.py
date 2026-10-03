@@ -3,14 +3,29 @@ Centralized application configuration.
 All environment-dependent values are read from here — never hardcode
 config values anywhere else in the codebase.
 """
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import List
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+# Which env file a LOCAL run reads: backend/.env.development (test database,
+# test credentials) unless ENV_FILE names another one. Live credentials live
+# in backend/.env.production, which only the deploy script reads — so
+# starting the app on a laptop can never reach the production database.
+# Cloud Run has no env file at all; it gets its values as real environment
+# variables (which always win over any file).
+ENV_FILE = BACKEND_DIR / os.environ.get("ENV_FILE", ".env.development")
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "mongo", "host.docker.internal"}
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore")
 
     # App
     APP_NAME: str = "Doorstep Vehicle Care Platform"
@@ -193,6 +208,27 @@ class Settings(BaseSettings):
         if not self.RAZORPAY_KEY_ID:
             return "unconfigured"
         return "live" if self.RAZORPAY_KEY_ID.startswith("rzp_live_") else "test"
+
+    # Local testing shortcuts — a fixed OTP for every phone and a one-click
+    # "log in as" panel. Honoured ONLY when dev_tools_active (below): a
+    # stray true in any non-development, non-local setup is ignored.
+    DEV_TOOLS_ENABLED: bool = False
+    DEV_OTP_CODE: str = "123456"
+
+    @property
+    def mongo_is_local(self) -> bool:
+        try:
+            hosts = urlparse(self.MONGO_URI).netloc.rsplit("@", 1)[-1]
+        except ValueError:
+            return False
+        names = [h.strip().rsplit(":", 1)[0].strip("[]") for h in hosts.split(",") if h.strip()]
+        return bool(names) and all(n in _LOCAL_HOSTS for n in names)
+
+    @property
+    def dev_tools_active(self) -> bool:
+        """All three, or nothing: the flag, APP_ENV=development, and a
+        database on this machine. Production can't satisfy the last two."""
+        return bool(self.DEV_TOOLS_ENABLED) and self.APP_ENV == "development" and self.mongo_is_local
 
     @property
     def cors_origins_list(self) -> List[str]:

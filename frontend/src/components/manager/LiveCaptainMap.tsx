@@ -113,7 +113,7 @@ function LeafletLiveCaptainMap({
   return (
     <div className="space-y-1.5">
       <div ref={containerRef} className="h-56 w-full overflow-hidden rounded-xl border border-gray-200" />
-      <p className="text-xs text-[var(--color-text-secondary)]">Last position: {secondsAgoLabel(capturedAt)}</p>
+      <p className="text-xs text-[var(--color-text-secondary)]">Last Position: {secondsAgoLabel(capturedAt)}</p>
     </div>
   );
 }
@@ -205,7 +205,7 @@ function GoogleLiveCaptainMap({
   return (
     <div className="space-y-1.5">
       <div ref={containerRef} className="h-56 w-full overflow-hidden rounded-xl border border-gray-200" />
-      <p className="text-xs text-[var(--color-text-secondary)]">Last position: {secondsAgoLabel(capturedAt)}</p>
+      <p className="text-xs text-[var(--color-text-secondary)]">Last Position: {secondsAgoLabel(capturedAt)}</p>
     </div>
   );
 }

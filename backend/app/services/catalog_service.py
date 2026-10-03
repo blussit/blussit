@@ -127,7 +127,9 @@ class ComboOfferService:
         return serialize_doc(created)
 
     async def update(self, combo_id: str, payload: ComboOfferUpdateRequest) -> dict:
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        # discounted_price / description sent as null = cleared (a removed
+        # first-time price used to stay live).
+        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k in ("discounted_price", "description")}
         if "name" in data:
             data["slug"] = slugify(data["name"])
         updated = await self.repo.update_by_id(combo_id, data)

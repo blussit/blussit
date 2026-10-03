@@ -7,6 +7,7 @@ import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDraw
 import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 
 type PlanFilter = "all" | "active" | "expired";
 const PAGE_SIZE = 25;
@@ -69,23 +70,28 @@ export default function AdminPurchasedPlansPage() {
     {
       header: "Plan",
       accessor: (r) => (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setUsageSubscriptionId(r.subscription_id);
-          }}
-          className="text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
-        >
-          {r.plan_name}
-        </button>
+        <div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setUsageSubscriptionId(r.subscription_id);
+            }}
+            className="text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+          >
+            {toTitle(r.plan_name)}
+          </button>
+          {carAndService(r.vehicle_type_name, r.service_name) && (
+            <p className="mt-0.5 text-xs text-gray-500">{carAndService(r.vehicle_type_name, r.service_name)}</p>
+          )}
+        </div>
       ),
     },
     {
       header: "Status",
       accessor: (r) => (
         <div>
-          <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{r.status || "—"}</Badge>
+          <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{toTitle(r.status) || "—"}</Badge>
           {r.total_service_count != null && (
             <p className="mt-1 text-xs text-gray-400">
               {r.remaining_service_count}/{r.total_service_count} washes left
@@ -106,31 +112,31 @@ export default function AdminPurchasedPlansPage() {
     {
       header: "Method",
       accessor: (r) => (
-        <span className="capitalize">
-          {r.payment_method || (r.service_center_id ? "free grant" : "—")}
+        <span>
+          {toTitle(r.payment_method) || (r.service_center_id ? "Free Grant" : "—")}
           {r.coupon_code ? <span className="ml-1 text-xs text-gray-400">· {r.coupon_code}</span> : null}
-          {r.auto_renew ? <span className="ml-1 text-xs text-gray-400">· auto-pay</span> : null}
+          {r.auto_renew ? <span className="ml-1 text-xs text-gray-400">· Auto-Pay</span> : null}
         </span>
       ),
     },
-    { header: "Sold by", accessor: (r) => r.service_center_name || <span className="text-gray-400">self-serve</span> },
+    { header: "Sold By", accessor: (r) => r.service_center_name || <span className="text-gray-400">Self-Serve</span> },
     { header: "Bought", accessor: (r) => (r.start_date ? format(r.start_date) : "—") },
   ];
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Purchased plans</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Purchased Plans</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           Every subscription bought or granted across every center — who holds what, and what it brought in.
         </p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Total plans" value={kpis?.total ?? "—"} />
+        <StatCard label="Total Plans" value={kpis?.total ?? "—"} />
         <StatCard label="Active" value={kpis?.active ?? "—"} tone="success" />
         <StatCard label="Expired" value={kpis?.expired ?? "—"} tone="muted" />
-        <StatCard label="Total revenue" value={kpis ? `₹${kpis.total_revenue.toLocaleString()}` : "—"} tone="success" />
+        <StatCard label="Total Revenue" value={kpis ? `₹${kpis.total_revenue.toLocaleString()}` : "—"} tone="success" />
       </div>
 
       <Panel>
@@ -167,7 +173,7 @@ export default function AdminPurchasedPlansPage() {
 
         {!!data?.plan_breakdown.length && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">By plan:</span>
+            <span className="text-xs font-semibold text-gray-500">By Plan:</span>
             {data.plan_breakdown.map((p) => {
               const planId = planIdByName.get(p.plan_name);
               return (
@@ -182,7 +188,7 @@ export default function AdminPurchasedPlansPage() {
                     planId && planFilter === planId ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-gray-500 hover:border-gray-300"
                   }`}
                 >
-                  {p.plan_name} · {p.count}
+                  {toTitle(p.plan_name)} · {p.count}
                 </button>
               );
             })}
@@ -190,7 +196,7 @@ export default function AdminPurchasedPlansPage() {
         )}
 
         <div className="mt-4">
-          <DataTable columns={columns} data={rows} isLoading={isLoading} emptyTitle="No plans match" />
+          <DataTable columns={columns} data={rows} isLoading={isLoading} emptyTitle="No Plans Match" />
         </div>
         {data?.meta && (
           <div className="mt-4">

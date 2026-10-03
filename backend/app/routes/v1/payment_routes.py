@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -41,8 +41,9 @@ async def create_order(payload: CreateOrderRequest, current_user: CurrentUser = 
 @router.get("/collections/center/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
 async def center_collections(
     service_center_id: str,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    # A malformed date used to reach strptime and 500.
+    date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):

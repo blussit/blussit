@@ -20,16 +20,19 @@ class ComplaintController:
         items, total = await self.service.list_for_customer(current_user.id, pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def list_for_center(self, current_user: CurrentUser, service_center_id: str, status: str | None, pagination: PaginationParams):
+    async def list_for_center(self, current_user: CurrentUser, service_center_id: str, status: str | None, pagination: PaginationParams, extra: dict | None = None):
         items, total = await self.service.list_for_center(
             service_center_id, status, pagination.page, pagination.page_size, current_user.role, current_user.service_center_id,
-            search=pagination.search,
+            search=pagination.search, extra=extra,
         )
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def list_all(self, filters: dict, pagination: PaginationParams):
         items, total = await self.service.list_all(filters, pagination.page, pagination.page_size, search=pagination.search)
         return paginated(items, pagination.page, pagination.page_size, total)
+
+    async def get_one(self, current_user: CurrentUser, complaint_id: str):
+        return success(await self.service.get_one(complaint_id, current_user.id, current_user.role, current_user.service_center_id))
 
     async def update(self, current_user: CurrentUser, complaint_id: str, payload: ComplaintUpdateRequest):
         result = await self.service.update(
@@ -48,6 +51,6 @@ class ComplaintController:
             payload.status.value if payload.status else None,
         )
         await self.audit.log_action(
-            current_user.id, current_user.role, "REPLY_COMPLAINT", "complaints", complaint_id, {"message": payload.message, "status": payload.status},
+            current_user.id, current_user.role, "REPLY_COMPLAINT", "complaints", complaint_id, {"message": payload.message, "status": payload.status.value if payload.status else None},
         )
         return success(result, "Reply added")

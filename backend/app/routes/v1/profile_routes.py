@@ -20,6 +20,13 @@ async def list_vehicles(current_user: CurrentUser = Depends(get_current_user), d
     return await VehicleController(db).list(current_user)
 
 
+@vehicle_router.get("/garage")
+async def my_garage(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Every car the customer has — saved vehicles merged with the cars
+    from their booking history, one row per car (see garage_service)."""
+    return await VehicleController(db).garage(current_user)
+
+
 @vehicle_router.post("/check-registration")
 async def check_vehicle_registration(
     payload: RegistrationCheckRequest,

@@ -33,7 +33,10 @@ export type LocationValue = {
   formatted: string;
 };
 
-const INDORE = { lat: 22.7196, lng: 75.8577 };
+/** Central Indore — where the map opens, and the point whose serving
+ *  center shows its slots before a customer has given an address. */
+export const INDORE_CENTER = { lat: 22.7196, lng: 75.8577 };
+const INDORE = INDORE_CENTER;
 
 function shortLabel(v: LocationValue): string {
   return [v.area, v.city, v.pincode].filter(Boolean).join(", ") || v.formatted;
@@ -248,50 +251,50 @@ export function LocationPicker({
     );
   };
 
-  // if (status === "unavailable") return null;
+  if (status === "unavailable") return null;
 
   return (
-    <div className="space-y-2">
-      <div className="hidden">
-        <div ref={mapRef} className="h-full w-full" />
-        {status === "loading" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-50 text-sm text-[var(--color-text-secondary)]">Loading map…</div>
-        )}
+    <div className="space-y-2.5">
+      <div className="flex gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9AA3B2]" />
+          <input
+            ref={searchRef}
+            placeholder="Search area, colony or landmark…"
+            className="h-[48px] w-full rounded-[12px] border border-[#E4E9F1] bg-white pl-10 pr-3 text-[15px] text-[#0E1A33] outline-none transition placeholder:text-[#9AA3B2] focus:border-[#0A66F0] focus:ring-2 focus:ring-[#0A66F0]/15"
+            onFocus={(e) => e.target.select()}
+            onBlur={(e) => {
+              // Typed-but-not-picked text is meaningless — restore the pin's label.
+              const current = valueRef.current;
+              setTimeout(() => {
+                if (current && e.target.value !== shortLabel(current)) e.target.value = shortLabel(current);
+              }, 200);
+            }}
+          />
+        </div>
         <button
           type="button"
           onClick={useMyLocation}
-          className="absolute right-3 top-3 flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-xs font-semibold text-[var(--color-text-primary)] shadow-lg hover:bg-gray-50"
+          aria-label="Use my current location"
+          className="flex h-[48px] shrink-0 items-center gap-1.5 rounded-[12px] border border-[#CFE0FD] bg-[#F3F7FF] px-3 text-[13px] font-semibold text-[#0A66F0] transition hover:bg-[#E8F0FE]"
         >
-          {locating ? <Crosshair className="h-4 w-4 animate-spin text-[var(--color-primary)]" /> : <LocateFixed className="h-4 w-4 text-[var(--color-primary)]" />}
-          Use my location
+          {locating ? <Crosshair className="h-4 w-4 animate-spin" /> : <LocateFixed className="h-4 w-4" />}
+          <span className="hidden min-[400px]:inline">Use My Location</span>
         </button>
       </div>
-      <p className="hidden flex items-start gap-1.5 text-xs text-[var(--color-text-secondary)]">
-        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
+      <div className="relative overflow-hidden rounded-[14px] border border-[#E4E9F1] bg-[#F6F8FC]" style={{ height }}>
+        <div ref={mapRef} className="h-full w-full" />
+        {status === "loading" && <div className="absolute inset-0 flex items-center justify-center text-sm text-[#5F6878]">Loading map…</div>}
+      </div>
+      <p className="flex items-start gap-1.5 text-[12px] text-[#5F6878]">
+        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0A66F0]" />
         {resolving
           ? "Finding this address…"
           : value
-            ? "Confirm the pin is on your exact doorstep — our captain navigates to this point."
+            ? "Drag the pin onto your exact gate — our captain navigates to this point."
             : "Drop the pin on your exact location — our captain navigates to this point."}
       </p>
-
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-        <input
-          ref={searchRef}
-          placeholder="Search area, colony or landmark…"
-          className="w-full rounded-xl border border-gray-300 py-2.5 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-          onFocus={(e) => e.target.select()}
-          onBlur={(e) => {
-            // Typed-but-not-picked text is meaningless — restore the pin's label.
-            const current = valueRef.current;
-            setTimeout(() => {
-              if (current && e.target.value !== shortLabel(current)) e.target.value = shortLabel(current);
-            }, 200);
-          }}
-        />
-      </div>
-      {gpsError && <p className="text-xs text-amber-700">{gpsError}</p>}
+      {gpsError && <p className="text-[12px] text-amber-700">{gpsError}</p>}
     </div>
   );
 }

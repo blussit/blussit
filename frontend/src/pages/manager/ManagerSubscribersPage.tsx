@@ -9,12 +9,13 @@ import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDraw
 import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
 import { format } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 
 type Filter = "all" | "active" | "expiring" | "expired";
 const PAGE_SIZE = 24;
 
 const FILTER_EMPTY: Record<Filter, string> = {
-  all: "No customer of this center holds a plan yet — sell one from \"Sell a plan\", or pitch a plan at the door.",
+  all: "No customer of this center holds a plan yet — sell one from \"Sell A Plan\", or pitch a plan at the door.",
   active: "No active plans right now.",
   expiring: "Nothing expires in the next 14 days.",
   expired: "No expired plans.",
@@ -70,7 +71,7 @@ export default function ManagerSubscribersPage() {
     return (
       <EmptyState
         icon={Gauge}
-        title="No service center linked"
+        title="No Service Center Linked"
         description="Your manager account isn't linked to a service center yet — ask an admin to assign one, then plans held by this center's customers show up here."
       />
     );
@@ -78,9 +79,9 @@ export default function ManagerSubscribersPage() {
 
   const kpis = data?.kpis;
   const tiles: { key: Filter; label: string; value: number | string; icon: typeof Gift; accent?: string }[] = [
-    { key: "all", label: "Plans held", value: kpis?.total ?? "—", icon: Gift },
+    { key: "all", label: "Plans Held", value: kpis?.total ?? "—", icon: Gift },
     { key: "active", label: "Active", value: kpis?.active ?? "—", icon: BadgeCheck, accent: "text-green-600" },
-    { key: "expiring", label: "Expiring in 14 days", value: kpis?.expiring_soon ?? "—", icon: AlarmClock, accent: "text-amber-600" },
+    { key: "expiring", label: "Expiring In 14 Days", value: kpis?.expiring_soon ?? "—", icon: AlarmClock, accent: "text-amber-600" },
     { key: "expired", label: "Expired", value: kpis?.expired ?? "—", icon: CircleOff, accent: "text-gray-400" },
   ];
 
@@ -94,7 +95,7 @@ export default function ManagerSubscribersPage() {
           </p>
         </div>
         <Button onClick={() => navigate("/manager/sell-plan")}>
-          <CreditCard className="h-4 w-4" /> Sell a plan
+          <CreditCard className="h-4 w-4" /> Sell A Plan
         </Button>
       </div>
 
@@ -108,7 +109,7 @@ export default function ManagerSubscribersPage() {
               setPage(1);
             }}
             className={`rounded-2xl border bg-white p-4 text-left transition-colors ${
-              filter === t.key ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-100 hover:border-gray-300"
+              filter === t.key ? "border-2 border-[#0A66F0] bg-[#E8F0FE]" : "border-gray-100 hover:border-gray-300"
             }`}
           >
             <t.icon className={`h-4 w-4 ${t.accent || "text-[var(--color-text-secondary)]"}`} />
@@ -121,7 +122,7 @@ export default function ManagerSubscribersPage() {
       {/* Which plan types are actually selling here. */}
       {!!data?.plan_breakdown.length && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Active by plan:</span>
+          <span className="text-xs font-semibold text-[var(--color-text-secondary)]">Active By Plan:</span>
           {data.plan_breakdown.map((p) => {
             const planId = planIdByName.get(p.plan_name);
             return (
@@ -133,10 +134,10 @@ export default function ManagerSubscribersPage() {
                   setPage(1);
                 }}
                 className={`rounded-full border px-3 py-1 text-xs font-medium disabled:cursor-default ${
-                  planId && planFilter === planId ? "border-2 border-black bg-[var(--color-primary-light)]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
+                  planId && planFilter === planId ? "border-2 border-[#0A66F0] bg-[#E8F0FE]" : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
                 }`}
               >
-                {p.plan_name} · {p.active_count}
+                {toTitle(p.plan_name)} · {p.active_count}
               </button>
             );
           })}
@@ -159,7 +160,7 @@ export default function ManagerSubscribersPage() {
       {isLoading ? (
         <PageLoader />
       ) : !rows.length ? (
-        <EmptyState icon={Gift} title="Nothing here" description={FILTER_EMPTY[filter]} />
+        <EmptyState icon={Gift} title="Nothing Here" description={FILTER_EMPTY[filter]} />
       ) : (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           {rows.map((r) => {
@@ -184,26 +185,26 @@ export default function ManagerSubscribersPage() {
                         e.stopPropagation();
                         setCustomerId(r.customer_id);
                       }}
-                      className="block max-w-full truncate text-left font-semibold text-black underline decoration-[#F3E5B5] decoration-2 underline-offset-2 hover:decoration-black"
+                      className="block max-w-full truncate text-left font-semibold text-[#0E1A33] underline decoration-[#C9D6EA] decoration-2 underline-offset-2 hover:decoration-[#0A66F0]"
                       title="Bookings and plans for this customer"
                     >
                       {r.customer_name}
                     </button>
-                    <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
-                      {r.plan_name}
-                      {r.vehicle_type_name ? ` · ${r.vehicle_type_name} tier` : ""}
-                      {paidText(r) ? ` · ${paidText(r)}` : ""}
+                    <p className="mt-0.5 text-sm font-medium text-[#0E1A33]">
+                      {toTitle(r.plan_name)}
+                      {carAndService(r.vehicle_type_name, r.service_name) ? ` · ${carAndService(r.vehicle_type_name, r.service_name)}` : ""}
                     </p>
+                    {paidText(r) && <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{paidText(r)}</p>}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {r.status && (
-                      <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{r.status}</Badge>
+                      <Badge tone={r.status === "active" ? "success" : r.status === "expired" ? "warning" : "neutral"}>{toTitle(r.status)}</Badge>
                     )}
                     {r.customer_phone && (
                       <a
                         href={`tel:${r.customer_phone}`}
                         onClick={(e) => e.stopPropagation()}
-                        className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-[var(--color-text-secondary)] hover:border-black hover:text-black"
+                        className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-[var(--color-text-secondary)] hover:border-[#0A66F0] hover:text-[#0A66F0]"
                         title={`Call ${r.customer_name}`}
                       >
                         <Phone className="h-3.5 w-3.5" />
@@ -231,7 +232,7 @@ export default function ManagerSubscribersPage() {
                     </div>
                     <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-gray-100">
                       <div
-                        className={`h-full rounded-full ${expiringSoon ? "bg-amber-400" : "bg-black"}`}
+                        className={`h-full rounded-full ${expiringSoon ? "bg-amber-400" : "bg-[#0A66F0]"}`}
                         style={{ width: `${Math.max(pct, 4)}%` }}
                       />
                     </div>

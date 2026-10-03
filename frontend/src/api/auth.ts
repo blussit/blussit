@@ -1,4 +1,4 @@
-import { apiClient, type ApiSuccess } from "../lib/api-client";
+import { apiClient, tokenStorage, type ApiSuccess } from "../lib/api-client";
 import type { User } from "../types";
 
 export interface AuthResult {
@@ -23,8 +23,16 @@ export const authApi = {
   me: () => apiClient.get<ApiSuccess<User>>("/auth/me").then((r) => r.data.data),
 
   logout: () => apiClient.post<{ success: boolean }>("/auth/logout").then((r) => r.data),
+  // The server signs out every other device on a password change and hands
+  // THIS one a fresh pair — store it, or the very next request 401s.
   changePassword: (payload: { current_password: string; new_password: string }) =>
-    apiClient.post<ApiSuccess<null>>("/auth/change-password", payload).then((r) => r.data),
+    apiClient
+      .post<ApiSuccess<{ access_token: string; refresh_token: string } | null>>("/auth/change-password", payload)
+      .then((r) => {
+        const fresh = r.data.data;
+        if (fresh?.access_token && fresh.refresh_token) tokenStorage.set(fresh.access_token, fresh.refresh_token);
+        return r.data;
+      }),
 
   // The OTP itself is never in these responses — only which channel
   // (WhatsApp / SMS) the backend delivered it on.
@@ -69,7 +77,17 @@ export const guestAuthApi = {
     apiClient.post<ApiSuccess<{ mode: "register" | "otp" | "password" }>>("/auth/booking-access", { phone }).then((r) => r.data.data),
   otpLogin: (payload: { phone: string; otp?: string; access_token?: string }) =>
     apiClient.post<ApiSuccess<AuthResult>>("/auth/otp-login", payload).then((r) => r.data.data),
-  setPassword: (new_password: string) => apiClient.post("/auth/set-password", { new_password }),
+  // Signs out every other session (e.g. whoever knew the temporary
+  // password) and hands THIS one a fresh pair — store it, or the next
+  // request 401s.
+  setPassword: (new_password: string) =>
+    apiClient
+      .post<ApiSuccess<{ access_token?: string; refresh_token?: string } | null>>("/auth/set-password", { new_password })
+      .then((r) => {
+        const fresh = r.data.data;
+        if (fresh?.access_token && fresh.refresh_token) tokenStorage.set(fresh.access_token, fresh.refresh_token);
+        return r;
+      }),
 };
 
 export const googleAuthApi = {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type Ref } from "react";
 import { Input } from "../ui";
+import { MENU_PANEL } from "../ui/fieldStyles";
 import { useCustomerTypeahead } from "../../hooks/useCustomerTypeahead";
 import { cleanMobileInput } from "../../lib/validators";
 import type { User } from "../../types";
@@ -73,7 +74,7 @@ export function CustomerNamePhoneFields({
   return (
     <div ref={containerRef} className="relative grid grid-cols-1 gap-3 sm:grid-cols-2">
       <Input
-        label="Customer name"
+        label="Customer Name"
         maxLength={100}
         value={name}
         onChange={(e) => {
@@ -88,7 +89,7 @@ export function CustomerNamePhoneFields({
       />
       <Input
         ref={phoneInputRef}
-        label="Customer mobile"
+        label="Customer Mobile"
         value={phone}
         inputMode="numeric"
         onChange={(e) => {
@@ -103,8 +104,8 @@ export function CustomerNamePhoneFields({
         autoComplete="off"
       />
       {open && suggestions.length > 0 && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-xl border border-[#F3E5B5] bg-white shadow-lg">
-          <p className="border-b border-[#F3E5B5] bg-[#FAFAFA] px-4 py-1.5 text-xs text-gray-500">
+        <div className={`absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden ${MENU_PANEL}`}>
+          <p className="border-b border-[#E4E9F1] bg-[#F7F9FC] px-4 py-1.5 text-xs text-[#5F6878]">
             Existing customer{suggestions.length > 1 ? "s" : ""}
           </p>
           {suggestions.map((u) => (
@@ -113,10 +114,10 @@ export function CustomerNamePhoneFields({
               type="button"
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(u)}
-              className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm hover:bg-[#FFF4CD]"
+              className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-[#F3F6FA] focus-visible:bg-[#F3F6FA] focus-visible:outline-none"
             >
-              <span className="font-medium text-black">{u.full_name}</span>
-              <span className="text-gray-500">{u.phone}</span>
+              <span className="font-medium text-[#0E1A33]">{u.full_name}</span>
+              <span className="text-[#5F6878]">{u.phone}</span>
             </button>
           ))}
         </div>

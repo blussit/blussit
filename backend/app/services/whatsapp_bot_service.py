@@ -901,7 +901,12 @@ class WhatsAppBotService:
 
     async def _save_new_address(self, wa_id, phone, customer_id, data, center: dict, pincode: str) -> None:
         location = center.get("location") or {}
-        address = await self.address_service.create(
+        # The same pin (~60 m) as an address the customer already has is
+        # that address — sharing the location again never adds a copy.
+        same, _ = await self.address_service.find_same_place(
+            customer_id, {"latitude": data.get("latitude"), "longitude": data.get("longitude"), "pincode": pincode or None}
+        )
+        address = {"id": str(same["_id"])} if same else await self.address_service.create(
             customer_id,
             AddressCreateRequest(
                 label="WhatsApp",

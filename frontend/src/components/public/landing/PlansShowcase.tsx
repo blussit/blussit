@@ -9,11 +9,12 @@ import { useAuth } from "../../../context/AuthContext";
 import { CustomPlanEnquiryModal } from "../../shared/CustomPlanEnquiryModal";
 import { passHeadlinePrice } from "../../../lib/passPricing";
 import { bikeTypeIds } from "../../../lib/serviceMix";
-import { INR } from "./shared";
+import { INR, titleCase } from "./shared";
+import { SocietyRequestCard } from "./SocietyRequestCard";
 import type { Service } from "../../../types";
 
-const MONTHLY_IMG = "/plans-card1.png";
-const CUSTOM_IMG = "/plans-card2.png";
+const MONTHLY_IMG = "/img/plans-card1-800.webp";
+const CUSTOM_IMG = "/img/plans-card2-800.webp";
 
 /**
  * Two cards, always: the monthly pass (bigger, highlighted), and "something else".
@@ -35,7 +36,16 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   // Monthly only — quarterly/yearly plans are retired and kept inactive.
   const active = (plans ?? []).filter((p) => p.is_active !== false && p.billing_cycle === "monthly");
 
-  if (!isLoading && active.length === 0 && !showEmpty) return null;
+  // No monthly pass on sale: the societies block still shows on its own.
+  if (!isLoading && active.length === 0 && !showEmpty) {
+    return (
+      <section id={id || "plans"} className="bg-white pt-4 pb-4 md:pt-6 md:pb-6 lg:pt-8 lg:pb-8">
+        <div className="mx-auto w-full max-w-[1400px] px-5 sm:px-6">
+          <SocietyRequestCard />
+        </div>
+      </section>
+    );
+  }
 
   const choose = () =>
     user?.role === "customer" ? navigate("/app/subscriptions") : navigate("/login", { state: { from: { pathname: "/app/subscriptions" } } });
@@ -65,11 +75,18 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
         <div className="flex flex-col text-left">
           <div>
             <span className="inline-block rounded-full bg-[#EEF4FF] px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#1677FF]">
-              Monthly pass
+              Monthly Pass
             </span>
           </div>
           <h2 className="mt-2.5 font-display text-[24px] font-extrabold leading-[1.15] text-[#071A3D] sm:text-[28px] lg:text-[32px]">
-            Keep Your Car Clean, <span className="text-[#1677FF]">Every Month.</span>
+            Keep Your Car Clean,
+            <br className="sm:hidden" />{" "}
+            <span className="relative inline-block text-[#1677FF]">
+              Every Month.
+              <svg viewBox="0 0 200 12" preserveAspectRatio="none" className="absolute -bottom-1.5 left-2 h-[8px] w-[75%]" aria-hidden="true">
+                <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FACC15" strokeWidth="3" strokeLinecap="round" />
+              </svg>
+            </span>
           </h2>
           <p className="mt-2 max-w-[680px] text-[14px] text-[#64748B] sm:text-[15px]">
             Save more with our convenient monthly car care plans. Hassle-free, doorstep service.
@@ -96,17 +113,17 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
                   <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">
                     {from != null ? INR(from) : "?"}
                   </span>
-                  <span className="text-[13px] text-[#64748B]">/ month</span>
+                  <span className="text-[13px] text-[#64748B]">/ Month</span>
                 </div>
 
                 <ul className="mb-5 mt-5 space-y-3">
                   <PlanLine
                     Icon={Droplet}
-                    title="Choose your service"
-                    sub={washes.length > 0 ? washes.join(", ") : "Pick the wash that fits your car"}
+                    title="Choose Your Service"
+                    sub={washes.length > 0 ? washes.map((w) => titleCase(w)).join(", ") : "Pick the wash that fits your car"}
                   />
-                  <PlanLine Icon={Car} title="One car per pass" sub={washesLine} />
-                  <PlanLine Icon={CalendarCheck} title="At your doorstep" sub="Book anytime, we come to you" />
+                  <PlanLine Icon={Car} title="One Car Per Pass" sub={washesLine} />
+                  <PlanLine Icon={CalendarCheck} title="At Your Doorstep" sub="Book anytime, we come to you" />
                 </ul>
 
                 <button
@@ -139,9 +156,9 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
               </p>
 
               <ul className="mb-5 mt-5 space-y-3">
-                <PlanLine Icon={Users} title="Any number of vehicles" sub="Personal or business fleets" />
-                <PlanLine Icon={CalendarClock} title="Your own schedule" sub="Weekly, bi-weekly or custom" />
-                <PlanLine Icon={FileText} title="We call you back" sub="With the best price for your needs" />
+                <PlanLine Icon={Users} title="Any Number Of Vehicles" sub="Personal or business fleets" />
+                <PlanLine Icon={CalendarClock} title="Your Own Schedule" sub="Weekly, bi-weekly or custom" />
+                <PlanLine Icon={FileText} title="We Call You Back" sub="With the best price for your needs" />
               </ul>
 
               <button
@@ -164,6 +181,8 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
               </div>
           </div>
         </div>
+
+        <SocietyRequestCard />
       </div>
 
       <CustomPlanEnquiryModal

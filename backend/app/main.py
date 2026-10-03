@@ -10,6 +10,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
 from app.core.database import close_mongo_connection, connect_to_mongo, mongodb
@@ -37,6 +38,9 @@ from app.routes.v1 import (
     purchase_confirmation_routes,
     review_routes,
     service_center_routes,
+    society_routes,
+    society_schedule_routes,
+    society_support_routes,
     payment_routes,
     staff_directory_routes,
     staff_ops_routes,
@@ -147,6 +151,50 @@ async def security_headers(request, call_next):
         if not vary or "authorization" not in vary.lower():
             response.headers["Vary"] = f"{vary}, Authorization" if vary else "Authorization"
     return response
+
+
+SERVER_ERROR_MESSAGE = "Something went wrong — please try again."
+
+
+def _server_error_response() -> JSONResponse:
+    return JSONResponse(status_code=500, content={"success": False, "error_code": "SERVER_ERROR", "message": SERVER_ERROR_MESSAGE})
+
+
+class CatchUnhandledErrors:
+    """Turns any unhandled exception into the JSON 500 INSIDE the CORS
+    middleware. Starlette sends an `exception_handler(Exception)` response
+    from ServerErrorMiddleware — outside every user middleware, so without
+    CORS headers — and the browser then reports a blocked request ("Can't
+    reach the server") instead of the error. Pure ASGI (not
+    BaseHTTPMiddleware) so streaming responses pass through untouched; a
+    failure after the response started can only be re-raised."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:  # noqa: BLE001 — the last net before the client
+            if started:
+                raise
+            logger.exception("Unhandled exception on %s %s: %s", scope.get("method"), scope.get("path"), exc)
+            await _server_error_response()(scope, receive, send)
+
+
+# Added before CORS = sits inside it, so its 500 gets the CORS headers.
+app.add_middleware(CatchUnhandledErrors)
 
 app.add_middleware(
     CORSMiddleware,
@@ -302,6 +350,12 @@ class _SweepPass:
                 logger.exception("Reminder sweep: %s failed for %s", what, item.get("booking_number") or item.get("_id"))
 
 
+async def _society_schedule_sweep(db, p: "_SweepPass") -> None:
+    from app.services.society_schedule_service import SocietyScheduleService
+
+    await SocietyScheduleService(db).sweep(checkpoint=p.checkpoint)
+
+
 async def _sweep_once(db, holder: str) -> None:
     """
     One pass of the in-process reminder sweep — no Redis/Celery required
@@ -346,6 +400,7 @@ async def _sweep_once(db, holder: str) -> None:
         mark_subscription_expired,
         mark_wash_reminder_sent,
     )
+    from app.services.society_service import SocietyService
     from app.services.whatsapp_service import WhatsAppService
     from app.utils.timezone import from_stored
 
@@ -733,6 +788,10 @@ async def _sweep_once(db, holder: str) -> None:
         await p.run("left site", flag_left_site)
         await p.run("pass expiring soon", warn_passes_ending)
         await p.run("pass expired", expire_passes)
+        await p.run("society attendance alerts", lambda: SocietyService(db).alert_missing_attendance())
+        # Society premium-wash schedule: materialize repeat rules a plan month
+        # ahead and book visit days N days out (docs/SOCIETY_PLANS.md §9).
+        await p.run("society schedule", lambda: _society_schedule_sweep(db, p))
         await p.run("recycle-bin purge", purge_recycle_bin)
         await p.run("pass wash reminder", remind_pass_washes)
         await p.run("repeat-booking nudge", nudge_repeat_bookings)
@@ -767,6 +826,13 @@ async def on_startup() -> None:
     # get wrong in either direction: testing against live moves real money,
     # and shipping to production on test keys silently takes none.
     logger.warning("Razorpay is in %s mode", settings.razorpay_mode.upper())
+    if settings.dev_tools_active:
+        logger.warning(
+            "DEV TOOLS ON (local test database %s): every OTP is %s and nothing is sent.",
+            settings.MONGO_DB_NAME, settings.DEV_OTP_CODE,
+        )
+    elif settings.DEV_TOOLS_ENABLED:
+        logger.critical("DEV_TOOLS_ENABLED is set but ignored — only honoured with APP_ENV=development and a local database.")
     if not settings.DEBUG:
         if settings.razorpay_mode == "test":
             logger.error(
@@ -775,6 +841,15 @@ async def on_startup() -> None:
             )
         if settings.JWT_SECRET_KEY == "change-this-super-secret-key-in-production":
             raise RuntimeError("Refusing to start: JWT_SECRET_KEY is still the default. Set a real secret in .env.")
+        if len(settings.JWT_SECRET_KEY) < 32:
+            logger.critical("JWT_SECRET_KEY is shorter than 32 characters — HS256 needs a long random secret; rotate it.")
+        # Wildcard origins with allow_credentials=True make Starlette echo
+        # back ANY caller's Origin — never acceptable in production.
+        if "*" in settings.cors_origins_list:
+            raise RuntimeError("Refusing to start: CORS_ORIGINS contains '*'. List the exact site origins.")
+        insecure = [o for o in settings.cors_origins_list if o.startswith("http://") and "localhost" not in o and "127.0.0.1" not in o]
+        if insecure:
+            logger.warning("CORS_ORIGINS has plain-http origins in production: %s", insecure)
         if settings.WHATSAPP_PROVIDER == "meta_cloud" and not settings.WHATSAPP_APP_SECRET:
             logger.warning("WHATSAPP_APP_SECRET is empty — webhook signature checking is fail-closed, inbound WhatsApp will be rejected until it is set.")
     await connect_to_mongo(build_indexes=False)
@@ -857,13 +932,27 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+@app.exception_handler(DuplicateKeyError)
+async def duplicate_key_handler(request: Request, exc: DuplicateKeyError) -> JSONResponse:
+    """A unique index refusing a write is the caller's conflict, not a
+    server fault — e.g. re-adding a service / vehicle type / category whose
+    name (slug) is taken, including by a deleted one the index still
+    holds. Paths that care give their own message; this is the floor so
+    none of them surfaces as "Something went wrong"."""
+    # Field NAMES only — keyValue can be a phone number or an email.
+    logger.info("Duplicate key on %s %s: %s", request.method, request.url.path, sorted(((exc.details or {}).get("keyPattern") or {}).keys()))
+    return JSONResponse(
+        status_code=409,
+        content={"success": False, "error_code": "CONFLICT", "message": "That name (or number) is already in use — pick a different one."},
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Outer net only (an error raised by a middleware outside CORS) — the
+    # CatchUnhandledErrors middleware answers everything else, with CORS.
     logger.exception("Unhandled exception: %s", exc)
-    return JSONResponse(
-        status_code=500,
-        content={"success": False, "error_code": "SERVER_ERROR", "message": "Something went wrong. Please try again."},
-    )
+    return _server_error_response()
 
 
 @app.get("/api/health", tags=["Health"])
@@ -913,3 +1002,10 @@ app.include_router(whatsapp_webhook_routes.router, prefix=api_prefix)
 app.include_router(whatsapp_crm_routes.router, prefix=api_prefix)
 app.include_router(zone_routes.router, prefix=api_prefix)
 app.include_router(coverage_lead_routes.router, prefix=api_prefix)
+app.include_router(society_routes.form_router, prefix=api_prefix)
+app.include_router(society_routes.society_router, prefix=api_prefix)
+app.include_router(society_routes.enrollment_router, prefix=api_prefix)
+app.include_router(society_routes.plan_router, prefix=api_prefix)
+app.include_router(society_schedule_routes.router, prefix=api_prefix)
+app.include_router(society_support_routes.issue_router, prefix=api_prefix)
+app.include_router(society_support_routes.lead_router, prefix=api_prefix)

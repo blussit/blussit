@@ -6,8 +6,19 @@ import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
 import { formatDateTime, formatSlot } from "../../lib/date";
 import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
-import { combinedStatus } from "../../lib/bookingGroups";
+import { bookingServiceLabel, combinedStatus } from "../../lib/bookingGroups";
+import { toTitle } from "../../lib/titleCase";
 import type { Booking } from "../../types";
+
+/** "Sedan" (quick booking) or "Sedan · Honda City · MP09AB1234" (older
+ *  saved vehicle) — staff always see the car TYPE first. */
+function carLine(c: Booking): string {
+  const type = toTitle(c.vehicle_type_name);
+  const label = vehicleLabel(c);
+  if (!type) return label;
+  if (label === "Vehicle" || label.toLowerCase() === type.toLowerCase()) return type;
+  return label.toLowerCase().startsWith(type.toLowerCase()) ? label : `${type} · ${label}`;
+}
 
 /**
  * The complete detail view for ONE VISIT — everything a manager, captain,
@@ -68,7 +79,7 @@ export function BookingDetailDrawer({
   const travelKm = cars.find((c) => (c.travel_charge || 0) > 0)?.travel_charge_km;
   /** "Car 2 · MP09RB0002" — how a per-car section is labelled on a visit. */
   const carTag = (c: Booking) =>
-    `Car ${cars.indexOf(c) + 1} · ${vehicleLabel(c) || c.booking_number}`;
+    `Car ${cars.indexOf(c) + 1} · ${carLine(c) || c.booking_number}`;
 
   const travelActive = car != null && ["assigned", "captain_on_the_way"].includes(car.status);
   const { data: travel } = useQuery({
@@ -88,7 +99,7 @@ export function BookingDetailDrawer({
     <Modal
       open={!!booking}
       onClose={onClose}
-      title={booking ? (isVisit ? `${booking.booking_number} · ${cars.length} vehicles` : booking.booking_number) : "Booking"}
+      title={booking ? (isVisit ? `${booking.booking_number} · ${cars.length} Vehicles` : booking.booking_number) : "Booking"}
       maxWidth="max-w-2xl"
     >
       {booking && car && (
@@ -103,7 +114,7 @@ export function BookingDetailDrawer({
                   title={editableCar ? undefined : "A completed or cancelled booking can't be edited"}
                   onClick={() => editableCar && onEdit(editableCar)}
                 >
-                  <Pencil className="h-3.5 w-3.5" /> Edit details
+                  <Pencil className="h-3.5 w-3.5" /> Edit Details
                 </Button>
               )}
               {onDelete && (
@@ -120,7 +131,7 @@ export function BookingDetailDrawer({
             <PriorityBadge priority={booking.priority} />
             {isVisit && (
               <Badge tone="neutral">
-                <Car className="h-3 w-3" /> 1 visit · {cars.length} vehicles
+                <Car className="h-3 w-3" /> 1 Visit · {cars.length} Vehicles
               </Badge>
             )}
             {prepaid && (
@@ -128,9 +139,9 @@ export function BookingDetailDrawer({
                 <CreditCard className="h-3 w-3" /> Prepaid
               </Badge>
             )}
-            {booking.source === "whatsapp" && <Badge tone="success">Booked via WhatsApp</Badge>}
-            {booking.source === "staff" && <Badge tone="neutral">Booked by staff</Badge>}
-            {car.completed_by_role === "manager" && <Badge tone="success">Done by manager</Badge>}
+            {booking.source === "whatsapp" && <Badge tone="success">Booked Via WhatsApp</Badge>}
+            {booking.source === "staff" && <Badge tone="neutral">Booked By Staff</Badge>}
+            {car.completed_by_role === "manager" && <Badge tone="success">Done By Manager</Badge>}
             {flagged.map((f) => (
               <Badge key={f.id} tone="error">
                 <AlertTriangle className="h-3 w-3" /> {ISSUE_LABELS[f.issue_flag!] || f.issue_flag}
@@ -151,7 +162,7 @@ export function BookingDetailDrawer({
               </div>
             ))}
 
-          <Section title={isVisit ? "Customer & vehicles" : "Customer & vehicle"} icon={UserIcon}>
+          <Section title={isVisit ? "Customer & Vehicles" : "Customer & Vehicle"} icon={UserIcon}>
             <Row label="Customer" value={booking.customer_name} />
             {booking.customer_phone && (
               <Row label="Phone" value={<a href={`tel:${booking.customer_phone}`} className="hover:text-[var(--color-primary)]">{booking.customer_phone}</a>} />
@@ -164,10 +175,10 @@ export function BookingDetailDrawer({
                   <div key={c.id} className="flex items-start justify-between gap-3 text-sm">
                     <span className="min-w-0">
                       <span className="block font-medium text-[var(--color-text-primary)]">
-                        <span className="text-[var(--color-text-secondary)]">{i + 1}.</span> {vehicleLabel(c) || c.vehicle_registration_number}
+                        <span className="text-[var(--color-text-secondary)]">{i + 1}.</span> {carLine(c) || c.vehicle_registration_number}
                       </span>
                       <span className="block text-xs text-[var(--color-text-secondary)]">
-                        {c.combo_name || c.service_names?.join(", ") || "Service"}
+                        {toTitle(bookingServiceLabel(c))}
                         <span className="font-mono-num ml-1.5 text-gray-400">{c.booking_number}</span>
                       </span>
                     </span>
@@ -178,17 +189,17 @@ export function BookingDetailDrawer({
             ) : (
               <Row
                 label="Vehicle"
-                value={vehicleLabel(booking)}
+                value={carLine(booking)}
               />
             )}
             {/* The 4-digit arrival code (quick-booking model) — so staff can
                 read it out to a customer who lost their confirmation. */}
-            {booking.service_code && <Row label="Service code" value={<span className="font-mono-num tracking-[0.2em]">{booking.service_code}</span>} />}
+            {booking.service_code && <Row label="Service Code" value={<span className="font-mono-num tracking-[0.2em]">{booking.service_code}</span>} />}
           </Section>
 
-          <Section title="Service & location" icon={Wrench}>
-            {!isVisit && <Row label="Service" value={booking.combo_name || booking.service_names?.join(", ")} />}
-            <Row label="Service center" value={centerName} />
+          <Section title="Service & Location" icon={Wrench}>
+            {!isVisit && <Row label="Service" value={toTitle(bookingServiceLabel(booking, "—"))} />}
+            <Row label="Service Center" value={centerName} />
             <Row
               label="Slot"
               value={
@@ -211,7 +222,7 @@ export function BookingDetailDrawer({
                         rel="noreferrer"
                         className="ml-2 text-xs font-semibold text-[var(--color-primary)] underline"
                       >
-                        Open in Maps
+                        Open In Maps
                       </a>
                     )}
                   </span>
@@ -220,7 +231,7 @@ export function BookingDetailDrawer({
             )}
             {travel?.store_to_customer && (
               <Row
-                label="From center"
+                label="From Center"
                 value={
                   <span className="font-mono-num">
                     {travel.store_to_customer.km} km
@@ -245,7 +256,7 @@ export function BookingDetailDrawer({
                 </p>
               </div>
             )}
-            <Row label="Captain" value={car.completed_by_role === "manager" ? "Done by the manager" : captainName || (car.captain_id ? "Assigned" : "Not yet assigned")} />
+            <Row label="Captain" value={car.completed_by_role === "manager" ? "Done By The Manager" : captainName || (car.captain_id ? "Assigned" : "Not Yet Assigned")} />
           </Section>
 
           <Section title="Payment" icon={CreditCard}>
@@ -256,13 +267,13 @@ export function BookingDetailDrawer({
               cars.map((c) => (
                 <Row
                   key={c.id}
-                  label={vehicleLabel(c) || c.booking_number}
+                  label={carLine(c) || c.booking_number}
                   value={<span className="font-mono-num">₹{c.total_amount}</span>}
                 />
               ))}
             {travelCharge > 0 && (
               <Row
-                label="Distance charge"
+                label="Distance Charge"
                 value={
                   <span className="font-mono-num">
                     ₹{travelCharge}
@@ -272,13 +283,13 @@ export function BookingDetailDrawer({
               />
             )}
             <Row
-              label={isVisit ? `Total · ${cars.length} vehicles` : "Amount"}
+              label={isVisit ? `Total · ${cars.length} Vehicles` : "Amount"}
               value={<span className="font-mono-num">₹{visitTotal}</span>}
             />
-            <Row label="Method" value={<span className="capitalize">{booking.payment_method?.replace(/_/g, " ")}</span>} />
+            <Row label="Method" value={toTitle(booking.payment_method)} />
             <Row
               label="Status"
-              value={<Badge tone={paymentPending ? "neutral" : "success"}>{paymentPending ? "pending" : "paid"}</Badge>}
+              value={<Badge tone={paymentPending ? "neutral" : "success"}>{paymentPending ? "Pending" : "Paid"}</Badge>}
             />
           </Section>
 
@@ -288,8 +299,8 @@ export function BookingDetailDrawer({
               a merged timeline that describes no actual car. */}
           {isVisit && (
             <div>
-              <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
-                <Car className="h-3.5 w-3.5" /> Work on each vehicle
+              <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-secondary)]">
+                <Car className="h-3.5 w-3.5" /> Work On Each Vehicle
               </p>
               <div className="flex flex-wrap gap-2">
                 {cars.map((c) => (
@@ -312,13 +323,13 @@ export function BookingDetailDrawer({
           )}
 
           <Section title={isVisit ? `Timeline · ${carTag(car)}` : "Timeline"} icon={Clock}>
-            <TimelineRow label="Booking created" value={car.created_at} />
-            <TimelineRow label="Manager notified" value={car.manager_notified_at} />
-            <TimelineRow label="Captain assigned" value={car.assigned_at} />
-            <TimelineRow label="Captain heading out" value={car.heading_at} />
-            <TimelineRow label="Vehicle verified (arrived)" value={car.vehicle_verified_at} />
-            <TimelineRow label="Service started" value={car.service_started_at} />
-            <TimelineRow label="Service completed" value={car.completed_at} />
+            <TimelineRow label="Booking Created" value={car.created_at} />
+            <TimelineRow label="Manager Notified" value={car.manager_notified_at} />
+            <TimelineRow label="Captain Assigned" value={car.assigned_at} />
+            <TimelineRow label="Captain Heading Out" value={car.heading_at} />
+            <TimelineRow label="Vehicle Verified (Arrived)" value={car.vehicle_verified_at} />
+            <TimelineRow label="Service Started" value={car.service_started_at} />
+            <TimelineRow label="Service Completed" value={car.completed_at} />
             <TimelineRow label="Closed" value={car.closed_at} />
             {car.delay_minutes != null && car.delay_minutes > 0 && (
               <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--color-error)]">
@@ -333,24 +344,24 @@ export function BookingDetailDrawer({
               where that tap happened, so there's evidence to put in
               front of the captain instead of just a distance number. */}
           {(car.heading_location || car.arrival_location || car.before_photo || car.after_photo) && (
-            <Section title={isVisit ? `Location checks · ${carTag(car)}` : "Location checks"} icon={MapPin}>
-              <LocationCheckRow label="Started heading from" point={car.heading_location} at={car.heading_at} />
+            <Section title={isVisit ? `Location Checks · ${carTag(car)}` : "Location Checks"} icon={MapPin}>
+              <LocationCheckRow label="Started Heading From" point={car.heading_location} at={car.heading_at} />
               <LocationCheckRow
-                label={'"I\'ve reached" tapped at'}
+                label={'"I\'ve Reached" Tapped At'}
                 point={car.arrival_location}
                 at={car.vehicle_verified_at}
                 flagged={car.arrival_flagged}
                 distanceM={car.arrival_distance_m}
               />
               <LocationCheckRow
-                label="Before-photo taken at"
+                label="Before-Photo Taken At"
                 point={car.before_photo}
                 at={car.before_photo?.captured_at}
                 flagged={car.before_photo_flagged}
                 distanceM={car.before_photo_distance_m}
               />
               <LocationCheckRow
-                label="After-photo taken at"
+                label="After-Photo Taken At"
                 point={car.after_photo}
                 at={car.after_photo?.captured_at}
                 flagged={car.after_photo_flagged}
@@ -388,7 +399,7 @@ export function BookingDetailDrawer({
                 )}
               </div>
             ) : (
-              <p className="text-sm text-[var(--color-text-secondary)]">No review yet</p>
+              <p className="text-sm text-[var(--color-text-secondary)]">No Review Yet</p>
             )}
           </Section>
         </div>
@@ -482,10 +493,10 @@ function PriorityBadge({ priority }: { priority: Booking["priority"] }) {
   if (priority === "high") {
     return (
       <Badge tone="error">
-        <Flag className="h-3 w-3" /> High priority
+        <Flag className="h-3 w-3" /> High Priority
       </Badge>
     );
   }
-  if (priority === "low") return <Badge tone="neutral">Low priority</Badge>;
-  return <Badge tone="neutral">Medium priority</Badge>;
+  if (priority === "low") return <Badge tone="neutral">Low Priority</Badge>;
+  return <Badge tone="neutral">Medium Priority</Badge>;
 }

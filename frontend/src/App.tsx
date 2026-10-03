@@ -21,15 +21,16 @@ import { loadBookPage, loadLoginPage } from "./routes/prefetch";
 // Only the landing page ships in the first download; everything else loads
 // on demand (the booking wizard and login are also prefetched while idle —
 // see routes/prefetch.ts — so they still open instantly).
-const ServicesPage = lazy(() => import("./pages/public/ServicesPage"));
-const PlansPage = lazy(() => import("./pages/public/PlansPage"));
 const ServicePolicyPage = lazy(() => import("./pages/public/ServicePolicyPage"));
 const CancellationPolicyPage = lazy(() => import("./pages/public/CancellationPolicyPage"));
 const PrivacyPolicyPage = lazy(() => import("./pages/public/PrivacyPolicyPage"));
 const TermsPage = lazy(() => import("./pages/public/TermsPage"));
 const BookPage = lazy(loadBookPage);
 const LoginPage = lazy(loadLoginPage);
+// Local test setup only — dropped entirely from production builds.
+const LocalEnvBadge = import.meta.env.DEV ? lazy(() => import("./components/dev/LocalEnvBadge")) : null;
 const ForgotPasswordPage = lazy(() => import("./pages/auth/ForgotPasswordPage"));
+const SocietyFormPage = lazy(() => import("./pages/society/SocietyFormPage"));
 
 const CustomerLayout = lazy(() => import("./pages/customer/CustomerLayout"));
 const DashboardHomePage = lazy(() => import("./pages/customer/DashboardHomePage"));
@@ -40,16 +41,21 @@ const ThankYouPage = lazy(() => import("./pages/customer/ThankYouPage"));
 const SubscriptionsPage = lazy(() => import("./pages/customer/SubscriptionsPage"));
 const AddressesPage = lazy(() => import("./pages/customer/AddressesPage"));
 const SupportPage = lazy(() => import("./pages/customer/SupportPage"));
+const GaragePage = lazy(() => import("./pages/customer/GaragePage"));
+const SettingsPage = lazy(() => import("./pages/customer/SettingsPage"));
+const OffersPage = lazy(() => import("./pages/customer/OffersPage"));
 
 const CaptainLayout = lazy(() => import("./pages/captain/CaptainLayout"));
+const CaptainTodayPage = lazy(() => import("./pages/captain/CaptainTodayPage"));
 const CaptainJobsPage = lazy(() => import("./pages/captain/CaptainJobsPage"));
+const CaptainJobPage = lazy(() => import("./pages/captain/CaptainJobPage"));
 const CaptainAttendancePage = lazy(() => import("./pages/captain/CaptainAttendancePage"));
 const CaptainEarningsPage = lazy(() => import("./pages/captain/CaptainEarningsPage"));
 const CaptainProfilePage = lazy(() => import("./pages/captain/CaptainProfilePage"));
+const CaptainSocietiesPage = lazy(() => import("./pages/captain/CaptainSocietiesPage"));
 
 const ManagerLayout = lazy(() => import("./pages/manager/ManagerLayout"));
 const ManagerDashboardPage = lazy(() => import("./pages/manager/ManagerDashboardPage"));
-const ManagerKpiPage = lazy(() => import("./pages/manager/ManagerKpiPage"));
 const ManagerNewBookingPage = lazy(() => import("./pages/manager/ManagerNewBookingPage"));
 const ManagerLogJobPage = lazy(() => import("./pages/manager/ManagerLogJobPage"));
 const BookingQueuePage = lazy(() => import("./pages/manager/BookingQueuePage"));
@@ -59,6 +65,9 @@ const ManagerSellPlanPage = lazy(() => import("./pages/manager/ManagerSellPlanPa
 const ManagerInventoryPage = lazy(() => import("./pages/manager/ManagerInventoryPage"));
 const ManagerComplaintsPage = lazy(() => import("./pages/manager/ManagerComplaintsPage"));
 const ManagerReviewsPage = lazy(() => import("./pages/manager/ManagerReviewsPage"));
+const ManagerSocietiesPage = lazy(() => import("./pages/manager/ManagerSocietiesPage"));
+const ManagerSocietyDetailPage = lazy(() => import("./pages/manager/ManagerSocietyDetailPage"));
+const ManagerSocietyPlannerPage = lazy(() => import("./pages/manager/ManagerSocietyPlannerPage"));
 
 const AdminLayout = lazy(() => import("./pages/admin/AdminLayout"));
 const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage"));
@@ -82,6 +91,10 @@ const AdminCouponsPage = lazy(() => import("./pages/admin/AdminCouponsPage"));
 const AdminComplaintsPage = lazy(() => import("./pages/admin/AdminComplaintsPage"));
 const AdminReviewsPage = lazy(() => import("./pages/admin/AdminReviewsPage"));
 const AdminAuditLogsPage = lazy(() => import("./pages/admin/AdminAuditLogsPage"));
+const AdminSocietiesPage = lazy(() => import("./pages/admin/AdminSocietiesPage"));
+const AdminSocietyDetailPage = lazy(() => import("./pages/admin/AdminSocietyDetailPage"));
+const AdminSocietyPlansPage = lazy(() => import("./pages/admin/AdminSocietyPlansPage"));
+const AdminSocietyPlannerPage = lazy(() => import("./pages/admin/AdminSocietyPlannerPage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
 const CustomerProfilePage = lazy(() => import("./pages/customer/CustomerProfilePage"));
@@ -118,19 +131,27 @@ export default function App() {
         <ConfirmProvider>
           <ScrollRestoration />
           <VisitBeacon />
+          {LocalEnvBadge && (
+            <Suspense fallback={null}>
+              <LocalEnvBadge />
+            </Suspense>
+          )}
           <ToastContainer />
           <ConfirmDialog />
           <RoutedErrorBoundary>
           <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
-            <Route path="/services" element={<ServicesPage />} />
-            <Route path="/plans" element={<PlansPage />} />
+            {/* One-page site: the old pages are sections of the landing now. */}
+            <Route path="/services" element={<Navigate to={{ pathname: "/", hash: "#services" }} replace />} />
+            <Route path="/plans" element={<Navigate to={{ pathname: "/", hash: "#plans" }} replace />} />
             <Route path="/cancellation-policy" element={<CancellationPolicyPage />} />
             <Route path="/service-policy" element={<ServicePolicyPage />} />
             <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
             <Route path="/terms" element={<TermsPage />} />
             <Route path="/book" element={<BookPage />} />
+            {/* Society resident form + hub — public, keyed by the society's link token. */}
+            <Route path="/society/:token" element={<SocietyFormPage />} />
 
             <Route element={<GuestOnlyRoute />}>
               <Route path="/login" element={<LoginPage />} />
@@ -158,6 +179,9 @@ export default function App() {
                 <Route path="addresses" element={<AddressesPage />} />
                 <Route path="support" element={<SupportPage />} />
                 <Route path="profile" element={<CustomerProfilePage />} />
+                <Route path="garage" element={<GaragePage />} />
+                <Route path="settings" element={<SettingsPage />} />
+                <Route path="offers" element={<OffersPage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
             </Route>
@@ -165,8 +189,11 @@ export default function App() {
             {/* Captain portal */}
             <Route element={<ProtectedRoute allowedRoles={["captain"]} />}>
               <Route path="/captain" element={<CaptainLayout />}>
-                <Route index element={<CaptainJobsPage />} />
+                <Route index element={<CaptainTodayPage />} />
+                <Route path="jobs" element={<CaptainJobsPage />} />
+                <Route path="jobs/:id" element={<CaptainJobPage />} />
                 <Route path="attendance" element={<CaptainAttendancePage />} />
+                <Route path="societies" element={<CaptainSocietiesPage />} />
                 <Route path="earnings" element={<CaptainEarningsPage />} />
                 <Route path="profile" element={<CaptainProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
@@ -177,7 +204,7 @@ export default function App() {
             <Route element={<ProtectedRoute allowedRoles={["manager"]} />}>
               <Route path="/manager" element={<ManagerLayout />}>
                 <Route index element={<ManagerDashboardPage />} />
-                <Route path="kpi" element={<ManagerKpiPage />} />
+                <Route path="kpi" element={<Navigate to="/manager" replace />} />
                 <Route path="new-booking" element={<ManagerNewBookingPage />} />
                 <Route path="log-job" element={<ManagerLogJobPage />} />
                 <Route path="bookings" element={<BookingQueuePage />} />
@@ -191,6 +218,9 @@ export default function App() {
                 <Route path="inventory" element={<ManagerInventoryPage />} />
                 <Route path="complaints" element={<ManagerComplaintsPage />} />
                 <Route path="reviews" element={<ManagerReviewsPage />} />
+                <Route path="societies" element={<ManagerSocietiesPage />} />
+                <Route path="societies/:id" element={<ManagerSocietyDetailPage />} />
+                <Route path="society-planner" element={<ManagerSocietyPlannerPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
@@ -221,6 +251,10 @@ export default function App() {
                 <Route path="complaints" element={<AdminComplaintsPage />} />
                 <Route path="reviews" element={<AdminReviewsPage />} />
                 <Route path="audit-logs" element={<AdminAuditLogsPage />} />
+                <Route path="societies" element={<AdminSocietiesPage />} />
+                <Route path="societies/:id" element={<AdminSocietyDetailPage />} />
+                <Route path="society-plans" element={<AdminSocietyPlansPage />} />
+                <Route path="society-planner" element={<AdminSocietyPlannerPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>

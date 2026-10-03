@@ -210,8 +210,11 @@ async def fetch_media(media_id: str, db: AsyncIOMotorDatabase = Depends(get_db))
 # ---- templates -------------------------------------------------------------
 
 @router.get("/templates")
-async def list_templates(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).list_local_templates())
+async def list_templates(sendable: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """sendable=true: only what the inbox's agent picker can really send
+    (see WhatsAppCrmService.agent_sendable_templates)."""
+    service = WhatsAppCrmService(db)
+    return success(await (service.agent_sendable_templates() if sendable else service.list_local_templates()))
 
 
 @router.post("/templates/sync")

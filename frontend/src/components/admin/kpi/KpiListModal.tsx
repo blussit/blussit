@@ -49,7 +49,7 @@ export function KpiListModal<T>({
         <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">{emptyText}</p>
       ) : (
         <div className="space-y-2">
-          <p className="text-xs text-gray-400">{data.meta.total} total</p>
+          <p className="text-xs text-gray-400">{data.meta.total} Total</p>
           <div className="max-h-[60vh] divide-y divide-[#FAF3DF] overflow-y-auto rounded-xl border border-[#F3E5B5]">
             {data.data.map((item) => (
               <div key={getRowKey(item)} className="px-3.5 py-2.5">

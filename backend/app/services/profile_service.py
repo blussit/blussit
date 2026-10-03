@@ -1,6 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException
 from app.repositories.address_repository import AddressRepository
 from app.repositories.booking_repository import BookingRepository
 from app.repositories.user_repository import UserRepository
@@ -11,6 +11,7 @@ from app.schemas.profile_schema import (
     VehicleCreateRequest,
     VehicleUpdateRequest,
 )
+from app.utils.address_match import fill_empty_fields, same_place
 from app.utils.serializers import serialize_doc
 from app.utils.text import normalize_plate
 
@@ -35,8 +36,15 @@ class VehicleService:
         other_owners = await self.repo.distinct_owners_for_registration(normalized, exclude_owner_id=owner_id)
         return {"already_registered": len(other_owners) > 0, "other_account_count": len(other_owners)}
 
+    async def _ensure_plate_not_saved(self, owner_id: str, normalized: str, plate: str, exclude_id: str | None = None) -> None:
+        """One account never holds the same car twice — "MP09 AB 1234" and
+        "mp09ab1234" are the same plate (normalize_plate)."""
+        if await self.repo.find_owner_plate(owner_id, normalized, exclude_id=exclude_id):
+            raise ConflictException(f"{plate} is already saved on this account.")
+
     async def create(self, owner_id: str, payload: VehicleCreateRequest, actor_role: str = "customer") -> dict:
         normalized = normalize_plate(payload.registration_number)
+        await self._ensure_plate_not_saved(owner_id, normalized, payload.registration_number)
         # Never trust the frontend's earlier check/acknowledgement alone —
         # re-count here, at the actual write, against whatever's true right
         # now. Admin can register a plate beyond the normal 2-account cap
@@ -68,6 +76,7 @@ class VehicleService:
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None and k != "acknowledge_shared_registration"}
         if payload.registration_number and normalize_plate(payload.registration_number) != existing.get("registration_number_normalized"):
             normalized = normalize_plate(payload.registration_number)
+            await self._ensure_plate_not_saved(owner_id, normalized, payload.registration_number, exclude_id=vehicle_id)
             other_owners = await self.repo.distinct_owners_for_registration(normalized, exclude_owner_id=owner_id)
             if len(other_owners) >= 2 and actor_role != "admin":
                 raise BadRequestException("This vehicle registration number is already in use by the maximum allowed number of accounts.")
@@ -113,6 +122,38 @@ class AddressService:
         if not customer or customer.get("role") != "customer":
             raise NotFoundException("Customer not found")
         return await self.list_my_addresses(customer_id)
+
+    async def find_same_place(self, owner_id: str, incoming: dict) -> tuple[dict | None, bool]:
+        """Before a booking creates an address: is it a place this customer
+        already has — a saved address, or one their recent bookings used?
+        Same place = pins within ~60 m, else the same normalised line1 with
+        no conflicting pincode (app/utils/address_match.py). The match is
+        reused, gaining only the fields it was MISSING from `incoming`
+        (landmark/flat line, a pin, a real pincode) — a filled field is
+        never overwritten. Returns (address or None, has_saved_addresses).
+
+        Bounded: the capped saved list + the addresses of the customer's
+        newest bookings (indexed), never a scan of every address."""
+        saved = await self.repo.list_by_owner(owner_id)
+        seen = {str(a["_id"]) for a in saved}
+        used = [i for i in await self.booking_repo.recent_address_ids(owner_id) if i not in seen]
+        candidates = saved + [a for a in (await self.repo.find_by_ids(used) if used else []) if a.get("owner_id") == owner_id]
+
+        best, best_rank = None, None
+        for a in candidates:
+            metres = same_place(a, incoming)
+            if metres is None:
+                continue
+            # Nearest first; then the default; then the oldest record, so
+            # repeat bookings keep converging on the original address.
+            rank = (metres, not a.get("is_default"), str(a["_id"]))
+            if best_rank is None or rank < best_rank:
+                best, best_rank = a, rank
+        if best is not None:
+            updates = fill_empty_fields(best, incoming)
+            if updates:
+                best = await self.repo.update_by_id(str(best["_id"]), updates) or best
+        return best, bool(saved)
 
     async def create(self, owner_id: str, payload: AddressCreateRequest) -> dict:
         if payload.is_default:

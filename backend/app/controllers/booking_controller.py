@@ -3,6 +3,7 @@ from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.dependencies import CurrentUser, PaginationParams
+from app.core.exceptions import ForbiddenException
 from app.core.responses import paginated, success
 from app.schemas.booking_schema import (
     BookingGroupCreateRequest,
@@ -27,7 +28,7 @@ from app.schemas.booking_schema import (
 )
 from app.services.audit_service import AuditService
 from app.services.auth_service import AuthService
-from app.services.booking_service import BookingService
+from app.services.booking_service import BookingService, redact_for_captain
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 from app.services.staff_directory_service import StaffDirectoryService
 
@@ -82,12 +83,30 @@ class BookingController:
                 # typed into the booking becomes the account's, unless it
                 # already belongs to someone else (then they must log in
                 # with that number instead of quietly taking it over).
+                # It must be PROVEN first (same OTP as a guest booking):
+                # an unverified claim let anyone attach a stranger's
+                # not-yet-registered number to their own Google account,
+                # so the real owner's later bookings and OTP logins landed
+                # in the claimer's account (and fresh numbers meant endless
+                # first-wash prices).
                 from app.core.exceptions import BadRequestException
+                from app.utils.phone import BUSINESS_NUMBER_MESSAGE, is_business_whatsapp_number
 
+                if is_business_whatsapp_number(payload.customer_phone):
+                    raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
                 other = await auth.users.find_by_phone(payload.customer_phone)
                 if other and str(other["_id"]) != str(customer["_id"]):
                     raise BadRequestException("This mobile number already has an account — log out and log in with that number to book.")
-                await auth.users.update_by_id(str(customer["_id"]), {"phone": payload.customer_phone})
+                if not (payload.phone_otp or payload.phone_access_token):
+                    await auth.require_phone_proof(payload.customer_phone, None, None)  # the "verify your number" refusal
+                await self.service.precheck_quick_booking(payload, source="app")
+                await auth.require_phone_proof(payload.customer_phone, payload.phone_otp, payload.phone_access_token)
+                from datetime import timezone as _tz
+
+                await auth.users.update_by_id(
+                    str(customer["_id"]),
+                    {"phone": payload.customer_phone, "phone_verified": True, "phone_verified_at": datetime.now(_tz.utc)},
+                )
                 customer["phone"] = payload.customer_phone
         else:
             if not (payload.phone_otp or payload.phone_access_token):
@@ -101,8 +120,20 @@ class BookingController:
         result = await self._quick_result_with_ticket(result, str(customer["_id"]))
         return success(result, "Booking confirmed" if not result.get("awaiting_payment") else "Finish paying to confirm your booking")
 
+    async def _ensure_manager_books_own_center(self, current_user: CurrentUser, *, address_id: str | None, address=None) -> None:
+        """A manager books into THEIR center only — the booking's center is
+        resolved from the customer's address, so without this a manager
+        could fill another center's slots (and fire its alerts) just by
+        typing an address in its area. Admin books anywhere."""
+        if current_user.role == "admin":
+            return
+        center_id = await self.service.staff_booking_center_id(address_id=address_id, address=address)
+        if center_id is not None and center_id != current_user.service_center_id:
+            raise ForbiddenException("This address is served by another service center — ask an admin to book it there.")
+
     async def manager_quick_create(self, current_user: CurrentUser, payload: QuickBookingRequest):
         """Same quick shape, on a customer's behalf — the phone-in booking."""
+        await self._ensure_manager_books_own_center(current_user, address_id=payload.address_id, address=payload.address)
         customer = await AuthService(self.db).ensure_customer_by_phone(payload.customer_phone, payload.customer_name)
         result = await self.service.create_quick_booking(payload, customer=customer, source="staff", allow_pinless=True)
         for b in result.get("bookings") or []:
@@ -213,13 +244,14 @@ class BookingController:
         return success(quote)
 
     async def manager_create(self, current_user: CurrentUser, payload: ManagerBookingCreateRequest):
+        await self._ensure_manager_books_own_center(current_user, address_id=payload.address_id, address=payload.new_address)
         result = await self.service.create_booking_for_customer(current_user.id, payload)
         await self.audit.log_action(current_user.id, current_user.role, "MANAGER_CREATE_BOOKING", "bookings", result["id"], {"customer_id": payload.customer_id})
         return success(result, "Booking created successfully")
 
     async def report_risk(self, current_user: CurrentUser, booking_id: str, payload: ReportRiskRequest):
         result = await self.service.report_risk(booking_id, current_user.id, payload.note)
-        return success(result, "Manager notified")
+        return success(redact_for_captain(result), "Manager notified")
 
     async def eligible_captains(self, current_user: CurrentUser, db: AsyncIOMotorDatabase, booking_id: str):
         return success(
@@ -296,18 +328,19 @@ class BookingController:
 
     async def captain_cancel(self, current_user: CurrentUser, booking_id: str, payload: CaptainCancelRequest):
         result = await self.service.captain_cancel(booking_id, payload, current_user.id)
-        return success(result, "Booking released back to the queue")
+        return success(redact_for_captain(result), "Booking released back to the queue")
 
     async def start_heading(self, current_user: CurrentUser, booking_id: str, payload: HeadingRequest):
         result = await self.service.start_heading(booking_id, payload, current_user.id)
-        return success(result, "Heading to customer")
+        return success(redact_for_captain(result), "Heading to customer")
 
     async def verify_vehicle(self, current_user: CurrentUser, booking_id: str, payload: VerifyVehicleRequest):
         result = await self.service.verify_vehicle(booking_id, payload, current_user.id)
-        return success(result, "Vehicle verified")
+        return success(redact_for_captain(result), "Vehicle verified")
 
     async def resolve_issue(self, current_user: CurrentUser, booking_id: str, payload: ResolveIssueRequest):
         result = await self.service.resolve_issue(booking_id, current_user.id, payload.note, current_user.role, current_user.service_center_id)
+        await self.audit.log_action(current_user.id, current_user.role, "RESOLVE_BOOKING_ISSUE", "bookings", booking_id, {"note": payload.note})
         return success(result, "Issue marked resolved")
 
     async def update_priority(self, current_user: CurrentUser, booking_id: str, payload: PriorityUpdateRequest):
@@ -322,11 +355,11 @@ class BookingController:
 
     async def capture_before_photo(self, current_user: CurrentUser, booking_id: str, payload: PhotoCaptureRequest):
         result = await self.service.capture_before_photo(booking_id, payload, current_user.id)
-        return success(result, "Service started")
+        return success(redact_for_captain(result), "Service started")
 
     async def capture_after_photo(self, current_user: CurrentUser, booking_id: str, payload: PhotoCaptureRequest):
         result = await self.service.capture_after_photo_and_complete(booking_id, payload, current_user.id)
-        return success(result, "Service completed")
+        return success(redact_for_captain(result), "Service completed")
 
     async def get_group(self, current_user: CurrentUser, booking_group_id: str):
         return success(

@@ -5,6 +5,7 @@ import { inventoryApi } from "../../api/admin";
 import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useAuth } from "../../context/AuthContext";
+import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import type { InventoryItem } from "../../types";
 
@@ -68,9 +69,14 @@ export default function ManagerInventoryPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  const { push: pushToast } = useToast();
   const deleteMutation = useMutation({
     mutationFn: (id: string) => inventoryApi.remove(id),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Item deleted" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't delete it", message: getErrorMessage(err) }),
   });
 
   const openEdit = (item: InventoryItem) => {
@@ -87,14 +93,14 @@ export default function ManagerInventoryPage() {
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Track consumables at your service center.</p>
         </div>
         <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add item
+          <Plus className="h-4 w-4" /> Add Item
         </Button>
       </div>
 
       {isLoading ? (
         <PageLoader />
       ) : !items.length ? (
-        <EmptyState icon={Package} title="No inventory items yet" action={<Button onClick={() => setOpen(true)}>Add item</Button>} />
+        <EmptyState icon={Package} title="No Inventory Items Yet" action={<Button onClick={() => setOpen(true)}>Add Item</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((i) => {
@@ -111,14 +117,14 @@ export default function ManagerInventoryPage() {
                       <p className="text-xs capitalize text-[var(--color-text-secondary)]">{i.unit}</p>
                     </div>
                   </div>
-                  {lowStock && <Badge tone="warning">Low stock</Badge>}
+                  {lowStock && <Badge tone="warning">Low Stock</Badge>}
                 </div>
 
                 <div className="mt-4 flex items-baseline gap-1.5">
                   <span className="font-mono-num text-3xl font-bold text-[var(--color-text-primary)]">{i.quantity_available}</span>
                   <span className="text-sm text-[var(--color-text-secondary)]">{i.unit} on hand</span>
                 </div>
-                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Reorder level: {i.reorder_level}</p>
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Reorder Level: {i.reorder_level}</p>
 
                 <div className="mt-4 flex gap-2">
                   <Button size="sm" variant="outline" className="flex-1" onClick={() => openEdit(i)}>
@@ -127,9 +133,11 @@ export default function ManagerInventoryPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    isLoading={deleteMutation.isPending}
+                    isLoading={deleteMutation.isPending && deleteMutation.variables === i.id}
+                    disabled={deleteMutation.isPending}
+                    aria-label={`Delete ${i.item_name}`}
                     onClick={async () => {
-                      if (await confirm({ title: `Delete "${i.item_name}" from inventory?`, tone: "danger" })) deleteMutation.mutate(i.id);
+                      if (await confirm({ title: `Delete "${i.item_name}" From Inventory?`, tone: "danger" })) deleteMutation.mutate(i.id);
                     }}
                   >
                     <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -141,7 +149,7 @@ export default function ManagerInventoryPage() {
         </div>
       )}
 
-      <Modal open={open} onClose={closeModal} title={editing ? "Edit inventory item" : "Add inventory item"}>
+      <Modal open={open} onClose={closeModal} title={editing ? "Edit Inventory Item" : "Add Inventory Item"}>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -152,7 +160,7 @@ export default function ManagerInventoryPage() {
             else createMutation.mutate();
           }}
         >
-          <Input label="Item name" value={form.item_name} onChange={(e) => setForm({ ...form, item_name: e.target.value })} required />
+          <Input label="Item Name" value={form.item_name} onChange={(e) => setForm({ ...form, item_name: e.target.value })} required />
           <Select label="Unit" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
             <option value="litre">Litre</option>
             <option value="ml">ML</option>
@@ -163,7 +171,7 @@ export default function ManagerInventoryPage() {
           </Select>
           <div className="grid grid-cols-2 gap-3">
             <Input
-              label={editing ? "Quantity on hand" : "Starting quantity"}
+              label={editing ? "Quantity On Hand" : "Starting Quantity"}
               type="number"
               min={0}
               value={form.quantity_available}
@@ -172,7 +180,7 @@ export default function ManagerInventoryPage() {
               hint={editing ? "Update this to however much is on hand now — e.g. after restocking." : undefined}
             />
             <Input
-              label="Reorder level"
+              label="Reorder Level"
               type="number"
               min={0}
               value={form.reorder_level}
@@ -181,7 +189,7 @@ export default function ManagerInventoryPage() {
           </div>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createMutation.isPending || updateMutation.isPending}>
-            {editing ? "Save changes" : "Add item"}
+            {editing ? "Save Changes" : "Add Item"}
           </Button>
         </form>
       </Modal>

@@ -1,0 +1,136 @@
+/*
+ * Theme v2 for the admin portal. AdminLayout puts `adm-v2` on <body> while
+ * an admin page is showing, so the pages AND everything they portal to the
+ * app root (modals, drawers, the confirm box, toasts) share one look:
+ * white ground, navy type (#0E1A33), one blue (#0A66F0) for actions and
+ * "active", muted #5F6878, hairline borders #E4E9F1, tints #E8F0FE /
+ * #EEF3FA, 12–16px radii. Yellow (#FFD21F) is reserved for the one key CTA
+ * on a screen (`.adm-cta`).
+ *
+ * Same mechanism as the customer app's cust-v2 (customerTheme.css): the
+ * shared primitives (ui/Card, StatCard, Panel, DataTable, Badge, Button,
+ * EmptyState, Modal) hard-code the older gold-and-black staff palette, so
+ * under `.adm-v2` those literal classes are re-pointed at v2 tokens rather
+ * than forking the components. Tailwind v4 utilities read their colours
+ * from CSS variables, so re-declaring --color-black / --color-gray-* here
+ * re-tints every text-black / text-gray-500 / bg-gray-50 below the body.
+ * Plain (unlayered) CSS on purpose: it outranks Tailwind's utilities layer.
+ */
+body.adm-v2 {
+  --color-surface: #ffffff;
+  --color-card-border: #e4e9f1;
+  --color-primary: #0a66f0;
+  --color-primary-dark: #0857d0;
+  --color-primary-light: #e8f0fe;
+  --color-secondary: #ffd21f;
+  --color-secondary-light: #fff8d6;
+  --color-accent: #0a66f0;
+  --color-accent-light: #e7f6ec;
+  --color-text-primary: #0e1a33;
+  --color-text-secondary: #5f6878;
+  --radius-card: 14px;
+  --shadow-soft: 0 1px 2px rgba(14, 26, 51, 0.04), 0 10px 28px -20px rgba(14, 26, 51, 0.16);
+  --shadow-lifted: 0 2px 6px rgba(14, 26, 51, 0.05), 0 18px 40px -18px rgba(14, 26, 51, 0.22);
+
+  /* The shared primitives' --ui-* tokens (ui/StatCard, DataTable, Badge,
+     Switch, Modal, EmptyState) — v2 values for the admin portal. */
+  --ui-ink: #0e1a33;
+  --ui-muted: #5f6878;
+  --ui-tint: #e8f0fe;
+  --ui-tint-ink: #0a66f0;
+  --ui-hover-line: #0a66f0;
+  --ui-row-line: #eef2f7;
+  --ui-row-hover: #f7f9fc;
+  --ui-icon-bg: #eef3fa;
+  --ui-accent: #0a66f0;
+  --ui-success-bg: #e7f6ec;
+  --color-black: #0e1a33;
+  --color-gray-50: #f7f9fc;
+  --color-gray-100: #eef3fa;
+  --color-gray-200: #e4e9f1;
+  --color-gray-300: #c9d6ea;
+  --color-gray-400: #8a93a3;
+  --color-gray-500: #5f6878;
+  --color-gray-600: #4b5565;
+  --color-gray-700: #344054;
+  --color-gray-800: #1d2939;
+  --color-gray-900: #0e1a33;
+  color: #0e1a33;
+}
+
+/* One hairline everywhere: the gold card border becomes the v2 hairline,
+   the warm table-row dividers and hover washes become cool ones. */
+.adm-v2 .border-\[\#F3E5B5\] {
+  border-color: #e4e9f1;
+}
+.adm-v2 .border-dashed.border-\[\#F3E5B5\] {
+  border-color: #d5dfee;
+}
+.adm-v2 .border-\[\#FAF3DF\] {
+  border-color: #eef2f7;
+}
+.adm-v2 .divide-\[\#FAF3DF\] > :not(:last-child) {
+  border-color: #eef2f7;
+}
+.adm-v2 .bg-\[\#FFFCF0\],
+.adm-v2 .hover\:bg-\[\#FFFCF0\]:hover {
+  background-color: #f7f9fc;
+}
+.adm-v2 .bg-\[\#FFF4CD\] {
+  background-color: #e8f0fe;
+}
+.adm-v2 .hover\:bg-\[\#FFF4CD\]:hover {
+  background-color: #eef3fa;
+}
+.adm-v2 .text-\[\#8A6600\] {
+  color: #0a66f0;
+}
+/* Clickable console tiles (StatCard / MiniStat) answer hover in blue. */
+.adm-v2 .hover\:border-black:hover {
+  border-color: #0a66f0;
+}
+
+/* Gold actions (ui/Button "info", a few inline CTAs) are the blue action. */
+.adm-v2 .bg-\[\#E8A900\] {
+  background-color: #0a66f0;
+}
+.adm-v2 .hover\:bg-\[\#D99A00\]:hover {
+  background-color: #0857d0;
+}
+.adm-v2 button[class*="bg-[#E8A900]"],
+.adm-v2 a[class*="bg-[#E8A900]"] {
+  box-shadow: 0 8px 18px -10px rgba(10, 102, 240, 0.55);
+}
+
+/* ui/Button: 10px corners instead of a full pill — the v2 control shape.
+   (Its base classes are unique enough to target without forking it.) */
+.adm-v2 button.inline-flex.items-center.justify-center.rounded-full.font-medium.transition-all {
+  border-radius: 10px;
+}
+
+/* The one key call-to-action on a screen. */
+.adm-v2 .adm-cta {
+  background-color: #ffd21f;
+  color: #0e1a33;
+}
+.adm-v2 .adm-cta:hover:not(:disabled) {
+  background-color: #f5c800;
+}
+
+/* Form fields outside the shell's own rule (modals/drawers portalled to
+   <body>): same v2 field tokens as ui/fieldStyles. */
+.adm-v2 :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea):not([aria-invalid="true"]) {
+  border-color: #e4e9f1;
+}
+.adm-v2 :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea):not([aria-invalid="true"]):not(:disabled):not(:focus):hover {
+  border-color: #c9d6ea;
+}
+.adm-v2 :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea):not([aria-invalid="true"]):focus {
+  border-color: #0a66f0;
+  box-shadow: 0 0 0 3px rgba(10, 102, 240, 0.15);
+  outline: none;
+}
+.adm-v2 input[type="checkbox"],
+.adm-v2 input[type="radio"] {
+  accent-color: #0a66f0;
+}

@@ -33,7 +33,9 @@ def _segments_cross(a, b, c, d) -> bool:
 
 
 def _validate_ring(ring: list) -> list:
-    if not isinstance(ring, list) or len(ring) < 4:
+    # An OPEN ring of 3 corners (a triangle drawn on the map) is valid — it
+    # gets closed below; the "< 4" check belongs after closing.
+    if not isinstance(ring, list) or len(ring) < 3:
         raise BadRequestException("A zone needs at least 3 corners")
     cleaned = []
     for point in ring:

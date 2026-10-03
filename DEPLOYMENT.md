@@ -57,7 +57,7 @@ sudo docker build -t blussit-api:local backend
 Run locally with a non-production environment file:
 
 ```bash
-sudo docker run --rm -p 8080:8080 --env-file backend/.env blussit-api:local
+sudo docker run --rm -p 8080:8080 --env-file backend/.env.development blussit-api:local
 ```
 
 Health check:

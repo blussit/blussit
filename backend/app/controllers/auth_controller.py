@@ -49,7 +49,15 @@ class AuthController:
 
     async def change_password(self, current_user: CurrentUser, payload: ChangePasswordRequest):
         await self.auth_service.change_password(current_user.id, payload.current_password, payload.new_password)
-        return success(None, "Password changed successfully")
+        # The change bumps token_version, signing out every OTHER device —
+        # this one gets a fresh pair minted at the new version so the person
+        # who just changed it isn't bounced to the login page too.
+        user = await self.auth_service.users.find_by_id(current_user.id)
+        tokens = self.auth_service._issue_tokens(user)
+        return success(
+            {"access_token": tokens["access_token"], "refresh_token": tokens["refresh_token"], "token_type": "bearer"},
+            "Password changed — other devices have been signed out",
+        )
 
     async def request_otp(self, payload: RequestOtpRequest):
         # SECURITY: the OTP itself is never included in this response.

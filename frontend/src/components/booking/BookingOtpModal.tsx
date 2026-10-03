@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { bookingApi, type PhoneProof } from "../../api/booking";
-import { Button, Modal, OtpInput } from "../ui";
+import { Modal, OtpInput, Spinner } from "../ui";
 import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
 
 /**
@@ -118,31 +118,37 @@ export function BookingOtpModal({
       <div className="space-y-4">
         <p className="text-sm text-gray-600">
           {sending ? "Sending a code to " : `Enter the 6-digit code sent ${channel === "widget" ? "by SMS " : ""}to `}
-          <span className="font-semibold text-black">+91 {phone}</span>
+          <span className="font-semibold text-[#0E1A33]">+91 {phone}</span>
         </p>
 
         <OtpInput value={otp} onChange={setOtp} autoFocus disabled={verifying} onComplete={(code) => void verify(code)} />
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
-        <Button variant="info" className="w-full font-semibold" disabled={otp.length < 6 || sending} isLoading={verifying} onClick={() => void verify(otp)}>
-          Verify And Book
-        </Button>
+        <button
+          type="button"
+          className="flex h-[50px] w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] font-display text-[15px] font-bold text-[#0E1A33] transition hover:bg-[#FFC800] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={otp.length < 6 || sending || verifying}
+          onClick={() => void verify(otp)}
+        >
+          {verifying && <Spinner className="h-4 w-4 text-[#0E1A33]" />}
+          Verify &amp; Book
+        </button>
 
         <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)]">
-          <button type="button" className="font-semibold text-black hover:underline" onClick={onEditNumber}>
-            Edit number
+          <button type="button" className="font-semibold text-[#0A66F0] hover:underline" onClick={onEditNumber}>
+            Edit Number
           </button>
           {cooldown > 0 ? (
             <span>Resend in {cooldown}s</span>
           ) : (
             <span className="flex items-center gap-3">
               {channel === "backend" && smsAvailable && (
-                <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(["widget"])}>
-                  Get it by SMS
+                <button type="button" className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(["widget"])}>
+                  Get It By SMS
                 </button>
               )}
-              <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(resendOrder)}>
-                Resend code
+              <button type="button" className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(resendOrder)}>
+                Resend Code
               </button>
             </span>
           )}

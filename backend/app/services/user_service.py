@@ -1,3 +1,4 @@
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
@@ -41,6 +42,18 @@ class UserService:
         items, total = await self.repo.find_many(filters, page=page, page_size=page_size)
         return [UserPublic.from_doc(u).model_dump() for u in items], total
 
+    async def ensure_not_last_admin(self, user_id: str) -> None:
+        """Refuses to suspend / demote / delete the only active admin — the
+        platform would be left with nobody able to manage it."""
+        target = await self.repo.find_by_id(user_id)
+        if not target or target.get("role") != "admin":
+            return
+        others = await self.db.users.count_documents({
+            "role": "admin", "status": {"$ne": "suspended"}, "is_deleted": {"$ne": True}, "_id": {"$ne": target["_id"]},
+        })
+        if not others:
+            raise BadRequestException("This is the only active admin account — add another admin first.")
+
     async def admin_update_user(self, user_id: str, payload: AdminUserUpdateRequest) -> dict:
         # exclude_unset (not `is not None`) is what lets a manager's
         # service_center_id be explicitly CLEARED back to null — dropping
@@ -60,18 +73,48 @@ class UserService:
                     raise ConflictException("An account with this phone number already exists")
                 # Set by an admin, not proven by OTP — the owner re-verifies.
                 data.update({"phone": phone, "phone_verified": False, "phone_verified_at": None})
+        if data.get("service_center_id"):
+            center_id = data["service_center_id"]
+            if not ObjectId.is_valid(center_id) or not await self.db.service_centers.find_one(
+                {"_id": ObjectId(center_id), "is_deleted": {"$ne": True}}, {"_id": 1}
+            ):
+                raise BadRequestException("That service center doesn't exist.")
+        before = await self.repo.find_by_id(user_id)
+        if not before:
+            raise NotFoundException("User not found")
         try:
             updated = await self.repo.update_by_id(user_id, data)
         except DuplicateKeyError:
             raise ConflictException("An account with this phone number already exists")
         if not updated:
             raise NotFoundException("User not found")
+        # A change of standing (suspend / reactivate) ends every session
+        # minted before it, refresh tokens included — a reactivated account
+        # signs in fresh. Role / center changes need no bump: every access
+        # token is re-checked against the DB row (get_current_user refuses a
+        # role/center claim that no longer matches) and the refresh that
+        # follows mints the new scope, so permissions are always current.
+        if "status" in data and data["status"] != before.get("status"):
+            # Who suspended decides who may lift it: an admin's suspension
+            # can't be undone by a center manager (staff_directory_routes).
+            standing = {"suspended_by_role": "admin"} if data["status"] == "suspended" else {}
+            update: dict = {"$inc": {"token_version": 1}}
+            if standing:
+                update["$set"] = standing
+            else:
+                update["$unset"] = {"suspended_by_role": ""}
+            await self.db.users.update_one({"_id": updated["_id"]}, update)
         return UserPublic.from_doc(updated).model_dump()
 
     async def deactivate_user(self, user_id: str) -> dict:
         updated = await self.repo.update_by_id(user_id, {"status": "suspended"})
         if not updated:
             raise NotFoundException("User not found")
+        # Every refresh token dies now; a later reactivation needs a fresh login.
+        # Admin-only route — recorded so a manager can't lift it.
+        await self.db.users.update_one(
+            {"_id": updated["_id"]}, {"$inc": {"token_version": 1}, "$set": {"suspended_by_role": "admin"}},
+        )
         return UserPublic.from_doc(updated).model_dump()
 
     async def delete_user(self, user_id: str) -> bool:

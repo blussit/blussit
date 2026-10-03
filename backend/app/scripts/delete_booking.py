@@ -1,6 +1,7 @@
 """
 Permanently deletes bookings (and the rows that only exist because of them)
-from the database in backend/.env. Built for cleaning out test / mistaken
+from the database in the active env file (backend/.env.development by default;
+ENV_FILE=.env.production for the live one). Built for cleaning out test / mistaken
 entries.
 
   python -m app.scripts.delete_booking BK0001-BK0007 BK0009            # look only

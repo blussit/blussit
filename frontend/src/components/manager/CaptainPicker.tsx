@@ -73,8 +73,8 @@ export function CaptainPicker({
               <div className="flex items-center justify-between">
                 <span className="font-medium text-[var(--color-text-primary)]">{c.full_name}</span>
                 <div className="flex items-center gap-1.5">
-                  {eligible?.is_on_job && <Badge tone="neutral">On a job</Badge>}
-                  {depth > 0 && <Badge tone={depth < 3 ? "warning" : "error"}>{depth} job{depth > 1 ? "s" : ""} today</Badge>}
+                  {eligible?.is_on_job && <Badge tone="neutral">On A Job</Badge>}
+                  {depth > 0 && <Badge tone={depth < 3 ? "warning" : "error"}>{depth} Job{depth > 1 ? "s" : ""} Today</Badge>}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)]">
@@ -112,7 +112,7 @@ export function CaptainPicker({
                 onClick={() => setExpandedMapId(mapExpanded ? null : c.id)}
                 className="pl-1 text-xs font-medium text-[var(--color-primary)] hover:underline"
               >
-                {mapExpanded ? "Hide live location" : "View live location"}
+                {mapExpanded ? "Hide Live Location" : "View Live Location"}
               </button>
             )}
             {mapExpanded && (

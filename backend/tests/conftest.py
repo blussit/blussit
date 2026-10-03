@@ -18,6 +18,9 @@ import os
 
 os.environ["MONGO_DB_NAME"] = os.environ.get("TEST_MONGO_DB_NAME", "doorstep_vehicle_care_test")
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# The local dev shortcuts (fixed OTP) would mask the real OTP rules the
+# suite tests — always off here, whatever backend/.env.development says.
+os.environ["DEV_TOOLS_ENABLED"] = "false"
 # Tests must never call Google (Routes/Geocoding) or reveal OAuth config.
 os.environ["GOOGLE_MAPS_SERVER_KEY"] = ""
 os.environ["GOOGLE_MAPS_BROWSER_KEY"] = ""

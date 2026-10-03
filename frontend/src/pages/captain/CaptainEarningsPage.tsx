@@ -1,247 +1,210 @@
+/**
+ * Captain · Earnings — today and this week, then the recent finished jobs.
+ * Per-job fees and the wallet only show while wallet gating is on (admin
+ * pricing toggle); otherwise it's the work count and the cash he holds.
+ */
 import { useState } from "react";
-import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownCircle, ArrowUpCircle, Briefcase, IndianRupee, Landmark, Star, TrendingUp, TriangleAlert, Wallet } from "lucide-react";
-import { staffDirectoryApi } from "../../api/admin";
+import { Link } from "react-router-dom";
+import { ArrowUpCircle, Landmark, TriangleAlert } from "lucide-react";
+import { bookingApi } from "../../api/booking";
 import { bookingPolicyApi } from "../../api/catalog";
 import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
-import { Badge, Button, Card, CardBody, Input, Modal, PageLoader } from "../../components/ui";
-import { format } from "../../lib/date";
+import { todayIST, formatDay } from "../../lib/date";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
+import { carService, clock, istDay, rupees, statusWord, useCarTypes, weekStartIST } from "../../components/captain/jobState";
+import { Btn, Notice, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
+import type { Booking } from "../../types";
+
+const field =
+  "h-12 w-full rounded-2xl border border-[#E4E9F1] px-4 text-[15px] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE]";
 
 export default function CaptainEarningsPage() {
   const { t } = useCaptainTranslation();
   const queryClient = useQueryClient();
-  const [showWithdraw, setShowWithdraw] = useState(false);
-  const [showBank, setShowBank] = useState(false);
-  const [amount, setAmount] = useState("");
-  const [bank, setBank] = useState({ bank_account_number: "", bank_ifsc: "", bank_account_holder: "" });
-  const [formError, setFormError] = useState<string | null>(null);
-
-  const { data: performance, isLoading: perfLoading } = useQuery({ queryKey: ["my-performance"], queryFn: staffDirectoryApi.myPerformance });
-  const { data: wallet, isLoading: walletLoading } = useQuery({ queryKey: ["my-wallet"], queryFn: walletApi.myWallet });
-  const { data: policy, isLoading: policyLoading } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
-  const { data: transactions } = useQuery({
-    queryKey: ["my-wallet-transactions"],
-    queryFn: () => walletApi.myTransactions({ page: 1, page_size: 15 }),
+  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
+  const walletOn = !!policy?.wallet_gating_enabled;
+  const recent = useQuery({
+    queryKey: ["my-jobs", "history", "recent"],
+    queryFn: () => bookingApi.myJobs({ scope: "history", status: "completed", page: 1, page_size: 100 }),
   });
+  const { data: wallet } = useQuery({ queryKey: ["my-wallet"], queryFn: walletApi.myWallet, enabled: walletOn });
   const { data: withdrawals } = useQuery({
     queryKey: ["my-withdrawals"],
-    queryFn: () => walletApi.myWithdrawals({ page: 1, page_size: 10 }),
+    queryFn: () => walletApi.myWithdrawals({ page: 1, page_size: 5 }),
+    enabled: walletOn,
   });
 
-  const withdrawMutation = useMutation({
-    mutationFn: (amt: number) => walletApi.requestWithdrawal(amt),
+  const [sheet, setSheet] = useState<null | "withdraw" | "bank">(null);
+  const [amount, setAmount] = useState("");
+  const [bank, setBank] = useState({ bank_account_holder: "", bank_account_number: "", bank_ifsc: "" });
+  const [formError, setFormError] = useState("");
+  const close = () => {
+    setSheet(null);
+    setFormError("");
+  };
+  const withdraw = useMutation({
+    mutationFn: () => walletApi.requestWithdrawal(Number(amount)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
       queryClient.invalidateQueries({ queryKey: ["my-withdrawals"] });
-      setShowWithdraw(false);
       setAmount("");
-      setFormError(null);
+      close();
     },
     onError: (e) => setFormError(getErrorMessage(e)),
   });
-
-  const bankMutation = useMutation({
+  const saveBank = useMutation({
     mutationFn: () => walletApi.updateBankDetails(bank),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
-      setShowBank(false);
-      setFormError(null);
+      close();
     },
     onError: (e) => setFormError(getErrorMessage(e)),
   });
 
-  if (perfLoading || walletLoading || policyLoading || !performance) return <PageLoader />;
+  const jobs = (recent.data?.data ?? []).filter((j) => j.completed_at);
+  const types = useCarTypes(jobs.slice(0, 10));
+  const today = todayIST();
+  const week = weekStartIST();
+  const sum = (list: Booking[]) => ({
+    count: list.length,
+    fee: list.reduce((s, j) => s + (j.captain_earning ?? 0), 0),
+    cash: list.filter((j) => j.payment_method === "cash").reduce((s, j) => s + (j.total_amount ?? 0), 0),
+  });
+  const todayStats = sum(jobs.filter((j) => istDay(j.completed_at) === today));
+  const weekStats = sum(jobs.filter((j) => istDay(j.completed_at) >= week));
+  const jobsWord = (n: number) => t(n === 1 ? "captain.v2.oneJob" : "captain.v2.nJobs").replace("{n}", String(n));
 
-  // Hidden while wallet balance gating is off — see AdminPricingPage's
-  // toggle and CaptainLayout, which also drops this from the nav. Guards a
-  // direct hit on the URL, not just the nav link.
-  if (!policy?.wallet_gating_enabled) {
-    return <Navigate to="/captain" replace />;
-  }
+  const tile = (label: string, s: ReturnType<typeof sum>) => (
+    <Panel className="px-4 py-4">
+      <p className="text-[13px] font-bold text-[#5F6878]">{label}</p>
+      <p className="mt-1 tabular-nums text-[28px] font-extrabold leading-none text-[#0E1A33]">{walletOn ? rupees(s.fee) : jobsWord(s.count)}</p>
+      <p className="mt-1.5 text-sm font-semibold text-[#5F6878]">
+        {walletOn ? jobsWord(s.count) : t("captain.v2.cashHeld").replace("{amount}", rupees(s.cash))}
+      </p>
+    </Panel>
+  );
 
-  const belowMinimum = wallet ? wallet.balance < wallet.minimum_balance : false;
-  const stats = [
-    { label: t("captain.earnings.jobsCompleted"), value: String(performance.total_jobs_completed ?? 0), icon: Briefcase },
-    { label: t("captain.earnings.averageRating"), value: String(performance.average_rating ?? 0), icon: Star },
-    { label: t("captain.earnings.totalReviews"), value: String(performance.total_reviews ?? 0), icon: TrendingUp },
-  ];
-  const statusCounts = (performance.booking_status_counts as Record<string, number>) || {};
+  const below = wallet ? wallet.balance < wallet.minimum_balance : false;
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t("captain.earnings.title")}</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Cash bookings debit the platform's share from your wallet; online bookings credit your fee straight in.
-        </p>
+    <div className="space-y-4">
+      <PageTitle>{t("captain.v2.tab.earnings")}</PageTitle>
+      <div className="grid grid-cols-2 gap-2">
+        {tile(t("captain.v2.today"), todayStats)}
+        {tile(t("captain.v2.thisWeek"), weekStats)}
       </div>
 
-      <Card className="overflow-hidden">
-        <div className="bg-[var(--color-primary)] px-6 py-6 text-white">
-          <div className="flex items-center justify-between">
+      {walletOn && wallet && (
+        <Panel className="p-4">
+          <div className="flex items-end justify-between gap-3">
             <div>
-              <p className="flex items-center gap-2 text-sm text-white/80">
-                <Wallet className="h-4 w-4" /> Available balance
-              </p>
-              <p className="font-mono-num mt-1 text-4xl font-bold">₹{wallet?.balance ?? 0}</p>
+              <p className="text-[13px] font-bold text-[#5F6878]">{t("captain.v2.walletBalance")}</p>
+              <p className="tabular-nums text-[28px] font-extrabold text-[#0E1A33]">{rupees(wallet.balance)}</p>
             </div>
-            <div className="text-right text-sm text-white/80">
-              <p>{t("captain.earnings.minimumRequired")}</p>
-              <p className="font-mono-num font-semibold text-white">₹{wallet?.minimum_balance ?? 50}</p>
-            </div>
+            <p className="text-right text-xs font-semibold text-[#5F6878]">
+              {t("captain.earnings.minimumRequired")}
+              <span className="block tabular-nums text-sm text-[#0E1A33]">{rupees(wallet.minimum_balance)}</span>
+            </p>
           </div>
-          {belowMinimum && (
-            <div className="mt-4 flex items-center gap-2 rounded-lg bg-white/15 px-3 py-2 text-sm">
-              <TriangleAlert className="h-4 w-4 shrink-0" />
-              Your balance is below the minimum — hand cash to your center manager to add balance; you won't get new jobs until then.
+          {below && (
+            <div className="mt-3">
+              <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.v2.belowMin")}</Notice>
             </div>
           )}
-        </div>
-        <CardBody className="flex flex-wrap gap-3">
-          <Button variant="outline" onClick={() => setShowWithdraw(true)}>
-            <ArrowUpCircle className="h-4 w-4" /> Request withdrawal
-          </Button>
-          <Button variant="outline" onClick={() => setShowBank(true)}>
-            <Landmark className="h-4 w-4" /> {wallet?.bank_account_number ? t("captain.earnings.updateBankDetails") : t("captain.earnings.addBankDetails")}
-          </Button>
-        </CardBody>
-      </Card>
-
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
-        {stats.map((s) => (
-          <Card key={s.label}>
-            <CardBody className="flex items-center gap-4">
-              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary-light)] text-[var(--color-primary)]">
-                <s.icon className="h-5 w-5" />
-              </span>
-              <div>
-                <p className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{s.value}</p>
-                <p className="text-sm text-[var(--color-text-secondary)]">{s.label}</p>
-              </div>
-            </CardBody>
-          </Card>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        <Card>
-          <CardBody>
-            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.recentTransactions")}</h2>
-            {!transactions?.data.length ? (
-              <p className="text-sm text-[var(--color-text-secondary)]">{t("captain.earnings.noActivity")}</p>
-            ) : (
-              <div className="space-y-3">
-                {transactions.data.map((t) => (
-                  <div key={t.id} className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2">
-                      {t.type === "credit" ? (
-                        <ArrowDownCircle className="h-4 w-4 text-[var(--color-success)]" />
-                      ) : (
-                        <ArrowUpCircle className="h-4 w-4 text-[var(--color-error)]" />
-                      )}
-                      <div>
-                        <p className="text-[var(--color-text-primary)]">{t.description}</p>
-                        <p className="text-xs text-[var(--color-text-secondary)]">{format(t.created_at)}</p>
-                      </div>
-                    </div>
-                    <span className={`font-mono-num font-semibold ${t.type === "credit" ? "text-[var(--color-success)]" : "text-[var(--color-error)]"}`}>
-                      {t.type === "credit" ? "+" : "-"}₹{t.amount}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
-
-        <Card>
-          <CardBody>
-            <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.withdrawalRequests")}</h2>
-            {!withdrawals?.data.length ? (
-              <p className="text-sm text-[var(--color-text-secondary)]">{t("captain.earnings.noWithdrawals")}</p>
-            ) : (
-              <div className="space-y-3">
-                {withdrawals.data.map((w) => (
-                  <div key={w.id} className="flex items-center justify-between text-sm">
-                    <div>
-                      <p className="font-mono-num font-semibold text-[var(--color-text-primary)]">₹{w.amount}</p>
-                      <p className="text-xs text-[var(--color-text-secondary)]">{format(w.created_at)}</p>
-                    </div>
-                    <Badge tone={w.status === "paid" || w.status === "approved" ? "success" : w.status === "rejected" ? "error" : "warning"}>
-                      {w.status}
-                    </Badge>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </div>
-
-      <Card>
-        <CardBody>
-          <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">{t("captain.earnings.jobsByStatus")}</h2>
-          <div className="space-y-3">
-            {Object.entries(statusCounts).map(([s, count]) => (
-              <div key={s} className="flex items-center justify-between text-sm">
-                <span className="capitalize text-[var(--color-text-secondary)]">{s.replace(/_/g, " ")}</span>
-                <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{count}</span>
-              </div>
-            ))}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <Btn variant="secondary" onClick={() => setSheet("withdraw")}>
+              <ArrowUpCircle className="h-5 w-5" /> {t("captain.v2.withdraw")}
+            </Btn>
+            <Btn
+              variant="outline"
+              onClick={() => {
+                setBank({
+                  bank_account_holder: wallet.bank_account_holder || "",
+                  bank_account_number: wallet.bank_account_number || "",
+                  bank_ifsc: wallet.bank_ifsc || "",
+                });
+                setSheet("bank");
+              }}
+            >
+              <Landmark className="h-5 w-5" /> {t("captain.earnings.bankDetails")}
+            </Btn>
           </div>
-        </CardBody>
-      </Card>
+          {!!withdrawals?.data.length && (
+            <ul className="mt-3 divide-y divide-[#E4E9F1] border-t border-[#E4E9F1]">
+              {withdrawals.data.map((w) => (
+                <li key={w.id} className="flex items-center justify-between py-2.5 text-sm">
+                  <span className="tabular-nums font-bold text-[#0E1A33]">{rupees(w.amount)}</span>
+                  <Pill tone={w.status === "paid" || w.status === "approved" ? "green" : w.status === "rejected" ? "red" : "amber"}>{statusWord(w.status)}</Pill>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      )}
 
-      <Modal open={showWithdraw} onClose={() => setShowWithdraw(false)} title={t("captain.earnings.requestWithdrawal")}>
-        <p className="text-sm text-[var(--color-text-secondary)]">
-          Requests are reviewed by the admin team and paid to your registered bank account.
-        </p>
-        <Input
-          className="mt-3"
-          label={t("captain.earnings.amount")}
+      <div>
+        <h2 className="mb-2 text-[15px] font-extrabold text-[#0E1A33]">{t("captain.v2.recentJobs")}</h2>
+        {recent.isLoading ? (
+          <Panel className="h-40 animate-pulse bg-[#EEF3FA]"><span /></Panel>
+        ) : !jobs.length ? (
+          <Panel className="px-4 py-8 text-center text-sm font-semibold text-[#5F6878]">{t("captain.v2.noDone")}</Panel>
+        ) : (
+          <Panel className="divide-y divide-[#E4E9F1]">
+            {jobs.slice(0, 10).map((j) => {
+              const day = formatDay(istDay(j.completed_at));
+              return (
+                <Link key={j.id} to={`/captain/jobs/${j.id}`} className="flex min-h-[60px] items-center gap-3 px-4 py-2.5 active:bg-[#EEF3FA]">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[15px] font-bold text-[#0E1A33]">{carService(j, types)}</p>
+                    <p className="text-[13px] text-[#5F6878]">
+                      {day === "Today" ? t("captain.v2.today") : day === "Tomorrow" ? t("captain.v2.tomorrow") : day} · {clock(j.completed_at)}
+                      {!walletOn && ` · ${j.payment_method === "cash" ? t("captain.v2.cash") : j.payment_method === "subscription" ? t("captain.v2.plan") : t("captain.v2.online")}`}
+                    </p>
+                  </div>
+                  <span className="tabular-nums text-[16px] font-extrabold text-[#0E1A33]">
+                    {walletOn ? rupees(j.captain_earning) : rupees(j.total_amount)}
+                  </span>
+                </Link>
+              );
+            })}
+          </Panel>
+        )}
+      </div>
+
+      <Sheet open={sheet === "withdraw"} onClose={close} title={t("captain.earnings.requestWithdrawal")}>
+        <input
+          className={field}
           type="number"
+          inputMode="numeric"
           min={1}
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          placeholder={t("captain.earnings.amount")}
+          onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
         />
-        {formError && <p className="mt-2 text-sm text-[var(--color-error)]">{formError}</p>}
-        <Button
-          className="mt-4 w-full"
-          isLoading={withdrawMutation.isPending}
-          disabled={!amount || Number(amount) <= 0}
-          onClick={() => withdrawMutation.mutate(Number(amount))}
-        >
-          <IndianRupee className="h-4 w-4" /> Submit request
-        </Button>
-      </Modal>
+        {formError && <p className="mt-2 text-sm font-medium text-[#B91C1C]">{formError}</p>}
+        <Btn className="mt-3 w-full" disabled={!amount || Number(amount) <= 0} loading={withdraw.isPending} onClick={() => withdraw.mutate()}>
+          {t("captain.common.submit")}
+        </Btn>
+      </Sheet>
 
-      <Modal open={showBank} onClose={() => setShowBank(false)} title={t("captain.earnings.bankDetails")}>
-        <div className="space-y-3">
-          <Input
-            label={t("captain.earnings.accountHolder")}
-            value={bank.bank_account_holder}
-            onChange={(e) => setBank((b) => ({ ...b, bank_account_holder: e.target.value }))}
-          />
-          <Input
-            label={t("captain.earnings.accountNumber")}
-            value={bank.bank_account_number}
-            onChange={(e) => setBank((b) => ({ ...b, bank_account_number: e.target.value }))}
-          />
-          <Input label={t("captain.earnings.ifsc")} value={bank.bank_ifsc} onChange={(e) => setBank((b) => ({ ...b, bank_ifsc: e.target.value }))} />
+      <Sheet open={sheet === "bank"} onClose={close} title={t("captain.earnings.bankDetails")}>
+        <div className="space-y-2">
+          <input className={field} placeholder={t("captain.earnings.accountHolder")} value={bank.bank_account_holder} onChange={(e) => setBank((b) => ({ ...b, bank_account_holder: e.target.value }))} />
+          <input className={field} inputMode="numeric" placeholder={t("captain.earnings.accountNumber")} value={bank.bank_account_number} onChange={(e) => setBank((b) => ({ ...b, bank_account_number: e.target.value }))} />
+          <input className={field} placeholder={t("captain.earnings.ifsc")} value={bank.bank_ifsc} onChange={(e) => setBank((b) => ({ ...b, bank_ifsc: e.target.value.toUpperCase() }))} />
         </div>
-        {formError && <p className="mt-2 text-sm text-[var(--color-error)]">{formError}</p>}
-        <Button
-          className="mt-4 w-full"
-          isLoading={bankMutation.isPending}
+        {formError && <p className="mt-2 text-sm font-medium text-[#B91C1C]">{formError}</p>}
+        <Btn
+          className="mt-3 w-full"
           disabled={!bank.bank_account_holder || !bank.bank_account_number || !bank.bank_ifsc}
-          onClick={() => bankMutation.mutate()}
+          loading={saveBank.isPending}
+          onClick={() => saveBank.mutate()}
         >
-          Save bank details
-        </Button>
-      </Modal>
+          {t("captain.common.save")}
+        </Btn>
+      </Sheet>
     </div>
   );
 }

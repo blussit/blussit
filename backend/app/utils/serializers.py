@@ -59,6 +59,8 @@ COMPUTED_INSTANT_KEYS = frozenset({
     # Pass reminder bookkeeping (UserSubscriptionModel) — now_ist() /
     # datetime.now(utc) at write time, read back naive.
     "last_used_at", "wash_reminder_sent_at", "used_up_notice_sent_at", "last_renewed_at",
+    # Society plans (society_service.py) — now_ist() at write time.
+    "cycle_start", "prev_cycle_start", "arrived_at", "activated_at", "cancelled_at", "washed_updated_at",
 })
 
 

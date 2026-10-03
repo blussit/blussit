@@ -46,7 +46,7 @@ async def completed_booking(db, cleanup):
     booking_id = str(result.inserted_id)
     cleanup.append(("bookings", {"_id": ObjectId(booking_id)}))
     cleanup.append(("reviews", {"booking_id": booking_id}))
-    return {"db": db, "booking_id": booking_id, "customer_id": customer_id, "captain_id": captain_id}
+    return {"db": db, "booking_id": booking_id, "customer_id": customer_id, "captain_id": captain_id, "center_id": center_id}
 
 
 @pytest.mark.asyncio
@@ -191,11 +191,19 @@ async def test_get_for_booking_visible_to_manager_and_owner(completed_booking):
     as_customer = await service.get_for_booking(completed_booking["booking_id"], completed_booking["customer_id"], "customer")
     assert as_customer is not None and as_customer["captain_rating"] == 4
 
-    as_manager = await service.get_for_booking(completed_booking["booking_id"], "some-manager-id", "manager")
+    as_manager = await service.get_for_booking(completed_booking["booking_id"], "some-manager-id", "manager", completed_booking["center_id"])
     assert as_manager is not None and as_manager["service_rating"] == 5
+    # Another center's manager (or one with no center) can't read it.
+    for other_center in (str(ObjectId()), None):
+        with pytest.raises(NotFoundException):
+            await service.get_for_booking(completed_booking["booking_id"], "some-manager-id", "manager", other_center)
 
     as_assigned_captain = await service.get_for_booking(completed_booking["booking_id"], completed_booking["captain_id"], "captain")
     assert as_assigned_captain is not None
+
+    # The admin reads any center's review.
+    as_admin = await service.get_for_booking(completed_booking["booking_id"], "some-admin-id", "admin")
+    assert as_admin is not None and as_admin["captain_rating"] == 4
 
 
 @pytest.mark.asyncio

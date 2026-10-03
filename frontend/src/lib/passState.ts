@@ -32,6 +32,17 @@ export const isLivePass = (sub: UserSubscription) => {
   return state === "active" || state === "used_up" || state === "renewing";
 };
 
+/** A society pass (docs/SOCIETY_PLANS.md): managed by the society manager —
+ *  no cancel / upgrade / auto-pay / buy again here. */
+export const isSocietyPass = (sub: Pick<UserSubscription, "society_id">): boolean => !!sub.society_id;
+
+/** Where a society pass is booked and renewed — only ever a same-site
+ *  /society/<token> path (never an arbitrary URL from the response). */
+export function societyPassPath(sub: Pick<UserSubscription, "society_form_path">): string | null {
+  const path = sub.society_form_path || "";
+  return /^\/society\/[A-Za-z0-9_-]{16,64}$/.test(path) ? path : null;
+}
+
 /** The plan's name for a pass — the pass carries it on some responses only. */
 export function passPlanName(sub: UserSubscription, plans?: SubscriptionPlan[] | null): string {
   return sub.plan_name || plans?.find((p) => p.id === sub.plan_id)?.name || "Monthly pass";
@@ -46,7 +57,8 @@ export function buyAgainCandidates(subs: UserSubscription[]): UserSubscription[]
   const live = subs.filter(isLivePass);
   const seen = new Set<string>();
   return subs
-    .filter((s) => passState(s) === "ended")
+    // A society pass is renewed on its society page, never re-bought here.
+    .filter((s) => passState(s) === "ended" && !isSocietyPass(s))
     .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())
     .filter((s) => {
       const key = `${s.plan_id}|${s.vehicle_type || ""}|${s.service_id || ""}`;

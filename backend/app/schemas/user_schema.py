@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import UserRole, UserStatus
 from app.utils.timezone import from_stored
@@ -152,8 +152,10 @@ class ManagerCreateCustomerRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    full_name: Optional[str] = None
-    profile_image: Optional[str] = None
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    full_name: Optional[str] = Field(None, min_length=2, max_length=100)
+    profile_image: Optional[str] = Field(None, max_length=1000, pattern=r"^(https?://|/)\S+$")
     # The "WhatsApp reminders & offers" switch (true = opted out). Stops the
     # marketing-template WhatsApps — "time for a wash?", "N washes left on
     # your pass" — never booking/payment updates or in-app notices.

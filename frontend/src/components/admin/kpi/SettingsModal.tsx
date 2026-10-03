@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { Button, Input, Modal, Select, Spinner } from "../../ui";
 import { kpiApi, type BusinessSettings, type MarketingEntry } from "../../../api/admin";
+import { toTitle } from "../../../lib/titleCase";
 
 const SOURCES = ["instagram", "facebook", "google", "organic", "referral", "offline", "society", "other"];
 
@@ -40,7 +41,7 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
     setForm((f) => (f ? { ...f, targets: { ...f.targets, [key]: Number(e.target.value) || 0 } } : f));
 
   return (
-    <Modal open={open} onClose={onClose} title="Business inputs" maxWidth="max-w-2xl">
+    <Modal open={open} onClose={onClose} title="Business Inputs" maxWidth="max-w-2xl">
       {isLoading || !form ? (
         <div className="flex justify-center py-10"><Spinner /></div>
       ) : (
@@ -48,7 +49,7 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
           <div className="flex gap-1 rounded-xl bg-[var(--color-surface)] p-1">
             {(["costs", "marketing"] as const).map((t) => (
               <button key={t} type="button" onClick={() => setTab(t)} className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold capitalize transition-colors ${tab === t ? "bg-white text-[var(--color-text-primary)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>
-                {t === "costs" ? "Costs & targets" : "Marketing spend log"}
+                {t === "costs" ? "Costs & Targets" : "Marketing Spend Log"}
               </button>
             ))}
           </div>
@@ -56,17 +57,17 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
           {tab === "costs" && (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <Input label="Variable cost per wash (₹)" type="number" value={form.variable_cost_per_wash} onChange={setNum("variable_cost_per_wash")} hint="Water, chemicals, captain payout, travel" />
-                <Input label="Fixed cost per month (₹)" type="number" value={form.fixed_cost_monthly} onChange={setNum("fixed_cost_monthly")} hint="Salaries, storage, subscriptions" />
-                <Input label="Kit cost (₹)" type="number" value={form.kit_cost} onChange={setNum("kit_cost")} />
-                <Input label="Number of kits" type="number" value={form.kits_count} onChange={setNum("kits_count")} />
+                <Input label="Variable Cost Per Wash (₹)" type="number" value={form.variable_cost_per_wash} onChange={setNum("variable_cost_per_wash")} hint="Water, chemicals, captain payout, travel" />
+                <Input label="Fixed Cost Per Month (₹)" type="number" value={form.fixed_cost_monthly} onChange={setNum("fixed_cost_monthly")} hint="Salaries, storage, subscriptions" />
+                <Input label="Kit Cost (₹)" type="number" value={form.kit_cost} onChange={setNum("kit_cost")} />
+                <Input label="Number Of Kits" type="number" value={form.kits_count} onChange={setNum("kits_count")} />
               </div>
               <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Targets</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                <Input label="Washes / captain / day" type="number" step="0.1" value={form.targets.washes_per_captain_per_day} onChange={setTarget("washes_per_captain_per_day")} />
-                <Input label="Repeat rate %" type="number" value={form.targets.repeat_rate_pct} onChange={setTarget("repeat_rate_pct")} />
-                <Input label="Capacity utilisation %" type="number" value={form.targets.capacity_utilisation_pct} onChange={setTarget("capacity_utilisation_pct")} />
-                <Input label="Avg rating" type="number" step="0.1" value={form.targets.avg_rating} onChange={setTarget("avg_rating")} />
+                <Input label="Washes / Captain / Day" type="number" step="0.1" value={form.targets.washes_per_captain_per_day} onChange={setTarget("washes_per_captain_per_day")} />
+                <Input label="Repeat Rate %" type="number" value={form.targets.repeat_rate_pct} onChange={setTarget("repeat_rate_pct")} />
+                <Input label="Capacity Utilisation %" type="number" value={form.targets.capacity_utilisation_pct} onChange={setTarget("capacity_utilisation_pct")} />
+                <Input label="Avg Rating" type="number" step="0.1" value={form.targets.avg_rating} onChange={setTarget("avg_rating")} />
                 <Input label="CAC (₹)" type="number" value={form.targets.cac} onChange={setTarget("cac")} />
               </div>
             </div>
@@ -90,11 +91,11 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
                 ))}
               </div>
               <div className="rounded-xl border border-gray-100 p-3">
-                <p className="mb-2 text-xs font-semibold text-[var(--color-text-primary)]">Add entry</p>
+                <p className="mb-2 text-xs font-semibold text-[var(--color-text-primary)]">Add Entry</p>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <Input label="Date" type="date" value={entry.date} onChange={(e) => setEntry({ ...entry, date: e.target.value })} />
                   <Select label="Source" value={entry.source} onChange={(e) => setEntry({ ...entry, source: e.target.value })}>
-                    {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    {SOURCES.map((s) => <option key={s} value={s}>{toTitle(s)}</option>)}
                   </Select>
                   <Input label="Campaign" value={entry.campaign} onChange={(e) => setEntry({ ...entry, campaign: e.target.value })} />
                   <Input label="Spend ₹" type="number" value={entry.spend} onChange={(e) => setEntry({ ...entry, spend: Number(e.target.value) || 0 })} />

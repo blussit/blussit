@@ -13,9 +13,11 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
 import { passHeadlinePrice } from "../../lib/passPricing";
-import { buyAgainCandidates, passPlanName, passState } from "../../lib/passState";
+import { buyAgainCandidates, isSocietyPass, passPlanName, passState, societyPassPath } from "../../lib/passState";
+import { NextPremiumWash } from "../../components/society/schedule/ResidentScheduleCard";
 import type { UserSubscription } from "../../types";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
+import { titleCase } from "../../components/public/landing/shared";
 
 const PAST_SHOWN = 4;
 
@@ -46,8 +48,8 @@ export default function SubscriptionsPage() {
   const { data: servicesData } = useQuery({ queryKey: ["services-for-subscriptions"], queryFn: () => catalogApi.services({ page_size: 100 }) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const services = servicesData?.data || [];
-  const serviceName = (id?: string | null) => services.find((s) => s.id === id)?.name || "";
-  const typeNameOf = (id?: string | null) => (vehicleTypes || []).find((t) => t.id === id)?.name || "";
+  const serviceName = (id?: string | null) => titleCase(services.find((s) => s.id === id)?.name);
+  const typeNameOf = (id?: string | null) => titleCase((vehicleTypes || []).find((t) => t.id === id)?.name);
 
   const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
   const [upgradeError, setUpgradeError] = useState("");
@@ -94,7 +96,11 @@ export default function SubscriptionsPage() {
     const plan = plans?.find((p) => p.id === sub.plan_id);
     const state = passState(sub);
     const isActive = state === "active";
-    const canUpgrade = isActive && !!plan?.upgrade_to_plan_ids?.length;
+    // A society pass is run by the society manager: no upgrade, auto-pay or
+    // cancel here — it books (a day ahead) and renews on its society page.
+    const society = isSocietyPass(sub);
+    const societyPath = society ? societyPassPath(sub) : null;
+    const canUpgrade = !society && isActive && !!plan?.upgrade_to_plan_ids?.length;
     const left = sub.remaining_service_count ?? 0;
     const pct = sub.total_service_count ? Math.round((left / sub.total_service_count) * 100) : 0;
     const covers = coversLine(sub);
@@ -102,11 +108,14 @@ export default function SubscriptionsPage() {
       <Card key={sub.id} className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EEF3FA] text-[#0E1A33]">
               <VehicleIcon vehicleTypeId={sub.vehicle_type} className="h-5 w-5" />
             </span>
             <div className="min-w-0">
-              <h3 className="truncate font-display font-bold text-black">{passPlanName(sub, plans)}</h3>
+              <h3 className="truncate font-display font-bold text-[#0E1A33]">{titleCase(passPlanName(sub, plans))}</h3>
+              {society && (
+                <p className="truncate text-xs font-semibold text-[#0A66F0]">Society Plan{sub.society_name ? ` · ${sub.society_name}` : ""}</p>
+              )}
               {covers && <p className="truncate text-xs text-gray-500">{covers}</p>}
             </div>
           </div>
@@ -114,26 +123,47 @@ export default function SubscriptionsPage() {
         </div>
 
         <p className="mt-4 text-sm text-gray-600">
-          <span className="font-mono-num text-lg font-bold text-black">{left}</span> of {sub.total_service_count} washes left
+          <span className="font-mono-num text-lg font-bold text-[#0E1A33]">{left}</span> of {sub.total_service_count} {society ? serviceName(sub.service_id) || "premium washes" : "washes"} left
         </p>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
-          <div className="h-full rounded-full bg-[#E8A900]" style={{ width: `${pct}%` }} />
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#EEF3FA]">
+          <div className="h-full rounded-full bg-[#0A66F0]" style={{ width: `${pct}%` }} />
         </div>
 
         <p className="mt-2.5 flex items-center gap-1.5 text-xs text-gray-500">
           {sub.auto_renew ? <RefreshCw className="h-3.5 w-3.5" /> : <CalendarClock className="h-3.5 w-3.5" />}
-          {state === "renewing"
+          {society
+            ? state === "used_up"
+              ? `Premium washes used · daily washes till ${format(sub.end_date)}`
+              : `Valid till ${format(sub.end_date)} · book a day ahead, renew on your society page`
+            : state === "renewing"
             ? "Your next month starts once the auto-pay charge goes through."
             : state === "used_up"
               ? `All washes used · ${sub.auto_renew ? "renews" : "valid till"} ${format(sub.end_date)}`
               : `${sub.auto_renew ? "Renews" : "Valid till"} ${format(sub.end_date)}`}
         </p>
 
-        {state !== "paused" && (
+        {society && isActive && <NextPremiumWash subscriptionId={sub.id} className="mt-2" />}
+        {state !== "paused" && society && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {societyPath ? (
+              <Button variant={isActive ? "info" : "outline"} size="sm" onClick={() => navigate(societyPath)}>
+                {isActive ? "Book Now" : "Society Page"}
+              </Button>
+            ) : isActive ? (
+              // Society link switched off: the pass still books here (a day ahead, checked by the server).
+              <Button variant="info" size="sm" onClick={() => navigate(`/app/book?subscription=${sub.id}`)}>
+                Book Now
+              </Button>
+            ) : (
+              <p className="text-xs text-gray-500">Your society manager renews this plan.</p>
+            )}
+          </div>
+        )}
+        {state !== "paused" && !society && (
           <div className="mt-4 flex flex-wrap gap-2">
             {isActive && (
               <Button variant="info" size="sm" onClick={() => navigate(`/app/book?subscription=${sub.id}`)}>
-                Book now
+                Book Now
               </Button>
             )}
             {canUpgrade && (
@@ -149,7 +179,7 @@ export default function SubscriptionsPage() {
                 onClick={async () => {
                   if (
                     await confirm({
-                      title: "Turn off auto-pay?",
+                      title: "Turn Off Auto-Pay?",
                       message: left > 0
                         ? `Your ${left} remaining wash${left === 1 ? "" : "es"} stay usable until ${format(sub.end_date)} — it just won't renew after that.`
                         : state === "renewing"
@@ -160,7 +190,7 @@ export default function SubscriptionsPage() {
                     autoPayOffMutation.mutate(sub.id);
                 }}
               >
-                Turn off auto-pay
+                Turn Off Auto-Pay
               </Button>
             )}
             {isActive && (
@@ -170,7 +200,7 @@ export default function SubscriptionsPage() {
                 onClick={async () => {
                   if (
                     await confirm({
-                      title: "Cancel this pass?",
+                      title: "Cancel This Pass?",
                       message: `${left} unused wash${left === 1 ? "" : "es"} will be lost${sub.auto_renew ? ", and auto-pay stops immediately" : ""} — this can't be undone.`,
                       tone: "danger",
                     })
@@ -178,7 +208,7 @@ export default function SubscriptionsPage() {
                     cancelMutation.mutate(sub.id);
                 }}
               >
-                Cancel pass
+                Cancel Pass
               </Button>
             )}
           </div>
@@ -197,18 +227,18 @@ export default function SubscriptionsPage() {
     const covers = coversLine(sub);
     const canBuy = rebuyable.has(sub.id) && !!plans?.some((p) => p.id === sub.plan_id);
     return (
-      <div key={sub.id} className="flex items-center gap-3 rounded-2xl border border-[#F3E5B5] bg-white px-4 py-3.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-gray-500">
+      <div key={sub.id} className="flex items-center gap-3 rounded-2xl border border-[#E4E9F1] bg-white px-4 py-3.5">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#EEF3FA] text-gray-500">
           <VehicleIcon vehicleTypeId={sub.vehicle_type} className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-black">{passPlanName(sub, plans)}</p>
+          <p className="truncate text-sm font-semibold text-[#0E1A33]">{titleCase(passPlanName(sub, plans))}</p>
           {covers && <p className="truncate text-xs text-gray-500">{covers}</p>}
           <p className="truncate text-xs text-gray-400">{endedLine(sub)}</p>
         </div>
         {canBuy ? (
           <Button variant="info" size="sm" className="shrink-0" onClick={() => buyAgain(sub)}>
-            <RotateCcw className="h-3.5 w-3.5" /> Buy again
+            <RotateCcw className="h-3.5 w-3.5" /> Buy Again
           </Button>
         ) : (
           <PassStatusBadge sub={sub} />
@@ -221,7 +251,7 @@ export default function SubscriptionsPage() {
 
   return (
     <div className="space-y-8">
-      <h1 className="font-display text-2xl font-bold text-black">Monthly passes</h1>
+      <h1 className="font-display text-[22px] font-bold text-[#0E1A33] lg:text-[26px]">My Plans</h1>
 
       {purchase.note && (
         <Card className="flex items-start justify-between gap-3 p-4">
@@ -235,11 +265,11 @@ export default function SubscriptionsPage() {
       )}
 
       <div>
-        <h2 className="mb-4 font-semibold text-black">My passes</h2>
+        <h2 className="mb-4 font-semibold text-[#0E1A33]">Your Passes</h2>
         {subsLoading ? (
           <PageLoader />
         ) : !subs.length ? (
-          <EmptyState icon={Gift} title="No passes yet" description="Pick one below." />
+          <EmptyState icon={Gift} title="No Passes Yet" description="Pick one below." />
         ) : !running.length ? (
           <p className="text-sm text-gray-500">No active pass right now.</p>
         ) : (
@@ -249,18 +279,18 @@ export default function SubscriptionsPage() {
 
       {past.length > 0 && (
         <div>
-          <h2 className="mb-4 font-semibold text-black">Past passes</h2>
+          <h2 className="mb-4 font-semibold text-[#0E1A33]">Past Passes</h2>
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">{pastShown.map(renderPast)}</div>
           {past.length > PAST_SHOWN && (
-            <button type="button" onClick={() => setShowAllPast((v) => !v)} className="mt-3 text-sm font-medium text-gray-600 hover:text-black">
-              {showAllPast ? "Show less" : `Show all ${past.length}`}
+            <button type="button" onClick={() => setShowAllPast((v) => !v)} className="mt-3 text-sm font-medium text-gray-600 hover:text-[#0E1A33]">
+              {showAllPast ? "Show Less" : `Show All ${past.length}`}
             </button>
           )}
         </div>
       )}
 
       <div>
-        <h2 className="mb-4 font-semibold text-black">Get a pass</h2>
+        <h2 className="mb-4 font-semibold text-[#0E1A33]">Get A Pass</h2>
         {plansLoading ? (
           <PageLoader />
         ) : (
@@ -270,18 +300,18 @@ export default function SubscriptionsPage() {
               const menuNames = (plan.included_service_ids || []).map(serviceName).filter(Boolean);
               return (
                 <Card key={plan.id} className="flex flex-col p-5">
-                  <h3 className="font-display font-bold text-black">{plan.name}</h3>
+                  <h3 className="font-display font-bold text-[#0E1A33]">{titleCase(plan.name)}</h3>
                   {from != null && (
                     <p className="mt-1">
                       <span className="text-xs text-gray-500">from </span>
-                      <span className="font-mono-num text-2xl font-bold text-black">₹{from}</span>
+                      <span className="font-mono-num text-2xl font-bold text-[#0E1A33]">₹{from}</span>
                       <span className="text-xs text-gray-500"> / {CYCLE_PRICE[plan.billing_cycle] ?? "month"}</span>
                     </p>
                   )}
                   <p className="mt-1 text-xs text-gray-500">{washesPerCycle(plan)}</p>
                   {!!menuNames.length && <p className="mt-2 text-xs text-gray-600">Choose from: {menuNames.join(", ")}</p>}
                   <Button variant="info" className="mt-4 w-full" onClick={() => purchase.start(plan)}>
-                    Choose pass
+                    Choose Pass
                   </Button>
                 </Card>
               );
@@ -289,13 +319,13 @@ export default function SubscriptionsPage() {
 
             {/* Anything the standard passes can't serve — a fleet, a
                 different rhythm — goes to a human instead of nowhere. */}
-            <div className="flex flex-col justify-between rounded-[var(--radius-card)] border border-dashed border-[#F3E5B5] p-5">
+            <div className="flex flex-col justify-between rounded-[var(--radius-card)] border border-dashed border-[#E4E9F1] p-5">
               <div>
-                <h3 className="font-display font-bold text-black">Need something else?</h3>
+                <h3 className="font-display font-bold text-[#0E1A33]">Need Something Else?</h3>
                 <p className="mt-1 text-sm text-gray-600">More cars or a fixed weekly time — we'll price it for you.</p>
               </div>
               <Button variant="outline" className="mt-4 w-full" onClick={() => setEnquiryOpen(true)}>
-                Request a custom plan
+                Request A Custom Plan
               </Button>
             </div>
           </div>
@@ -306,7 +336,7 @@ export default function SubscriptionsPage() {
 
       <CustomPlanEnquiryModal open={enquiryOpen} onClose={() => setEnquiryOpen(false)} defaultName={user?.full_name} defaultPhone={user?.phone} />
 
-      <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade pass">
+      <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade Pass">
         <div className="space-y-3">
           {upgradeTargets.length === 0 ? (
             <p className="text-sm text-gray-600">No upgrade is available from your current pass.</p>
@@ -316,7 +346,7 @@ export default function SubscriptionsPage() {
               {upgradeTargets.map((p) => (
                 <Card key={p.id} className="flex items-center justify-between p-4">
                   <div>
-                    <p className="font-medium text-black">{p.name}</p>
+                    <p className="font-medium text-[#0E1A33]">{titleCase(p.name)}</p>
                     <p className="text-xs text-gray-500">{washesPerCycle(p)}</p>
                   </div>
                   <Button variant="info" size="sm" isLoading={upgradeMutation.isPending} onClick={() => upgradeMutation.mutate(p.id)}>

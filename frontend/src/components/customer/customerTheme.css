@@ -1,0 +1,77 @@
+/*
+ * Theme v2 for the customer app. CustomerShell puts `cust-v2` on <body>
+ * while a customer page is showing (never on the booking flow, never in the
+ * staff portals), so modals, toasts and the confirm box mounted outside the
+ * page tree match too.
+ *
+ * The shared primitives (ui/Button "info", Modal, EmptyState, Badge, Input)
+ * hard-code the staff portals' gold-and-black palette. Under `.cust-v2` the
+ * same literal classes are re-pointed at the v2 tokens, so a shared modal
+ * or button reads blue/navy without forking the component. Plain
+ * (unlayered) CSS on purpose: it outranks Tailwind's utilities layer, which
+ * is why each re-pointed hover is re-pointed explicitly too.
+ */
+body.cust-v2 {
+  --color-surface: #ffffff;
+  --color-card-border: #e4e9f1;
+  --color-primary: #0a66f0;
+  --color-primary-dark: #0857d0;
+  --color-primary-light: #e8f0fe;
+  --color-secondary: #ffd21f;
+  --color-secondary-light: #fff8d6;
+  --color-accent: #0a66f0;
+  --color-accent-light: #e7f6ec;
+  --color-text-primary: #0e1a33;
+  --color-text-secondary: #5f6878;
+}
+.cust-v2 .text-black {
+  color: #0e1a33;
+}
+.cust-v2 .bg-\[\#E8A900\] {
+  background-color: #0a66f0;
+}
+.cust-v2 .hover\:bg-\[\#D99A00\]:hover {
+  background-color: #0857d0;
+}
+.cust-v2 .border-\[\#F3E5B5\] {
+  border-color: #e4e9f1;
+}
+.cust-v2 .bg-\[\#FFF4CD\] {
+  background-color: #e8f0fe;
+}
+.cust-v2 .hover\:bg-\[\#FFF4CD\]:hover {
+  background-color: #e8f0fe;
+}
+.cust-v2 .text-\[\#8A6600\] {
+  color: #0a66f0;
+}
+.cust-v2 .bg-gray-100 {
+  background-color: #eef3fa;
+}
+
+/* Form fields: hairline border, #c9d6ea hover, blue focus with a soft halo
+   (same tokens as ui/fieldStyles). A field flagged aria-invalid keeps its
+   red error border. */
+.cust-v2 :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea):not([aria-invalid="true"]) {
+  border-color: #e4e9f1;
+}
+.cust-v2 :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea):not([aria-invalid="true"]):not(:disabled):not(:focus):hover {
+  border-color: #c9d6ea;
+}
+.cust-v2 :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea):not([aria-invalid="true"]):focus {
+  border-color: #0a66f0;
+  box-shadow: 0 0 0 3px rgba(10, 102, 240, 0.15);
+  outline: none;
+}
+.cust-v2 input[type="checkbox"] {
+  accent-color: #0a66f0;
+}
+
+/* index.css gives every gold CTA a gold halo — inside the customer app
+   those buttons are blue, so the halo is too. */
+.cust-v2 button[class*="bg-[#E8A900]"],
+.cust-v2 a[class*="bg-[#E8A900]"],
+.cust-v2 button[class*="bg-[#E8A900]"]:hover:not(:disabled),
+.cust-v2 a[class*="bg-[#E8A900]"]:hover {
+  box-shadow: 0 8px 18px -8px rgba(10, 102, 240, 0.55);
+}

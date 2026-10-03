@@ -21,9 +21,11 @@ import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, Marketi
 import { KpiListModal } from "../../components/admin/kpi/KpiListModal";
 import { KpiBriefModal } from "../../components/admin/kpi/KpiBriefModal";
 import { RevenueDrillModal } from "../../components/admin/kpi/RevenueDrillModal";
+import { KpiExplorer } from "../../components/admin/kpi/KpiExplorer";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { format, formatSlot } from "../../lib/date";
+import { bookingCarAndService } from "../../lib/titleCase";
 import { PERIODS, REVENUE_SCOPES, type RevenueScope } from "../../lib/kpiPeriods";
 import type { Booking, User } from "../../types";
 
@@ -96,8 +98,8 @@ export default function AdminDashboardPage() {
   const revenueFor = (block?: OverviewBlock) =>
     !block ? 0 : revenueScope === "bookings" ? block.revenue : revenueScope === "plans" ? block.plan_revenue : block.combined_revenue;
   const revenueLabel =
-    (periodKey === "today" ? "Today's revenue" : "Revenue") +
-    (revenueScope === "bookings" ? " — bookings" : revenueScope === "plans" ? " — plans" : "");
+    (periodKey === "today" ? "Today's Revenue" : "Revenue") +
+    (revenueScope === "bookings" ? " — Bookings" : revenueScope === "plans" ? " — Plans" : "");
   const revenueTip =
     revenueScope === "bookings"
       ? "Completed-wash revenue in the period"
@@ -107,12 +109,12 @@ export default function AdminDashboardPage() {
 
   const primary = cur && prev ? [
     {
-      label: periodKey === "today" ? "Today's bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag,
+      label: periodKey === "today" ? "Today's Bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag,
       delta: <DeltaPill current={cur.bookings} previous={prev.bookings} />, tip: "Bookings created in the selected period",
       onClick: () => setListDrill("bookings-created"),
     },
     {
-      label: "Completed washes", value: String(cur.completed), icon: CheckCircle2,
+      label: "Completed Washes", value: String(cur.completed), icon: CheckCircle2,
       delta: <DeltaPill current={cur.completed} previous={prev.completed} />, tip: "Washes finished in the selected period",
       onClick: () => setListDrill("bookings-completed"),
     },
@@ -122,36 +124,36 @@ export default function AdminDashboardPage() {
       onClick: () => setRevenueDrillOpen(true),
     },
     {
-      label: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
+      label: "Completion Rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
       delta: <DeltaPill current={cur.completion_rate} previous={prev.completion_rate} />, tip: "Completed ÷ all bookings",
       onClick: () =>
         setBriefDrill({
-          title: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, tip: "Completed ÷ all bookings in the period",
+          title: "Completion Rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, tip: "Completed ÷ all bookings in the period",
           breakdown: [
-            { label: "Bookings created", value: cur.bookings },
+            { label: "Bookings Created", value: cur.bookings },
             { label: "Completed", value: cur.completed },
           ],
         }),
     },
     {
-      label: "New customers", value: String(cur.new_customers), icon: UserPlus,
+      label: "New Customers", value: String(cur.new_customers), icon: UserPlus,
       delta: <DeltaPill current={cur.new_customers} previous={prev.new_customers} />, tip: "Customer accounts created in the period",
       onClick: () => setListDrill("new-customers"),
     },
     {
-      label: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`, icon: Repeat,
+      label: "Repeat Customer Rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`, icon: Repeat,
       delta: <DeltaPill current={cur.repeat_customer_rate} previous={prev.repeat_customer_rate} />, tip: "Share of this period's customers who had booked before it",
       target: <TargetChip actual={cur.repeat_customer_rate} target={data?.targets?.repeat_rate_pct} unit="%" />,
       onClick: () =>
         setBriefDrill({
-          title: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`,
+          title: "Repeat Customer Rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`,
           tip: "Share of this period's customers who had booked before it started — a rising rate means BLUSSIT is becoming a habit, not a one-time purchase.",
         }),
     },
   ] : [];
 
   // Revenue leads (it is THE business number); the rest support it.
-  const hero = primary.find((p) => p.label.startsWith(periodKey === "today" ? "Today's revenue" : "Revenue"));
+  const hero = primary.find((p) => p.label.startsWith(periodKey === "today" ? "Today's Revenue" : "Revenue"));
   const rest = primary.filter((p) => p !== hero);
 
   return (
@@ -230,7 +232,7 @@ export default function AdminDashboardPage() {
           />
         </div>
       )}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-1 gap-4 min-[480px]:grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
         {rest.map((s) => (
           <StatCard
             key={s.label}
@@ -249,7 +251,7 @@ export default function AdminDashboardPage() {
           />
         ))}
         <StatCard
-          label="Website visitors"
+          label="Website Visitors"
           labelAfter={<InfoTip text={VISITORS_TIP} />}
           value={visitors ? visitors.total.toLocaleString("en-IN") : "—"}
           icon={Globe}
@@ -263,7 +265,7 @@ export default function AdminDashboardPage() {
             visitors
               ? () =>
                   setBriefDrill({
-                    title: "Website visitors",
+                    title: "Website Visitors",
                     value: visitors.total.toLocaleString("en-IN"),
                     tip: VISITORS_TIP,
                     breakdown: [...visitors.daily].reverse().map((d) => ({ label: format(d.date), value: d.visitors })),
@@ -276,7 +278,7 @@ export default function AdminDashboardPage() {
 
       {/* Action required — only triggered exceptions, invisible when healthy. */}
       {alerts.length > 0 ? (
-        <Panel title="Action required">
+        <Panel title="Action Required">
           <ul className="space-y-1.5">
             {alerts.map((a) => (
               <li key={a.text} className="flex items-start gap-2 text-sm text-gray-700">
@@ -291,6 +293,10 @@ export default function AdminDashboardPage() {
           <Sparkles className="h-3.5 w-3.5" /> No exceptions need attention in this period.
         </p>
       )}
+
+      {/* Interactive trends: its own filter row (period, center, service,
+          car type, channel) scopes every chart in it; every bar drills in. */}
+      <KpiExplorer />
 
       {/* SECONDARY — one focus area at a time. */}
       <div className="overflow-x-auto">
@@ -319,7 +325,7 @@ export default function AdminDashboardPage() {
       <KpiListModal<Booking>
         open={listDrill === "bookings-created" || listDrill === "bookings-completed"}
         onClose={() => setListDrill(null)}
-        title={listDrill === "bookings-completed" ? "Completed washes" : "Bookings"}
+        title={listDrill === "bookings-completed" ? "Completed Washes" : "Bookings"}
         queryKey={["kpi-drill", listDrill, params]}
         fetchFn={(page) =>
           bookingApi.all({
@@ -333,6 +339,7 @@ export default function AdminDashboardPage() {
           <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-black">{b.customer_name || "—"} · {b.booking_number}</p>
+              <p className="truncate text-xs text-gray-600">{bookingCarAndService(b)}</p>
               <p className="text-xs text-gray-500">{format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -346,7 +353,7 @@ export default function AdminDashboardPage() {
       <KpiListModal<User>
         open={listDrill === "new-customers"}
         onClose={() => setListDrill(null)}
-        title="New customers"
+        title="New Customers"
         queryKey={["kpi-drill-new-customers", params]}
         fetchFn={(page) => adminUserApi.list({ ...params, role: "customer", page, page_size: 50 })}
         getRowKey={(u) => u.id}

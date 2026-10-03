@@ -58,7 +58,8 @@ class ServiceUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     vehicle_types: Optional[list[str]] = None
-    price: Optional[float] = None
+    # Same floor as create: an edit could save a ₹0 / 0-minute service.
+    price: Optional[float] = Field(default=None, gt=0)
     discounted_price: Optional[float] = None
     vehicle_type_prices: Optional[dict[str, float]] = None
     vehicle_type_discounted_prices: Optional[dict[str, float]] = None
@@ -72,8 +73,8 @@ class ServiceUpdateRequest(BaseModel):
     charges_travel: Optional[bool] = None
     # Sent blank (or null) = clear the tag; omitted = leave it alone.
     offer_tag: Optional[str] = Field(default=None, max_length=30)
-    captain_fee: Optional[float] = None
-    duration_minutes: Optional[int] = None
+    captain_fee: Optional[float] = Field(default=None, ge=0)
+    duration_minutes: Optional[int] = Field(default=None, gt=0)
     image: Optional[str] = None
     is_active: Optional[bool] = None
     is_featured: Optional[bool] = None

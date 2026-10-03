@@ -84,7 +84,7 @@ export default function ServicePolicyPage() {
               </ul>
               {addons.length > 0 && (
                 <p className="mt-3 text-sm">
-                  <span className="font-semibold text-black">Extras you can add to any wash: </span>
+                  <span className="font-semibold text-black">Extras You Can Add To Any Wash: </span>
                   {addons.map((a) => titleCase(a.name)).join(", ")}.
                 </p>
               )}
