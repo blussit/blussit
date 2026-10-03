@@ -8,13 +8,18 @@ venv
 .env.*
 !.env.example
 !*/.env.example
+# Local-dev templates (no real keys) — see SETUP_WINDOWS.md
+!*/.env.development.example
 backend/.env
 backend/app/__pycache__
 __pycache__
 frontend/node_modules
 blussit-prelaunch/frontend/node_modules
 .claude
-backend/uploads/photos
+backend/uploads/
 
 # Local dev runner state (pids, logs) — scripts/dev.sh
 .dev/
+
+# Local test-database snapshot to share with teammates (see SETUP_WINDOWS.md) — not committed
+devdata/

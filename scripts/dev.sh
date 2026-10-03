@@ -9,7 +9,7 @@
 #   scripts/dev.sh reset    wipe the LOCAL test database and seed it fresh
 #   scripts/dev.sh test     run the backend test suite (separate throwaway DB)
 #
-# Website http://localhost:5173 · API http://localhost:8000/docs
+# Website http://localhost:5173 · API docs http://localhost:8000/api/docs
 # Uses backend/.env.development only. Production credentials
 # (backend/.env.production) are never read by this script.
 set -Eeuo pipefail
@@ -115,7 +115,7 @@ case "${1:-up}" in
     start_bg backend "$BACKEND" env ENV_FILE=.env.development "$VENV/bin/uvicorn" app.main:app \
       --host 127.0.0.1 --port 8000 --reload --reload-dir app
     start_bg frontend "$FRONTEND" ./node_modules/.bin/vite --host localhost --port 5173 --strictPort
-    wait_for http://127.0.0.1:8000/api/health "Backend ✓  http://localhost:8000/docs"
+    wait_for http://127.0.0.1:8000/api/health "Backend ✓  http://localhost:8000/api/docs"
     wait_for http://localhost:5173 "Website ✓  http://localhost:5173"
     say "Test logins: customers = phone + OTP 123456 · staff = see backend/app/scripts/seed_dev.py"
     ;;

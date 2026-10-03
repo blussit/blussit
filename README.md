@@ -7,29 +7,19 @@ plus Customer, Captain, Manager, and Super Admin portals.
 
 ## Quick start
 
-**1. Backend** (see `backend/README.md` for full detail)
+**Windows (step by step, for new teammates): see [SETUP_WINDOWS.md](SETUP_WINDOWS.md).**
+
+**macOS / Linux:** with Docker, Python 3.12 and Node 20.19+ installed:
 
 ```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env        # point MONGO_URI at your MongoDB instance
-python -m app.seed          # optional: seed demo data + a super admin
-uvicorn app.main:app --reload --port 8000
+cp backend/.env.development.example backend/.env.development
+cp frontend/.env.development.example frontend/.env.development
+scripts/dev.sh up      # local Mongo (Docker) + backend + website, seeds test data on first run
 ```
 
-API docs: http://localhost:8000/api/docs
-
-**2. Frontend** (see `frontend/README.md` for full detail)
-
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm run dev
-```
-
-App: http://localhost:5173
+Website http://localhost:5173 · API docs http://localhost:8000/api/docs · every
+OTP is `123456` locally. Live credentials live only in `backend/.env.production`,
+which the deploy script reads — local runs never touch production.
 
 ## What's included (Phase 1 scope)
 
