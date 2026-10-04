@@ -25,35 +25,40 @@ export function SocietyRequestCard() {
 
   return (
     <div
-      className="mt-5 flex flex-col gap-5 rounded-[16px] border border-[#E4E9F1] bg-[#EEF3FA] p-5 sm:p-6 lg:mt-6 lg:flex-row lg:items-center lg:justify-between lg:gap-8"
+      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#E4E9F1] bg-[#EEF3FA] p-5 sm:p-6 lg:h-full lg:min-h-[470px] lg:-my-4 lg:shadow-xl lg:px-7 lg:py-8 lg:z-10"
       data-testid="landing-society-card"
     >
-      <div className="min-w-0">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#0A66F0]">
-          <Building2 className="h-3.5 w-3.5" /> For Housing Societies
-        </span>
-        <h3 className="mt-2.5 font-display text-[22px] font-extrabold leading-tight text-[#0E1A33] sm:text-[24px]">
-          Every Car In Your Society, Washed Daily
-        </h3>
-        <p className="mt-1 max-w-[620px] text-[14px] text-[#5F6878]">
-          A dedicated captain comes every morning, plus premium washes each month. Residents join from one link.
-        </p>
-        <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-[13px] text-[#0E1A33]">
-          <li className="flex items-center gap-1.5"><UserCheck className="h-4 w-4 text-[#0A66F0]" /> Daily Wash By Your Captain</li>
-          <li className="flex items-center gap-1.5"><Sparkles className="h-4 w-4 text-[#0A66F0]" /> Star Wash / Deep Cleaning Included</li>
-          <li className="flex items-center gap-1.5"><CalendarCheck className="h-4 w-4 text-[#0A66F0]" /> One Plan Per Car, Monthly</li>
+      <div className="flex flex-col flex-1">
+        <div>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#0A66F0] shadow-sm">
+            <Building2 className="h-3.5 w-3.5" /> For Housing Societies
+          </span>
+          <h3 className="mt-3 font-display text-[22px] font-extrabold leading-tight text-[#0E1A33] sm:text-[24px]">
+            Every Car In Your Society, Washed Daily
+          </h3>
+          <p className="mt-2 text-[13px] leading-snug text-[#5F6878]">
+            A dedicated captain comes every morning, plus premium washes each month. Residents join from one link.
+          </p>
+        </div>
+
+        <div className="mt-5 lg:mt-6">
+          <p className="text-[#0E1A33] flex items-baseline gap-1.5">
+            <span className="text-[12px] text-[#5F6878]">From</span>
+            <span className="font-display text-[30px] font-extrabold leading-none text-[#0A66F0] sm:text-[34px]">{INR(from)}</span>
+            <span className="text-[13px] text-[#5F6878]">/ Car / Month</span>
+          </p>
+        </div>
+
+        <ul className="mb-5 mt-5 space-y-3">
+          <li className="flex items-center gap-2"><UserCheck className="h-[18px] w-[18px] shrink-0 text-[#0A66F0]" /> <span className="text-[13px] font-bold text-[#0E1A33]">Daily Wash By Your Captain</span></li>
+          <li className="flex items-center gap-2"><Sparkles className="h-[18px] w-[18px] shrink-0 text-[#0A66F0]" /> <span className="text-[13px] font-bold text-[#0E1A33]">Star Wash / Deep Cleaning Included</span></li>
+          <li className="flex items-center gap-2"><CalendarCheck className="h-[18px] w-[18px] shrink-0 text-[#0A66F0]" /> <span className="text-[13px] font-bold text-[#0E1A33]">One Plan Per Car, Monthly</span></li>
         </ul>
-      </div>
-      <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center lg:flex-col lg:items-end">
-        <p className="text-[#0E1A33]">
-          <span className="text-[12px] text-[#5F6878]">From </span>
-          <span className="font-display text-[30px] font-extrabold leading-none text-[#0A66F0]">{INR(from)}</span>
-          <span className="text-[13px] text-[#5F6878]"> / Car / Month</span>
-        </p>
+
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="inline-flex items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] px-6 py-3 text-[14.5px] font-bold text-[#0E1A33] transition hover:brightness-95"
+          className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] py-3 text-[14.5px] font-bold text-[#0E1A33] shadow-sm transition hover:brightness-95"
         >
           Request For Your Society <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
         </button>
