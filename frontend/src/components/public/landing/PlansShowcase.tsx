@@ -45,7 +45,12 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   const bikeIds = bikeTypeIds(vehicleTypes);
 
   // Headline = Waterless Service × Hatchback price (see passHeadlinePrice).
-  const fromPrices = active.map((plan) => passHeadlinePrice(plan, services, vehicleTypes)).filter((n): n is number => n != null);
+  const fromPrices = active
+    .map((plan) => {
+      const hp = passHeadlinePrice(plan, services, vehicleTypes);
+      return hp != null ? hp : (plan.discounted_price ?? plan.price);
+    })
+    .filter((n): n is number => n != null);
   const from = fromPrices.length ? Math.min(...fromPrices) : null;
   const washes = Array.from(
     new Set(
