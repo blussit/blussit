@@ -105,9 +105,8 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
                 <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
 
                 <div className="mt-4 flex items-baseline gap-1.5">
-                  {from != null && <span className="text-[12px] text-[#64748B]">From</span>}
                   <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">
-                    {from != null ? INR(from) : "?"}
+                    ₹999
                   </span>
                   <span className="text-[13px] text-[#64748B]">/ Month</span>
                 </div>
