@@ -33,19 +33,10 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
 
   const services = servicesData?.data ?? [];
-  // Monthly only — quarterly/yearly plans are retired and kept inactive.
-  const active = (plans ?? []).filter((p) => p.is_active !== false && p.billing_cycle === "monthly");
+  const active = (plans ?? []).filter((p) => p.is_active !== false);
 
-  // No monthly pass on sale: the societies block still shows on its own.
-  if (!isLoading && active.length === 0 && !showEmpty) {
-    return (
-      <section id={id || "plans"} className="bg-white pt-4 pb-4 md:pt-6 md:pb-6 lg:pt-8 lg:pb-8">
-        <div className="mx-auto w-full max-w-[1400px] px-5 sm:px-6">
-          <SocietyRequestCard />
-        </div>
-      </section>
-    );
-  }
+  // No monthly pass on sale: the cards will still render (showing fallback pricing if needed),
+  // so the user can always see the Monthly Pass and Custom Plan options alongside the Society block.
 
   const choose = () =>
     user?.role === "customer" ? navigate("/app/subscriptions") : navigate("/login", { state: { from: { pathname: "/app/subscriptions" } } });
