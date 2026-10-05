@@ -22,7 +22,6 @@ OTP is `123456` locally. Live credentials live only in `backend/.env.production`
 which the deploy script reads — local runs never touch production.
 
 ## What's included (Phase 1 scope)
-
 - Premium public landing page (hero, how it works, services, why choose us,
   subscription plans, testimonials, stats, FAQs, contact)
 - Customer auth (register/login/forgot-password with an OTP-placeholder

@@ -13,13 +13,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
-# Which env file a LOCAL run reads: backend/.env.development (test database,
-# test credentials) unless ENV_FILE names another one. Live credentials live
-# in backend/.env.production, which only the deploy script reads — so
-# starting the app on a laptop can never reach the production database.
-# Cloud Run has no env file at all; it gets its values as real environment
-# variables (which always win over any file).
-ENV_FILE = BACKEND_DIR / os.environ.get("ENV_FILE", ".env.development")
+# Which env file a LOCAL run reads:
+#   1) ENV_FILE if explicitly set
+#   2) backend/.env.development when present (local test DB, test creds)
+#   3) backend/.env as a compatibility fallback for the same local setup
+# We intentionally DO NOT fall back to backend/.env.production here: a laptop
+# run must never reach the live database by accident. Cloud Run has no env file
+# at all; it gets its values as real environment variables (which always win).
+
+def _resolve_env_file() -> Path:
+    env_file = os.environ.get("ENV_FILE")
+    if env_file:
+        return Path(env_file)
+
+    candidates = (BACKEND_DIR / ".env.development", BACKEND_DIR / ".env")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return BACKEND_DIR / ".env.development"
+
+
+ENV_FILE = _resolve_env_file()
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "mongo", "host.docker.internal"}
 

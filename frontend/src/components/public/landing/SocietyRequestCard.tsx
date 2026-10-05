@@ -6,7 +6,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Building2, CalendarCheck, CheckCircle2, Sparkles, UserCheck } from "lucide-react";
+import { ArrowRight, Building2, CalendarCheck, CheckCircle2, Crown, Sparkles, UserCheck } from "lucide-react";
 import { Modal } from "../../ui";
 import { societyLeadApi } from "../../../api/society";
 import { getErrorMessage } from "../../../lib/api-client";
@@ -25,10 +25,15 @@ export function SocietyRequestCard() {
 
   return (
     <div
-      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#E4E9F1] bg-[#EEF3FA] p-5 sm:p-6 lg:h-full lg:min-h-[470px] lg:-my-4 lg:shadow-xl lg:px-7 lg:py-8 lg:z-10"
+      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#E4E9F1] bg-[#EEF3FA] lg:h-full lg:min-h-[470px] lg:-my-4 lg:shadow-xl lg:z-10 sm:flex-row lg:flex-col"
       data-testid="landing-society-card"
     >
-      <div className="flex flex-col flex-1">
+      <span className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-[#FDE9A6] px-3 py-1 text-[11px] font-bold text-[#071A3D] shadow-sm">
+        <Crown className="h-3.5 w-3.5" strokeWidth={2.5} />
+        Most Popular
+      </span>
+
+      <div className="relative z-10 flex flex-col flex-1 p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
         <div>
           <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#0A66F0] shadow-sm">
             <Building2 className="h-3.5 w-3.5" /> For Housing Societies
@@ -62,6 +67,15 @@ export function SocietyRequestCard() {
         >
           Request For Your Society <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
         </button>
+      </div>
+      <div
+        className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
+      >
+        <img
+          src="/plans-card3.png"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-105"
+        />
       </div>
       <SocietyRequestModal open={open} onClose={() => setOpen(false)} />
     </div>

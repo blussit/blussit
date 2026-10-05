@@ -68,9 +68,13 @@ export default function LandingPage() {
     <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
       <PageSeo path="/" />
       <PublicNavbar />
-      <OfferBar offers={offers} onBook={bookService} />
       {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
-      <LandingHero onBook={bookService} />
+      <div className="relative">
+        <div className="absolute left-0 right-0 top-0 z-30">
+          <OfferBar offers={offers} onBook={bookService} />
+        </div>
+        <LandingHero onBook={bookService} />
+      </div>
       <ServicesShowcase row />
       <HowItWorksStrip />
       <PlansShowcase />

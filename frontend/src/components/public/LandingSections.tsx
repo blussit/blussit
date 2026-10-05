@@ -59,11 +59,10 @@ const IMG = {
    behavior cycled images by index, so e.g. Bike Wash could show a car).
    Anything without a match keeps the index-cycled fallback. */
 const SERVICE_IMAGE_MAP: [RegExp, string][] = [
-  [/waterless/i, "waterless.png"],
-  [/deep cleaning/i, "deep-cleaning.png"],
+  [/waterless/i, "/service-waterless.webp"],
   [/deep/i, "/service-deepclean.webp"],
-  [/jet/i, "jet-wash.png"],
-  [/bike/i, "bike-wash.png"],
+  [/jet/i, "/service-jet.webp"],
+  [/bike/i, "/service-bike.webp"],
 ];
 
 function serviceImageFor(name: string | undefined, index: number): string {
@@ -88,7 +87,7 @@ function PrimaryButton({
     <button
       type="button"
       onClick={onClick}
-      className={`group inline-flex cursor-pointer items-center justify-center gap-2 rounded-[10px] bg-[#E8A900] px-6 py-3 text-sm font-bold tracking-wide text-white shadow-[0_6px_16px_rgba(232,169,0,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#D99A00] hover:shadow-[0_10px_22px_rgba(232,169,0,0.30)] active:translate-y-0 active:shadow-md ${className}`}
+      className={`group inline-flex cursor-pointer items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-6 py-3 text-sm font-bold tracking-wide text-[#0B1730] shadow-[0_6px_16px_rgba(255,210,31,0.24)] transition-all duration-200 hover:-translate-y-0.5 hover:brightness-105 hover:shadow-[0_10px_22px_rgba(255,210,31,0.30)] active:translate-y-0 active:shadow-md ${className}`}
     >
       {children}
     </button>
@@ -108,7 +107,7 @@ function OutlineButton({
     <button
       type="button"
       onClick={onClick}
-      className={`group inline-flex cursor-pointer items-center justify-center gap-2 rounded-[10px] border border-white/55 bg-[#141414]/35 px-6 py-3 text-sm font-bold tracking-wide text-white shadow-sm backdrop-blur-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-[#E8A900] hover:bg-[#E8A900]/15 hover:text-white active:translate-y-0 ${className}`}
+      className={`group inline-flex cursor-pointer items-center justify-center gap-2 rounded-[12px] border border-[#E5EEF8] bg-white px-6 py-3 text-sm font-bold tracking-wide text-[#0B1730] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-[#0878F9] hover:bg-[#F4F9FF] hover:text-[#0878F9] active:translate-y-0 ${className}`}
     >
       {children}
     </button>
@@ -129,8 +128,8 @@ export function OfferTicker() {
 
 /** The right-sized hero files for a slide (built by frontend/scripts/optimize-images.py):
  *  a phone crop and a 1600px version for tablets and up. */
-const heroPhone = (slug: string) => `/hero/${slug}-m.webp`;
-const heroWide = (slug: string) => `/hero/${slug}-1600.webp`;
+const heroPhone = (slug: string) => slug.includes('.') ? `/${slug}` : `/hero/${slug}-m.webp`;
+const heroWide = (slug: string) => slug.includes('.') ? `/${slug}` : `/hero/${slug}-1600.webp`;
 
 /** Art direction for one hero photo, so the slide's main subject sits right
  *  beside the frosted text panel instead of under it. Each slide carries one
@@ -180,19 +179,23 @@ const HERO_SLIDES = [
   {
     id: "home",
     type: "home" as const,
-    eyebrow: "Premium Car Care",
-    tag: "Doorstep service",
-    title: "CAR WASH",
-    titleLine2: "AT YOUR",
+    eyebrow: "PREMIUM DOORSTEP CAR CARE",
+    tag: "",
+    title: "CAR WASH AT",
+    titleLine2: "YOUR",
     titleAccent: "DOORSTEP",
     description:
       "We come to you. You relax.\nWe make your car shine like new.",
-    image: "home",
+    items: [
+      "Waterless Options",
+      "At Your Doorstep",
+      "Trusted Professionals",
+    ],
+    image: "wash-image1.png",
     serviceSlug: "",
-    // The foam-covered car fills the right half; keep its wheel in frame.
-    focusPhone: { position: "0% 100%", scale: 1.15, origin: "0% 100%" },
-    focusTablet: { position: "30% 60%" },
-    focusDesktop: { position: "50% 72%" },
+    focusPhone: { position: "50% 100%" },
+    focusTablet: { position: "right center" },
+    focusDesktop: { position: "right center" },
   },
 
   // Prices here are only the fallback — the hero shows the live catalogue
@@ -340,14 +343,7 @@ const HERO_STATS = [
   { emoji: "⭐", value: 4.9, decimals: 1, suffix: "/5", label: "Customer rating" },
 ];
 
-/** Hairlines between the hero panel's cells for each of its shapes:
- * one row (sm, xl), one column (md) and 2×2 (lg). */
-const HERO_STAT_DIVIDERS = [
-  "",
-  "border-l md:border-l-0 md:border-t lg:border-t-0 lg:border-l",
-  "border-l md:border-l-0 md:border-t lg:border-l-0 xl:border-t-0 xl:border-l",
-  "border-l md:border-l-0 md:border-t lg:border-l xl:border-t-0",
-];
+
 
 /** Counts 0 → `to` once, the first time it scrolls into view. */
 function CountUp({ to, decimals = 0, duration = 1400 }: { to: number; decimals?: number; duration?: number }) {
@@ -362,6 +358,7 @@ function CountUp({ to, decimals = 0, duration = 1400 }: { to: number; decimals?:
       return;
     }
     let frame = 0;
+    
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (!entry.isIntersecting) return;
@@ -672,7 +669,7 @@ export function LandingHero({
 
       <WhatsAppFloatingButton />
       <div
-        className="relative isolate h-[540px] min-h-0 overflow-hidden bg-[#111] [--hero-h:clamp(620px,78vh,760px)] sm:h-[var(--hero-h)]"
+        className="relative isolate h-[100svh] min-h-0 overflow-hidden bg-[#F4F9FF] [--hero-h:clamp(700px,85vh,820px)] sm:h-[var(--hero-h)]"
         {...heroHandlers}
       >
         {/* A single, full-bleed image plane keeps the artwork and copy in one composition. */}
@@ -698,11 +695,10 @@ export function LandingHero({
             />
           </motion.picture>
 
-          {/* The frosted panel carries the copy's contrast now, so the photo
-              keeps its own light — only a faint floor for the slide dots. */}
-          <div className="absolute inset-0 hidden bg-[linear-gradient(180deg,transparent_72%,rgba(0,0,0,0.16)_100%)] sm:block" />
-          {/* Phones: one dark floor under the dots on every slide, so the lifted photos' end blends in */}
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,transparent_62%,#111_88%)] sm:hidden" />
+          {/* Fading the image out cleanly so the left side text works. */}
+          <div className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/50 to-transparent sm:w-[70%]" />
+          {/* Phones: ensure bottom is readable for mobile text/stats */}
+          <div className="absolute inset-0 bg-gradient-to-t from-white/95 via-white/40 to-transparent sm:hidden" />
         </div>
 
         {/* Hero Content — a frosted card on the left with the subject beside
@@ -712,71 +708,63 @@ export function LandingHero({
             centred: the slides differ in height by ~130px, and the stats
             panel shares that baseline. The bottom gap stays small enough on
             short heroes that the tallest slide still clears the top. */}
-        <div className="container-page relative z-10 flex h-full flex-col justify-center px-5 py-8 sm:px-8 sm:pb-56 sm:pt-14 md:justify-end md:pb-[max(64px,min(calc(var(--hero-h)_-_556px),calc((var(--hero-h)_-_460px)_/_2)))] lg:px-0">
-          <div className="md:flex md:items-end md:justify-between md:gap-4 lg:gap-6">
+        <div className="container-page relative z-10 flex h-full flex-col justify-start pt-[12vh] sm:pt-[20vh] px-5 sm:px-8 lg:px-4">
+          <div className="w-full">
 
           <motion.div
             key={slide.id}
-            initial={{
-              opacity: 0,
-              y: 10,
-            }}
-            animate={{
-              opacity: 1,
-              y: 0,
-            }}
-            transition={{
-              duration: 0.55,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-            className="relative z-30 -ml-1 mr-[52px] box-content max-w-[296px] rounded-[20px] border border-white/15 bg-black/50 p-3.5 shadow-[0_18px_40px_-24px_rgba(0,0,0,0.7)] backdrop-blur-md sm:mx-0 sm:w-fit sm:max-w-[420px] sm:rounded-[24px] sm:border sm:bg-black/55 sm:p-7 sm:shadow-[0_24px_60px_-30px_rgba(0,0,0,0.7)] sm:backdrop-blur-[20px] xl:max-w-[540px] xl:p-8"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
+            className="relative z-30 flex flex-col justify-center max-w-[340px] sm:max-w-[520px] xl:max-w-[700px] pointer-events-auto"
           >
 
             {isHome && config?.banner_active && config?.banner_text && (
-              <p className="mb-3 hidden w-fit rounded-full bg-[#E8A900] px-3.5 py-1.5 text-[11px] font-black uppercase tracking-[0.06em] text-white shadow-[0_5px_14px_rgba(232,169,0,0.3)] sm:block">
+              <p className="mb-3 hidden w-fit rounded-full bg-[#FFD21F] px-3.5 py-1.5 text-[11px] font-black uppercase tracking-[0.06em] text-[#0B1730] shadow-sm sm:block">
                 {config.banner_text}
               </p>
             )}
 
             {/* Eyebrow — tablet up; phones keep the card to title, price and CTAs */}
-            <div className="hidden flex-wrap items-center gap-2 sm:flex">
-
-              <p className="w-fit border-b border-[#E8A900]/75 pb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-[#E8A900] sm:text-xs">
-                {isHome
-                  ? config?.hero_badge_text ||
-                    slide.eyebrow
-                  : slide.eyebrow}
-              </p>
-
-              {slide.tag && (
-                <span className="rounded-full border border-[#E8A900]/45 bg-[#E8A900]/20 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.09em] text-[#F5C542] shadow-[0_4px_12px_rgba(0,0,0,0.20)]">
-                  {slide.tag}
-                </span>
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              {isHome ? (
+                <>
+                  <span className="text-[12px] font-extrabold uppercase tracking-widest text-[#0B1730]">
+                    PROFESSIONAL CARE
+                  </span>
+                  <span className="rounded-full bg-[#FFF9E5] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-[#D9A000]">
+                    DOORSTEP SERVICE
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-[12px] font-extrabold uppercase tracking-widest text-[#0B1730]">
+                    {slide.eyebrow}
+                  </span>
+                  {slide.tag && (
+                    <span className="rounded-full bg-[#FFF9E5] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-[#D9A000]">
+                      {slide.tag}
+                    </span>
+                  )}
+                </>
               )}
-
             </div>
 
-            {/* Phones: the slide's tag above the title */}
-            {slide.tag && (
-              <span className="mb-2.5 inline-flex rounded-full border border-[#E8A900]/45 bg-[#E8A900]/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.09em] text-[#F5C542] sm:hidden">
-                {slide.tag}
-              </span>
-            )}
+
 
             {/* Heading */}
             {isHome ? (
-              <h1 className="mt-0 sm:mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
-                {/* Admin Homepage Settings drives the home headline — the
-                    hardcoded slide copy is only the fallback. */}
+              <h1 className="mt-0 sm:mt-2 font-display text-[42px] font-black uppercase leading-[0.95] tracking-[-0.04em] text-[#0B1730] sm:text-[56px] lg:text-[72px]">
+                {/* Admin Homepage Settings drives the home headline */}
                 {config?.hero_headline ? (
                   <span className="whitespace-pre-line">
                     {config.hero_headline.split(/(doorstep)/i).map((part, i) =>
-                      part.toUpperCase() === "DOORSTEP" ? (
-                        <span key={i} className="text-[var(--color-gold)]">
-                          {part}
+                      part.toLowerCase() === "doorstep" ? (
+                        <span key={i} className="text-[#0878F9]">
+                          {part.toUpperCase()}
                         </span>
                       ) : (
-                        part
+                        part.toUpperCase()
                       )
                     )}
                   </span>
@@ -786,20 +774,20 @@ export function LandingHero({
                     <br />
                     {slide.titleLine2}
                     <br />
-                    <span className="text-[var(--color-gold)]">
+                    <span className="text-[#0878F9]">
                       {slide.titleAccent}
                     </span>
                   </>
                 )}
               </h1>
             ) : (
-              <h1 className="mt-0 sm:mt-4 font-display text-[42px] font-black uppercase leading-[0.94] tracking-[-0.045em] text-white sm:text-[56px] lg:text-[68px]">
+              <h1 className="mt-0 sm:mt-4 font-display text-[42px] font-black leading-[0.94] tracking-[-0.045em] text-[#0B1730] sm:text-[56px] lg:text-[68px]">
                 {slide.title}
 
                 {slide.titleLine2 && (
                   <>
                     <br />
-                    <span className="text-[var(--color-gold)]">
+                    <span className="text-[#0878F9]">
                       {slide.titleLine2}
                     </span>
                   </>
@@ -812,18 +800,18 @@ export function LandingHero({
               <div className="mt-2.5 sm:mt-5 flex flex-wrap items-center gap-3">
 
                 {slideOldPrice != null && (
-                  <span className="text-[15px] font-semibold text-white/55 line-through sm:text-[17px]">
+                  <span className="text-[15px] font-semibold text-[#4B5563] line-through sm:text-[17px]">
                     {INR(slideOldPrice)}
                   </span>
                 )}
 
                 {slidePrice != null && (
-                  <span className="text-[38px] font-black leading-none tracking-[-0.04em] text-[#E8A900] sm:text-[46px]">
+                  <span className="text-[38px] font-black leading-none tracking-[-0.04em] text-[#0B1730] sm:text-[46px]">
                     {INR(slidePrice)}
                   </span>
                 )}
 
-                {slide.unit && <span className="text-[13px] font-semibold text-white/75">{slide.unit}</span>}
+                {slide.unit && <span className="text-[13px] font-semibold text-[#4B5563]">{slide.unit}</span>}
 
                 {slidePrice != null && <DiscountBadge percent={discountPercent(slidePrice, slideOldPrice)} />}
 
@@ -831,39 +819,58 @@ export function LandingHero({
             )}
 
             {/* Phones: what's included, short and spaced */}
-            {!isHome && slide.items.length > 0 && (
-              <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2 sm:hidden">
-                {slide.items.map((item) => (
-                  <li key={item} className="flex items-center gap-1.5 text-[12px] font-medium leading-tight text-white/85">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#E8A900]" />
-                    {item}
-                  </li>
-                ))}
+            {slide.items && slide.items.length > 0 && (
+              <ul className="mt-4 flex flex-col gap-2 sm:hidden">
+                {slide.items.map((item) => {
+                  const isEco = /waterless/i.test(item);
+                  const isDoor = /doorstep/i.test(item);
+                  const isPro = /professional/i.test(item);
+                  
+                  const Icon = isEco ? Droplet : isDoor ? MapPin : isPro ? ShieldCheck : BadgeCheck;
+                  const colorClass = isEco ? "text-[#10B981]" : "text-[#0878F9]";
+                  const bgClass = isEco ? "bg-[#10B981]/10" : "bg-[#0878F9]/10";
+
+                  return (
+                    <li key={item} className="flex items-center gap-2 text-[12px] font-semibold leading-tight text-[#0B1730]">
+                      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${bgClass} ${colorClass}`}>
+                        <Icon className="h-3 w-3" strokeWidth={2.5} />
+                      </span>
+                      {item}
+                    </li>
+                  );
+                })}
               </ul>
             )}
 
             {/* Description */}
-            <p className="mt-5 hidden max-w-[500px] whitespace-pre-line text-[14px] font-medium leading-relaxed text-white/80 sm:block sm:text-[16px]">
+            <p className="mt-4 max-w-[500px] whitespace-pre-line text-[14px] font-medium leading-relaxed text-[#0B1730] sm:text-[16px]">
               {isHome && config?.hero_subtext ? config.hero_subtext : slide.description}
             </p>
 
             {/* Items */}
-            {!isHome && (
-              <div className="mt-5 hidden max-w-[440px] grid-cols-2 gap-x-5 gap-y-2 sm:grid">
+            {slide.items && slide.items.length > 0 && (
+              <div className="mt-5 flex flex-col sm:flex-row sm:flex-wrap items-start sm:items-center gap-x-6 gap-y-3">
+                {slide.items.map((item) => {
+                  const isEco = /waterless/i.test(item);
+                  const isDoor = /doorstep/i.test(item);
+                  const isPro = /professional/i.test(item);
+                  
+                  const Icon = isEco ? Droplet : isDoor ? MapPin : isPro ? ShieldCheck : BadgeCheck;
+                  const colorClass = isEco ? "text-[#10B981]" : "text-[#0878F9]";
+                  const bgClass = isEco ? "bg-[#10B981]/10" : "bg-[#0878F9]/10";
 
-                {slide.items.map((item) => (
-                  <div
-                    key={item}
-                    className="flex items-center gap-2 text-[11px] font-semibold text-white/90 sm:text-[12px]"
-                  >
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#E8A900] text-[11px] text-white shadow-sm">
-                      ✓
-                    </span>
-
-                    {item}
-                  </div>
-                ))}
-
+                  return (
+                    <div
+                      key={item}
+                      className="flex items-center gap-2 text-[13px] font-semibold text-[#0B1730]"
+                    >
+                      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${bgClass} ${colorClass} shadow-sm`}>
+                        <Icon className="h-3.5 w-3.5" strokeWidth={2.5} />
+                      </span>
+                      <span className="whitespace-nowrap">{item}</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -875,7 +882,7 @@ export function LandingHero({
                 className="!rounded-[10px] min-h-[44px] w-full whitespace-nowrap !px-2.5 py-3 text-[13px] sm:w-auto sm:min-h-0 sm:flex-none sm:whitespace-normal sm:!px-6 sm:py-3.5 sm:text-[12px]"
               >
                 {isHome
-                  ? "Book your wash"
+                  ? "Book a Wash"
                   : "Book this offer"}
 
                 <ArrowRight className="h-3 w-3 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5 sm:h-3.5 sm:w-3.5" />
@@ -889,42 +896,40 @@ export function LandingHero({
                       behavior: "smooth",
                     })
                 }
-                className="rounded-[10px] min-h-[44px] w-full whitespace-nowrap sm:w-auto sm:min-h-0 sm:flex-none sm:whitespace-normal !border-white/55 !bg-[#141414]/35 !px-2.5 py-3 text-[13px] sm:!px-5 sm:py-3.5 sm:text-[12px] !text-white shadow-none backdrop-blur-sm hover:!border-[#E8A900] hover:!bg-[#E8A900]/15 hover:!text-white"
+                className="!rounded-[12px] min-h-[44px] w-full whitespace-nowrap sm:w-auto sm:min-h-0 sm:flex-none sm:whitespace-normal !px-2.5 py-3 text-[13px] sm:!px-5 sm:py-3.5 sm:text-[12px] flex items-center justify-center gap-2"
               >
-                Explore services
+                <PlayCircle className="h-4 w-4 text-[#0878F9]" />
+                Watch How It Works
               </OutlineButton>
+            </div>
 
+            {/* Floating Stats Strip */}
+            <div
+              data-hero-stats
+              className="mt-8 grid w-full grid-cols-2 gap-2 rounded-[16px] border border-white/40 bg-white/85 p-2.5 shadow-sm backdrop-blur-md sm:w-fit sm:grid-cols-4 sm:gap-0 sm:p-1.5"
+            >
+              {HERO_STATS.map((stat, i) => (
+                <div
+                  key={stat.label}
+                  className={`flex items-center gap-2.5 sm:gap-2 px-2 sm:px-4 py-1.5 sm:py-2 text-left ${
+                    i < HERO_STATS.length - 1 ? "sm:border-r sm:border-[#E5EEF8]" : ""
+                  }`}
+                >
+                  <span aria-hidden="true" className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-full bg-[#F4F9FF] text-[15px] sm:text-[16px]">
+                    {stat.emoji}
+                  </span>
+                  <div className="flex flex-col">
+                    <span className="font-display text-[16px] sm:text-[18px] font-extrabold leading-none tracking-tight text-[#0878F9] tabular-nums">
+                      <CountUp to={stat.value} decimals={stat.decimals} />
+                      {stat.suffix}
+                    </span>
+                    <span className="mt-0.5 sm:mt-1 text-[10px] font-semibold text-[#0B1730] uppercase tracking-wide whitespace-nowrap">{stat.label}</span>
+                  </div>
+                </div>
+              ))}
             </div>
 
           </motion.div>
-
-          {/* Shared stats panel: identical and static on every slide. Smoked
-              glass like the card; right edge on the container edge. Below the
-              card on small tablets (no room beside it), then a column (md),
-              2×2 (lg) and one row (xl) beside it on the card's baseline. */}
-          <div
-            data-hero-stats
-            className="absolute bottom-[52px] left-4 right-4 z-20 hidden grid-cols-4 rounded-[22px] border border-white/15 bg-black/50 p-1.5 shadow-[0_24px_60px_-30px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-[20px] sm:grid md:static md:ml-auto md:w-[224px] md:shrink-0 md:grid-cols-1 lg:w-[452px] lg:grid-cols-2 xl:w-[600px] xl:grid-cols-4 2xl:w-[640px]"
-          >
-            {HERO_STATS.map((stat, i) => (
-              <div
-                key={stat.label}
-                className={`flex min-w-0 flex-col items-center gap-2 border-white/10 px-2 py-3 text-center md:flex-row md:gap-3 md:px-3.5 md:py-3 md:text-left xl:flex-col xl:gap-2 xl:px-2 xl:py-3.5 xl:text-center ${HERO_STAT_DIVIDERS[i]}`}
-              >
-                <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/10 text-[17px] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] xl:h-10 xl:w-10 xl:text-[19px]">
-                  {stat.emoji}
-                </span>
-                <span className="min-w-0">
-                  <span className="block whitespace-nowrap font-display text-[22px] font-extrabold leading-none tracking-[-0.02em] text-white tabular-nums lg:text-[24px] xl:text-[26px] 2xl:text-[28px]">
-                    <CountUp to={stat.value} decimals={stat.decimals} />
-                    <span className="text-[#E8A900]">{stat.suffix}</span>
-                  </span>
-                  <span className="mt-1.5 block text-[11px] font-medium leading-tight text-white/70 lg:whitespace-nowrap lg:text-[12px]">{stat.label}</span>
-                </span>
-              </div>
-            ))}
-          </div>
-
           </div>
         </div>
         <div className="absolute bottom-3 left-5 z-50 flex items-center gap-2 sm:bottom-7 sm:left-8 lg:left-1/2 lg:-translate-x-1/2">
@@ -939,8 +944,8 @@ export function LandingHero({
         h-2 rounded-full transition-all duration-300
         ${
           activeSlide === index
-            ? "w-7 bg-[#E8A900]"
-            : "w-2 bg-white/55 hover:bg-[#E8A900]/75"
+            ? "w-7 bg-[#FFD21F]"
+            : "w-2 bg-white/80 hover:bg-[#FFD21F]/75"
         }
       `}
     />
@@ -1176,32 +1181,6 @@ export function LandingHero({
       </section>
       )}
 
-      {/* ============================================================ */}
-      {/* FEATURE STRIP (mobile) — the same four points as the desktop  */}
-      {/* overlay, shown below the hero; static, identical on every slide */}
-      {/* ============================================================ */}
-
-      <div className="bg-white px-5 py-5 sm:hidden">
-        <div className="grid grid-cols-2 rounded-[22px] bg-[#141414] p-1.5 shadow-[0_18px_40px_-22px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.08)]">
-          {HERO_STATS.map((stat, i) => (
-            <div
-              key={stat.label}
-              className={`flex min-w-0 flex-col items-center gap-2 border-white/10 px-2 py-3.5 text-center ${i % 2 ? "border-l" : ""} ${i > 1 ? "border-t" : ""}`}
-            >
-              <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/10 text-[17px] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
-                {stat.emoji}
-              </span>
-              <span className="min-w-0">
-                <span className="block whitespace-nowrap font-display text-[22px] font-extrabold leading-none tracking-[-0.02em] text-white tabular-nums">
-                  <CountUp to={stat.value} decimals={stat.decimals} />
-                  <span className="text-[#E8A900]">{stat.suffix}</span>
-                </span>
-                <span className="mt-1.5 block whitespace-nowrap text-[11px] font-medium leading-tight text-white/70">{stat.label}</span>
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
 
     </section>
   );

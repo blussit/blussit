@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Crown, Droplet, Car, CalendarCheck, Users, CalendarClock, FileText } from "lucide-react";
+import { ArrowRight, Droplet, Car, CalendarCheck, Users, CalendarClock, FileText } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { subscriptionApi } from "../../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
@@ -90,28 +90,23 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
         </div>
 
         {/* Cards */}
-        <div className="mt-6 lg:mt-8 grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[1fr_1.05fr_1fr] lg:gap-6 lg:items-center">
+        <div className="mt-6 lg:mt-8 grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[1fr_1.05fr_1fr] lg:gap-6 lg:items-stretch">
           {isLoading ? (
             <div className="h-[380px] animate-pulse rounded-[22px] border border-[#E4E9F0] bg-white" aria-hidden="true" />
           ) : (
-            <div className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#BBD6FB] bg-white text-[#071A3D] shadow-[0_16px_44px_rgba(22,119,255,0.16)] sm:flex-row lg:flex-col lg:min-h-[440px]">
-              <span className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-[#FDE9A6] px-3 py-1 text-[11px] font-bold text-[#071A3D] shadow-sm">
-                <Crown className="h-3.5 w-3.5" strokeWidth={2.5} />
-                Most Popular
-              </span>
-
-              <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[50%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
+            <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:flex-col lg:min-h-[440px]">
+              <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
                 <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[26px]">Monthly Pass</h3>
                 <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
 
-                <div className="mt-4 flex items-baseline gap-1.5">
+                <div className="mt-1.5 flex items-baseline gap-1.5">
                   <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">
                     ₹999
                   </span>
                   <span className="text-[13px] text-[#64748B]">/ Month</span>
                 </div>
 
-                <ul className="mb-5 mt-5 space-y-3">
+                <ul className="my-3 space-y-1.5">
                   <PlanLine
                     Icon={Droplet}
                     title="Choose Your Service"
@@ -124,7 +119,7 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
                 <button
                   type="button"
                   onClick={choose}
-                  className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-full bg-[#FBBF24] py-3 text-[14.5px] font-bold text-[#071A3D] shadow-[0_6px_16px_rgba(251,191,36,0.32)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_22px_rgba(251,191,36,0.42)]"
+                  className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-full border border-[#1677FF]/50 bg-white py-3 text-[14.5px] font-bold text-[#1677FF] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#F4F8FF]"
                 >
                   Subscribe Now
                   <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
@@ -132,7 +127,7 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
               </div>
 
               <div
-                className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[58%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
+                className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
               >
                 <div
                   className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"

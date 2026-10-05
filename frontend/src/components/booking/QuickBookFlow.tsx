@@ -2616,12 +2616,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                       <div ref={slotsRef} className="mt-6 scroll-mt-24">
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <h2 className="font-display text-[18px] font-bold text-[#0E1A33]">Available Slots</h2>
-                          {slotCenter && (
-                            <span className="inline-flex min-w-0 items-center gap-1 text-[12px] text-[#5F6878]">
-                              <MapPin className="h-3.5 w-3.5 shrink-0 text-[#0A66F0]" />
-                              <span className="truncate">{slotArea}</span>
-                            </span>
-                          )}
                         </div>
                         {slotsBlock}
                       </div>

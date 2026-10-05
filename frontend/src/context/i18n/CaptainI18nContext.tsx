@@ -54,3 +54,4 @@ export function useCaptainTranslation() {
   }
   return context;
 }
+

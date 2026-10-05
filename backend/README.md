@@ -8,43 +8,31 @@ Routes → Controllers → Services → Repositories → Database
 
 ## Setup
 
-Full local setup (Windows, step by step): [../SETUP_WINDOWS.md](../SETUP_WINDOWS.md).
-
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.development.example .env.development   # local test DB + test keys; read automatically
+cp .env.example .env   # edit MONGO_URI / JWT_SECRET_KEY for your environment
 ```
-
-The app reads `backend/.env.development` by default (`ENV_FILE` picks another
-file). `backend/.env.production` holds the live credentials and is read only by
-`scripts/deploy-gcp.sh` — never use it locally.
 
 Make sure MongoDB is running locally (or point `MONGO_URI` at your instance), then:
 
 ```bash
-# Seed local test data: staff accounts, services, plans, a service center
-# and three test customers (refuses to run against anything but a local DB)
-python -m app.scripts.seed_dev
+# Seed sample data: super admin, categories, services, a service center,
+# subscription plans, and FAQs
+python -m app.seed
 
 # Run the API
-uvicorn app.main:app --reload --port 8000
+.venv/Scripts/activate
+
+
+
 ```
 
 API docs: `http://localhost:8000/api/docs`
 
 Default seeded super admin: `admin@doorstepvehiclecare.in` / `Admin@12345`
 (change this immediately in any real deployment).
-
-
-Profile	Login
-Admin	admin@doorstepvehiclecare.in / Admin@12345
-Manager	manager.indore@doorstepvehiclecare.in / Manager@12345
-Captain	captain.indore@doorstepvehiclecare.in / Captain@12345
-Customer (new)	9000000001 + OTP 123456
-Customer (has a plan)	9000000002 + OTP 123456
-Customer (has past wash)	9000000003 + OTP 123456
 
 ## Structure
 
@@ -74,3 +62,12 @@ concerns (e.g. `AuthService.request_otp` is a placeholder generator ready to
 be swapped for a real provider; `PaymentMethod.ONLINE_PLACEHOLDER` marks
 where Razorpay will plug in) so none of this requires touching the API
 surface used by the frontend.
+
+
+
+Admin: admin@doorstepvehiclecare.in / Admin@12345
+Manager: manager.indore@doorstepvehiclecare.in / Manager@12345
+Captain: captain.indore@doorstepvehiclecare.in / Captain@12345
+Customer: 9000000001 / OTP 123456
+Customer: 9000000002 / OTP 123456
+Customer: 9000000003 / OTP 123456
