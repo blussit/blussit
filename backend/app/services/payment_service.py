@@ -74,6 +74,11 @@ logger = logging.getLogger(__name__)
 # Razorpay's own floor — anything below is refused before we even call them.
 MIN_ORDER_PAISE = 100
 
+# The history note an online payment leaves when it CONFIRMS a booking that
+# was waiting on it — also how the payment-link page tells a real website
+# sale from a doorstep collection (link_purchase_event).
+PAYMENT_CONFIRMED_NOTE = "Online payment received — booking confirmed"
+
 # Auto-pay (Razorpay Subscriptions) mapping from OUR billing cycle to
 # Razorpay's (period, interval) pair, plus how many cycles the mandate is
 # authorised for. Razorpay caps total_count per period, so these stay well
@@ -1074,9 +1079,7 @@ class PaymentService:
         # (cash paid online later, a plan top-up, the WhatsApp flow).
         from app.services.booking_service import BookingService
 
-        await BookingService(self.db).confirm_awaiting_payment_booking(
-            order["booking_id"], "Online payment received — booking confirmed"
-        )
+        await BookingService(self.db).confirm_awaiting_payment_booking(order["booking_id"], PAYMENT_CONFIRMED_NOTE)
         # The payment flip and the confirm are two writes; a cancellation
         # (expiry sweep, the customer) landing between them leaves a PAID
         # CANCELLED booking — money for nothing unless someone sees it.
@@ -2069,6 +2072,25 @@ class PaymentService:
         if params["razorpay_payment_link_status"] != "paid":
             raise BadRequestException("This payment wasn't completed.")
         return await self._apply_link_paid(params["razorpay_payment_link_id"], params["razorpay_payment_id"])
+
+    async def link_purchase_event(self, link_id: str) -> dict | None:
+        """The Meta Pixel Purchase for the "payment received" page, or None.
+        Only a link whose payment CONFIRMED a booking that was waiting on it
+        is a new sale — a captain's doorstep QR for a cash booking, or a
+        WhatsApp booking confirmed before its link went out, was already a
+        booking. The event id matches the website's (lib/metaPixel.ts)."""
+        order = await self.orders.find_one({"razorpay_link_id": link_id})
+        if not order or order.get("status") != "paid" or order.get("purpose") == "subscription" or not order.get("booking_id"):
+            return None
+        booking_id = order["booking_id"]
+        if not await self.db.booking_status_history.find_one({"booking_id": booking_id, "note": PAYMENT_CONFIRMED_NOTE}):
+            return None
+        booking = await self.booking_repo.find_by_id(booking_id) or {}
+        group_id = booking.get("booking_group_id")
+        return {
+            "value": order.get("amount_paise", 0) / 100,
+            "event_id": f"visit:{group_id}" if group_id else f"booking:{booking_id}",
+        }
 
     async def notify_link_paid(self, order: dict) -> None:
         """The WhatsApp ✅ for a settled booking link (sweep or webhook)."""

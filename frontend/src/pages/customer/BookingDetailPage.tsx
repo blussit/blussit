@@ -14,6 +14,7 @@ import { format, formatDateTime, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay, sentence } from "../../lib/razorpay";
 import { vehicleLabel } from "../../lib/constants";
+import { bookingEventId, trackPurchase } from "../../lib/metaPixel";
 import type { Booking } from "../../types";
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = { cash: "Cash on service", online: "Online", subscription: "Plan" };
@@ -194,10 +195,26 @@ export default function BookingDetailPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  // Paying (or switching to cash) only CONFIRMS a booking that was waiting
+  // on payment — that's the Meta Purchase. Paying a confirmed cash booking
+  // online later isn't a new sale. Read when the action starts, before a
+  // live update can change the status under it.
+  const confirmsBooking = useRef(false);
+  const trackConfirmed = () => {
+    if (!confirmsBooking.current || !booking || !(visitTotal > 0)) return;
+    trackPurchase({
+      value: visitTotal,
+      eventId: bookingEventId(groupId, booking.id),
+      contentType: "booking",
+      numItems: trailCars.length,
+    });
+  };
+
   const payMutation = useMutation({
     mutationFn: () => {
       setPayNote(null);
       setError("");
+      confirmsBooking.current = booking?.status === "awaiting_payment";
       return payWithRazorpay(
         // A visit is paid for once — every car on it, one order.
         groupId ? { purpose: "booking_group", booking_group_id: groupId } : { purpose: "booking", booking_id: id as string },
@@ -209,7 +226,10 @@ export default function BookingDetailPage() {
         }
       );
     },
-    onSuccess: () => setPayNote(null),
+    onSuccess: () => {
+      setPayNote(null);
+      trackConfirmed();
+    },
     onError: (err) => {
       if (err instanceof PaymentFailed) {
         setPayNote({ tone: "error", text: `Payment failed — ${err.reason} Try again${cashAllowed ? ", or pay cash instead" : ""}.` });
@@ -232,10 +252,12 @@ export default function BookingDetailPage() {
   const switchToCashMutation = useMutation({
     // One decision for the whole visit — switching one car would leave the others unpaid.
     mutationFn: async (): Promise<void> => {
+      confirmsBooking.current = booking?.status === "awaiting_payment";
       if (groupId) await bookingApi.switchGroupToCash(groupId);
       else await bookingApi.switchToCash(id as string);
     },
     onSuccess: () => {
+      trackConfirmed();
       queryClient.invalidateQueries({ queryKey: bookingQueryKey });
       queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });

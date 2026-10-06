@@ -19,6 +19,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
+import { bookingEventId, trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
 import { ensureGoogleMaps } from "../../lib/googleMaps";
 import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
@@ -1127,6 +1128,18 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
         queryClient.invalidateQueries({ queryKey: ["addresses"] });
       }
+      // A pay-online booking isn't real until it's paid — that Purchase
+      // comes from the payment instead. A ₹0 visit fully covered by a plan
+      // was already counted when the plan was bought.
+      if (!result.awaiting_payment && result.total_amount > 0 && result.bookings[0]) {
+        trackPurchase({
+          value: result.total_amount,
+          eventId: bookingEventId(result.booking_group_id, result.bookings[0].id),
+          contentType: "booking",
+          contentName: lines.map(lineLabel).join(" + "),
+          numItems: result.vehicle_count,
+        });
+      }
       navigate(`/thank-you?token=${result.confirmation_token}`, {
         state: {
           type: "booking",
@@ -1229,6 +1242,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             onClick={() => {
               setPlanIssue("");
               setStep(1);
+              if (!isManager) {
+                trackInitiateCheckout({
+                  value: payable,
+                  contentType: "booking",
+                  contentName: lines.map(lineLabel).join(" + "),
+                  numItems: lines.reduce((n, l) => n + l.count, 0),
+                });
+              }
             }}
           >
             Continue

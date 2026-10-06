@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, MapPin } from "lucide-react";
 import { coverageLeadPublicApi } from "../../api/catalog";
+import { trackLead } from "../../lib/metaPixel";
 import { Button, Input } from "../ui";
 import { getErrorMessage } from "../../lib/api-client";
 
@@ -40,7 +41,10 @@ export function CoverageLeadInline({
         city_area: area.trim() || undefined,
         service_interest: serviceInterest,
       }),
-    onSuccess: () => setDone(true),
+    onSuccess: () => {
+      setDone(true);
+      trackLead("Coverage waitlist");
+    },
     onError: (err) => setError(getErrorMessage(err)),
   });
 

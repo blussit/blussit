@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay } from "../../lib/razorpay";
+import { trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
 import type { SubscriptionPlan } from "../../types";
 import { PassPurchaseSheet, type PassPrefill } from "./PassPurchaseSheet";
 
@@ -39,6 +40,7 @@ export function usePassPurchase() {
       setNote("");
       autoPayUnavailable.current = false;
       buyingName.current = plan?.name;
+      trackInitiateCheckout({ contentType: "plan", contentName: plan?.name });
       return payWithRazorpay(
         { purpose: "subscription", plan_id: plan!.id, vehicle_type: args.vehicleType, service_id: args.serviceId, auto_pay: args.autoPay },
         { name: user?.full_name, email: user?.email, contact: user?.phone },
@@ -58,6 +60,10 @@ export function usePassPurchase() {
       invalidateSubs();
       const planName = result.subscription?.plan_name || buyingName.current;
       const fallback = autoPayUnavailable.current;
+      const paid = result.subscription?.purchased_price;
+      if (result.subscription && paid && paid > 0) {
+        trackPurchase({ value: paid, eventId: `plan:${result.subscription.id}`, contentType: "plan", contentName: planName });
+      }
       setPlan(null);
       setError("");
       // The thank-you ticket goes to whichever request confirmed the

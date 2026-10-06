@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     # links are created without a callback and the reminder-loop's
     # link-status sweep alone marks them paid.
     PUBLIC_BASE_URL: str = ""
+    # Meta Pixel on that "payment received" page, so a website booking paid
+    # by link still reports its Purchase to Meta Ads. Public by design (the
+    # same id is in frontend/index.html); blank turns it off.
+    META_PIXEL_ID: str = "1153209444066340"
 
     # Google: Maps (browser key is public-by-design, protected by key
     # restrictions in Google Cloud console; server key used for Routes

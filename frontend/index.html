@@ -167,8 +167,34 @@
         }, 2500);
       });
     </script>
+
+    <!-- Meta Pixel — Meta's standard snippet, except fbevents.js is fetched
+         once the page has loaded (like GA4 above) so it never delays the hero
+         or the booking code. The fbq stub queues the PageView until then.
+         Route changes in the SPA are tracked by the pixel itself (it listens
+         to history pushState), so no per-route PageView call is needed.
+         Live site only: test bookings on localhost / Vercel previews would
+         otherwise reach Meta as real Purchases (src/lib/metaPixel.ts). -->
+    <script>
+      if (/(^|\.)blussit\.com$/.test(location.hostname))
+      !function(f,b,e,v,n,t,s)
+      {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+      n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+      if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+      n.queue=[];f.addEventListener('load',function(){t=b.createElement(e);t.async=!0;
+      t.src=v;s=b.getElementsByTagName(e)[0];
+      s.parentNode.insertBefore(t,s)})}(window, document,'script',
+      'https://connect.facebook.net/en_US/fbevents.js');
+      if (window.fbq) {
+        fbq('init', '1153209444066340');
+        fbq('track', 'PageView');
+      }
+    </script>
   </head>
   <body>
+    <noscript><img height="1" width="1" style="display:none" alt=""
+      src="https://www.facebook.com/tr?id=1153209444066340&ev=PageView&noscript=1"
+    /></noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
