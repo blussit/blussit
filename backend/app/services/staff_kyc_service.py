@@ -50,6 +50,19 @@ def _serialized(kyc: dict) -> dict:
     return out
 
 
+# Everything the manager needs to verify a captain — a packet missing any
+# of these is refused rather than sent for review half-empty.
+KYC_REQUIRED = (
+    ("photo_url", "your photo"),
+    ("aadhaar_number", "Aadhaar number"),
+    ("pan_number", "PAN number"),
+    ("aadhaar_doc_url", "Aadhaar card photo"),
+    ("pan_doc_url", "PAN card photo"),
+    ("local_address", "local address"),
+    ("permanent_address", "permanent address"),
+)
+
+
 class StaffKycService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.user_repo = UserRepository(db)
@@ -73,6 +86,9 @@ class StaffKycService:
         data = payload.model_dump()
         if data.get("same_as_local"):
             data["permanent_address"] = data.get("local_address")
+        missing = [label for key, label in KYC_REQUIRED if not str(data.get(key) or "").strip()]
+        if missing:
+            raise BadRequestException(f"Please add {', '.join(missing)} before sending for review.")
         kyc = {
             **{k: current.get(k) for k in ("reviewed_by", "reviewed_at")},
             **{k: v for k, v in data.items()},

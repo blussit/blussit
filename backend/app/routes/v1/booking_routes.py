@@ -30,6 +30,7 @@ from app.schemas.booking_schema import (
     BookingPhoneOtpRequest,
     BookingQuoteRequest,
     BookingRescheduleRequest,
+    BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
     HeadingRequest,
@@ -416,6 +417,15 @@ async def reschedule_booking(booking_id: str, payload: BookingRescheduleRequest,
     """Customers reschedule their own bookings; managers/admins can also reschedule
     as a remediation path when a captain issue was flagged (see resolve_issue)."""
     return await BookingController(db).reschedule(current_user, booking_id, payload)
+
+
+@router.patch("/{booking_id}/tip", dependencies=[Depends(require_manager_or_admin)])
+async def set_booking_tip(
+    booking_id: str, payload: BookingTipRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Add or correct the tip on a finished job (0 clears it). Recorded
+    only — never part of the bill or revenue."""
+    return await BookingController(db).set_tip(current_user, booking_id, payload)
 
 
 @router.patch("/{booking_id}/details", dependencies=[Depends(require_manager_or_admin)])

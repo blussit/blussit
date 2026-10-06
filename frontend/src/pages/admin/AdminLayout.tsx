@@ -1,7 +1,5 @@
-import { useLayoutEffect } from "react";
 import { Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import "./adminTheme.css";
 import { whatsappCrmApi } from "../../api/admin";
 import {
   AlertTriangle,
@@ -58,16 +56,7 @@ const navItems: NavItem[] = [
   { label: "Profile", to: "/admin/profile", icon: User },
 ];
 
-/** Theme v2 on <body> while the admin portal is mounted — see adminTheme.css. */
-function useAdminTheme() {
-  useLayoutEffect(() => {
-    document.body.classList.add("adm-v2");
-    return () => document.body.classList.remove("adm-v2");
-  }, []);
-}
-
 export default function AdminLayout() {
-  useAdminTheme();
   // Paused while the tab is hidden (react-query default); the server
   // answers it from a 15 s shared cache, and marking a chat read
   // invalidates it directly.

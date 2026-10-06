@@ -3,11 +3,14 @@
  * primary (#0A66F0), muted #5F6878, tints #E8F0FE / #EEF3FA, hairline
  * borders #E4E9F1, 14–18 px radii and ≥48 px tap targets. Phones first.
  */
-import { type ButtonHTMLAttributes, type ReactNode } from "react";
+import { type ButtonHTMLAttributes, type ReactNode, useId } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronLeft, Loader2, X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
+import { useDialogStack } from "../ui/Modal";
 
 type BtnVariant = "primary" | "secondary" | "outline" | "danger" | "success";
 
@@ -77,7 +80,11 @@ export function BottomBar({ children }: { children: ReactNode }) {
 }
 
 export function Sheet({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: ReactNode }) {
-  return (
+  // On <body> like every other popup, so it always lands on top.
+  const id = useId();
+  useDialogStack(open, onClose, id);
+  useBodyScrollLock(open);
+  return createPortal(
     <AnimatePresence>
       {open && (
         <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label={title}>
@@ -106,7 +113,8 @@ export function Sheet({ open, onClose, title, children }: { open: boolean; onClo
           </motion.div>
         </div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }
 

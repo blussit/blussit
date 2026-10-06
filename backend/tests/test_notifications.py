@@ -116,3 +116,34 @@ async def test_status_updates_notify_the_customer(rig):
 
     notifs = await rig["db"].notifications.find({"user_id": rig["customer_id"], "reference_id": booking["id"]}).to_list(None)
     assert any("heading" in n["title"].lower() or "way" in n["title"].lower() for n in notifs)
+
+
+@pytest.mark.asyncio
+async def test_manager_bell_clears_handled_alerts_and_hides_read(rig):
+    """Founder: a manager's bell must not pile up — alerts about work already
+    done clear themselves, and read ones drop off his list."""
+    from app.controllers.notification_controller import NotificationController
+    from app.core.dependencies import CurrentUser, PaginationParams
+
+    db = rig["db"]
+    bs = BookingService(db)
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    booking = await bs.create_booking(rig["customer_id"], BookingCreateRequest(vehicle_id=rig["vehicle_id"], address_id=rig["address_id"], service_ids=[rig["foam"]], scheduled_date=tomorrow, scheduled_slot="09:00-12:00"))
+    await db.notifications.insert_one({"user_id": rig["manager_id"], "title": "Customer changed the note", "message": "x", "notification_type": "booking", "reference_id": booking["id"], "is_read": False, "created_at": datetime.now(timezone.utc)})
+    await db.notifications.insert_one({"user_id": rig["manager_id"], "title": "Old alert", "message": "x", "notification_type": "system", "is_read": True, "created_at": datetime.now(timezone.utc)})
+
+    manager = CurrentUser(id=rig["manager_id"], role="manager", service_center_id=rig["center_id"])
+    page = PaginationParams(page=1, page_size=20)
+    listed = await NotificationController(db).list_mine(manager, page, unread_only=False)
+    titles = [n["title"] for n in listed["data"]]
+    assert any(t.startswith("New booking") for t in titles)  # still needs a captain
+    assert "Old alert" not in titles  # read ones never show for a manager
+
+    await bs.assign_captain(booking["id"], BookingAssignCaptainRequest(captain_id=rig["captain_id"]), rig["manager_id"], "manager", rig["center_id"])
+    listed = await NotificationController(db).list_mine(manager, page, unread_only=False)
+    titles = [n["title"] for n in listed["data"]]
+    assert not any(t.startswith("New booking") for t in titles)  # handled → cleared
+    assert "Customer changed the note" in titles  # informational: stays until opened
+    assert listed["unread_count"] == len(listed["data"])
+    cleared = await db.notifications.find_one({"user_id": rig["manager_id"], "title": {"$regex": "^New booking"}})
+    assert cleared["is_read"] is True and cleared["auto_cleared"] is True

@@ -7,15 +7,12 @@
  * See docs/SOCIETY_PLANS.md.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Navigate, useLocation, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CalendarDays, Car, Check, CheckCircle2, Minus, Plus, Sparkles, Tag } from "lucide-react";
+import { AlertTriangle, Car, Check, CheckCircle2, Minus, Plus, Sparkles, Tag } from "lucide-react";
 import {
-  bucketUsage,
-  carLabel,
   planCovers,
   planWithServices,
-  premiumUsage,
   societyFormApi,
   societyIssueApi,
   rupees,
@@ -62,45 +59,72 @@ const statusText: Record<SocietyEnrollment["status"], string> = {
   cancelled: "Cancelled",
 };
 
-export default function SocietyFormPage() {
+/**
+ * `embedded`: the same hub inside the customer dashboard (/app/society/:token,
+ * CustomerShell around it). The standalone page is for joining; a signed-in
+ * resident who already has a plan is sent into the dashboard version.
+ */
+export default function SocietyFormPage({ embedded = false }: { embedded?: boolean }) {
   const { token = "" } = useParams();
+  const location = useLocation();
   const { user, isLoading: authLoading } = useAuth();
   const isCustomer = user?.role === "customer";
   const form = useQuery({ queryKey: ["society-form", token, isCustomer ? user?.id : "anon"], queryFn: () => societyFormApi.get(token), retry: false });
   const hub = useQuery({ queryKey: ["society-hub", token, user?.id], queryFn: () => societyFormApi.me(token), enabled: isCustomer, retry: false });
   const [adding, setAdding] = useState(false);
-  const [flash, setFlash] = useState("");
+  // A banner carried over from the standalone page (e.g. "You're all set").
+  const [flash, setFlash] = useState(() => (location.state as { flash?: string } | null)?.flash || "");
+  const Frame = embedded ? InAppShell : Shell;
 
   useEffect(() => {
     document.title = form.data ? `${form.data.society.name} — Blussit Society Plan` : "Blussit Society Plan";
   }, [form.data]);
 
-  if (form.isLoading || authLoading) {
+  if (form.isLoading || authLoading || (isCustomer && hub.isLoading)) {
     return (
-      <Shell>
+      <Frame>
         <div className="flex justify-center py-24"><Spinner /></div>
-      </Shell>
+      </Frame>
     );
   }
   if (form.isError || !form.data) {
     return (
-      <Shell>
+      <Frame>
         <div className={`${card} mt-6 text-center`}>
           <p className="text-lg font-bold text-[#0E1A33]">This Link Isn't Active</p>
           <p className="mt-1 text-sm text-[#5F6878]">Ask your society manager for the latest link.</p>
         </div>
-      </Shell>
+      </Frame>
     );
   }
   const hasPlan = !!hub.data?.enrollments.length;
+  if (!embedded && isCustomer && hasPlan && !adding) {
+    return <Navigate to={`/app/society/${token}`} replace state={flash ? { flash } : undefined} />;
+  }
   return (
-    <Shell society={form.data.society}>
+    <Frame society={form.data.society}>
       {hasPlan && !adding ? (
         <ResidentHub token={token} hub={hub.data!} flash={flash} onAdd={() => { setFlash(""); setAdding(true); }} />
       ) : (
         <EnrollForm token={token} data={form.data} onCancel={hasPlan ? () => setAdding(false) : undefined} onDone={(message) => { setFlash(message); setAdding(false); }} />
       )}
-    </Shell>
+    </Frame>
+  );
+}
+
+/** Inside the customer dashboard: no second header, just a Society tag + name. */
+function InAppShell({ society, children }: { society?: SocietyFormData["society"]; children: React.ReactNode }) {
+  return (
+    <div className="mx-auto max-w-xl overflow-x-hidden text-[#0E1A33]">
+      {society && (
+        <div className="mb-4">
+          <span className="inline-flex rounded-full bg-[#EEF3FA] px-3 py-1 text-xs font-semibold text-[#0A66F0]">Society Plan</span>
+          <h1 className="mt-2 text-[22px] font-extrabold leading-tight sm:text-2xl">{society.name}</h1>
+          <p className="mt-0.5 text-sm text-[#5F6878]">{[society.area, society.city].filter(Boolean).join(", ") || "Daily Car Wash At Your Society"}</p>
+        </div>
+      )}
+      {children}
+    </div>
   );
 }
 
@@ -522,6 +546,28 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
 // Resident hub
 // ---------------------------------------------------------------------------
 
+/** "Daily Wash · 2 of 25 done" with a bar — one plan allowance at a glance. */
+function Meter({ label, value, pct, hint }: { label: string; value: string; pct: number; hint?: string }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[13px] font-semibold text-[#0E1A33]">{label}</span>
+        <span className="shrink-0 text-[13px] font-bold text-[#0E1A33]">{value}</span>
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[#E4E9F1]">
+        <div className="h-full rounded-full bg-[#0A66F0]" style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+      </div>
+      {hint && <p className="mt-1 text-[12px] text-[#5F6878]">{hint}</p>}
+    </div>
+  );
+}
+
+/** "2 Nov" — when the plan's current month ends (first live car's pass). */
+const validTill = (e: SocietyEnrollment) => {
+  const end = e.cars.find((c) => c.subscription?.status === "active" && c.subscription.end_date)?.subscription?.end_date;
+  return end ? formatShortDate(end.slice(0, 10)) : "";
+};
+
 function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: SocietyHub; flash?: string; onAdd: () => void }) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -570,30 +616,53 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
             <div className="min-w-0">
               <p className="text-[15px] font-bold leading-snug">{planWithServices(e)}</p>
               <p className="mt-0.5 text-[13px] text-[#5F6878]">
-                {e.flat} · {rupees(e.total_amount)} a month
+                Flat {e.flat} · {rupees(e.total_amount)} / Month
+                {validTill(e) && <> · Valid Till {validTill(e)}</>}
                 {e.status !== "active" && e.discount_amount > 0 && <span className="text-[#0A66F0]"> · coupon {e.coupon_code} −{rupees(e.discount_amount)}</span>}
               </p>
             </div>
             <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ${e.status === "active" ? "bg-[#E8F0FE] text-[#0A66F0]" : "bg-[#FFF8DB] text-[#7A5B00]"}`}>{statusText[e.status]}</span>
           </div>
-          <ul className="mt-3 divide-y divide-[#EEF2F7]">
-            {e.cars.map((c) => (
-              <li key={c.vehicle_id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
-                <span className="min-w-0">
-                  <span className="block font-mono text-[14px] font-bold">{c.registration_number}</span>
-                  <span className="block text-xs text-[#5F6878]">{titleCase(c.vehicle_type_name)}{c.status === "cancelled" ? " · Cancelled" : ""}</span>
-                </span>
-                {c.subscription && c.status === "active" ? (
-                  <span className="text-right text-xs text-[#5F6878]">
-                    <span className="block" title="Premium washes left this cycle"><b className="text-[#0E1A33]">{premiumUsage(e.premium_service_name, c.subscription.remaining, c.subscription.total)}</b> Left</span>
-                    {c.bucket_used != null && <span className="block" title="Daily washes done this cycle">{bucketUsage(e.bucket_short_label, c.bucket_used, c.bucket_allowance)} This Cycle</span>}
-                    {c.subscription.end_date && <span className="block">Till {formatShortDate(c.subscription.end_date.slice(0, 10))}</span>}
+          <ul className="mt-4 space-y-2.5">
+            {e.cars.map((c) =>
+              c.subscription && c.status === "active" ? (
+                <li key={c.vehicle_id} className="rounded-[14px] bg-[#F7F9FC] p-3.5" data-testid="society-car">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-white text-[#0A66F0] ring-1 ring-[#E4E9F1]">
+                      <Car className="h-[18px] w-[18px]" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block font-mono text-[14px] font-bold leading-tight">{c.registration_number}</span>
+                      <span className="block text-xs text-[#5F6878]">{titleCase(c.vehicle_type_name)}</span>
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    {c.bucket_used != null && (
+                      <Meter
+                        label={titleCase(e.bucket_short_label) || "Daily Wash"}
+                        value={`${c.bucket_used} of ${c.bucket_allowance} done`}
+                        pct={c.bucket_allowance ? (c.bucket_used / c.bucket_allowance) * 100 : 0}
+                        hint="Done every morning by your captain"
+                      />
+                    )}
+                    <Meter
+                      label={titleCase(e.premium_service_name) || "Premium Wash"}
+                      value={`${c.subscription.remaining} of ${c.subscription.total} left`}
+                      pct={c.subscription.total ? (c.subscription.remaining / c.subscription.total) * 100 : 0}
+                      hint={c.subscription.remaining > 0 ? "Planned for you, or book one below" : `All used — more on ${c.subscription.end_date ? formatShortDate(c.subscription.end_date.slice(0, 10)) : "renewal"}`}
+                    />
+                  </div>
+                </li>
+              ) : (
+                <li key={c.vehicle_id} className="flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-[#F7F9FC] px-3.5 py-3">
+                  <span className="min-w-0">
+                    <span className="block font-mono text-[14px] font-bold">{c.registration_number}</span>
+                    <span className="block text-xs text-[#5F6878]">{titleCase(c.vehicle_type_name)}{c.status === "cancelled" ? " · Cancelled" : ""}</span>
                   </span>
-                ) : (
                   <span className="text-sm font-semibold">{rupees(c.price)}</span>
-                )}
-              </li>
-            ))}
+                </li>
+              ),
+            )}
           </ul>
           <div className="mt-3 flex flex-wrap gap-2">
             {(e.status === "requested" || e.status === "awaiting_payment") && hub.online_payment && (
@@ -620,23 +689,6 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
 
       {liveCars.length > 0 && <ResidentScheduleCard societyId={hub.society.id} />}
       {liveCars.length > 0 && <BookPremium token={token} hub={hub} cars={liveCars} />}
-
-      {hub.upcoming.length > 0 && (
-        <section className={card}>
-          <h2 className="mb-2 text-base font-bold">Upcoming Premium Washes</h2>
-          <ul className="space-y-2 text-sm">
-            {hub.upcoming.map((b) => (
-              <li key={b.id} className="flex items-center justify-between gap-3 rounded-[12px] bg-[#F7F9FC] px-3 py-2.5">
-                <span>
-                  <span className="block font-semibold">{formatDay(b.scheduled_date)} · {b.slot_label}</span>
-                  <span className="block text-xs text-[#5F6878]">{[titleCase(b.service_name), b.registration_number ? carLabel(b.registration_number, b.vehicle_type_name) : "", b.booking_number].filter(Boolean).join(" · ")}</span>
-                </span>
-                <CalendarDays className="h-4 w-4 text-[#0A66F0]" />
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
 
       <section className={card} data-testid="society-issues-card">
         <div className="flex items-start justify-between gap-3">
@@ -753,6 +805,7 @@ function BookPremium({ token, hub, cars }: { token: string; hub: SocietyHub; car
       setSlot("");
       queryClient.invalidateQueries({ queryKey: ["society-hub", token] });
       queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["my-society-schedule"] });
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -768,7 +821,8 @@ function BookPremium({ token, hub, cars }: { token: string; hub: SocietyHub; car
   return (
     <section className={card} data-testid="book-premium">
       <h2 className="text-base font-bold">Book A Premium Wash</h2>
-      <p className="mb-3 mt-0.5 text-sm text-[#5F6878]">Book at least a day ahead. Covered by your plan.</p>
+      <p className="mb-3 mt-0.5 text-sm text-[#5F6878]">Pick a car, a day and a time. It uses one premium wash from your plan — nothing to pay. Book at least a day ahead.</p>
+      <p className="mb-1.5 text-xs font-semibold text-[#5F6878]">Car</p>
       <div className="mb-3 flex flex-wrap gap-2">
         {bookable.map((c) => {
           const id = c.subscription!.id;
@@ -776,7 +830,7 @@ function BookPremium({ token, hub, cars }: { token: string; hub: SocietyHub; car
           return (
             <button key={id} type="button" className={chip(on)} onClick={() => setPicked((p) => (on ? p.filter((x) => x !== id) : [...p, id]))}>
               <span className="font-mono">{c.registration_number}</span>{c.vehicle_type_name ? ` · ${titleCase(c.vehicle_type_name)}` : ""}
-              <span className="block text-xs font-normal">{premiumUsage(c.premium_service_name, c.subscription!.remaining, c.subscription!.total)} Left</span>
+              <span className="block text-xs font-normal">{titleCase(c.premium_service_name) || "Premium Wash"} · {c.subscription!.remaining} of {c.subscription!.total} left</span>
             </button>
           );
         })}

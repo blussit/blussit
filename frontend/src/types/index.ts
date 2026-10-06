@@ -373,6 +373,9 @@ export interface Booking {
   payment_method: string;
   subtotal: number;
   discount_amount: number;
+  /** Tip the customer gave on a job the manager did — already INCLUDED in
+   *  total_amount. One per visit (sits on one of its cars). */
+  tip_amount?: number | null;
   tax_amount: number;
   /** Distance charge, once per visit (on the visit's first car), already
    *  included in total_amount. 0 when nothing on the visit charges_travel. */

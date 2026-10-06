@@ -1,4 +1,5 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import "./staffTheme.css";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import {
@@ -234,6 +235,13 @@ export function DashboardShell({
   // Modal, Badge, Switch, EmptyState) with the old brand values as their
   // fallbacks, so the customer and captain portals look exactly as before.
   const staffTheme = !!user && (user.role === "manager" || user.role === "admin");
+  // On <body>, not just this frame: popups, drawers and the confirm box are
+  // rendered at the end of <body> and must get the same v2 look.
+  useLayoutEffect(() => {
+    if (!staffTheme) return;
+    document.body.classList.add("staff-v2");
+    return () => document.body.classList.remove("staff-v2");
+  }, [staffTheme]);
   const staffVars = {
     "--color-surface": "#FFFFFF",
     "--color-card-border": "#E4E9F1",

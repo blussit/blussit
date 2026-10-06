@@ -12,9 +12,10 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, CalendarDays, CarFront, Gift, Home, LifeBuoy, LogOut, Plus, Tag, User as UserIcon, type LucideIcon } from "lucide-react";
+import { Bell, Building2, CalendarDays, CarFront, Gift, Home, LifeBuoy, LogOut, Plus, Tag, User as UserIcon, type LucideIcon } from "lucide-react";
 import { MandatoryGates } from "../shared/MandatoryGates";
-import { notificationApi } from "../../api/engagement";
+import { notificationApi, subscriptionApi } from "../../api/engagement";
+import { isSocietyPass, societyPassPath } from "../../lib/passState";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
@@ -48,6 +49,15 @@ const SIDEBAR: Tab[] = [
   { label: "Help & Support", to: "/app/support", icon: LifeBuoy },
   { label: "Profile", to: "/app/profile", icon: UserIcon, also: ["/app/settings", "/app/addresses", "/app/notifications"] },
 ];
+
+/** Society residents get a "Society" tab (their society's hub, in-app),
+ *  placed right after Plans. One society per resident is the norm; with
+ *  more, it opens the newest one and the others stay reachable from Plans. */
+function withSociety(tabs: Tab[], societyPath: string | null, label: string): Tab[] {
+  if (!societyPath) return tabs;
+  const at = tabs.findIndex((t) => t.to === "/app/subscriptions") + 1;
+  return [...tabs.slice(0, at), { label, to: societyPath, icon: Building2, also: ["/app/society"] }, ...tabs.slice(at)];
+}
 
 function isActive(tab: Tab, pathname: string): boolean {
   if (tab.to === "/app") return pathname === "/app" || pathname === "/app/";
@@ -128,6 +138,13 @@ export function CustomerShell({ children }: { children: ReactNode }) {
   const confirm = useConfirm();
   const { pathname } = useLocation();
   const unread = useNotificationToasts();
+  const { data: subs } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions, staleTime: 60_000 });
+  const societySub = (subs || [])
+    .filter((s) => isSocietyPass(s) && societyPassPath(s))
+    .sort((a, b) => new Date(b.end_date || 0).getTime() - new Date(a.end_date || 0).getTime())[0];
+  const societyPath = societySub ? societyPassPath(societySub) : null;
+  const tabs = withSociety(TABS, societyPath, "Society");
+  const sidebar = withSociety(SIDEBAR, societyPath, "My Society");
   // The booking flow is shared with the public /book page and styles itself;
   // it renders here exactly as it does there (no v2 re-pointing, no vars).
   const inBookingFlow = /^\/app\/book\/?$/.test(pathname);
@@ -154,7 +171,7 @@ export function CustomerShell({ children }: { children: ReactNode }) {
           </Link>
         </div>
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-3">
-          {SIDEBAR.map((item) => {
+          {sidebar.map((item) => {
             const active = isActive(item, pathname);
             return (
               <NavLink
@@ -211,9 +228,12 @@ export function CustomerShell({ children }: { children: ReactNode }) {
       {/* Phone / tablet tab bar */}
       <nav
         aria-label="Main"
-        className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t border-[#E4E9F1] bg-white/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur lg:hidden"
+        className={cn(
+          "fixed inset-x-0 bottom-0 z-40 grid border-t border-[#E4E9F1] bg-white/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur lg:hidden",
+          tabs.length > 4 ? "grid-cols-5" : "grid-cols-4"
+        )}
       >
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const active = isActive(tab, pathname);
           return (
             <Link

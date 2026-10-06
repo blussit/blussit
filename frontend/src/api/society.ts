@@ -169,6 +169,8 @@ export interface SocietyEnrollment {
   payment: { method: string; amount: number; discount?: number; coupon_code?: string | null; at: string | null } | null;
   renew_open: boolean;
   renew_amount: number;
+  /** Staff list only: the unpaid WhatsApp payment link, if one was sent. */
+  payment_link?: { short_url: string; amount: number; renewal: boolean; sent_at: string | null } | null;
   created_at: string | null;
   activated_at: string | null;
   cancelled_at: string | null;
@@ -421,6 +423,11 @@ export const societyApi = {
     data<CouponPreview>(apiClient.post(`/society-enrollments/${enrollmentId}/coupon-preview`, payload)),
   cancel: (enrollmentId: string, vehicleIds?: string[]) =>
     data<SocietyEnrollment>(apiClient.post(`/society-enrollments/${enrollmentId}/cancel`, { vehicle_ids: vehicleIds ?? null })),
+  /** Razorpay link to the resident's WhatsApp — paying it activates (or renews) the plan by itself. */
+  paymentLink: (enrollmentId: string, renewal = false) =>
+    data<{ short_url: string; amount: number; order_id: string; reused: boolean; sent: boolean }>(
+      apiClient.post(`/society-enrollments/${enrollmentId}/payment-link`, { renewal, send_whatsapp: true }),
+    ),
 };
 
 export const societyPlanApi = {

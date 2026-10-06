@@ -76,6 +76,8 @@ export interface ManagerLogPayload {
   customer_notes?: string;
   /** Rupees taken off the whole bill (optional) — the saved total is what was actually paid. */
   discount_amount?: number;
+  /** Tip the customer gave (optional) — added to the job's total and revenue. */
+  tip_amount?: number;
   /** true = the customer gets ONE WhatsApp: "service is done". */
   send_whatsapp: boolean;
 }
@@ -242,6 +244,8 @@ export const bookingApi = {
   /** The manager did this (not-yet-started) booking himself — closes it, whole visit. */
   markDone: (id: string, sendWhatsapp: boolean) =>
     apiClient.post<ApiSuccess<{ completed: number; booking_numbers: string[] }>>(`/bookings/${id}/mark-done`, { send_whatsapp: sendWhatsapp }).then((r) => r.data.data),
+  /** Add or correct the tip on a job the manager did (0 removes it) — one per visit, added to its total. */
+  setTip: (id: string, tipAmount: number) => apiClient.patch<ApiSuccess<Booking>>(`/bookings/${id}/tip`, { tip_amount: tipAmount }).then((r) => r.data.data),
   /** Same shape, booked by a manager/admin on a customer's behalf. */
   managerQuick: (payload: QuickBookingPayload) =>
     apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-quick", payload).then((r) => r.data.data),

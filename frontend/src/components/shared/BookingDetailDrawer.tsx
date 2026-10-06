@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Calendar, Car, Clock, CreditCard, Flag, MapPin, Navigation, Pencil, Star, Trash2, User as UserIcon, Wrench } from "lucide-react";
+import { useAuth } from "../../context/AuthContext";
+import { TipModal } from "./TipModal";
 import { Badge, Button, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
@@ -77,6 +79,17 @@ export function BookingDetailDrawer({
   // Charged once per visit (on its first car); summed so it shows whichever car carries it.
   const travelCharge = cars.reduce((sum, c) => sum + (c.travel_charge || 0), 0);
   const travelKm = cars.find((c) => (c.travel_charge || 0) > 0)?.travel_charge_km;
+  // The visit's tip (kept on one of its cars, already inside its total) —
+  // only on jobs the manager did, only shown to managers/admins. `tipSaved`
+  // shows a fresh save straight away.
+  const { user } = useAuth();
+  const [tipOpen, setTipOpen] = useState(false);
+  const [tipSaved, setTipSaved] = useState<number | null>(null);
+  useEffect(() => setTipSaved(null), [booking?.id]);
+  const visitTip = tipSaved ?? cars.reduce((sum, c) => sum + (Number(c.tip_amount) || 0), 0);
+  const doneCar = cars.find((c) => c.status === "completed" && c.completed_by_role === "manager") || null;
+  const canEditTip = !!doneCar && (user?.role === "manager" || user?.role === "admin");
+  const showTip = canEditTip || (visitTip > 0 && (user?.role === "manager" || user?.role === "admin"));
   /** "Car 2 · MP09RB0002" — how a per-car section is labelled on a visit. */
   const carTag = (c: Booking) =>
     `Car ${cars.indexOf(c) + 1} · ${carLine(c) || c.booking_number}`;
@@ -291,6 +304,21 @@ export function BookingDetailDrawer({
               label="Status"
               value={<Badge tone={paymentPending ? "neutral" : "success"}>{paymentPending ? "Pending" : "Paid"}</Badge>}
             />
+            {showTip && (
+              <Row
+                label="Tip (Included In Amount)"
+                value={
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono-num">{visitTip > 0 ? `₹${visitTip}` : "—"}</span>
+                    {canEditTip && (
+                      <button type="button" onClick={() => setTipOpen(true)} className="text-xs font-semibold text-[#0A66F0] hover:underline">
+                        {visitTip > 0 ? "Edit" : "Add Tip"}
+                      </button>
+                    )}
+                  </span>
+                }
+              />
+            )}
           </Section>
 
           {/* Below this line everything is about ONE car: its own plate
@@ -404,6 +432,7 @@ export function BookingDetailDrawer({
           </Section>
         </div>
       )}
+      <TipModal booking={tipOpen ? doneCar : null} currentTip={visitTip} onClose={() => setTipOpen(false)} onSaved={setTipSaved} />
     </Modal>
   );
 }

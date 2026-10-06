@@ -1,9 +1,39 @@
 import { type ReactNode, useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 
 /** Ids of the currently open modals, innermost last. */
 const openStack: string[] = [];
+
+/**
+ * Escape closes only the TOP-most open dialog (keyboard users had no way out
+ * but tabbing to the X) — one opened from another closes first, its parent
+ * stays. Every full-screen overlay registers here, not just <Modal>.
+ */
+export function useDialogStack(open: boolean, onClose: () => void, id: string) {
+  // Callers pass an inline onClose; a ref keeps the effect below from
+  // re-registering (and re-ordering the stack) on every render.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open) return;
+    openStack.push(id);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && openStack[openStack.length - 1] === id) {
+        e.preventDefault();
+        closeRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const i = openStack.lastIndexOf(id);
+      if (i >= 0) openStack.splice(i, 1);
+    };
+  }, [open, id]);
+}
 
 export function Modal({
   open,
@@ -19,30 +49,12 @@ export function Modal({
   maxWidth?: string;
 }) {
   const titleId = useId();
-  // Callers pass an inline onClose; a ref keeps the effect below from
-  // re-registering (and re-ordering the stack) on every render.
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  // Escape closes the TOP-most open dialog only (keyboard users had no way
-  // out but tabbing to the X) — a modal opened from another modal closes
-  // first, its parent stays.
-  useEffect(() => {
-    if (!open) return;
-    openStack.push(titleId);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && openStack[openStack.length - 1] === titleId) {
-        e.preventDefault();
-        closeRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      const i = openStack.lastIndexOf(titleId);
-      if (i >= 0) openStack.splice(i, 1);
-    };
-  }, [open, titleId]);
-  return (
+  useDialogStack(open, onClose, titleId);
+  // The page behind stays still while the dialog is open.
+  useBodyScrollLock(open);
+  // Rendered on <body>: inside an animated/transformed card a `fixed` layer is
+  // trapped in that card, so the dimmer covered only part of the page.
+  return createPortal(
     <AnimatePresence>
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby={titleId}>
@@ -74,6 +86,7 @@ export function Modal({
           </motion.div>
         </div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

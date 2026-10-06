@@ -12,6 +12,7 @@ from app.schemas.booking_schema import (
     BookingCreateRequest,
     BookingQuoteRequest,
     BookingRescheduleRequest,
+    BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
     HeadingRequest,
@@ -154,7 +155,7 @@ class BookingController:
         for b in result.get("bookings") or []:
             await self.audit.log_action(
                 current_user.id, current_user.role, "MANAGER_LOG_COMPLETED", "bookings", b["id"],
-                {"customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp, "discount_amount": payload.discount_amount},
+                {"customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp, "discount_amount": payload.discount_amount, "tip_amount": payload.tip_amount},
             )
         return success(result, "Job logged as done")
 
@@ -446,6 +447,15 @@ class BookingController:
             {"new_date": payload.scheduled_date.isoformat(), "new_slot": payload.scheduled_slot},
         )
         return success(result, "Booking rescheduled successfully")
+
+    async def set_tip(self, current_user: CurrentUser, booking_id: str, payload: BookingTipRequest):
+        before = await self.service.repo.find_by_id(booking_id)
+        result = await self.service.set_tip(booking_id, payload.tip_amount, current_user.id, current_user.role, current_user.service_center_id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "SET_BOOKING_TIP", "bookings", booking_id,
+            {"tip_amount": payload.tip_amount, "previous": float((before or {}).get("tip_amount") or 0)},
+        )
+        return success(result, "Tip saved" if payload.tip_amount > 0 else "Tip removed")
 
     async def update_details(self, current_user: CurrentUser, booking_id: str, payload: BookingUpdateDetailsRequest):
         result = await self.service.update_details(booking_id, payload, current_user.role, current_user.service_center_id)

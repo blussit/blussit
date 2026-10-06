@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
+from pymongo import ReturnDocument
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
@@ -1890,6 +1891,8 @@ class BookingService:
                 await self._discard_logged_booking(booking["id"])
             raise
 
+        if payload.tip_amount > 0:
+            await self._record_tip(created[0]["id"], [b["id"] for b in created], payload.tip_amount, manager_id)
         raw_cars = [c for c in [await self.repo.find_by_id(b["id"]) for b in created] if c]
         await self._notify_service_done(raw_cars, customer_id, payload.send_whatsapp)
         await self._after_visit_completed(customer_id, raw_cars, service_at, payload.send_whatsapp)
@@ -4881,6 +4884,58 @@ class BookingService:
             await self._broadcast_slots_changed(center_id, old_date_str)
             await self._broadcast_slots_changed(center_id, new_date_str)
         return serialize_doc(updated)
+
+    # -- Tips ----------------------------------------------------------
+    # A tip on a job the MANAGER did (Log A Done Job): what the customer
+    # handed over on top of the bill. Founder: it counts — it's added to the
+    # job's total_amount and (a manager-done job's earning being its total)
+    # platform_earning, so revenue and the cash/online ledgers include it.
+    # One tip per VISIT, kept on a single car so it's never counted twice.
+    async def _record_tip(self, primary_id: str, visit_ids: list[str], amount: float, actor_id: str) -> dict | None:
+        now = now_ist()
+        updated = None
+        for vid in dict.fromkeys([*visit_ids, primary_id]):
+            car = await self.repo.find_by_id(vid)
+            if not car:
+                continue
+            old = float(car.get("tip_amount") or 0)
+            target = float(amount) if vid == primary_id else 0.0
+            if old == target and vid != primary_id:
+                continue
+            delta = round(target - old, 2)
+            inc = {"total_amount": delta}
+            if car.get("completed_by_role") == "manager":
+                inc["platform_earning"] = delta
+            # Guarded on the tip we read: two quick edits can't both add
+            # their difference to the total.
+            result = await self.repo.collection.find_one_and_update(
+                {"_id": car["_id"], "tip_amount": car.get("tip_amount")},
+                {"$set": {"tip_amount": target, "tip_updated_by": actor_id, "tip_updated_at": now, "updated_at": now}, "$inc": inc},
+                return_document=ReturnDocument.AFTER,
+            )
+            if result is None:
+                raise BadRequestException("This job's tip just changed — refresh and try again.")
+            if vid == primary_id:
+                updated = result
+        return updated
+
+    async def set_tip(self, booking_id: str, amount: float, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """Add or correct the tip on a job the manager did (0 removes it).
+        Captain jobs never carry one — that side has nothing to do with tips."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        if actor_role == "manager":
+            ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        if booking["status"] != BookingStatus.COMPLETED.value or booking.get("completed_by_role") != "manager":
+            raise BadRequestException("Tips are recorded only on jobs done by the manager.")
+        cars = await self._visit_cars(booking)
+        # The visit's tip stays on whichever car already holds it.
+        holder = next((c for c in cars if float(c.get("tip_amount") or 0) > 0), None)
+        primary = str(holder["_id"]) if holder else booking_id
+        updated = await self._record_tip(primary, [str(c["_id"]) for c in cars], amount, actor_id)
+        await self._broadcast_booking_changed(updated or booking)
+        return serialize_doc(updated) if updated else serialize_doc(booking)
 
     async def update_details(
         self, booking_id: str, payload: BookingUpdateDetailsRequest, actor_role: str, actor_center_id: str | None,

@@ -245,6 +245,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [logTime, setLogTime] = useState("");
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const [discount, setDiscount] = useState("");
+  // Log mode: the tip the customer gave — added to the job's total and revenue.
+  const [tip, setTip] = useState("");
   // Manager booking of a prepaid service: the pay link the customer was sent.
   const [sentLink, setSentLink] = useState<{ numbers: string; link: string } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -300,6 +302,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         setLogTime(typeof saved.logTime === "string" ? saved.logTime : "");
         setSendWhatsApp(saved.sendWhatsApp !== false);
         setDiscount(typeof saved.discount === "string" ? saved.discount : "");
+        setTip(typeof saved.tip === "string" ? saved.tip : "");
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
@@ -325,12 +328,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount })
+        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount]);
+  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -792,7 +795,9 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // Log mode only: rupees the manager took off the bill. What the customer
   // actually paid (finalTotal) drives the footer, the payment choice and the save.
   const discountNum = isLog ? Math.round(Number(discount) || 0) : 0;
-  const finalTotal = Math.max(0, displayTotal - discountNum);
+  const tipNum = isLog ? Math.round(Number(tip) || 0) : 0;
+  const afterDiscount = Math.max(0, displayTotal - discountNum);
+  const finalTotal = afterDiscount + tipNum;
   const allServices = lines.flatMap((l) => l.services);
   const step1Ready = lines.length > 0 && lines.every((l) => !!l.base) && (!draft.typeId || draftReady);
 
@@ -1125,6 +1130,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         customer_notes: notes.trim() || undefined,
         payment_method: finalTotal > 0 ? paymentMethod : "cash",
         discount_amount: discountNum > 0 ? discountNum : undefined,
+        tip_amount: tipNum || undefined,
         send_whatsapp: sendWhatsApp,
       });
       try {
@@ -1283,6 +1289,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         : { label: "Distance Charge", value: `Free — within ${travelQuote.free_km} km` }
     );
   if (discountNum > 0 && discountNum <= displayTotal) billRows.push({ label: "Discount", value: `−₹${discountNum}` });
+  if (tipNum > 0) billRows.push({ label: "Tip From Customer", value: `+₹${tipNum}` });
   const shownTotal = isLog ? finalTotal : payable;
   // The first-wash price struck against what a returning customer pays.
   const struckTotal = showFirstWash && regularTotal > total ? shownTotal + (regularTotal - total) : null;
@@ -2033,7 +2040,16 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
                     placeholder="0"
                     error={fieldErrors.discount}
-                    hint={discountNum > 0 && discountNum <= displayTotal ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.` : undefined}
+                    hint={discountNum > 0 && discountNum <= displayTotal ? `Bill is ₹${afterDiscount} instead of ₹${displayTotal}.` : undefined}
+                  />
+
+                  <Input
+                    label="Tip Given (₹, Optional)"
+                    inputMode="numeric"
+                    value={tip}
+                    onChange={(e) => setTip(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="0"
+                    hint={tipNum > 0 ? `Added to the total — ₹${finalTotal} with the tip, counted in revenue.` : "If the customer tipped, it's added to the total and revenue. You can also add it later from the booking."}
                   />
 
                   {planTogglesNode}
@@ -2296,36 +2312,66 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     </div>
   );
   const divider = <div className="my-5 h-px bg-[#EEF1F5]" />;
-  const planSwitches = lines.map((line, i) => {
-    const match = lineMatches[i];
-    if (!match) return null;
-    const plan = titleCase(match.subs[0].plan_name) || "Plan";
-    const left = match.subs[0].remaining_service_count;
-    const units = line.payload?.quantity ?? 1;
-    return (
-      <button
-        key={i}
-        type="button"
-        role="switch"
-        aria-checked={match.on}
-        onClick={() => setSubscriptionOverride((prev) => ({ ...prev, [i]: !match.on }))}
-        className={`flex w-full items-center justify-between gap-3 rounded-[14px] border p-3 text-left transition ${match.on ? "border-[#0A66F0] bg-[#F3F7FF]" : "border-[#E4E9F1] bg-white"}`}
-      >
-        <span className="min-w-0">
-          <span className="block text-[14px] font-semibold text-[#0E1A33]">
-            Use My {plan} — {left} Wash{left === 1 ? "" : "es"} Left
-          </span>
-          <span className="block text-[12px] text-[#5F6878]">
-            {lineLabel(line)}
-            {match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}
-          </span>
-        </span>
-        <span aria-hidden className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${match.on ? "bg-[#0A66F0]" : "bg-[#C9D3E2]"}`}>
-          <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${match.on ? "translate-x-[22px]" : "translate-x-0.5"}`} />
-        </span>
-      </button>
-    );
-  });
+  // "How would you like to pay?" — shown the moment a plan matches the car
+  // and wash picked, so ₹0 never appears without the reason next to it. Using
+  // the plan stays the default (it's what a plan holder usually wants), and
+  // paying instead is one tap. Same state as the server's use_subscription.
+  const passLabel = (sub: UserSubscription) =>
+    sub.society_id ? "Society Plan" : `${titleCase(sub.plan_name) || "Monthly"} Pass`.replace(/ Pass Pass$/, " Pass");
+  const planChoice = lineMatches.some(Boolean) ? (
+    <div className="mt-5" data-testid="plan-choice">
+      <h3 className="mb-2.5 font-display text-[16px] font-bold text-[#0E1A33]">How Would You Like To Pay?</h3>
+      <div className="space-y-3">
+        {lines.map((line, i) => {
+          const match = lineMatches[i];
+          if (!match) return null;
+          const sub = match.subs[0];
+          const left = sub.remaining_service_count ?? 0;
+          const total = sub.total_service_count ?? 0;
+          const units = line.payload?.quantity ?? 1;
+          const service = line.base ? titleCase(line.base.name) : "Wash";
+          const withPlan = line.subtotal - match.coveredCount * line.baseUnitPrice;
+          const where = sub.society_id && sub.society_name ? `${titleCase(sub.society_name)} · ` : "";
+          const option = (usePlan: boolean, title: string, note: string, price: string) => {
+            const on = match.on === usePlan;
+            return (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={on}
+                onClick={() => setSubscriptionOverride((prev) => ({ ...prev, [i]: usePlan }))}
+                className={`flex w-full items-center gap-3 rounded-[14px] border p-3.5 text-left transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] ring-1 ring-[#0A66F0]" : "border-[#E4E9F1] bg-white hover:border-[#0A66F0]/50"}`}
+              >
+                <span aria-hidden className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 ${on ? "border-[#0A66F0]" : "border-[#C3CBD8]"}`}>
+                  {on && <span className="h-2 w-2 rounded-full bg-[#0A66F0]" />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[14px] font-semibold text-[#0E1A33]">{title}</span>
+                  <span className="block text-[12px] text-[#5F6878]">{note}</span>
+                </span>
+                <span className={`shrink-0 text-[15px] font-bold ${usePlan ? "text-[#0A66F0]" : "text-[#0E1A33]"}`}>{price}</span>
+              </button>
+            );
+          };
+          return (
+            <div key={i} role="radiogroup" aria-label={`How to pay for ${lineLabel(line)}`}>
+              {lines.length > 1 && <p className="mb-1.5 text-[12px] font-semibold text-[#5F6878]">{lineLabel(line)}</p>}
+              <div className="grid gap-2 @lg:grid-cols-2">
+                {option(
+                  true,
+                  `${isCustomer ? "Use My" : "Use Their"} ${passLabel(sub)}`,
+                  `${where}${service} · ${left} of ${total} left${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`,
+                  withPlan > 0 ? `${INR(withPlan)}` : "Covered",
+                )}
+                {option(false, "Pay For This Wash", isCustomer ? "Keep your plan wash for later" : "Keep the plan wash for later", INR(line.subtotal))}
+              </div>
+              {match.on && withPlan > 0 && <p className="mt-1.5 text-[12px] text-[#5F6878]">Extras aren't part of the plan, so they're charged.</p>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
   const introSummary =
     isCustomer && introSub && introLine ? (
       <div className="flex items-center gap-3 rounded-[16px] border border-[#CFE0FD] bg-[#F3F7FF] p-3.5">
@@ -2456,28 +2502,41 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
             +
           </button>
         </span>
-        {addonList.map((a) => {
-          const on = draft.addons.includes(a.id);
-          const perBike = editingIsBike && editingKit?.bikePolish && a.id === editingKit.bikePolish.id;
-          return (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => toggleAddon(a.id)}
-              aria-pressed={on}
-              className={`inline-flex h-9 items-center gap-1 rounded-full border px-3 text-[13px] font-medium transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] text-[#0A66F0]" : "border-[#E4E9F1] bg-white text-[#0E1A33] hover:border-[#0A66F0]/50"}`}
-            >
-              {on ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-              {titleCase(a.name)} · {INR(unit(a, draft.typeId))}
-              {perBike ? "/bike" : ""}
-            </button>
-          );
-        })}
         {totalVehicles < maxVehicles && (
           <button type="button" onClick={addAnother} className="inline-flex h-9 items-center gap-1 px-1 text-[13px] font-semibold text-[#0A66F0] hover:underline">
             <Plus className="h-3.5 w-3.5" /> Add Another Vehicle
           </button>
         )}
+      </div>
+    ) : null;
+
+  // Extras sit under the time slots (founder call): pick the wash, then the
+  // time, then anything extra.
+  const addonsRow =
+    editing?.base && addonList.length > 0 ? (
+      <div className="mt-5">
+        <p className="mb-2 text-[13px] font-semibold text-[#0E1A33]">
+          Add Extras <span className="font-normal text-[#5F6878]">· Optional</span>
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {addonList.map((a) => {
+            const on = draft.addons.includes(a.id);
+            const perBike = editingIsBike && editingKit?.bikePolish && a.id === editingKit.bikePolish.id;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => toggleAddon(a.id)}
+                aria-pressed={on}
+                className={`inline-flex h-9 items-center gap-1 rounded-full border px-3 text-[13px] font-medium transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] text-[#0A66F0]" : "border-[#E4E9F1] bg-white text-[#0E1A33] hover:border-[#0A66F0]/50"}`}
+              >
+                {on ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                {titleCase(a.name)} · {INR(unit(a, draft.typeId))}
+                {perBike ? "/bike" : ""}
+              </button>
+            );
+          })}
+        </div>
       </div>
     ) : null;
 
@@ -2510,8 +2569,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         })}
       </div>
     ) : null;
-
-  const slotArea = slotCenter && slotCenter === centerId && coverage === "covered" ? savedAddress?.label || "Your Address" : "Indore";
 
   return (
     <>
@@ -2619,6 +2676,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                         </div>
                         {slotsBlock}
                       </div>
+                      {addonsRow}
+                      {isCustomer && planChoice}
                     </div>
 
                     {/* Phone / narrow: price + Continue right under the slots */}
@@ -2700,7 +2759,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                         </div>
                       )}
 
-                      {!(introSummary && lines.length === 1) && planSwitches.some(Boolean) && <div className="mt-4 space-y-2">{planSwitches}</div>}
+                      {!(introSummary && lines.length === 1) && planChoice}
 
                       {payable > 0 && (
                         <>

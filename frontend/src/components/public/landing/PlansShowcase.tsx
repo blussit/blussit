@@ -7,9 +7,8 @@ import { subscriptionApi } from "../../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
 import { useAuth } from "../../../context/AuthContext";
 import { CustomPlanEnquiryModal } from "../../shared/CustomPlanEnquiryModal";
-import { passHeadlinePrice } from "../../../lib/passPricing";
 import { bikeTypeIds } from "../../../lib/serviceMix";
-import { INR, titleCase } from "./shared";
+import { titleCase } from "./shared";
 import { SocietyRequestCard } from "./SocietyRequestCard";
 import type { Service } from "../../../types";
 
@@ -17,10 +16,10 @@ const MONTHLY_IMG = "/img/plans-card1-800.webp";
 const CUSTOM_IMG = "/img/plans-card2-800.webp";
 
 /**
- * Two cards, always: the monthly pass (bigger, highlighted), and "something else".
+ * Three cards, always: the monthly pass, housing societies, and a custom plan.
  * A pass is bought for ONE car and covers ONE wash, so the price is only a "from".
  */
-export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string; showEmpty?: boolean }) {
+export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boolean }) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [enquiryOpen, setEnquiryOpen] = useState(false);
@@ -44,14 +43,6 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
   // Bike-only vehicle types are excluded so the headline always reflects a car wash.
   const bikeIds = bikeTypeIds(vehicleTypes);
 
-  // Headline = Waterless Service × Hatchback price (see passHeadlinePrice).
-  const fromPrices = active
-    .map((plan) => {
-      const hp = passHeadlinePrice(plan, services, vehicleTypes);
-      return hp != null ? hp : (plan.discounted_price ?? plan.price);
-    })
-    .filter((n): n is number => n != null);
-  const from = fromPrices.length ? Math.min(...fromPrices) : null;
   const washes = Array.from(
     new Set(
       active
@@ -90,12 +81,13 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
         </div>
 
         {/* Cards */}
-        <div className="mt-6 lg:mt-8 grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[1fr_1.05fr_1fr] lg:gap-6 lg:items-stretch">
+        {/* Three equal columns, equal heights — every button lines up on one row. */}
+        <div className="mt-6 grid grid-cols-1 items-stretch gap-5 lg:mt-8 lg:grid-cols-3 lg:gap-6">
           {isLoading ? (
-            <div className="h-[380px] animate-pulse rounded-[22px] border border-[#E4E9F0] bg-white" aria-hidden="true" />
+            <div className="h-[380px] animate-pulse rounded-[22px] lg:h-full border border-[#E4E9F0] bg-white" aria-hidden="true" />
           ) : (
-            <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:flex-col lg:min-h-[440px]">
-              <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
+            <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:h-full lg:flex-col">
+              <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
                 <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[26px]">Monthly Pass</h3>
                 <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
 
@@ -140,8 +132,8 @@ export function PlansShowcase({ id = "plans", showEmpty = false }: { id?: string
           <SocietyRequestCard />
 
           {/* Custom plan */}
-          <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:flex-col lg:min-h-[440px]">
-            <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
+          <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:h-full lg:flex-col">
+            <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
               <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[24px]">Custom Plan</h3>
               <p className="mt-1 text-[13px] leading-snug text-[#64748B]">
                 More cars, more washes, or a fixed time every week? Tell us what you need and we'll create a plan for you.

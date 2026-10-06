@@ -176,6 +176,7 @@ export default function App() {
                 <Route path="bookings" element={<MyBookingsPage />} />
                 <Route path="bookings/:id" element={<BookingDetailPage />} />
                 <Route path="subscriptions" element={<SubscriptionsPage />} />
+                <Route path="society/:token" element={<SocietyFormPage embedded />} />
                 <Route path="addresses" element={<AddressesPage />} />
                 <Route path="support" element={<SupportPage />} />
                 <Route path="profile" element={<CustomerProfilePage />} />

@@ -19,11 +19,13 @@ export function useBodyScrollLock(active: boolean): void {
       saved = { y, bodyStyle: body.getAttribute("style") ?? "" };
       Object.assign(body.style, { position: "fixed", top: `-${y}px`, left: "0", right: "0", width: "100%", overflow: "hidden" });
       if (scrollbar > 0) body.style.paddingRight = `${scrollbar}px`;
+      html.dataset.overlay = "open"; // index.css hides the floating Call/WhatsApp buttons
     }
     return () => {
       if (--locks > 0 || !saved) return;
       const { y, bodyStyle } = saved;
       saved = null;
+      delete html.dataset.overlay;
       if (bodyStyle) body.setAttribute("style", bodyStyle);
       else body.removeAttribute("style");
       // index.css makes html scroll smoothly — jumping back must be instant.

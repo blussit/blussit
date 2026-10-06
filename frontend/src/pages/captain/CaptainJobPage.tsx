@@ -425,7 +425,7 @@ function JobScreen({ id }: { id: string }) {
           {!summary && stuck && <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.jobs.waiting.desc")}</Notice>}
           {!summary && !stuck && flagged && <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.v2.flagged")}</Notice>}
           {!summary && step === "start" && tooEarly && !stuck && (
-            <Notice tone="blue" icon={<Clock className="h-4 w-4" />}>
+            <Notice tone="amber" icon={<Clock className="h-4 w-4" />}>
               {t("captain.v2.opensAt").replace("{time}", clock(new Date(opensAt!).toISOString()))}
             </Notice>
           )}

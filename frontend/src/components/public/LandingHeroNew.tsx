@@ -104,7 +104,9 @@ function CountUp({ to, decimals = 0, duration = 1800, group = true }: { to: numb
 
 const scrollToHowItWorks = () => document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
 
-export function LandingHero({ onBook }: { onBook: (serviceSlug?: string) => void }) {
+/** `offer` (phones/tablets only) floats over the bottom of the photo, just
+ *  above the features row; the desktop strip is placed by the page. */
+export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) => void; offer?: ReactNode }) {
   return (
     <section className="relative w-full overflow-hidden bg-white">
       <WhatsAppFloatingButton />
@@ -159,7 +161,7 @@ export function LandingHero({ onBook }: { onBook: (serviceSlug?: string) => void
               <span style={{ color: BLUE }}>Your Doorstep.</span>
             </h1>
             <p className="mt-5 max-w-[470px] text-[17px] leading-[1.55]" style={{ color: MUTED }}>
-              Professional car wash &amp; detailing at your location in Indore. Waterless options. Cleaner cars. Happier drives.
+              Professional car wash at your location in Indore. Waterless options. Cleaner cars. Happier drives.
             </p>
 
             <Features className="mt-7" />
@@ -179,7 +181,7 @@ export function LandingHero({ onBook }: { onBook: (serviceSlug?: string) => void
 
       {/* ============================ PHONE / TABLET ============================ */}
       <div className="lg:hidden">
-        {/* The square photo starts right under the offer bar; the copy sits
+        {/* The square photo starts right under the navbar; the copy sits
             in its open sky (top-left). Every size here is a share of the
             photo's width, so on any phone the words land in the same clear
             spot — beside the "Clean Cars Greener Indore" script, above the car.
@@ -227,7 +229,7 @@ export function LandingHero({ onBook }: { onBook: (serviceSlug?: string) => void
               </span>
             </h1>
             <p className="leading-[1.4]" style={{ color: "#4B5466", fontSize: "3.05vw", marginTop: "2vw", maxWidth: "41vw" }}>
-              Professional car wash &amp; detailing at your location in Indore.
+              Professional car wash at your location in Indore.
             </p>
           </div>
 
@@ -238,6 +240,13 @@ export function LandingHero({ onBook }: { onBook: (serviceSlug?: string) => void
             className="absolute z-10"
             style={{ right: "3.5vw", top: "3.5vw", width: "clamp(30px, 8.5vw, 48px)", height: "clamp(30px, 8.5vw, 48px)" }}
           />
+
+          {/* The offer floats just above the frosted sheet (which rides up 12vw). */}
+          {offer && (
+            <div className="absolute inset-x-0 z-20" style={{ bottom: "calc(12vw + 2px)" }}>
+              {offer}
+            </div>
+          )}
         </div>
 
         {/* A frosted white sheet that rides up over the bottom of the photo, so

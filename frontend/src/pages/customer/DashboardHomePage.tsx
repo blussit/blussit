@@ -236,7 +236,7 @@ export default function CustomerDashboardPage() {
             </p>
             {isSocietyPass(sub) && societyPassPath(sub) && (
               <button type="button" className={btn("outline", "md", "mt-3 w-full")} onClick={() => bookWithPass(sub)}>
-                Open Society Page <ArrowRight className="h-4 w-4" />
+                Open My Society <ArrowRight className="h-4 w-4" />
               </button>
             )}
           </>
@@ -263,7 +263,7 @@ export default function CustomerDashboardPage() {
           </div>
           {active || (isSocietyPass(sub) && societyPassPath(sub)) ? (
             <button type="button" className={btn(active ? "primary" : "outline", "sm")} onPointerEnter={warmBooking} onFocus={warmBooking} onClick={() => bookWithPass(sub)}>
-              {active ? "Book Now" : "Society Page"}
+              {active ? "Book Now" : "My Society"}
             </button>
           ) : (
             <PassStatusBadge sub={sub} />

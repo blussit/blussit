@@ -1291,8 +1291,14 @@ class SocietyService:
         live_sub_ids = [k for k, s in subs.items() if sub_is_live(s)]
         upcoming = []
         if live_sub_ids:
+            # Today onwards only — a past wash still "pending" is not upcoming.
             bookings = await self.db.bookings.find(
-                {"subscription_id": {"$in": live_sub_ids}, "status": {"$in": LIVE_BOOKING_STATUSES}, "is_deleted": {"$ne": True}}
+                {
+                    "subscription_id": {"$in": live_sub_ids},
+                    "status": {"$in": LIVE_BOOKING_STATUSES},
+                    "is_deleted": {"$ne": True},
+                    "scheduled_date": {"$gte": datetime.combine(today_ist(), datetime.min.time())},
+                }
             ).sort("scheduled_date", 1).to_list(length=20)
             plate_of = {k: s.get("vehicle_id") for k, s in subs.items()}
             plates = {c.get("vehicle_id"): c.get("registration_number") for e in rows for c in e.get("cars") or []}

@@ -108,7 +108,7 @@ export function WhatsAppFloatingButton() {
       ref={stackRef}
       aria-hidden={overFooter || phoneAtTop}
       style={lift ? { position: "absolute", top: lift.top, right: lift.right, bottom: "auto" } : undefined}
-      className={`fixed bottom-4 right-4 z-[99999] flex flex-col items-end gap-2.5 transition-opacity duration-200 sm:bottom-6 sm:right-6 sm:gap-3 ${overFooter || phoneAtTop ? "pointer-events-none opacity-0" : "opacity-100"}`}
+      className={`floating-contact fixed bottom-4 right-4 z-[99999] flex flex-col items-end gap-2.5 transition-opacity duration-200 sm:bottom-6 sm:right-6 sm:gap-3 ${overFooter || phoneAtTop ? "pointer-events-none opacity-0" : "opacity-100"}`}
     >
       <a
         href={`tel:${getBlussitCallNumber()}`}

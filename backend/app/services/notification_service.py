@@ -1,6 +1,8 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import NotFoundException
@@ -23,6 +25,14 @@ _background_tasks: set[asyncio.Task] = set()
 # addressed to a manager is written in-app only.
 MANAGER_WHATSAPP_EVENTS = frozenset({"manager_new_booking"})
 
+# Manager alerts that ask for an action, keyed by how their title starts.
+# Once the action is done the alert clears itself (see clear_handled_alerts).
+NEEDS_CAPTAIN_TITLES = ("New booking", "Still needs a captain")
+URGENT_TITLE = "🚨 Urgent"
+FINISHED_BOOKING = frozenset({"completed", "cancelled"})
+CLOSED_COMPLAINT = frozenset({"resolved", "closed"})
+CLEAR_SCAN_LIMIT = 300
+
 
 def _fire_and_forget(coro) -> None:
     task = asyncio.create_task(coro)
@@ -32,6 +42,7 @@ def _fire_and_forget(coro) -> None:
 
 class NotificationService:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.repo = NotificationRepository(db)
         # Every in-app notification also goes out on WhatsApp when the
         # recipient has a phone on file — a single bridge point here means
@@ -160,6 +171,74 @@ class NotificationService:
     async def list_for_user(self, user_id: str, page: int, page_size: int, unread_only: bool = False):
         items, total = await self.repo.list_for_user(user_id, page, page_size, unread_only)
         return serialize_list(items), total
+
+    async def clear_handled_alerts(self, user_id: str) -> int:
+        """Marks read a manager's open alerts whose job is already done, so
+        the bell only lists what still needs him:
+          - "New booking" / "Still needs a captain": a captain is assigned,
+          - "🚨 Urgent": the issue was resolved,
+          - any of these: the booking was completed, cancelled or deleted,
+          - "New complaint": the complaint was resolved or closed.
+        Everything else clears once he opens it. Returns how many cleared."""
+        rows = await self.db.notifications.find(
+            {
+                "user_id": user_id,
+                "is_read": False,
+                "is_deleted": {"$ne": True},
+                "reference_id": {"$nin": [None, ""]},
+                "notification_type": {"$in": [NotificationType.BOOKING.value, NotificationType.COMPLAINT.value]},
+            },
+            {"title": 1, "reference_id": 1, "notification_type": 1},
+        ).sort("created_at", -1).limit(CLEAR_SCAN_LIMIT).to_list(CLEAR_SCAN_LIMIT)
+        if not rows:
+            return 0
+
+        def ref_ids(kind: str) -> list[ObjectId]:
+            return list({ObjectId(r["reference_id"]) for r in rows if r.get("notification_type") == kind and ObjectId.is_valid(r["reference_id"])})
+
+        booking_ids = ref_ids(NotificationType.BOOKING.value)
+        complaint_ids = ref_ids(NotificationType.COMPLAINT.value)
+        # Raw collections on purpose: a deleted booking must count as handled.
+        bookings = {
+            str(b["_id"]): b
+            async for b in self.db.bookings.find({"_id": {"$in": booking_ids}}, {"status": 1, "captain_id": 1, "issue_flag": 1, "is_deleted": 1})
+        } if booking_ids else {}
+        complaints = {
+            str(c["_id"]): c
+            async for c in self.db.complaints.find({"_id": {"$in": complaint_ids}}, {"status": 1, "is_deleted": 1})
+        } if complaint_ids else {}
+
+        done: list[ObjectId] = []
+        for r in rows:
+            title = str(r.get("title") or "")
+            ref = str(r["reference_id"])
+            if r.get("notification_type") == NotificationType.COMPLAINT.value:
+                if not title.startswith("New complaint"):
+                    continue
+                c = complaints.get(ref)
+                if c is None or c.get("is_deleted") or c.get("status") in CLOSED_COMPLAINT:
+                    done.append(r["_id"])
+                continue
+            needs_captain = title.startswith(NEEDS_CAPTAIN_TITLES)
+            urgent = title.startswith(URGENT_TITLE)
+            if not (needs_captain or urgent):
+                continue
+            b = bookings.get(ref)
+            if (
+                b is None
+                or b.get("is_deleted")
+                or b.get("status") in FINISHED_BOOKING
+                or (needs_captain and b.get("captain_id"))
+                or (urgent and not b.get("issue_flag"))
+            ):
+                done.append(r["_id"])
+        if not done:
+            return 0
+        result = await self.db.notifications.update_many(
+            {"_id": {"$in": done}, "user_id": user_id, "is_read": False},
+            {"$set": {"is_read": True, "auto_cleared": True, "updated_at": datetime.now(timezone.utc)}},
+        )
+        return result.modified_count
 
     async def unread_count(self, user_id: str) -> int:
         return await self.repo.unread_count(user_id)

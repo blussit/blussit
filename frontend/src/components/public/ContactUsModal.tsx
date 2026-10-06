@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { contentApi } from "../../api/catalog";
 import { getErrorMessage } from "../../lib/api-client";
 import { openBlussitWhatsApp } from "./WhatsAppFloatingButton";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 
 type ContactForm = {
   name: string;
@@ -99,11 +100,10 @@ export function ContactUsModal({
 
   const nameRef = useRef<HTMLInputElement>(null);
 
+  useBodyScrollLock(open);
+
   useEffect(() => {
     if (!open) return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
 
     const focusTimer = window.setTimeout(() => {
       nameRef.current?.focus();
@@ -118,7 +118,6 @@ export function ContactUsModal({
     window.addEventListener("keydown", onKeyDown);
 
     return () => {
-      document.body.style.overflow = previousOverflow;
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
 

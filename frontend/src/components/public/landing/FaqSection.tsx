@@ -1,23 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
 import { Helmet } from "react-helmet-async";
-import { contentApi } from "../../../api/catalog";
+import { FAQS } from "../../../data/faqs";
 import { SectionShell, headingCase } from "./shared";
 
 /**
- * Admin-managed FAQ section.
- * FAQ content is fetched from the public FAQ API and the same
- * content is used for the visible accordion and FAQPage JSON-LD.
+ * FAQ section. The questions and answers live in src/data/faqs.ts; the same
+ * list feeds the visible accordion and the FAQPage JSON-LD.
  */
 
 export function FaqSection({ id = "faq" }: { id?: string }) {
-  const { data } = useQuery({
-    queryKey: ["public-faqs"],
-    queryFn: contentApi.faqs,
-  });
-
-  const faqs = data || [];
-
-  if (!faqs.length) return null;
+  const faqs = FAQS;
 
   const jsonLd = {
     "@context": "https://schema.org",

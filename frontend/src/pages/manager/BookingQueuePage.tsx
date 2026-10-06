@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, HandCoins, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
@@ -12,6 +12,7 @@ import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { EditBookingModal } from "../../components/shared/EditBookingModal";
+import { TipModal } from "../../components/shared/TipModal";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -173,6 +174,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const confirm = useConfirm();
   const [doneBooking, setDoneBooking] = useState<Booking | null>(null);
   const [doneWhatsApp, setDoneWhatsApp] = useState(true);
+  // Add / edit the tip on a job the manager did (the visit's current tip alongside).
+  const [tipFor, setTipFor] = useState<{ booking: Booking; tip: number } | null>(null);
 
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const { data: center } = useQuery({ queryKey: ["center-detail-for-queue", centerId], queryFn: () => adminServiceCenterApi.get(centerId), enabled: !!centerId });
@@ -530,8 +533,13 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   // Sits inside a row that now opens the booking detail drawer on click
   // (DataTable's onRowClick) — stopPropagation here so clicking any of
   // these action buttons doesn't ALSO trigger that row-open behavior.
-  const bookingActions = (b: Booking) => (
+  const bookingActions = (b: Booking, visitTip = Number(b.tip_amount) || 0) => (
     <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      {b.status === "completed" && b.completed_by_role === "manager" && (user?.role === "manager" || user?.role === "admin") && (
+        <Button size="sm" variant="outline" onClick={() => setTipFor({ booking: b, tip: visitTip })}>
+          <HandCoins className="h-3.5 w-3.5" /> {visitTip > 0 ? `Tip ₹${visitTip}` : "Add Tip"}
+        </Button>
+      )}
       {needsCaptain(b) && (
         <Button size="sm" onClick={() => openAssign(b, false)}>
           Assign Captain
@@ -916,7 +924,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
               { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
               { header: "What Happened", accessor: (slab) => <WhatHappened booking={slab.primary} /> },
-              { header: "", accessor: (slab) => bookingActions(actionTarget(slab)) },
+              { header: "", accessor: (slab) => bookingActions(actionTarget(slab), slab.bookings.reduce((sum, x) => sum + (Number(x.tip_amount) || 0), 0)) },
             ]}
           />
           {allPages > 1 && (
@@ -1035,6 +1043,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           </div>
         )}
       </Modal>
+
+      <TipModal booking={tipFor?.booking ?? null} currentTip={tipFor?.tip ?? 0} onClose={() => setTipFor(null)} />
 
       <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel Visit" : "Cancel Booking"}>
         <p className="mb-3 text-sm text-[var(--color-text-secondary)]">

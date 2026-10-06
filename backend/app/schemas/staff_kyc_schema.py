@@ -4,9 +4,10 @@ from pydantic import BaseModel, Field
 
 
 class KycSubmitRequest(BaseModel):
-    """Captain submitting/updating their own KYC packet. Everything is
-    optional so a captain can fill it in over multiple sessions; the
-    completeness check lives in the UI, the manager judges the packet."""
+    """Captain submitting their own KYC packet for review. Fields are
+    optional here so a bad one gets a specific message: StaffKycService.submit
+    refuses a packet with anything missing (photo, Aadhaar + PAN numbers and
+    card photos, address)."""
     photo_url: Optional[str] = None
     aadhaar_number: Optional[str] = Field(default=None, pattern=r"^\d{12}$")
     pan_number: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{5}\d{4}[A-Za-z]$")

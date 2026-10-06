@@ -165,6 +165,14 @@ class ManagerEnrollRequest(SocietyEnrollRequest):
     pay_now: bool = False
 
 
+class SocietyPaymentLinkRequest(BaseModel):
+    """Manager/admin: send the resident a Razorpay link on WhatsApp — for the
+    first payment, or (renewal=True) next month's renewal."""
+
+    renewal: bool = False
+    send_whatsapp: bool = True
+
+
 class ActivateEnrollmentRequest(BaseModel):
     """Manager/admin: cash collected for this enrollment (or its renewal)."""
 

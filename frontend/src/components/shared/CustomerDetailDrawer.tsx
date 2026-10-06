@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useId, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AlertTriangle, Calendar, Car, CreditCard, IndianRupee, MapPin, Phone } from "lucide-react";
 import { crmApi, type Customer360Booking } from "../../api/crm";
-import { Badge, PageLoader, StatusBadge } from "../ui";
+import { Badge, PageLoader, StatusBadge, useDialogStack } from "../ui";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 import { BookingDetailDrawer } from "./BookingDetailDrawer";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -33,11 +35,16 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
     queryFn: () => crmApi.customer360(customerId as string),
     enabled: !!customerId,
   });
+  // Opened from inside other popups (a complaint, a booking): it lives on
+  // <body> like they do, so it lands on top instead of behind them.
+  const dialogId = useId();
+  useDialogStack(!!customerId, onClose, dialogId);
+  useBodyScrollLock(!!customerId);
 
   if (!customerId) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-[2px]" onClick={onClose} />
       <div className="relative z-10 max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[#F3E5B5] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)]">
         {isError ? (
@@ -188,6 +195,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
         )}
       </div>
       <BookingDetailDrawer booking={openBooking} onClose={() => setOpenBooking(null)} centerName={openBooking?.service_center_name} />
-    </div>
+    </div>,
+    document.body,
   );
 }

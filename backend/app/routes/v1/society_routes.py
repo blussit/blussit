@@ -33,6 +33,7 @@ from app.schemas.society_schema import (
     SocietyCaptainRequest,
     SocietyCreateRequest,
     SocietyEnrollRequest,
+    SocietyPaymentLinkRequest,
     SocietyPlanRequest,
     SocietyPlanUpdateRequest,
     SocietyQuoteRequest,
@@ -40,6 +41,7 @@ from app.schemas.society_schema import (
     WashedRequest,
 )
 from app.services.audit_service import AuditService
+from app.services.payment_service import PaymentService
 from app.services.society_service import SocietyService
 
 form_router = APIRouter(prefix="/society-forms", tags=["Society form (public)"])
@@ -135,7 +137,9 @@ async def society_form_withdraw(token: str, enrollment_id: str, current_user: Cu
         raise NotFoundException("Enrollment not found")
     if enrollment.get("status") not in ("requested", "awaiting_payment"):
         raise BadRequestException("An active plan is cancelled by the society manager — please call them.")
-    return success(await service.cancel(enrollment, vehicle_ids=None, actor_id=current_user.id, reason="Withdrawn by resident"), "Request withdrawn")
+    result = await service.cancel(enrollment, vehicle_ids=None, actor_id=current_user.id, reason="Withdrawn by resident")
+    await PaymentService(db).void_society_links(enrollment_id, "request withdrawn")
+    return success(result, "Request withdrawn")
 
 
 @form_router.post("/{token}/me/enrollments/{enrollment_id}/coupon-preview", dependencies=[Depends(require_customer)])
@@ -266,7 +270,22 @@ async def society_enrollments(
 ):
     service = SocietyService(db)
     society = await service.society_for_actor(society_id, current_user.role, current_user.service_center_id)
-    return success(await service.enrollments_for_society(society, status))
+    rows = await service.enrollments_for_society(society, status)
+    # Each resident's unpaid WhatsApp link (if any), so the manager sees
+    # "link sent · waiting" instead of guessing. One query for the page.
+    links = await db.payment_orders.find(
+        {"kind": "link", "purpose": "society", "status": "created", "society_enrollment_id": {"$in": [r["id"] for r in rows]}},
+        {"society_enrollment_id": 1, "society_renewal": 1, "short_url": 1, "amount_paise": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(length=500)
+    latest: dict = {}
+    for link in links:
+        latest.setdefault(link["society_enrollment_id"], {
+            "short_url": link.get("short_url"), "amount": (link.get("amount_paise") or 0) / 100,
+            "renewal": bool(link.get("society_renewal")), "sent_at": link["created_at"].isoformat() if link.get("created_at") else None,
+        })
+    for r in rows:
+        r["payment_link"] = latest.get(r["id"])
+    return success(rows)
 
 
 @society_router.get("/{society_id}/plans", dependencies=[Depends(require_manager_or_admin)])
@@ -350,6 +369,8 @@ async def activate_enrollment(enrollment_id: str, payload: ActivateEnrollmentReq
         enrollment, method=payload.method, actor_id=current_user.id, note=payload.note, expected_revision=payload.expected_revision,
         coupon_code=payload.coupon_code, remove_coupon=payload.remove_coupon,
     )
+    # Paid in cash: the WhatsApp link (if one was sent) must not take money too.
+    await PaymentService(db).void_society_links(enrollment_id, "paid in cash", renewal=False)
     payment = result["enrollment"].get("payment") or {}
     await _audit(db, current_user, "ACTIVATE_SOCIETY_ENROLLMENT", "society_enrollments", enrollment_id,
                  {"method": payload.method, "amount": payment.get("amount"), "coupon_code": payment.get("coupon_code"), "discount": payment.get("discount")})
@@ -362,6 +383,7 @@ async def renew_enrollment(enrollment_id: str, payload: ActivateEnrollmentReques
     service = SocietyService(db)
     enrollment = await service.enrollment_for_actor(enrollment_id, current_user.role, current_user.service_center_id)
     result = await service.renew(enrollment, method=payload.method, actor_id=current_user.id, coupon_code=payload.coupon_code)
+    await PaymentService(db).void_society_links(enrollment_id, "renewed in cash", renewal=True)
     await _audit(db, current_user, "RENEW_SOCIETY_ENROLLMENT", "society_enrollments", enrollment_id,
                  {"method": payload.method, "amount": result["amount"], "coupon_code": payload.coupon_code, "discount": result.get("discount")})
     return success(result["enrollment"], f"Renewed {result['renewed']} car{'s' if result['renewed'] != 1 else ''}")
@@ -380,8 +402,23 @@ async def cancel_enrollment(enrollment_id: str, payload: CancelEnrollmentRequest
     service = SocietyService(db)
     enrollment = await service.enrollment_for_actor(enrollment_id, current_user.role, current_user.service_center_id)
     result = await service.cancel(enrollment, vehicle_ids=payload.vehicle_ids, actor_id=current_user.id, reason=payload.reason)
+    await PaymentService(db).void_society_links(enrollment_id, "plan cancelled or changed")
     await _audit(db, current_user, "CANCEL_SOCIETY_ENROLLMENT", "society_enrollments", enrollment_id, payload.model_dump())
     return success(result, "Cancelled")
+
+
+@enrollment_router.post("/{enrollment_id}/payment-link")
+async def society_payment_link(enrollment_id: str, payload: SocietyPaymentLinkRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Send the resident a Razorpay link on WhatsApp; paying it activates
+    (or renews) the plan by itself. Cash stays available — marking it paid
+    in cash cancels the link."""
+    result = await PaymentService(db).create_society_link(
+        enrollment_id, renewal=payload.renewal, actor_id=current_user.id, actor_role=current_user.role,
+        actor_center_id=current_user.service_center_id, send_whatsapp=payload.send_whatsapp,
+    )
+    await _audit(db, current_user, "SOCIETY_PAYMENT_LINK", "society_enrollments", enrollment_id,
+                 {"renewal": payload.renewal, "amount": result["amount"], "reused": result["reused"], "sent": result["sent"]})
+    return success(result, "Payment link sent on WhatsApp" if result["sent"] else "Payment link ready")
 
 
 # ---------------------------------------------------------------------------

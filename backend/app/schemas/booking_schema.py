@@ -210,6 +210,13 @@ class BookingPhoneOtpRequest(BaseModel):
     _phone = field_validator("phone")(_canonical_phone)
 
 
+def _whole_rupee_tip(v: float) -> float:
+    """Tips are whole rupees, never paise."""
+    from app.utils.money import round_rupees
+
+    return float(round_rupees(v or 0))
+
+
 class ManagerLogBookingRequest(BaseModel):
     """A job the manager already did himself (phone-in or walk-in): it is
     saved directly as COMPLETED — no slot capacity, no captain, no photos.
@@ -228,10 +235,14 @@ class ManagerLogBookingRequest(BaseModel):
     # off the price BEFORE the money is recorded, so the ledger, revenue and
     # the customer's booking all show what was actually paid.
     discount_amount: float = Field(default=0, ge=0, le=100000)
+    # Tip the customer gave for this visit (optional). Added to the visit's
+    # total and revenue (founder) — see BookingService._record_tip.
+    tip_amount: float = Field(default=0, ge=0, le=100000)
     # True = the customer gets ONE WhatsApp: "service is done". Nothing else.
     send_whatsapp: bool = True
 
     _phone = field_validator("customer_phone")(_canonical_phone)
+    _tip = field_validator("tip_amount")(_whole_rupee_tip)
 
     @field_validator("discount_amount")
     @classmethod
@@ -272,6 +283,15 @@ class ManagerLogBookingRequest(BaseModel):
 
 class ManagerMarkDoneRequest(BaseModel):
     send_whatsapp: bool = True
+
+
+class BookingTipRequest(BaseModel):
+    """Manager/admin recording (or correcting) the tip on a job the manager
+    did. 0 clears it. One tip per visit, part of its total — see
+    BookingService.set_tip."""
+    tip_amount: float = Field(ge=0, le=100000)
+
+    _tip = field_validator("tip_amount")(_whole_rupee_tip)
 
 
 class ManagerBookingCreateRequest(BaseModel):

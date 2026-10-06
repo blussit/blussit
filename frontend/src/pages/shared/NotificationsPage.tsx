@@ -46,14 +46,18 @@ export default function NotificationsPage() {
           disabled={!data?.unread_count}
           onClick={() => markAllReadMutation.mutate()}
         >
-          <BellOff className="h-4 w-4" /> Mark all read
+          <BellOff className="h-4 w-4" /> Mark All Read
         </Button>
       </div>
 
       {isLoading ? (
         <PageLoader />
       ) : !data?.data.length ? (
-        <EmptyState icon={Bell} title="No Notifications Yet" />
+        user?.role === "manager" ? (
+          <EmptyState icon={Bell} title="You're All Caught Up" description="Alerts clear once you open them or the job is done." />
+        ) : (
+          <EmptyState icon={Bell} title="No Notifications Yet" />
+        )
       ) : (
         <div className="space-y-2">
           {data.data.map((n) => {

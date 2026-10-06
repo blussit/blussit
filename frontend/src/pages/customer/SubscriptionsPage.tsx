@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { CalendarClock, Gift, RefreshCw, RotateCcw } from "lucide-react";
+import { ArrowRight, Building2, CalendarClock, Gift, RefreshCw, RotateCcw, Sun } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
-import { Button, Card, EmptyState, Modal, PageLoader } from "../../components/ui";
+import { vehicleApi } from "../../api/profile";
+import { Badge, Button, Card, EmptyState, Modal, PageLoader } from "../../components/ui";
 import { usePassPurchase } from "../../components/customer/usePassPurchase";
 import { PassStatusBadge } from "../../components/customer/PassStatusBadge";
 import { CustomPlanEnquiryModal } from "../../components/shared/CustomPlanEnquiryModal";
@@ -50,6 +51,9 @@ export default function SubscriptionsPage() {
   const services = servicesData?.data || [];
   const serviceName = (id?: string | null) => titleCase(services.find((s) => s.id === id)?.name);
   const typeNameOf = (id?: string | null) => titleCase((vehicleTypes || []).find((t) => t.id === id)?.name);
+  const hasSociety = (mySubs || []).some(isSocietyPass);
+  const { data: myVehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: hasSociety });
+  const plateOf = (id?: string | null) => (myVehicles || []).find((v) => v.id === id)?.registration_number || "";
 
   const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
   const [upgradeError, setUpgradeError] = useState("");
@@ -79,6 +83,12 @@ export default function SubscriptionsPage() {
 
   const subs = mySubs || [];
   const running = subs.filter((s) => passState(s) !== "ended");
+  // Society cars are shown together, one card per society (they share one
+  // plan, one page and one manager); every other pass keeps its own card.
+  const runningPasses = running.filter((s) => !isSocietyPass(s));
+  const societyGroups = Array.from(
+    running.filter(isSocietyPass).reduce((m, s) => m.set(s.society_id as string, [...(m.get(s.society_id as string) || []), s]), new Map<string, UserSubscription[]>()).values(),
+  );
   const past = subs
     .filter((s) => passState(s) === "ended")
     .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime());
@@ -90,6 +100,65 @@ export default function SubscriptionsPage() {
     const plan = plans?.find((p) => p.id === sub.plan_id);
     if (!plan) return;
     purchase.start(plan, { vehicleType: sub.vehicle_type, serviceId: sub.service_id, autoPay: true });
+  };
+
+  /** One card per society: its cars, premium washes left, next premium
+   *  wash, and the way in (the Society tab). Daily washes simply run. */
+  const renderSocietyGroup = (cars: UserSubscription[]) => {
+    const first = cars[0];
+    const path = cars.map(societyPassPath).find(Boolean) || null;
+    const paused = cars.every((c) => passState(c) === "paused");
+    const till = cars.map((c) => c.end_date).sort().slice(-1)[0];
+    return (
+      <Card key={`society-${first.society_id}`} className="p-5" data-testid="society-plan-card">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#E8F0FE] text-[#0A66F0]">
+              <Building2 className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <h3 className="font-display font-bold leading-tight text-[#0E1A33]">{titleCase(first.society_name) || "Your Society"}</h3>
+              <p className="mt-0.5 text-xs font-semibold text-[#0A66F0]">Society Plan · {titleCase(passPlanName(first, plans))}</p>
+            </div>
+          </div>
+          {paused ? <Badge tone="warning">Paused</Badge> : <Badge tone="success">Active</Badge>}
+        </div>
+
+        <p className="mt-4 flex items-center gap-1.5 text-xs text-gray-600">
+          <Sun className="h-3.5 w-3.5 text-[#0A66F0]" /> Daily wash every morning · valid till {format(till)}
+        </p>
+
+        <ul className="mt-3 space-y-2">
+          {cars.map((c) => {
+            const left = c.remaining_service_count ?? 0;
+            return (
+              <li key={c.id} className="rounded-xl bg-[#F7F9FC] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <VehicleIcon vehicleTypeId={c.vehicle_type} className="h-4 w-4 shrink-0 text-[#5F6878]" />
+                    <span className="min-w-0 text-sm font-semibold text-[#0E1A33]">
+                      {[plateOf(c.vehicle_id), typeNameOf(c.vehicle_type)].filter(Boolean).join(" · ") || "Car"}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-xs text-gray-600">
+                    <b className="font-mono-num text-sm text-[#0E1A33]">{left}</b> of {c.total_service_count} {serviceName(c.service_id) || "premium washes"} left
+                  </span>
+                </div>
+                {passState(c) === "active" && <NextPremiumWash subscriptionId={c.id} className="mt-1.5" />}
+              </li>
+            );
+          })}
+        </ul>
+
+        {path ? (
+          <Button variant="info" size="sm" className="mt-4" onClick={() => navigate(path)}>
+            Open My Society <ArrowRight className="h-4 w-4" />
+          </Button>
+        ) : (
+          <p className="mt-4 text-xs text-gray-500">Your society manager books and renews this plan.</p>
+        )}
+      </Card>
+    );
   };
 
   const renderRunning = (sub: UserSubscription) => {
@@ -273,7 +342,10 @@ export default function SubscriptionsPage() {
         ) : !running.length ? (
           <p className="text-sm text-gray-500">No active pass right now.</p>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{running.map(renderRunning)}</div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {societyGroups.map(renderSocietyGroup)}
+            {runningPasses.map(renderRunning)}
+          </div>
         )}
       </div>
 

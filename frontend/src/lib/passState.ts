@@ -36,11 +36,12 @@ export const isLivePass = (sub: UserSubscription) => {
  *  no cancel / upgrade / auto-pay / buy again here. */
 export const isSocietyPass = (sub: Pick<UserSubscription, "society_id">): boolean => !!sub.society_id;
 
-/** Where a society pass is booked and renewed — only ever a same-site
- *  /society/<token> path (never an arbitrary URL from the response). */
+/** Where a society pass is booked and renewed — the society hub inside the
+ *  customer dashboard, built only from a same-site /society/<token> path
+ *  (never an arbitrary URL from the response). */
 export function societyPassPath(sub: Pick<UserSubscription, "society_form_path">): string | null {
   const path = sub.society_form_path || "";
-  return /^\/society\/[A-Za-z0-9_-]{16,64}$/.test(path) ? path : null;
+  return /^\/society\/[A-Za-z0-9_-]{16,64}$/.test(path) ? `/app${path}` : null;
 }
 
 /** The plan's name for a pass — the pass carries it on some responses only. */

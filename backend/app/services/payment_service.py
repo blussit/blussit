@@ -169,7 +169,7 @@ def _razorpay_client():
     with a clear message instead of an SDK auth traceback."""
     global _RZP_CLIENT
     if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
-        raise BadRequestException("Online payments aren't configured yet — please pay by cash, or contact support.")
+        raise BadRequestException("Online payment isn't set up on this server yet. Please contact support.")
     auth = (settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
     if _RZP_CLIENT is None or _RZP_CLIENT[0] != auth:
         _RZP_CLIENT = (auth, _build_razorpay_client(auth))
@@ -2166,6 +2166,114 @@ class PaymentService:
             raise BadRequestException("This payment wasn't completed.")
         return await self._apply_link_paid(params["razorpay_payment_link_id"], params["razorpay_payment_id"])
 
+    # -- Society plan payment links (manager) -------------------------
+    async def create_society_link(
+        self, enrollment_id: str, *, renewal: bool, actor_id: str, actor_role: str, actor_center_id: str | None, send_whatsapp: bool = True,
+    ) -> dict:
+        """The manager sends a resident a Razorpay link for their society
+        plan (first payment, or a renewal). Paying it activates/renews the
+        plan by itself — callback, webhook or the link sweep, all through
+        _apply_link_paid -> SocietyService.on_order_paid. An unpaid link for
+        the same thing and amount is reused (sent again), never duplicated;
+        cash, a cancel or a resubmission voids it."""
+        from app.services.society_service import SocietyService
+
+        societies = SocietyService(self.db)
+        enrollment = await societies.enrollment_for_actor(enrollment_id, actor_role, actor_center_id)
+        # Before payment_quote, which moves a request to awaiting_payment —
+        # a server without Razorpay keys must change nothing.
+        client = _razorpay_client()
+        customer_id = enrollment["customer_id"]
+        if renewal and enrollment.get("status") != "active":
+            raise BadRequestException("Only an active plan can be renewed.")
+        amount_paise, description, reference = await societies.payment_quote(customer_id, enrollment_id, renewal)
+        if amount_paise < MIN_ORDER_PAISE:
+            raise BadRequestException("There's nothing to collect online for this plan.")
+        same = {"kind": "link", "purpose": "society", "status": "created", "society_enrollment_id": enrollment_id,
+                "society_renewal": renewal, "amount_paise": amount_paise}
+        if not renewal:
+            same["society_revision"] = reference.get("society_revision")
+        existing = await self.orders.find_one(same, sort=[("created_at", -1)])
+        if existing:
+            order_id, short_url = existing["_id"], existing["short_url"]
+        else:
+            customer_doc = await self.db.users.find_one({"_id": ObjectId(customer_id)}) if ObjectId.is_valid(customer_id) else None
+            reference_id = f"soc-{enrollment_id[-10:]}-{secrets.token_hex(3)}"
+            link_payload: dict = {
+                "amount": amount_paise, "currency": "INR", "reference_id": reference_id,
+                "description": description[:255], "notify": {"sms": False, "email": False},  # WE deliver it, on WhatsApp
+            }
+            if (customer_doc or {}).get("phone"):
+                link_payload["customer"] = {"name": (customer_doc or {}).get("full_name") or "Blussit customer", "contact": customer_doc["phone"]}
+            if settings.PUBLIC_BASE_URL:
+                link_payload["callback_url"] = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/link-callback"
+                link_payload["callback_method"] = "get"
+            try:
+                link = await _rzp(client.payment_link.create, link_payload)
+            except Exception:
+                # Razorpay rejects some contacts (e.g. repeated digits) — retry without.
+                link_payload.pop("customer", None)
+                try:
+                    link = await _rzp(client.payment_link.create, link_payload)
+                except Exception as exc:
+                    raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc).__name__})") from exc
+            society = await self.db.societies.find_one({"_id": ObjectId(enrollment["society_id"])}) if ObjectId.is_valid(str(enrollment.get("society_id"))) else None
+            doc = {
+                "kind": "link", "purpose": "society",
+                "razorpay_link_id": link["id"], "short_url": link["short_url"], "reference_id": reference_id,
+                "customer_id": customer_id, "amount_paise": amount_paise, "currency": "INR", "status": "created",
+                "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
+                "service_center_id": (society or {}).get("service_center_id"),
+                **{k: v for k, v in reference.items() if k != "receipt"},
+            }
+            order_id = (await self.orders.insert_one(doc)).inserted_id
+            short_url = link["short_url"]
+        if send_whatsapp:
+            await self._send_society_link_whatsapp(enrollment, amount_paise / 100, short_url, renewal)
+        return {"short_url": short_url, "amount": amount_paise / 100, "order_id": str(order_id), "reused": bool(existing), "sent": send_whatsapp}
+
+    async def void_society_links(self, enrollment_id: str, reason: str, renewal: bool | None = None) -> int:
+        """Cancels the unpaid links for a society plan — it was paid in cash,
+        cancelled or changed. A link paid in the same instant can't be
+        cancelled at Razorpay; the sweep settles or parks that payment."""
+        query: dict = {"kind": "link", "purpose": "society", "status": "created", "society_enrollment_id": enrollment_id}
+        if renewal is not None:
+            query["society_renewal"] = renewal
+        voided = 0
+        for order in await self.orders.find(query).to_list(length=20):
+            voided += await self._void_link(order, reason)
+        return voided
+
+    async def _send_society_link_whatsapp(self, enrollment: dict, amount: float, short_url: str, renewal: bool) -> None:
+        """Same approved message as a plan link ("Pay ₹X to activate Y: link")."""
+        try:
+            from app.services.notification_service import NotificationService
+
+            what = f"{enrollment.get('plan_name') or 'your society plan'}"
+            if renewal:
+                what = f"{what} for next month"
+            amount_text = f"{amount:g}"
+            await NotificationService(self.db).notify(
+                enrollment["customer_id"], f"Pay to {'renew' if renewal else 'activate'} {enrollment.get('plan_name') or 'your society plan'}",
+                f"Pay ₹{amount_text} to {'renew' if renewal else 'activate'} {what}: {short_url}",
+                NotificationType.SYSTEM, None, wa_event="subscription_payment_link", wa_params=[amount_text, what, short_url],
+            )
+        except Exception:  # noqa: BLE001 — the link exists either way
+            logger.exception("Could not send the society payment link for enrollment %s", enrollment.get("_id"))
+
+    async def _notify_society_link_paid(self, order: dict) -> None:
+        try:
+            from app.services.notification_service import NotificationService
+
+            renewal = bool(order.get("society_renewal"))
+            await NotificationService(self.db).notify(
+                str(order.get("customer_id") or ""), "Society plan renewed" if renewal else "Society plan active",
+                f"✅ Payment of ₹{(order.get('amount_paise') or 0) / 100:g} received — your society plan is {'renewed' if renewal else 'active'}. Thank you!",
+                NotificationType.SUBSCRIPTION, None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not confirm society payment for order %s", order.get("_id"))
+
     async def notify_link_paid(self, order: dict) -> None:
         """The WhatsApp ✅ for a settled booking link (sweep or webhook)."""
         from app.services.whatsapp_service import WhatsAppService
@@ -2183,6 +2291,8 @@ class PaymentService:
         paid some other way — paying it now could only be a refund case."""
         if order.get("purpose") == "subscription":
             return False
+        if order.get("purpose") == "society":
+            return not await self._society_order_still_payable(order)
         ids = [i for i in (order.get("booking_ids") or [order.get("booking_id")]) if i and ObjectId.is_valid(i)]
         if not ids:
             return False
@@ -2242,7 +2352,7 @@ class PaymentService:
             # would get two different confirmation messages.
             if result.get("settled"):
                 settled += 1
-                if order.get("purpose") != "subscription":
+                if order.get("purpose") not in ("subscription", "society"):
                     await notify_customer(order)
         return settled
 
@@ -2274,6 +2384,17 @@ class PaymentService:
                 result = await self._activate_linked_subscription(claimed)
                 await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
                 return result
+            if claimed.get("purpose") == "society":
+                from app.services.society_service import SocietyService
+
+                outcome = await SocietyService(self.db).on_order_paid(claimed)
+                settled = bool(outcome.get("ok"))
+                if settled:
+                    await self._notify_society_link_paid(claimed)
+                else:
+                    await self._flag_order_attention({"_id": claimed["_id"]}, "link paid, but the society plan couldn't be activated/renewed — check it")
+                await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
+                return {"status": "paid" if settled else "needs_attention", "booking_number": None, "settled": settled}
             if claimed.get("booking_ids"):
                 # A visit's link: settle each car through the same guarded path,
                 # each checked against ITS own price.

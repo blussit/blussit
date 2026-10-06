@@ -96,8 +96,10 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
 
     // Fixed positioning computed from the trigger's viewport rect; kept in
     // sync while scrolling any ancestor (capture phase catches them all)
-    // and on resize, so the panel stays glued to its trigger. A narrow
-    // compact trigger still gets a readable panel, clamped on-screen.
+    // and on resize, so the panel stays glued to its trigger. The panel is
+    // at least as wide as the trigger and grows to fit its longest option
+    // (a short "Open ▾" filter used to cut "Contacted" to "Conta…"); on the
+    // right half of the screen it grows leftwards so it never runs off-screen.
     useLayoutEffect(() => {
       if (!open) return;
       const place = () => {
@@ -107,12 +109,16 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         const panelHeight = Math.min(options.length * 40 + 16, 256);
         const spaceBelow = window.innerHeight - rect.bottom;
         const upward = spaceBelow < panelHeight && rect.top > panelHeight;
-        const width = Math.min(Math.max(rect.width, compact ? 184 : 0), window.innerWidth - margin * 2);
-        const left = Math.min(Math.max(rect.left, margin), Math.max(margin, window.innerWidth - width - margin));
+        const vw = window.innerWidth;
+        const minWidth = Math.min(Math.max(rect.width, compact ? 184 : 0), vw - margin * 2);
+        const growLeft = rect.left + rect.width / 2 > vw / 2;
+        const room = growLeft ? Math.min(rect.right, vw - margin) - margin : vw - Math.max(rect.left, margin) - margin;
         setPanelStyle({
           position: "fixed",
-          left,
-          width,
+          ...(growLeft ? { right: Math.max(vw - rect.right, margin) } : { left: Math.max(rect.left, margin) }),
+          width: "max-content",
+          minWidth,
+          maxWidth: Math.max(minWidth, Math.min(room, 360)),
           maxHeight: 256,
           ...(upward ? { bottom: window.innerHeight - rect.top + 6 } : { top: rect.bottom + 6 }),
         });

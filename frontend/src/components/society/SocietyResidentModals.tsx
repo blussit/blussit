@@ -218,7 +218,7 @@ export function StaffBookPremiumModal({ open, onClose, societyId, centerId, enro
               const on = picked.includes(id);
               return (
                 <button key={id} type="button" onClick={() => setPicked((p) => (on ? p.filter((x) => x !== id) : [...p, id]))}
-                  className={`rounded-xl border px-3 py-2 text-sm font-semibold ${on ? "border-black bg-[#FFF4CD]" : "border-gray-200"}`}>
+                  className={`rounded-xl border px-3 py-2 text-sm font-semibold ${on ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border-[#E4E9F1]"}`}>
                   <span className="font-mono">{c.registration_number}</span>{c.vehicle_type_name ? ` · ${titleCase(c.vehicle_type_name)}` : ""}
                   <span className="block text-xs font-normal text-gray-600">{premiumUsage(enrollment?.premium_service_name, c.subscription!.remaining, c.subscription!.total)} Left</span>
                 </button>
@@ -228,13 +228,13 @@ export function StaffBookPremiumModal({ open, onClose, societyId, centerId, enro
           <div className="flex gap-2 overflow-x-auto pb-1">
             {days.map((d) => (
               <button key={d} type="button" onClick={() => { setDay(d); setSlot(""); }}
-                className={`shrink-0 rounded-xl border px-3 py-2 text-sm ${day === d ? "border-black bg-[#FFF4CD] font-semibold" : "border-gray-200"}`}>{formatDay(d)}</button>
+                className={`shrink-0 rounded-xl border px-3 py-2 text-sm ${day === d ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0] font-semibold" : "border-[#E4E9F1]"}`}>{formatDay(d)}</button>
             ))}
           </div>
           <div className="grid grid-cols-2 gap-2">
             {(slots.data || []).map((s) => (
               <button key={s.key} type="button" disabled={s.status === "full"} onClick={() => setSlot(s.key)}
-                className={`rounded-xl border px-3 py-2 text-sm disabled:opacity-40 ${slot === s.key ? "border-black bg-[#FFF4CD] font-semibold" : "border-gray-200"}`}>{formatSlot(s.key)}</button>
+                className={`rounded-xl border px-3 py-2 text-sm disabled:opacity-40 ${slot === s.key ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0] font-semibold" : "border-[#E4E9F1]"}`}>{formatSlot(s.key)}</button>
             ))}
           </div>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}

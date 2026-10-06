@@ -16,30 +16,46 @@ import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { AttendanceCard } from "../../components/captain/Attendance";
 import { Btn, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
+import { Modal } from "../../components/ui";
 
 const field =
   "w-full rounded-2xl border border-[#E4E9F1] px-4 text-[15px] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE] disabled:bg-[#EEF3FA] disabled:text-[#5F6878]";
 
 const KYC_TONE = { pending: "gray", submitted: "amber", verified: "green", rejected: "red" } as const;
+const PAN_RE = /^[A-Z]{5}\d{4}[A-Z]$/;
+const RED = "border-[#B91C1C] focus:border-[#B91C1C] focus:ring-[#FDECEC]";
 
-function DocUpload({ label, url, disabled, onUploaded }: { label: string; url?: string | null; disabled: boolean; onUploaded: (url: string) => void }) {
+function FieldError({ text }: { text?: string }) {
+  return text ? <span className="mt-1 block text-xs font-medium text-[#B91C1C]">{text}</span> : null;
+}
+
+function DocUpload({ label, url, disabled, missing, onUploaded }: { label: string; url?: string | null; disabled: boolean; missing?: string; onUploaded: (url: string) => void }) {
   const { t } = useCaptainTranslation();
   const ref = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [viewing, setViewing] = useState(false);
   return (
-    <div className="flex min-h-[56px] items-center justify-between gap-3 rounded-2xl border border-[#E4E9F1] px-4 py-2">
+    <div className={`flex min-h-[56px] items-center justify-between gap-3 rounded-2xl border px-4 py-2 ${missing ? "border-[#B91C1C]" : "border-[#E4E9F1]"}`}>
       <div className="min-w-0">
         <p className="text-sm font-bold text-[#0E1A33]">{label}</p>
         {url ? (
-          <a href={url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-[#0A66F0]">
+          <button type="button" onClick={() => setViewing(true)} className="text-xs font-semibold text-[#0A66F0]">
             {t("captain.v2.viewDoc")}
-          </a>
+          </button>
         ) : (
           <p className="text-xs text-[#5F6878]">{t("captain.profile.clearPhoto")}</p>
         )}
-        {error && <p className="text-xs text-[#B91C1C]">{error}</p>}
+        {(error || missing) && <p className="text-xs font-medium text-[#B91C1C]">{error || missing}</p>}
       </div>
+      {url && (
+        <Modal open={viewing} onClose={() => setViewing(false)} title={label} maxWidth="max-w-sm">
+          <img src={url} alt={label} className="max-h-[60vh] w-full rounded-xl bg-[#F6F8FC] object-contain" />
+          <Btn variant="outline" className="mt-4 w-full" onClick={() => setViewing(false)}>
+            {t("captain.common.close")}
+          </Btn>
+        </Modal>
+      )}
       {!disabled && (
         <button
           type="button"
@@ -87,6 +103,8 @@ export default function CaptainProfilePage() {
   const [kycOpen, setKycOpen] = useState<boolean | null>(null);
   const [formError, setFormError] = useState("");
   const [saved, setSaved] = useState(false);
+  // Field errors show only after the first Submit tap, then update live.
+  const [tried, setTried] = useState(false);
   useEffect(() => {
     if (kyc) setForm(kyc);
   }, [kyc]);
@@ -98,6 +116,33 @@ export default function CaptainProfilePage() {
   const set = (patch: Partial<CaptainKyc>) => {
     setForm((f) => ({ ...f, ...patch }));
     setSaved(false);
+  };
+
+  const kycErrors = (): Partial<Record<"photo" | "aadhaar" | "pan" | "aadhaarDoc" | "panDoc" | "local" | "permanent", string>> => {
+    const required = t("captain.kyc.required");
+    const e: ReturnType<typeof kycErrors> = {};
+    const aadhaar = form.aadhaar_number || "";
+    const pan = (form.pan_number || "").toUpperCase();
+    if (!form.photo_url) e.photo = t("captain.kyc.photoNeeded");
+    if (!/^\d{12}$/.test(aadhaar)) e.aadhaar = aadhaar ? t("captain.kyc.aadhaarInvalid") : required;
+    if (!PAN_RE.test(pan)) e.pan = pan ? t("captain.kyc.panInvalid") : required;
+    if (!form.aadhaar_doc_url) e.aadhaarDoc = t("captain.kyc.docNeeded");
+    if (!form.pan_doc_url) e.panDoc = t("captain.kyc.docNeeded");
+    if (!form.local_address?.trim()) e.local = required;
+    if (!form.same_as_local && !form.permanent_address?.trim()) e.permanent = required;
+    return e;
+  };
+  const errs = tried && !locked ? kycErrors() : {};
+  // The "fill in the red fields" line goes away once they're all filled.
+  const showFormError = !!formError && !(formError === t("captain.kyc.fixFields") && Object.keys(errs).length === 0);
+  const sendForReview = () => {
+    setTried(true);
+    if (Object.keys(kycErrors()).length) {
+      setFormError(t("captain.kyc.fixFields"));
+      return;
+    }
+    setFormError("");
+    submitKyc.mutate();
   };
 
   const submitKyc = useMutation({
@@ -149,7 +194,7 @@ export default function CaptainProfilePage() {
         <button
           type="button"
           onClick={() => !locked && !photoUploading && photoRef.current?.click()}
-          className="relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#E8F0FE] text-xl font-extrabold text-[#0A66F0]"
+          className={`relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#E8F0FE] text-xl font-extrabold text-[#0A66F0] ${errs.photo ? "ring-2 ring-[#B91C1C] ring-offset-2" : ""}`}
           aria-label={t("captain.profile.addPhoto")}
         >
           {form.photo_url ? <img src={form.photo_url} alt="" className="h-full w-full object-cover" /> : initial}
@@ -216,21 +261,25 @@ export default function CaptainProfilePage() {
               </p>
             )}
             {locked && <p className="text-sm font-semibold text-[#15803D]">{t("captain.v2.kycLocked")}</p>}
+            {errs.photo && <p className="rounded-xl bg-[#FDECEC] px-3.5 py-2.5 text-sm font-medium text-[#B91C1C]">{errs.photo}</p>}
             <label className="block text-xs font-bold text-[#5F6878]">
               {t("captain.profile.aadhaarNumber")}
-              <input className={`${field} mt-1 h-12`} inputMode="numeric" placeholder="12 digits" value={form.aadhaar_number || ""} disabled={locked}
-                onChange={(e) => set({ aadhaar_number: e.target.value.replace(/\D/g, "").slice(0, 12) })} />
+              <input className={`${field} mt-1 h-12 ${errs.aadhaar ? RED : ""}`} inputMode="numeric" placeholder="12 digits" value={form.aadhaar_number || ""} disabled={locked}
+                aria-invalid={!!errs.aadhaar} onChange={(e) => set({ aadhaar_number: e.target.value.replace(/\D/g, "").slice(0, 12) })} />
+              <FieldError text={errs.aadhaar} />
             </label>
             <label className="block text-xs font-bold text-[#5F6878]">
               {t("captain.profile.panNumber")}
-              <input className={`${field} mt-1 h-12`} placeholder="ABCDE1234F" value={form.pan_number || ""} disabled={locked}
-                onChange={(e) => set({ pan_number: e.target.value.toUpperCase().slice(0, 10) })} />
+              <input className={`${field} mt-1 h-12 ${errs.pan ? RED : ""}`} placeholder="ABCDE1234F" value={form.pan_number || ""} disabled={locked}
+                aria-invalid={!!errs.pan} onChange={(e) => set({ pan_number: e.target.value.toUpperCase().slice(0, 10) })} />
+              <FieldError text={errs.pan} />
             </label>
-            <DocUpload label={t("captain.profile.aadhaarPhoto")} url={form.aadhaar_doc_url} disabled={locked} onUploaded={(url) => set({ aadhaar_doc_url: url })} />
-            <DocUpload label={t("captain.profile.panPhoto")} url={form.pan_doc_url} disabled={locked} onUploaded={(url) => set({ pan_doc_url: url })} />
+            <DocUpload label={t("captain.profile.aadhaarPhoto")} url={form.aadhaar_doc_url} disabled={locked} missing={errs.aadhaarDoc} onUploaded={(url) => set({ aadhaar_doc_url: url })} />
+            <DocUpload label={t("captain.profile.panPhoto")} url={form.pan_doc_url} disabled={locked} missing={errs.panDoc} onUploaded={(url) => set({ pan_doc_url: url })} />
             <label className="block text-xs font-bold text-[#5F6878]">
               {t("captain.profile.localAddress")}
-              <textarea className={`${field} mt-1 py-3`} rows={2} value={form.local_address || ""} disabled={locked} onChange={(e) => set({ local_address: e.target.value })} />
+              <textarea className={`${field} mt-1 py-3 ${errs.local ? RED : ""}`} rows={2} value={form.local_address || ""} disabled={locked} aria-invalid={!!errs.local} onChange={(e) => set({ local_address: e.target.value })} />
+              <FieldError text={errs.local} />
             </label>
             <label className="flex min-h-[44px] items-center gap-2.5 text-sm font-semibold text-[#0E1A33]">
               <input type="checkbox" className="h-5 w-5 accent-[#0A66F0]" checked={!!form.same_as_local} disabled={locked} onChange={(e) => set({ same_as_local: e.target.checked })} />
@@ -239,17 +288,18 @@ export default function CaptainProfilePage() {
             {!form.same_as_local && (
               <label className="block text-xs font-bold text-[#5F6878]">
                 {t("captain.profile.permanentAddress")}
-                <textarea className={`${field} mt-1 py-3`} rows={2} value={form.permanent_address || ""} disabled={locked} onChange={(e) => set({ permanent_address: e.target.value })} />
+                <textarea className={`${field} mt-1 py-3 ${errs.permanent ? RED : ""}`} rows={2} value={form.permanent_address || ""} disabled={locked} aria-invalid={!!errs.permanent} onChange={(e) => set({ permanent_address: e.target.value })} />
+                <FieldError text={errs.permanent} />
               </label>
             )}
-            {formError && <p className="text-sm font-medium text-[#B91C1C]">{formError}</p>}
+            {showFormError && <p className="text-sm font-medium text-[#B91C1C]">{formError}</p>}
             {saved && (
               <p className="flex items-center gap-1.5 text-sm font-semibold text-[#15803D]">
                 <Check className="h-4 w-4" /> {t("captain.v2.kycSent")}
               </p>
             )}
             {!locked && (
-              <Btn className="w-full" loading={submitKyc.isPending} onClick={() => submitKyc.mutate()}>
+              <Btn className="w-full" loading={submitKyc.isPending} onClick={sendForReview}>
                 {status === "pending" ? t("captain.profile.submitForVerification") : t("captain.profile.resubmit")}
               </Btn>
             )}

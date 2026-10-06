@@ -25,7 +25,7 @@ export function SocietyRequestCard() {
 
   return (
     <div
-      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#E4E9F1] bg-[#EEF3FA] lg:h-full lg:min-h-[470px] lg:-my-4 lg:shadow-xl lg:z-10 sm:flex-row lg:flex-col"
+      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#0A66F0]/35 bg-[#EEF3FA] shadow-[0_10px_30px_rgba(10,102,240,0.12)] sm:flex-row lg:h-full lg:flex-col"
       data-testid="landing-society-card"
     >
       <span className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-[#FDE9A6] px-3 py-1 text-[11px] font-bold text-[#071A3D] shadow-sm">
@@ -33,7 +33,7 @@ export function SocietyRequestCard() {
         Most Popular
       </span>
 
-      <div className="relative z-10 flex flex-col flex-1 p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:p-7">
+      <div className="relative z-10 flex flex-col flex-1 p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
         <div>
           <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[1.2px] text-[#0A66F0] shadow-sm">
             <Building2 className="h-3.5 w-3.5" /> For Housing Societies

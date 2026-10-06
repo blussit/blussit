@@ -70,10 +70,12 @@ export default function LandingPage() {
       <PublicNavbar />
       {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
       <div className="relative">
-        <div className="absolute left-0 right-0 top-0 z-30">
+        {/* Desktop: the offer floats over the photo's sky. Phones/tablets: the
+            hero floats it above the features row instead. */}
+        <div className="absolute inset-x-0 top-0 z-30 hidden lg:block">
           <OfferBar offers={offers} onBook={bookService} />
         </div>
-        <LandingHero onBook={bookService} />
+        <LandingHero onBook={bookService} offer={<OfferBar offers={offers} onBook={bookService} />} />
       </div>
       <ServicesShowcase row />
       <HowItWorksStrip />

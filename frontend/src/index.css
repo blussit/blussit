@@ -246,6 +246,13 @@ section[id] {
   animation: sheen-drift 9s ease-in-out infinite;
 }
 
+/* A popup is open (useBodyScrollLock): the floating Call/WhatsApp stack sits
+   above every layer, so it would stay bright on top of the dimmed page. */
+html[data-overlay="open"] .floating-contact {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

@@ -75,6 +75,20 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
     onSuccess: () => { ok("Cancelled"); refresh(); },
     onError: (err) => { fail(err); refresh(); },
   });
+  // Payment link on the resident's WhatsApp; paying it activates/renews by itself.
+  const payLink = useMutation({
+    mutationFn: ({ id, renewal }: { id: string; renewal: boolean }) => societyApi.paymentLink(id, renewal),
+    onSuccess: (r) => { ok(r.reused ? `Payment link sent again — ₹${r.amount}` : `Payment link sent on WhatsApp — ₹${r.amount}`); refresh(); },
+    onError: fail,
+  });
+  const copyLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      ok("Link copied");
+    } catch {
+      toast.push({ tone: "info", title: url });
+    }
+  };
   const linkAct = useMutation({
     mutationFn: async (kind: "rotate" | "toggle") =>
       kind === "rotate" ? societyApi.rotateLink(societyId) : societyApi.update(societyId, { form_enabled: !society.data?.form_enabled }),
@@ -196,20 +210,45 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
                       </div>
                     ))}
                   </div>
+                  {e.payment_link && (
+                    <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-[#F3F7FF] px-2.5 py-1.5 text-xs text-[#0E1A33]" data-testid="society-link-pending">
+                      <MessageCircle className="h-3.5 w-3.5 text-[#0A66F0]" />
+                      <span>
+                        {e.payment_link.renewal ? "Renewal link" : "Payment link"} sent on WhatsApp · <b>{rupees(e.payment_link.amount)}</b> · waiting for payment
+                        {e.payment_link.sent_at ? ` · ${format(e.payment_link.sent_at)}` : ""}
+                      </span>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold text-[#0A66F0] hover:underline" onClick={() => copyLink(e.payment_link!.short_url)}>
+                        <Copy className="h-3 w-3" /> Copy Link
+                      </button>
+                      <span className="w-full text-[11px] text-gray-500">The plan turns active by itself once they pay. If they pay you in cash instead, use Mark Paid (Cash) — the link is cancelled.</span>
+                    </p>
+                  )}
                   <div className="mt-2 flex flex-wrap gap-2">
                     {(e.status === "requested" || e.status === "awaiting_payment") && (
-                      <Button size="sm" variant="info" onClick={() => setCollect({ enrollment: e, mode: "activate" })}>
-                        Mark Paid (Cash)
-                      </Button>
+                      <>
+                        <Button size="sm" variant="info" isLoading={payLink.isPending && payLink.variables?.id === e.id && !payLink.variables?.renewal}
+                          onClick={() => payLink.mutate({ id: e.id, renewal: false })}>
+                          <MessageCircle className="h-4 w-4" /> {e.payment_link && !e.payment_link.renewal ? "Send Link Again" : "Send Payment Link"}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => setCollect({ enrollment: e, mode: "activate" })}>
+                          Mark Paid (Cash)
+                        </Button>
+                      </>
                     )}
                     {e.status === "active" && (
                       <Button size="sm" variant="outline" onClick={() => setBookFor(e)}><CalendarCheck2 className="h-4 w-4" /> Book Premium Wash</Button>
                     )}
                     {e.status === "active" && <ResidentScheduleButton societyId={societyId} enrollmentId={e.id} />}
                     {e.renew_open && (
-                      <Button size="sm" variant="outline" onClick={() => setCollect({ enrollment: e, mode: "renew" })}>
-                        Renew (Cash)
-                      </Button>
+                      <>
+                        <Button size="sm" variant="outline" isLoading={payLink.isPending && payLink.variables?.id === e.id && !!payLink.variables?.renewal}
+                          onClick={() => payLink.mutate({ id: e.id, renewal: true })}>
+                          <MessageCircle className="h-4 w-4" /> {e.payment_link?.renewal ? "Send Renewal Link Again" : "Send Renewal Link"}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => setCollect({ enrollment: e, mode: "renew" })}>
+                          Renew (Cash)
+                        </Button>
+                      </>
                     )}
                     {e.status !== "cancelled" && (
                       <Button size="sm" variant="ghost" onClick={async () => { if (await confirm({ title: "Cancel This Plan?", message: "No refund is made automatically.", tone: "danger", confirmLabel: "Cancel Plan", cancelLabel: "Keep" })) act.mutate({ kind: "cancel", id: e.id }); }}>
