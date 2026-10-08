@@ -264,7 +264,6 @@ async def test_no_captain_can_be_assigned_to_an_unpaid_booking(rig, db, cleanup)
         )
 
 
-
 class _StubLinkClient:
     class payment_link:
         @staticmethod
