@@ -83,33 +83,6 @@ MIN_ORDER_PAISE = 100
 # sale from a doorstep collection (link_purchase_event).
 PAYMENT_CONFIRMED_NOTE = "Online payment received — booking confirmed"
 
-# The most a MANAGER may knock off a plan they sell by hand ("₹ off" on the
-# Sell-a-plan form). An admin may go up to the full price; coupons are
-# admin-made and carry their own limits.
-MANAGER_MAX_PLAN_DISCOUNT_PERCENT = 50
-
-
-def manual_plan_discount(amount: float, base_price: float, actor_role: str) -> float:
-    """The rupees-off a manager/admin typed for a hand-sold plan, checked
-    server-side: never negative, never more than the plan's price, and —
-    for a manager — at most MANAGER_MAX_PLAN_DISCOUNT_PERCENT of it.
-    Refuses with a clear message rather than silently clamping, so the
-    number the manager typed is never quietly changed under them."""
-    amount = float(amount or 0)
-    if amount <= 0:
-        return 0.0
-    base_price = float(base_price or 0)
-    if amount > base_price:
-        raise BadRequestException(f"The discount can't be more than the plan price (₹{base_price:g}).")
-    if actor_role != "admin":
-        cap = float(int(base_price * MANAGER_MAX_PLAN_DISCOUNT_PERCENT / 100))
-        if amount > cap:
-            raise BadRequestException(
-                f"You can give at most {MANAGER_MAX_PLAN_DISCOUNT_PERCENT}% off a plan — up to ₹{cap:g} on this one. "
-                "Ask an admin for a bigger discount."
-            )
-    return amount
-
 # Auto-pay (Razorpay Subscriptions) mapping from OUR billing cycle to
 # Razorpay's (period, interval) pair, plus how many cycles the mandate is
 # authorised for. Razorpay caps total_count per period, so these stay well
@@ -1592,12 +1565,14 @@ class PaymentService:
             # confirmations go out. A no-op for an already-confirmed booking.
             from app.services.booking_service import BookingService
 
-            service = BookingService(self.db)
-            for booking_id in result["newly_paid"]:
-                await service.confirm_awaiting_payment_booking(booking_id, PAYMENT_CONFIRMED_NOTE)
-            # Any OTHER link still open for these cars (a bot "pay online"
-            # tap, a manager's link) would now take a second payment.
-            await self.void_open_links(result["newly_paid"], "paid online")
+        await BookingService(self.db).confirm_awaiting_payment_booking(order["booking_id"], PAYMENT_CONFIRMED_NOTE)
+        # The payment flip and the confirm are two writes; a cancellation
+        # (expiry sweep, the customer) landing between them leaves a PAID
+        # CANCELLED booking — money for nothing unless someone sees it.
+        after = await self.booking_repo.find_by_id(order["booking_id"])
+        if after and after.get("status") == "cancelled":
+            await self._flag_order_attention({"_id": order["_id"]}, "paid, but the booking was cancelled at the same moment")
+            return False
         return True
 
     async def _flag_order_attention(self, filter_: dict, reason: str) -> None:
@@ -3073,75 +3048,28 @@ class PaymentService:
             raise BadRequestException("This payment wasn't completed.")
         return await self._apply_link_paid(params["razorpay_payment_link_id"], params["razorpay_payment_id"])
 
-    # -- Society plan payment links (manager) -------------------------
-    async def create_society_link(
-        self, enrollment_id: str, *, renewal: bool, actor_id: str, actor_role: str, actor_center_id: str | None, send_whatsapp: bool = True,
-    ) -> dict:
-        """The manager sends a resident a Razorpay link for their society
-        plan (first payment, or a renewal). Paying it activates/renews the
-        plan by itself — callback, webhook or the link sweep, all through
-        _apply_link_paid -> SocietyService.on_order_paid. An unpaid link for
-        the same thing and amount is reused (sent again), never duplicated;
-        cash, a cancel or a resubmission voids it."""
-        from app.services.society_service import SocietyService
+    async def link_purchase_event(self, link_id: str) -> dict | None:
+        """The Meta Pixel Purchase for the "payment received" page, or None.
+        Only a link whose payment CONFIRMED a booking that was waiting on it
+        is a new sale — a captain's doorstep QR for a cash booking, or a
+        WhatsApp booking confirmed before its link went out, was already a
+        booking. The event id matches the website's (lib/metaPixel.ts)."""
+        order = await self.orders.find_one({"razorpay_link_id": link_id})
+        if not order or order.get("status") != "paid" or order.get("purpose") == "subscription" or not order.get("booking_id"):
+            return None
+        booking_id = order["booking_id"]
+        if not await self.db.booking_status_history.find_one({"booking_id": booking_id, "note": PAYMENT_CONFIRMED_NOTE}):
+            return None
+        booking = await self.booking_repo.find_by_id(booking_id) or {}
+        group_id = booking.get("booking_group_id")
+        return {
+            "value": order.get("amount_paise", 0) / 100,
+            "event_id": f"visit:{group_id}" if group_id else f"booking:{booking_id}",
+        }
 
-        societies = SocietyService(self.db)
-        enrollment = await societies.enrollment_for_actor(enrollment_id, actor_role, actor_center_id)
-        # Before payment_quote, which moves a request to awaiting_payment —
-        # a server without Razorpay keys must change nothing.
-        client = _razorpay_client()
-        customer_id = enrollment["customer_id"]
-        if renewal and enrollment.get("status") != "active":
-            raise BadRequestException("Only an active plan can be renewed.")
-        amount_paise, description, reference = await societies.payment_quote(customer_id, enrollment_id, renewal)
-        if amount_paise < MIN_ORDER_PAISE:
-            raise BadRequestException("There's nothing to collect online for this plan.")
-        same = {"kind": "link", "purpose": "society", "status": "created", "society_enrollment_id": enrollment_id,
-                "society_renewal": renewal, "amount_paise": amount_paise}
-        if not renewal:
-            same["society_revision"] = reference.get("society_revision")
-        elif reference.get("society_renewal_end"):
-            # A stale unpaid link from an older cycle is never re-sent for this one.
-            same["society_renewal_end"] = reference["society_renewal_end"]
-        existing = await self.orders.find_one(same, sort=[("created_at", -1)])
-        if existing:
-            order_id, short_url = existing["_id"], existing["short_url"]
-        else:
-            customer_doc = await self.db.users.find_one({"_id": ObjectId(customer_id)}) if ObjectId.is_valid(customer_id) else None
-            reference_id = f"soc-{enrollment_id[-10:]}-{secrets.token_hex(3)}"
-            link_payload: dict = {
-                "amount": amount_paise, "currency": "INR", "reference_id": reference_id,
-                "description": description[:255], "notify": {"sms": False, "email": False},  # WE deliver it, on WhatsApp
-            }
-            if (customer_doc or {}).get("phone"):
-                link_payload["customer"] = {"name": (customer_doc or {}).get("full_name") or "Blussit customer", "contact": customer_doc["phone"]}
-            link_payload["expire_by"] = _link_expire_by()
-            if settings.PUBLIC_BASE_URL:
-                link_payload["callback_url"] = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/link-callback"
-                link_payload["callback_method"] = "get"
-            try:
-                link = await _rzp(client.payment_link.create, link_payload)
-            except Exception:
-                # Razorpay rejects some contacts (e.g. repeated digits) — retry without.
-                link_payload.pop("customer", None)
-                try:
-                    link = await _rzp(client.payment_link.create, link_payload)
-                except Exception as exc:
-                    raise BadRequestException(f"Couldn't create the payment link — please try again. ({type(exc).__name__})") from exc
-            society = await self.db.societies.find_one({"_id": ObjectId(enrollment["society_id"])}) if ObjectId.is_valid(str(enrollment.get("society_id"))) else None
-            doc = {
-                "kind": "link", "purpose": "society",
-                "razorpay_link_id": link["id"], "short_url": link["short_url"], "reference_id": reference_id,
-                "customer_id": customer_id, "amount_paise": amount_paise, "currency": "INR", "status": "created",
-                "channel": "manager", "issued_by": actor_id, "created_at": now_ist(),
-                "service_center_id": (society or {}).get("service_center_id"),
-                **{k: v for k, v in reference.items() if k != "receipt"},
-            }
-            order_id = (await self.orders.insert_one(doc)).inserted_id
-            short_url = link["short_url"]
-        if send_whatsapp:
-            await self._send_society_link_whatsapp(enrollment, amount_paise / 100, short_url, renewal)
-        return {"short_url": short_url, "amount": amount_paise / 100, "order_id": str(order_id), "reused": bool(existing), "sent": send_whatsapp}
+    async def notify_link_paid(self, order: dict) -> None:
+        """The WhatsApp ✅ for a settled booking link (sweep or webhook)."""
+        from app.services.whatsapp_service import WhatsAppService
 
     # -- Custom multi-car plans (manager cart — PLANS' CustomPlanService) ----
     #
