@@ -371,7 +371,10 @@ for target in "${TARGETS[@]}"; do
       export "$name"="${!name:-}"
     done
     export RUN_MODE="$target" ENV_FILE=/dev/null PYTHONPATH="$APP_DIR" PYTHONDONTWRITEBYTECODE=1
-    "$PY" -m app.core.config --check --require-production
+    "$PY" -m app.core.config --check --require-production || exit 1
+    # The image must at least IMPORT: a code error (a missing import) would
+    # otherwise only show as a crash-looping Cloud Run revision.
+    "$PY" -c "import app.main" || { echo "ERROR: the backend code does not import (traceback above)." >&2; exit 1; }
   ); then
     fail "The backend would refuse to start with $ENV_FILE as RUN_MODE=$target (problems listed above) — nothing was deployed"
   fi

@@ -1173,6 +1173,12 @@ CURRENT_TEMPLATE_DEFS: list[dict] = [
     _def("blussit_account_created", "UTILITY",
          "Hi {{1}}, your Blussit account has been created. Reply here anytime for help with your bookings.",
          ["Asha"]),
+    # Staff password reset (WHATSAPP_TEMP_PASSWORD_TEMPLATE_NAME): one {{1}}
+    # = the temporary password. Reaches staff outside the 24 h chat window.
+    # Staff temp-password template: Meta REJECTED both wordings tried
+    # (blussit_staff_password_v1/_v2 — it treats a password in a UTILITY
+    # message as an authentication message). Not re-submitted; staff resets
+    # use free text inside an open 24 h chat (see send_temp_password_outcome).
     # -- booking lifecycle (button deep-links to the booking) -------------
     _def("blussit_booking_confirmed_v5", "UTILITY",
          "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
@@ -1235,7 +1241,7 @@ CURRENT_TEMPLATE_DEFS: list[dict] = [
          "🔄 Auto-pay ₹{{1}}/mo to activate {{2}}:\n{{3}}\nCall us for any query.",
          ["999", "Monthly Pass (Hatchback)", "https://rzp.io/i/AbC123"]),
     _def("blussit_subscription_activated", "UTILITY",
-         "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}",
+         "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}\n\nYou can see it any time in your Blussit account.",
          ["Asha", "Monthly Pass", "Hatchback MP09AB1234", "4", "12 Nov 2026"], "View Plan", f"{SITE}/app/subscriptions"),
     _def("blussit_subscription_renewed", "UTILITY",
          "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass has renewed.\n\nPlan: {{2}}\nValid till: {{3}}\n\nAuto-pay went through — nothing to do.",
@@ -1253,7 +1259,7 @@ CURRENT_TEMPLATE_DEFS: list[dict] = [
          ["Asha", "Monthly Pass"], "Renew Pass", f"{SITE}/app/subscriptions"),
     # -- staff -----------------------------------------------------------
     _def("blussit_manager_new_booking_v2", "UTILITY",
-         "📥 New Booking\nCustomer: {{1}} ({{2}})\nVehicle: {{3}}\nService: {{4}}\nWhen: {{5}}\nArea: {{6}}\nPlease assign a captain.",
+         "📥 New Booking\nCustomer: {{1}} ({{2}})\nVehicle: {{3}}\nService: {{4}}\nWhen: {{5}}\nArea: {{6}}\n\nPlease open the booking, check the details and assign a captain who is free for this slot.",
          ["Asha", "9876543210", "Hatchback", "Star Wash", "12 Oct 2026 · 9:00 AM – 12:00 PM", "Vijay Nagar, Indore"],
          "Open Bookings", f"{SITE}/manager/bookings"),
     # -- talking to one customer ------------------------------------------
