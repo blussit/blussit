@@ -295,7 +295,12 @@ class ManagerLogBookingRequest(BaseModel):
     lines: list[QuickBookingLine] = Field(min_length=1)
     scheduled_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     service_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    address_line: str = Field(min_length=3, max_length=300)
+    # Where it was done — ONE of: a saved address of this customer
+    # (address_id), a new pinned/typed address (address), or just typed text
+    # (address_line, the original form).
+    address_line: Optional[str] = Field(default=None, min_length=3, max_length=300)
+    address_id: Optional[str] = Field(default=None, min_length=24, max_length=24)
+    address: Optional["QuickAddress"] = None
     landmark: Optional[str] = Field(default=None, max_length=200)
     payment_method: PaymentMethod = PaymentMethod.CASH
     customer_notes: Optional[str] = Field(default=None, max_length=500)
@@ -314,6 +319,12 @@ class ManagerLogBookingRequest(BaseModel):
 
     _phone = field_validator("customer_phone")(_canonical_phone)
     _tip = field_validator("tip_amount")(_whole_rupee_tip)
+
+    @model_validator(mode="after")
+    def _needs_a_place(self) -> "ManagerLogBookingRequest":
+        if not (self.address_id or self.address or (self.address_line or "").strip()):
+            raise ValueError("Say where the job was done")
+        return self
 
     @field_validator("discount_amount")
     @classmethod

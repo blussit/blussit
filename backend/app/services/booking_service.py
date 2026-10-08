@@ -2434,26 +2434,43 @@ class BookingService:
     ) -> dict:
         """create_manager_logged_visit's write half, run while it holds the
         (customer, minute) claim."""
-        # -- where: typed text on the center's own pincode; no pin, no coverage check
-        line1 = payload.address_line.strip()
+        # -- where: a saved address of this customer, a new pinned/typed one,
+        # or plain text on the center's own pincode. No coverage check — the
+        # job is already done.
         loc = center.get("location") or {}
-        # Same-place reuse on the text alone: the center's pincode is only a
-        # stand-in here, so it must not veto a saved copy's real pincode.
-        match, has_saved = await AddressService(self.db).find_same_place(
-            customer_id, {"line1": line1, "landmark": payload.landmark, "city": loc.get("city"), "state": loc.get("state")}
-        )
-        if match:
-            address_id = str(match["_id"])
+        addresses = AddressService(self.db)
+        if payload.address_id:
+            saved = await addresses.repo.find_by_id(payload.address_id)
+            if not saved or saved.get("owner_id") != customer_id or saved.get("is_deleted"):
+                raise NotFoundException("Address not found for this customer")
+            address_id = payload.address_id
         else:
-            created_addr = await AddressService(self.db).create(
-                customer_id,
-                AddressCreateRequest(
-                    label="Home", line1=line1, landmark=payload.landmark,
-                    city=loc.get("city") or "—", state=loc.get("state") or "—",
-                    pincode=str(loc.get("pincode") or "000000"), is_default=not has_saved,
-                ),
-            )
-            address_id = created_addr["id"]
+            if payload.address:
+                a = payload.address
+                incoming = {
+                    "line1": a.line1.strip(), "landmark": a.landmark or payload.landmark,
+                    "city": a.city or loc.get("city"), "state": a.state or loc.get("state"),
+                    "pincode": (a.pincode or "").strip(), "latitude": a.latitude, "longitude": a.longitude,
+                }
+            else:
+                # Same-place reuse on the text alone: the center's pincode is
+                # only a stand-in here, so it must not veto a saved copy's
+                # real pincode.
+                incoming = {"line1": (payload.address_line or "").strip(), "landmark": payload.landmark, "city": loc.get("city"), "state": loc.get("state")}
+            match, has_saved = await addresses.find_same_place(customer_id, incoming)
+            if match:
+                address_id = str(match["_id"])
+            else:
+                created_addr = await addresses.create(
+                    customer_id,
+                    AddressCreateRequest(
+                        label="Home", line1=incoming["line1"], landmark=incoming.get("landmark"),
+                        city=incoming.get("city") or loc.get("city") or "—", state=incoming.get("state") or loc.get("state") or "—",
+                        pincode=incoming.get("pincode") or str(loc.get("pincode") or "000000"),
+                        latitude=incoming.get("latitude"), longitude=incoming.get("longitude"), is_default=not has_saved,
+                    ),
+                )
+                address_id = created_addr["id"]
 
         cars = await self._cars_for_lines(
             customer_id, payload.lines, as_of=service_at, scheduled_date=payload.scheduled_date, log_center_id=str(center["_id"]),

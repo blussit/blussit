@@ -423,13 +423,15 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     queryKey: ["customer-addresses", pickedCustomerId],
     // 404 = a customer new to this center: no saved addresses, not an error.
     queryFn: () => addressApi.forCustomer(pickedCustomerId as string).catch((e) => (getErrorStatus(e) === 404 ? [] : Promise.reject(e))),
-    enabled: mode === "manager" && !!pickedCustomerId,
+    enabled: isManager && !!pickedCustomerId,
   });
-  const savedAddresses = isCustomer ? myAddresses : mode === "manager" && pickedCustomerId ? customerAddresses : undefined;
+  const savedAddresses = isCustomer ? myAddresses : isManager && pickedCustomerId ? customerAddresses : undefined;
   useEffect(() => {
     if (!savedAddresses?.length || savedAddressId !== null) return;
     const def = savedAddresses.find((a) => a.is_default) || savedAddresses[0];
-    void chooseSavedAddress(def);
+    // A job already done needs no coverage check — just remember the address.
+    if (isLog) setSavedAddressId(def.id);
+    else void chooseSavedAddress(def);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedAddresses, savedAddressId]);
   /** Manager: a different (or no) customer — their saved address no longer applies. */
@@ -1187,7 +1189,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   };
   // The button stays live once the fields are filled; a time that hasn't
   // happened yet (or a date past the limit) is explained inline on tap.
-  const logReady = name.trim().length >= 2 && !!validateIndianMobile(phone) && line1.trim().length >= 3 && !!date && date <= todayIST() && !!logTime;
+  const logAddressOk = savedAddressId ? true : usingPin ? !!pinned : line1.trim().length >= 3;
+  const logReady = name.trim().length >= 2 && !!validateIndianMobile(phone) && logAddressOk && !!date && date <= todayIST() && !!logTime;
   const step2Ready = isLog
     ? logReady
     : coverage === "covered" && !!date && !!slot && addressReady && name.trim().length >= 2 && !!validateIndianMobile(phone);
@@ -1197,7 +1200,10 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     if (isLog) {
       if (name.trim().length < 2) next.name = "Enter the customer's name.";
       if (!validateIndianMobile(phone)) next.phone = "Enter a valid 10-digit mobile number.";
-      if (line1.trim().length < 3) next.address = "Enter where the job was done.";
+      if (!logAddressOk) {
+        if (usingPin) next.location = "Drop the pin on where the job was done.";
+        else next.address = "Enter where the job was done.";
+      }
       if (!date) next.date = "Choose the date.";
       else if (date > todayIST()) next.date = "Pick today or an earlier date.";
       else if (date < oldestLogDate) next.date = "Jobs older than 90 days can't be logged.";
@@ -1237,7 +1243,22 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         lines: linesForPayload(),
         scheduled_date: date,
         service_time: logTime,
-        address_line: line1.trim(),
+        ...(savedAddressId
+          ? { address_id: savedAddressId }
+          : pinned && usingPin
+            ? {
+                address: {
+                  line1: pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ") || "Pinned location",
+                  city: pinned.city || undefined,
+                  state: pinned.state || undefined,
+                  pincode: pinned.pincode || undefined,
+                  latitude: pinned.latitude,
+                  longitude: pinned.longitude,
+                },
+              }
+            : pincode.trim().length >= 4
+              ? { address: { line1: line1.trim(), pincode: pincode.trim() } }
+              : { address_line: line1.trim() }),
         customer_notes: notes.trim() || undefined,
         payment_method: finalTotal > 0 ? paymentMethod : "cash",
         discount_amount: discountNum > 0 ? discountNum : undefined,
@@ -2315,7 +2336,70 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
 
               {isLog && (
                 <div className="space-y-6">
-                  <Input label="Where Was It Done?" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
+                  <div className="space-y-3">
+                    <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
+                      <MapPin className="h-3.5 w-3.5" /> Where Was It Done?
+                    </p>
+                    {!!savedAddresses?.length && (
+                      <div className="flex flex-wrap gap-2">
+                        {savedAddresses.map((a) => (
+                          <button
+                            key={a.id}
+                            type="button"
+                            onClick={() => setSavedAddressId(a.id)}
+                            aria-pressed={savedAddressId === a.id}
+                            className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
+                          >
+                            <span className="block font-semibold text-[#0E1A33]">{a.label}</span>
+                            <span className="block truncate text-xs text-[#5F6878]">
+                              {a.line1} · {a.pincode}
+                            </span>
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSavedAddressId("");
+                            setPinned(null);
+                          }}
+                          aria-pressed={savedAddressId === ""}
+                          className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
+                        >
+                          + New Address
+                        </button>
+                      </div>
+                    )}
+                    {!savedAddressId && usingPin && (
+                      <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => setPinned(v)} />
+                    )}
+                    {fieldErrors.location && <p className="text-xs font-medium text-red-600">{fieldErrors.location}</p>}
+                    {!savedAddressId && mapsUp && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTypedAddress((v) => !v);
+                          setPinned(null);
+                        }}
+                        className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0A66F0]"
+                      >
+                        {typedAddress ? "Pin On The Map Instead" : "Type The Address Instead"}
+                      </button>
+                    )}
+                    {!savedAddressId && !usingPin && (
+                      <>
+                        <Input
+                          label="Address"
+                          maxLength={300}
+                          value={line1}
+                          onChange={(e) => setLine1(e.target.value)}
+                          error={fieldErrors.address}
+                          placeholder="House / flat, street, area"
+                          hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
+                        />
+                        <Input label="Pincode (Optional)" value={pincode} maxLength={10} inputMode="numeric" onChange={(e) => setPincode(e.target.value.replace(/\D/g, ""))} placeholder="E.g. 452001" />
+                      </>
+                    )}
+                  </div>
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />

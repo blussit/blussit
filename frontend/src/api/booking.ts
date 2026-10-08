@@ -85,7 +85,10 @@ export interface ManagerLogPayload {
   scheduled_date: string;
   /** HH:MM — filed under the center's slot that contains it. */
   service_time: string;
-  address_line: string;
+  /** Where it was done — a saved address of this customer, a new pinned/typed one, or plain text. */
+  address_line?: string;
+  address_id?: string;
+  address?: { line1: string; city?: string; state?: string; pincode?: string; latitude?: number | null; longitude?: number | null };
   landmark?: string;
   payment_method: "cash" | "online";
   customer_notes?: string;
