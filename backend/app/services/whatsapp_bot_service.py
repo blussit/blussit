@@ -39,8 +39,10 @@ import logging
 import random
 import re
 import string
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
@@ -51,12 +53,13 @@ from app.repositories.booking_repository import BookingRepository
 from app.repositories.catalog_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
+from app.services.auth_service import AuthService
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.booking_schema import BookingCancelRequest, BookingRescheduleRequest, QuickBookingLine, QuickBookingRequest
 from app.schemas.profile_schema import AddressCreateRequest
 from app.services.booking_service import BookingService
 from app.services.profile_service import AddressService
-from app.services.whatsapp_service import WhatsAppService
+from app.services.whatsapp_service import MARKETING_OPT_OUT_ERROR, WhatsAppService, inbound_session, mask_phone, set_marketing_opt_out
 from app.utils.slots import format_slot_12h
 from app.utils.timezone import now_ist
 
@@ -67,12 +70,41 @@ logger = logging.getLogger(__name__)
 # the middle of a stale slot pick.
 CONVERSATION_TTL_MINUTES = 30
 
+# "WhatsApp customer needs help" pings to the admins (in-app + WhatsApp, up
+# to 3 admins each): at most one per conversation per this many hours —
+# and again once the CRM thread is resolved. Every chat message is already
+# in the inbox; the ping only has to make sure someone looks.
+ADMIN_PING_COOLDOWN_HOURS = 12
+
+# Same limit as every other name field in the app (UserCreate.full_name,
+# QuickBookingRequest.customer_name).
+NAME_MAX_LENGTH = 100
+
 _RESET_WORDS = {"cancel", "stop", "restart", "reset"}
 _GREETING_WORDS = {"hi", "hello", "hey", "menu", "start", "namaste"}
+# WhatsApp's own opt-out words (NTF-05): they also stop our marketing
+# messages (offers, "book again"); booking updates keep coming. "stop" still
+# resets the chat as before.
+_OPT_OUT_WORDS = {"stop", "unsubscribe", "opt out", "optout", "stop offers", "stop promotions"}
+_OPT_IN_WORDS = {"subscribe", "start offers", "resume offers"}
+
+# A staff member's own phone messaging the business number (AUTH-05): told
+# once per this many hours that the booking assistant is for customers;
+# every message still lands in the CRM inbox for a human.
+STAFF_NOTICE_COOLDOWN_HOURS = 12
+
+_LIVE_STATUSES = ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]
 
 
 def _short(text: str, limit: int = 24) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _clean_name(text: str) -> str:
+    """A typed name as stored: control characters (newlines, NULs, bells)
+    become spaces, whitespace runs collapse, capped at NAME_MAX_LENGTH."""
+    spaced = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
+    return " ".join(spaced.split())[:NAME_MAX_LENGTH].strip()
 
 
 class WhatsAppBotService:
@@ -104,6 +136,7 @@ class WhatsAppBotService:
             for change in entry.get("changes") or []:
                 value = change.get("value") or {}
                 if change.get("field") != "messages":
+                    await self._handle_account_event(change.get("field"), value)
                     continue
                 # Delivery receipts for OUR outbound messages — the only
                 # place Meta ever reports a silent drop (e.g. free-form
@@ -123,6 +156,20 @@ class WhatsAppBotService:
                         ]
                         logger.warning("WhatsApp delivery failed for %s: %s", wamid, update["delivery_errors"])
                     await self.db.whatsapp_outbox.update_one({"wamid": wamid}, {"$set": update})
+                    # ...and onto the delivery queue row, so a message Meta
+                    # accepted and then failed to deliver stops counting as
+                    # "sent" in delivery health (never raises).
+                    from app.services.notification_service import NotificationService
+
+                    await NotificationService(self.db).apply_delivery_status(wamid, status.get("status"), status.get("errors"))
+                    if any(e.get("code") == MARKETING_OPT_OUT_ERROR for e in status.get("errors") or []):
+                        # The recipient stopped our marketing messages (NTF-05).
+                        recipient = status.get("recipient_id")
+                        if not recipient:
+                            row = await self.db.whatsapp_outbox.find_one({"wamid": wamid}, {"phone": 1})
+                            recipient = (row or {}).get("phone")
+                        if recipient:
+                            await set_marketing_opt_out(self.db, recipient, True, "meta_131050")
                 contacts = {c.get("wa_id"): (c.get("profile") or {}).get("name") for c in value.get("contacts") or []}
                 for message in value.get("messages") or []:
                     wa_id = message.get("from")
@@ -139,20 +186,83 @@ class WhatsAppBotService:
 
                     crm = WhatsAppCrmService(self.db)
                     await crm.record_inbound(wa_id, contacts.get(wa_id), message)
-                    if await crm.is_bot_paused(wa_id):
-                        # A human agent owns this thread (they sent a
-                        # manual message and haven't resolved it) — the
-                        # bot stays silent instead of talking over them.
+                    paused = await crm.is_bot_paused(wa_id)
+                    if paused and not self._is_pay_tap(message):
+                        # A human owns this thread (an agent's message, or
+                        # the bot's own handoff still within its quiet
+                        # period) — the bot stays silent instead of talking
+                        # over them.
                         processed += 1
                         continue
-                    try:
-                        await self._handle_message(wa_id, contacts.get(wa_id), message)
-                        processed += 1
-                    except Exception:  # noqa: BLE001 — see docstring
-                        logger.exception("WhatsApp bot failed handling %s from %s", wamid, wa_id)
-                        await self._safe_reply(wa_id, "Sorry, something went wrong on our side. Type *hi* to start again.")
-                        await self._set_state(wa_id, None, {})
+                    # This number just messaged us: its 24-hour window is
+                    # open, so the replies below are allowed free text.
+                    with inbound_session(wa_id):
+                        try:
+                            if paused:
+                                # The stateless pay buttons (sent after booking
+                                # and by the payment-reminder sweep) still work
+                                # — ownership-checked, and a prepaid booking
+                                # expires unpaid otherwise.
+                                await self._handle_pay_tap_while_paused(wa_id, message)
+                            else:
+                                await self._handle_message(wa_id, contacts.get(wa_id), message)
+                            processed += 1
+                        except Exception:  # noqa: BLE001 — see docstring
+                            logger.exception("WhatsApp bot failed handling %s from %s", wamid, mask_phone(wa_id))
+                            await self._safe_reply(wa_id, "Sorry, something went wrong on our side. Type *hi* to start again.")
+                            await self._set_state(wa_id, None, {})
         return {"processed": processed}
+
+    async def _handle_account_event(self, field: str | None, value: dict) -> None:
+        """Webhook fields other than messages. Never raises (see
+        handle_webhook): template review results (DEP-04 — a paused or
+        rejected template stops being used at once, an approved one starts)
+        and the customer's marketing preference (NTF-05)."""
+        try:
+            if field in ("message_template_status_update", "template_category_update"):
+                from app.services.whatsapp_crm_service import WhatsAppCrmService
+
+                await WhatsAppCrmService(self.db).apply_template_event(field, value)
+            elif field == "user_preferences":
+                for pref in value.get("user_preferences") or []:
+                    if pref.get("category") != "marketing_messages" or not pref.get("wa_id"):
+                        continue
+                    choice = str(pref.get("value") or "").lower()
+                    if choice in ("stop", "resume"):
+                        await set_marketing_opt_out(self.db, pref["wa_id"], choice == "stop", "meta_user_preferences")
+        except Exception:  # noqa: BLE001
+            logger.exception("WhatsApp webhook %s event could not be applied", field)
+
+    @classmethod
+    def _is_pay_tap(cls, message: dict) -> bool:
+        kind, value = cls._extract_input(message)
+        return kind == "reply" and str(value).startswith("pay:")
+
+    async def _handle_pay_tap_while_paused(self, wa_id: str, message: dict) -> None:
+        """A pay button on a paused thread: settle it, touch nothing else
+        (no chat state, no account creation, no menu)."""
+        _, value = self._extract_input(message)
+        if await self._staff_account(wa_id):
+            return  # a staff phone never pays as a customer (AUTH-05)
+        convo = await self.conversations.find_one({"wa_id": wa_id}, {"customer_id": 1}) or {}
+        customer_id = await self._live_customer_id(wa_id, convo.get("customer_id"))
+        if not customer_id:
+            phone = self._local_phone(wa_id)
+            user = await self.users.find_by_phone(phone) or (await self.users.find_by_phone(wa_id) if phone != wa_id else None)
+            customer_id = str(user["_id"]) if user else None
+        if customer_id:
+            await self._on_pay_choice(self._local_phone(wa_id), customer_id, str(value))
+
+    async def _live_customer_id(self, wa_id: str, customer_id: str | None) -> str | None:
+        """The conversation's linked account, or None when that account no
+        longer exists (an admin hard-deleted it) — the dead link is dropped
+        so the number is resolved (or signed up) afresh."""
+        if not customer_id:
+            return None
+        if ObjectId.is_valid(customer_id) and await self.db.users.find_one({"_id": ObjectId(customer_id)}, {"_id": 1}):
+            return customer_id
+        await self.conversations.update_one({"wa_id": wa_id, "customer_id": customer_id}, {"$unset": {"customer_id": ""}})
+        return None
 
     async def _first_time_seeing(self, wamid: str) -> bool:
         try:
@@ -165,7 +275,48 @@ class WhatsAppBotService:
         try:
             await self.wa.send_text(self._local_phone(wa_id), text)
         except Exception:  # noqa: BLE001
-            logger.exception("Failed sending WhatsApp reply to %s", wa_id)
+            logger.exception("Failed sending WhatsApp reply to %s", mask_phone(wa_id))
+
+    async def _staff_account(self, wa_id: str) -> dict | None:
+        """The staff account (admin / manager / captain) this number belongs
+        to, if any. Messaging us proves nothing about a STAFF account — the
+        bot must never adopt, "prove" or book for one (AUTH-05)."""
+        phone = self._local_phone(wa_id)
+        user = await self.users.find_by_phone(phone)
+        if not user and phone != wa_id:
+            user = await self.users.find_by_phone(wa_id)
+        if user and user.get("role") != UserRole.CUSTOMER.value:
+            return user
+        return None
+
+    async def _route_staff_to_inbox(self, wa_id: str, phone: str, staff: dict) -> None:
+        """No customer flow for a staff phone: drop any link the old bug
+        made, keep the chat stateless, and say why — once per cooldown, not
+        on every line. The message itself is already in the CRM inbox
+        (record_inbound ran first), where a human can answer it."""
+        now = datetime.now(timezone.utc)
+        await self.conversations.update_one(
+            {"wa_id": wa_id},
+            {"$set": {"state": None, "data": {}, "staff_account": True, "updated_at": now},
+             "$unset": {"customer_id": ""}, "$setOnInsert": {"wa_id": wa_id}},
+            upsert=True,
+        )
+        claimed = await self.conversations.update_one(
+            {
+                "wa_id": wa_id,
+                "$or": [
+                    {"staff_notice_at": None},
+                    {"staff_notice_at": {"$lte": now - timedelta(hours=STAFF_NOTICE_COOLDOWN_HOURS)}},
+                ],
+            },
+            {"$set": {"staff_notice_at": now}},
+        )
+        logger.info("WhatsApp message from a %s's phone %s routed to the inbox only", staff.get("role"), mask_phone(phone))
+        if claimed.modified_count:
+            await self.wa.send_text(
+                phone,
+                "This number belongs to a BLUSSIT staff account, so booking here is off. Our team will reply in this chat.",
+            )
 
     # ------------------------------------------------------------------
     # Conversation plumbing
@@ -173,7 +324,7 @@ class WhatsAppBotService:
 
     @staticmethod
     def _local_phone(wa_id: str) -> str:
-        """wa_id arrives as E.164 digits (919302964803). The app stores
+        """wa_id arrives as E.164 digits (e.g. 91XXXXXXXXXX). The app stores
         Indian numbers as bare 10-digit strings — strip the 91 country
         code when that's what this is, otherwise keep as-is."""
         digits = "".join(ch for ch in wa_id if ch.isdigit())
@@ -209,9 +360,14 @@ class WhatsAppBotService:
         if not user and phone != wa_id:
             user = await self.users.find_by_phone(wa_id)
         if user:
+            if user.get("role") != UserRole.CUSTOMER.value:
+                # Never adopt or "prove" a staff account (AUTH-05) —
+                # _handle_message routes staff phones away before this.
+                raise AppException("This number belongs to a staff account.")
             # Messaging us from this number IS live proof of ownership —
-            # every chat refreshes the 90-day verification window.
-            await self.users.update_by_id(str(user["_id"]), {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
+            # every chat refreshes the 90-day verification window (and the
+            # first one evicts anything set up on it without proof).
+            await AuthService(self.db).mark_phone_proven(user)
             return str(user["_id"]), False
 
         name = (supplied_name or "").strip()
@@ -236,8 +392,8 @@ class WhatsAppBotService:
             user = await self.users.find_by_phone(phone)
             if not user and phone != wa_id:
                 user = await self.users.find_by_phone(wa_id)
-            if user:
-                await self.users.update_by_id(str(user["_id"]), {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc)})
+            if user and user.get("role") == UserRole.CUSTOMER.value:
+                await AuthService(self.db).mark_phone_proven(user)
                 return str(user["_id"]), False
             raise
         return str(created["_id"]), True
@@ -264,17 +420,33 @@ class WhatsAppBotService:
 
     async def _handle_message(self, wa_id: str, profile_name: str | None, message: dict) -> None:
         phone = self._local_phone(wa_id)
+        staff = await self._staff_account(wa_id)
+        if staff:
+            await self._route_staff_to_inbox(wa_id, phone, staff)
+            return
         convo = await self._load_conversation(wa_id)
         kind, value = self._extract_input(message)
-        text_lower = value.lower() if kind == "text" else ""
+        text_lower = " ".join(value.lower().split()) if kind == "text" else ""
+
+        # Marketing opt-in/out by keyword ("STOP" also resets the chat below).
+        if kind == "text" and text_lower in _OPT_IN_WORDS:
+            await set_marketing_opt_out(self.db, wa_id, False, "whatsapp_keyword")
+            await self.wa.send_text(phone, "Done — you'll get our offers again. Type *hi* to book.")
+            return
+        opted_out = kind == "text" and text_lower in _OPT_OUT_WORDS
+        if opted_out:
+            await set_marketing_opt_out(self.db, wa_id, True, "whatsapp_keyword")
 
         # Global escape hatches beat whatever state we were in.
-        if kind == "text" and text_lower in _RESET_WORDS:
+        if kind == "text" and (text_lower in _RESET_WORDS or opted_out):
             stale = convo.get("data") or {}
             if convo.get("customer_id") and stale.get("center_id") and stale.get("date") and stale.get("slot"):
                 await self.booking_service.release_hold(convo["customer_id"], stale["center_id"], stale["date"], stale["slot"])
             await self._set_state(wa_id, None, {})
-            await self.wa.send_text(phone, "Okay, cancelled. Type *hi* whenever you want to book.")
+            if opted_out:
+                await self.wa.send_text(phone, "Okay, stopped. No more offers from us — booking updates still come here. Type *hi* to book.")
+            else:
+                await self.wa.send_text(phone, "Okay, cancelled. Type *hi* whenever you want to book.")
             return
         # "back"/"menu" from anywhere returns to the main menu — the
         # universal recovery from a mis-tap without losing the account.
@@ -282,13 +454,19 @@ class WhatsAppBotService:
             await self._send_menu(wa_id, phone)
             return
 
-        customer_id = convo.get("customer_id")
+        # A link to an account that no longer exists (hard-deleted by an
+        # admin) is dropped and the number resolved afresh — else the dead
+        # id would fail every booking from this number, forever.
+        customer_id = await self._live_customer_id(wa_id, convo.get("customer_id"))
+        if convo.get("customer_id") and not customer_id:
+            # Any half-built flow belonged to the deleted account.
+            convo["state"], convo["data"], convo["customer_id"] = None, {}, None
         if not customer_id:
             customer_id, is_new = await self._ensure_customer(wa_id, profile_name)
             if not customer_id:
                 data = convo.get("data") or {}
                 if convo.get("state") == "collect_name":
-                    name_text = str(value).strip()
+                    name_text = _clean_name(str(value))
                     if kind != "text" or len(name_text) < 2 or name_text.lower() in _GREETING_WORDS:
                         await self.wa.send_text(phone, "Please reply with your name so we can save your booking correctly.")
                         await self._set_state(wa_id, "collect_name", data)
@@ -374,10 +552,19 @@ class WhatsAppBotService:
 
     async def _handoff_to_admin(self, wa_id: str, phone: str, context_text: str) -> None:
         """Pauses the bot for this thread and pings the admins — the
-        conversation continues with a human in the admin WhatsApp inbox."""
+        conversation continues with a human in the admin WhatsApp inbox.
+        Marked as the BOT's pause: if no agent takes it over, the bot
+        answers again after the quiet period (WhatsAppCrmService.
+        is_bot_paused), instead of ignoring this customer forever."""
+        from app.services.whatsapp_crm_service import PAUSED_BY_BOT
+
+        now = datetime.now(timezone.utc)
         await self.conversations.update_one(
             {"wa_id": wa_id},
-            {"$set": {"bot_paused": True, "state": None, "data": {}, "updated_at": datetime.now(timezone.utc)}},
+            {"$set": {
+                "bot_paused": True, "bot_paused_by": PAUSED_BY_BOT, "bot_paused_at": now,
+                "state": None, "data": {}, "updated_at": now,
+            }},
             upsert=True,
         )
         await self.wa.send_text(
@@ -387,10 +574,27 @@ class WhatsAppBotService:
         await self._ping_admins(wa_id, phone, context_text)
 
     async def _ping_admins(self, wa_id: str, phone: str, context_text: str) -> None:
+        """At most once per conversation per ADMIN_PING_COOLDOWN_HOURS (and
+        again after the thread is resolved) — claimed atomically on the
+        conversation, so a chatty customer (or two racing messages) can't
+        page up to 3 admins on every line they type."""
         try:
             from app.models.enums import NotificationType
             from app.services.notification_service import NotificationService
 
+            now = datetime.now(timezone.utc)
+            claimed = await self.conversations.update_one(
+                {
+                    "wa_id": wa_id,
+                    "$or": [
+                        {"admin_pinged_at": None},
+                        {"admin_pinged_at": {"$lte": now - timedelta(hours=ADMIN_PING_COOLDOWN_HOURS)}},
+                    ],
+                },
+                {"$set": {"admin_pinged_at": now}},
+            )
+            if not claimed.modified_count:
+                return
             notifications = NotificationService(self.db)
             async for admin in self.db.users.find({"role": "admin", "is_deleted": {"$ne": True}}).limit(3):
                 await notifications.notify(
@@ -432,8 +636,9 @@ class WhatsAppBotService:
             await self._send_bookings_list(wa_id, phone, items)
         else:
             # Free text that isn't a menu action = a question the bot
-            # can't answer. Ping the admins (once per attempt), keep the
-            # menu available, and let a human pick it up in the inbox.
+            # can't answer. Ping the admins (throttled per conversation —
+            # see _ping_admins), keep the menu available, and let a human
+            # pick it up in the inbox.
             courtesy = {"ok", "okay", "thanks", "thank you", "thx", "great", "good", "cool", "👍", "🙏", "yes", "no"}
             if kind == "text" and len(value.strip()) > 2 and value.strip().lower() not in courtesy:
                 await self._ping_admins(wa_id, phone, value)
@@ -497,7 +702,11 @@ class WhatsAppBotService:
         vehicle = await self.vehicles.find_by_id(booking.get("vehicle_id", "")) if booking.get("vehicle_id") else None
         if vehicle:
             lines.append(f"🚗 {vehicle.get('brand', '')} {vehicle.get('model', '')} · {vehicle.get('registration_number', '')}".strip())
-        address = await self.addresses.find_by_id(booking.get("address_id", "")) if booking.get("address_id") else None
+        # The booking's own snapshot first (spec 1.3) — a later edit of the
+        # saved address doesn't move this booking.
+        address = booking.get("address_snapshot") or (
+            await self.addresses.find_by_id(booking.get("address_id", "")) if booking.get("address_id") else None
+        )
         if address:
             addr_bits = ", ".join(x for x in (address.get("line1"), address.get("city"), address.get("pincode")) if x)
             lines.append(f"📍 {_short(addr_bits, 90)}")
@@ -955,7 +1164,7 @@ class WhatsAppBotService:
                     return str(center["_id"])
                 except AppException:
                     pass
-        centers = await self.booking_service.center_repo.find_all_no_paginate({"is_active": True}, sort_by="_id", sort_order=1)
+        centers = await self.booking_service.center_repo.find_all_no_paginate({"is_active": {"$ne": False}}, sort_by="_id", sort_order=1)
         return str(centers[0]["_id"]) if centers else None
 
     async def _start_when_step(self, wa_id, phone, data):
@@ -1045,6 +1254,10 @@ class WhatsAppBotService:
 
     @staticmethod
     def _quote_total(lines: list[dict], quote: dict) -> float:
+        # What's left to pay after wallet credit (the total already carries
+        # any previous balance due).
+        if "amount_payable" in quote:
+            return float(quote["amount_payable"])
         if "total_amount" in quote:
             return float(quote["total_amount"])
         return round(sum(float(l.get("subtotal") or 0) for l in lines), 2)
@@ -1058,6 +1271,12 @@ class WhatsAppBotService:
         travel = quote.get("travel")
         if travel and travel["charge"] > 0:
             out += f"🚗 Distance charge ({travel['distance_km']:g} km): ₹{travel['charge']:g}\n"
+        # Wallet (spec 1.1): money owed from before rides on this booking;
+        # credit is spent on it.
+        if quote.get("previous_balance_due"):
+            out += f"⚠️ Previous Balance Due: ₹{quote['previous_balance_due']:g}\n"
+        if quote.get("wallet_applied"):
+            out += f"👛 Wallet Credit: −₹{quote['wallet_applied']:g}\n"
         if quote.get("online_only"):
             out += "💳 Prepaid — pay online to confirm\n"
         return out
@@ -1092,6 +1311,9 @@ class WhatsAppBotService:
                 lines=self._quick_lines(lines),
                 address=address,
                 source="whatsapp",
+                # The chosen day: a pass covers only washes inside its own
+                # period, exactly as the booking will check it.
+                scheduled_date=data.get("date"),
             )
         except AppException:
             raise
@@ -1229,12 +1451,20 @@ class WhatsAppBotService:
                 except AppException as exc:
                     await self.wa.send_text(phone, f"Couldn't switch this to cash: {exc.message}")
                     return
+                await self._void_links_for_cash(cars)
                 await self.wa.send_text(
                     phone,
                     f"Booking *{booking['booking_number']}* is confirmed ✅ — pay the captain "
                     f"*₹{visit_total:g}* in cash after the wash.",
                 )
                 return
+            # Back to cash after an earlier "Pay online" tap: the unpaid
+            # cars are cash again (the captain collects; no online-payment
+            # chasing). Already-paid cars keep how they were actually paid.
+            for car in cars:
+                if car.get("payment_status") != "paid" and car.get("payment_method") == "online":
+                    await self.booking_service.repo.update_by_id(str(car["_id"]), {"payment_method": "cash"})
+            await self._void_links_for_cash(cars)
             await self.wa.send_text(
                 phone,
                 f"Noted 💵 — pay the captain *₹{visit_total:g}* in cash after the wash. "
@@ -1250,22 +1480,58 @@ class WhatsAppBotService:
         from app.services.payment_service import PaymentService
 
         try:
-            for car in cars:
+            unpaid = [c for c in cars if c.get("payment_status") != "paid"]
+            # Only what's still owed turns online — a car already paid in
+            # cash keeps saying so (the captain's cash ledger reads it).
+            for car in unpaid:
                 if car.get("payment_method") == "cash":
                     await self.booking_service.repo.update_by_id(str(car["_id"]), {"payment_method": "online"})
-            unpaid = [c for c in cars if c.get("payment_status") != "paid"]
-            link = await PaymentService(self.db).create_payment_link(
-                booking, contact_phone=phone, name=booking.get("customer_name"), cars=unpaid or None
-            )
+            link = await self._open_payment_link(booking_id, unpaid or [booking])
+            if not link:
+                link = await PaymentService(self.db).create_payment_link(
+                    booking, contact_phone=phone, name=booking.get("customer_name"), cars=unpaid or None
+                )
         except AppException as exc:
             await self.wa.send_text(phone, f"Couldn't set up the payment: {exc.message}")
             return
+        due = round(sum(float(c.get("total_amount") or 0) for c in unpaid or [booking]), 2)  # what the link charges
         await self.wa.send_text(
             phone,
-            f"Here's your secure payment link for *₹{visit_total:g}* "
+            f"Here's your secure payment link for *₹{due:g}* "
             f"(UPI, cards, netbanking — powered by Razorpay):\n\n{link['short_url']}\n\n"
             "I'll confirm right here the moment it's received ✅",
         )
+
+    async def _void_links_for_cash(self, cars: list[dict]) -> None:
+        """Cash replaces online (PAY-06): the payment link sent for these
+        cars must stop being payable, or the customer can pay twice (the
+        second payment parked for a refund). Best effort — a link Razorpay
+        won't cancel stays for the paid-twice safety net."""
+        from app.services.payment_service import PaymentService
+
+        unpaid = [str(c["_id"]) for c in cars if c.get("_id") and c.get("payment_status") != "paid"]
+        if not unpaid:
+            return
+        try:
+            await PaymentService(self.db).void_open_links(unpaid, "customer chose cash on WhatsApp")
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not void the open payment link(s) for %s", unpaid)
+
+    async def _open_payment_link(self, booking_id: str, unpaid: list[dict]) -> dict | None:
+        """A still-open link for exactly these cars and this amount — a
+        second "Pay online" tap (or a reminder's button) re-sends it rather
+        than minting another live link for the same money. Same lookup as
+        PaymentService.captain_payment_link."""
+        from app.services.payment_service import PaymentService
+
+        existing = await self.db.payment_orders.find_one(
+            {
+                "kind": "link", "status": "created", "amount_paise": PaymentService._rupees_to_paise(unpaid),
+                "short_url": {"$exists": True},
+                "$or": [{"booking_id": booking_id, "booking_ids": {"$exists": False}}, {"booking_ids": [str(c["_id"]) for c in unpaid]}],
+            }
+        )
+        return {"short_url": existing["short_url"]} if existing else None
 
     async def send_payment_reminder(self, booking: dict) -> bool:
         """A proactive "still hasn't paid" nudge with the SAME tappable
@@ -1308,6 +1574,26 @@ class WhatsAppBotService:
 
     # -- confirm & create ---------------------------------------------
 
+    async def _booked_already(self, customer_id: str, data: dict, lines: list[dict]) -> dict | None:
+        """This customer's live booking for the same vehicle type(s), day
+        and slot — what a second Confirm tap collides with."""
+        try:
+            day = datetime.strptime(str(data.get("date")), "%Y-%m-%d")
+        except ValueError:
+            return None
+        types = [l.get("vehicle_type") for l in lines if l.get("vehicle_type")]
+        return await self.bookings.collection.find_one(
+            {
+                "customer_id": customer_id,
+                "scheduled_date": day,
+                "scheduled_slot": data.get("slot"),
+                "status": {"$in": _LIVE_STATUSES},
+                "is_deleted": {"$ne": True},
+                **({"vehicle_type": {"$in": types}} if types else {}),
+            },
+            sort=[("created_at", -1)],
+        )
+
     async def _on_confirm(self, wa_id, phone, customer_id, data, kind, value):
         if kind != "reply" or not value.startswith("confirm:"):
             await self._nudge(wa_id, phone, "confirm", data, "Tap *Confirm* or *Cancel* above 👆", str(value))
@@ -1325,31 +1611,50 @@ class WhatsAppBotService:
             await self.wa.send_text(phone, "Hmm, that booking got lost along the way — let's start again. Type *hi*.")
             await self._set_state(wa_id, None, {})
             return
+        from app.services.notification_service import whatsapp_muted_for
+
         try:
-            result = await self.booking_service.create_quick_booking(
-                QuickBookingRequest(
-                    customer_name=(customer.get("full_name") or "Customer").strip() or "Customer",
-                    customer_phone=customer.get("phone") or phone,
-                    address_id=data["address_id"],
-                    lines=self._quick_lines(lines),
-                    scheduled_date=data["date"],
-                    scheduled_slot=data["slot"],
-                    customer_notes="Booked via WhatsApp",
-                ),
-                customer=customer,
-                # The bot confirms first and offers a pay link right after —
-                # so the visit is created REAL (cash), never parked
-                # awaiting payment (source != "app") — unless it is a
-                # PREPAID visit, which is parked and paid by the link below.
-                # The pin the customer shared is trusted (allow_pinless for
-                # the rare typed-only address).
-                source="whatsapp",
-                allow_pinless=True,
-                # The bot's own "confirmed" text follows immediately — the
-                # announcement's WhatsApp send must finish first.
-                notify_background=False,
-            )
+            # This chat answers the customer itself, right below ("🎉
+            # Booking confirmed!" with the service code + pay buttons), so
+            # the announcement's WhatsApp template to the same customer
+            # would be a second confirmation — muted for them only; the
+            # in-app row and the manager's alert are untouched.
+            with whatsapp_muted_for(customer_id):
+                result = await self.booking_service.create_quick_booking(
+                    QuickBookingRequest(
+                        customer_name=_clean_name(customer.get("full_name") or "") or "Customer",
+                        customer_phone=customer.get("phone") or phone,
+                        address_id=data["address_id"],
+                        lines=self._quick_lines(lines),
+                        scheduled_date=data["date"],
+                        scheduled_slot=data["slot"],
+                        customer_notes="Booked via WhatsApp",
+                    ),
+                    customer=customer,
+                    # The bot confirms first and offers a pay link right after —
+                    # so the visit is created REAL (cash), never parked
+                    # awaiting payment (source != "app") — unless it is a
+                    # PREPAID visit, which is parked and paid by the link below.
+                    # The pin the customer shared is trusted (allow_pinless for
+                    # the rare typed-only address).
+                    source="whatsapp",
+                    allow_pinless=True,
+                    # The bot's own "confirmed" text follows immediately — the
+                    # announcement's WhatsApp send must finish first.
+                    notify_background=False,
+                )
         except AppException as exc:
+            # A double-tapped Confirm: the first tap booked it, this one hit
+            # the one-booking-per-slot guard. Say so, don't offer new times.
+            existing = await self._booked_already(customer_id, data, lines)
+            if existing:
+                await self._set_state(wa_id, None, {})
+                await self.wa.send_text(
+                    phone,
+                    f"✅ You're already booked — *{existing['booking_number']}* · {data.get('date')} · "
+                    f"{format_slot_12h(data.get('slot'))}. Type *hi* for the menu.",
+                )
+                return
             # Most common real cause: the slot filled up (web + WhatsApp
             # draw from the same capacity pool) between listing and
             # confirming — offer a fresh pick rather than dead-ending.

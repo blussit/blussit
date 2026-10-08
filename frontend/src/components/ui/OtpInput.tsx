@@ -118,10 +118,10 @@ export function OtpInput({
           aria-label={`Digit ${i + 1}`}
           disabled={disabled}
           className={cn(
-            "font-mono-num h-12 w-full min-w-0 rounded-xl border text-center text-lg font-bold text-black transition-colors",
-            "focus:border-black focus:outline-none focus:ring-2 focus:ring-black/10",
+            "font-mono-num h-12 w-full min-w-0 rounded-xl border text-center text-lg font-bold text-[#0E1A33] transition-colors",
+            "focus:border-[#0A66F0] focus:outline-none focus:ring-2 focus:ring-[#0A66F0]/15",
             "disabled:cursor-not-allowed disabled:opacity-50",
-            digits[i]?.trim() ? "border-black bg-white" : "border-[#F3E5B5] bg-white"
+            digits[i]?.trim() ? "border-[#0A66F0] bg-white" : "border-[#E4E9F1] bg-white"
           )}
         />
       ))}

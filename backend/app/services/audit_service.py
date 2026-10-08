@@ -22,6 +22,29 @@ from app.models.base import utcnow
 logger = logging.getLogger(__name__)
 
 
+def _plain(value):
+    """Enum members (role/status) compare and store as their value."""
+    return value.value if hasattr(value, "value") else value
+
+
+def field_changes(before: dict | None, after: dict | None, fields=None) -> dict:
+    """{field: {"before": old, "after": new}} for every field whose value
+    actually changed — what an update's audit entry records (ADM-08), so
+    "who moved this price from ₹349 to ₹1, and when" is answerable.
+    `fields` limits the comparison (normally the keys the request sent);
+    by default every key on either side. Unchanged fields are left out."""
+    before, after = before or {}, after or {}
+    keys = list(fields) if fields is not None else sorted(set(before) | set(after))
+    changes: dict = {}
+    for key in keys:
+        if key in ("_id", "id", "updated_at", "created_at"):
+            continue
+        old, new = _plain(before.get(key)), _plain(after.get(key))
+        if old != new:
+            changes[key] = {"before": old, "after": new}
+    return changes
+
+
 class AuditService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db

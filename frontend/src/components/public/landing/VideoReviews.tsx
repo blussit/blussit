@@ -5,6 +5,8 @@ import { VIDEO_REVIEWS, type VideoReviewConfig } from "../../../data/videoReview
 interface ParsedVideo {
   id: string;
   isShort: boolean;
+  /** What the thumbnail and player are called for screen readers. */
+  label: string;
 }
 
 function parseYouTube(input: string): { id: string; isShort: boolean } | null {
@@ -41,9 +43,12 @@ function parseYouTube(input: string): { id: string; isShort: boolean } | null {
   }
 }
 
-function toParsed(item: VideoReviewConfig): ParsedVideo | null {
+function toParsed(item: VideoReviewConfig, index: number): ParsedVideo | null {
   const parsed = parseYouTube(item.url);
-  return parsed ? { id: parsed.id, isShort: parsed.isShort } : null;
+  if (!parsed) return null;
+  // The customer's name and what was washed, when videoReviews.ts has them.
+  const who = [item.name, item.caption].filter(Boolean).join(", ");
+  return { id: parsed.id, isShort: parsed.isShort, label: who ? `Customer video review — ${who}` : `Customer video review ${index + 1}` };
 }
 
 export function VideoReviews({ id = "video-reviews" }: { id?: string }) {
@@ -181,7 +186,7 @@ export function VideoReviews({ id = "video-reviews" }: { id?: string }) {
                     <path
                       d="M2,8 C50,2 120,2 198,7"
                       fill="none"
-                      stroke="#FACC15"
+                      stroke="#FFD21F"
                       strokeWidth="3"
                       strokeLinecap="round"
                     />
@@ -299,7 +304,7 @@ function VideoCard({
       {playing ? (
         <iframe
           src={`https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&rel=0&modestbranding=1&playsinline=1`}
-          title="Customer review"
+          title={video.label}
           className="absolute inset-0 h-full w-full border-0"
           allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
           allowFullScreen
@@ -315,7 +320,7 @@ function VideoCard({
                 image.src = `https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`;
               }
             }}
-            alt="Customer review"
+            alt={video.label}
             loading="lazy"
             className="absolute inset-0 h-full w-full object-cover object-center scale-[1.52] transition-transform duration-700 ease-out group-hover:scale-[1.58]"
           />
@@ -335,7 +340,7 @@ function VideoCard({
       )}
 
       {/* Small bottom accent — no names, stars or extra text */}
-      <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-gradient-to-r from-[#1677FF] via-[#FACC15] to-[#1677FF] opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+      <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-gradient-to-r from-[#1677FF] via-[#FFD21F] to-[#1677FF] opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
     </div>
   );
 }

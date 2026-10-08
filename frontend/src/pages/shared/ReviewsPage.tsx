@@ -47,7 +47,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
   // page, so older reviews were unreachable). Manager view unchanged.
   const [page, setPage] = useState(1);
   useEffect(() => setPage(1), [centerFilter, captainFilter, ratingFilter]);
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["reviews-list", role, ownCenterId, ...(role === "admin" ? [centerFilter, captainFilter, ratingFilter, page] : [])],
     queryFn: () =>
       role === "admin"
@@ -63,11 +63,12 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
     placeholderData: keepPreviousData,
   });
 
-  const { data: selectedBooking } = useQuery({
+  const selectedBookingQuery = useQuery({
     queryKey: ["review-drilldown-booking", selectedBookingId],
     queryFn: () => bookingApi.get(selectedBookingId!),
     enabled: !!selectedBookingId,
   });
+  const selectedBooking = selectedBookingQuery.data;
 
   const filtered = useMemo(() => {
     let items = data?.data || [];
@@ -157,8 +158,25 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
         </div>
       </div>
 
+      {/* A row whose booking failed to load would otherwise just do nothing. */}
+      {selectedBookingId && selectedBookingQuery.isError && !selectedBooking && (
+        <p role="alert" className="text-sm text-[var(--color-text-secondary)]">
+          Couldn't open that booking.{" "}
+          <button
+            type="button"
+            className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+            disabled={selectedBookingQuery.isFetching}
+            onClick={() => void selectedBookingQuery.refetch()}
+          >
+            Try Again
+          </button>
+        </p>
+      )}
+
       <DataTable<Review>
         data={filtered}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle="No Reviews Match These Filters"
         onRowClick={(r) => setSelectedBookingId(r.booking_id)}
         columns={[

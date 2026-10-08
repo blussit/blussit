@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Package, Pencil, Plus, Trash2 } from "lucide-react";
 import { inventoryApi } from "../../api/admin";
-import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, Select } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, PageLoader, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
@@ -21,7 +21,7 @@ export default function ManagerInventoryPage() {
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["center-inventory", centerId],
     queryFn: () => inventoryApi.forCenter(centerId, { page: 1, page_size: 50 }),
     enabled: !!centerId,
@@ -99,6 +99,8 @@ export default function ManagerInventoryPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load inventory." onRetry={() => void refetch()} busy={isFetching} />
       ) : !items.length ? (
         <EmptyState icon={Package} title="No Inventory Items Yet" action={<Button onClick={() => setOpen(true)}>Add Item</Button>} />
       ) : (

@@ -76,3 +76,34 @@ export function passHeadlinePrice(
   }
   return passFromPrice(plan, services, vehicleTypes);
 }
+
+/**
+ * The landing's "From ₹X / Month": the cheapest MONTHLY pass anyone can
+ * actually buy for a car right now — the minimum over every plan on sale,
+ * every wash it sells and every car type it's sold for (bike-only types
+ * left out, so a bike wash never sets a car headline; used only when no
+ * car type exists). Null when nothing is on sale — the card then shows no
+ * price at all rather than an invented one.
+ */
+export function cheapestMonthlyPassPrice(
+  plans: SubscriptionPlan[] | undefined,
+  services: Service[],
+  vehicleTypes: VehicleTypeOption[] | undefined,
+  bikeTypeIds: Set<string> = new Set()
+): number | null {
+  const onSale = (plans ?? []).filter((p) => p.is_active !== false && (p.billing_cycle || "monthly") === "monthly");
+  if (!onSale.length) return null;
+  const activeTypes = (vehicleTypes ?? []).filter((t) => t.is_active !== false).map((t) => t.id);
+  const pick = (excludeBikes: boolean) => {
+    const prices: number[] = [];
+    for (const plan of onSale) {
+      const sold = plan.vehicle_types?.length ? plan.vehicle_types : activeTypes;
+      const types = excludeBikes ? sold.filter((t) => !bikeTypeIds.has(t)) : sold;
+      if (!types.length) continue;
+      const price = passFromPrice({ ...plan, vehicle_types: types }, services, vehicleTypes);
+      if (price != null) prices.push(price);
+    }
+    return prices.length ? Math.min(...prices) : null;
+  };
+  return pick(true) ?? pick(false);
+}

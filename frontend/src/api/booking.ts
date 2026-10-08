@@ -1,5 +1,13 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { Address, Booking, EquipmentUsed, TravelQuote, Vehicle } from "../types";
+import type { CancellationChargePreview, LateCancellationCharge } from "./charges";
+
+/** Staff cancel options: the customer asked to cancel (late-cancellation
+ *  charge applies), and the amount (0..the policy amount). */
+export interface StaffCancelOptions {
+  at_customer_request?: boolean;
+  charge_amount?: number;
+}
 
 /** What POST /bookings/group returns: the visit, and every car on it as a
  *  real booking of its own. */
@@ -27,6 +35,10 @@ export interface QuickBookingLine {
    *  form sends false for a line they explicitly unticked "use this
    *  customer's plan?" for. */
   use_subscription?: boolean;
+  /** An explicit car-bound pass (custom plan / society): the saved car and
+   *  the pass to use for it. Never auto-applied; quantity must be 1. */
+  vehicle_id?: string;
+  subscription_id?: string;
 }
 
 export interface QuickBookingPayload {
@@ -57,6 +69,9 @@ export interface QuickBookingPayload {
    *  website bookings: our own OTP code, or the MSG91 widget access token. */
   phone_otp?: string;
   phone_access_token?: string;
+  /** The total the customer was shown (the live quote). The server refuses
+   *  with 409 PRICE_CHANGED (and the new total) if its price differs. */
+  expected_total?: number;
 }
 
 export type PhoneProof = Pick<QuickBookingPayload, "phone_otp" | "phone_access_token">;
@@ -98,6 +113,9 @@ export interface QuickBookingResult {
   payment_link: string | null;
   customer_id: string;
   confirmation_token?: string;
+  /** A previous late-cancellation charge added to this visit (in total_amount). */
+  cancellation_charge?: number;
+  payment_method?: "cash" | "online" | string;
 }
 
 /** What POST /bookings/quote asks — the same lines a booking sends. */
@@ -118,6 +136,9 @@ export interface BookingQuotePayload {
 export interface BookingQuote {
   vehicle_count: number;
   first_time_eligible: boolean;
+  /** false = the first-wash price was assumed, not checked against the
+   *  customer's number (anonymous quote) — so it isn't final yet. */
+  first_time_confirmed?: boolean;
   lines: {
     line_index: number;
     vehicle_type: string;
@@ -142,6 +163,9 @@ export interface BookingQuote {
   travel_charge: number;
   /** The visit charges travel but no address was given yet. */
   travel_pending: boolean;
+  /** A previous late-cancellation charge on the customer's account —
+   *  INCLUDED in total_amount. */
+  cancellation_charge?: number;
   total_amount: number;
   prepaid_service: string | null;
   online_only: boolean;
@@ -313,8 +337,20 @@ export const bookingApi = {
   switchGroupToCash: (groupId: string) =>
     apiClient.post<ApiSuccess<{ switched_count: number }>>(`/bookings/group/${groupId}/switch-to-cash`).then((r) => r.data.data),
 
-  cancelGroup: (groupId: string, reason: string) =>
-    apiClient.post<ApiSuccess<{ cancelled_count: number }>>(`/bookings/group/${groupId}/cancel`, { reason }).then((r) => r.data.data),
+  cancelGroup: (groupId: string, reason: string, options?: StaffCancelOptions) =>
+    apiClient
+      .post<ApiSuccess<{ cancelled_count: number; late_cancellation_charge?: LateCancellationCharge | null }>>(`/bookings/group/${groupId}/cancel`, { reason, ...options })
+      .then((r) => r.data.data),
+
+  /** What cancelling now would add to the customer's next booking.
+   *  `wholeVisit` previews the visit cancel. */
+  cancellationChargePreview: (id: string, wholeVisit = false) =>
+    apiClient
+      .get<ApiSuccess<CancellationChargePreview>>(`/bookings/${id}/cancellation-charge-preview`, { params: { whole_visit: wholeVisit } })
+      .then((r) => r.data.data),
+
+  /** Too many wrong arrival codes locked the visit — manager/admin reset. */
+  unlockArrivalCode: (id: string) => apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/unlock-arrival-code`).then((r) => r.data.data),
 
   /** Several of the customer's own vehicles wash on ONE visit: one
    *  address, one slot, one captain, one payment — and ONE slot seat,
@@ -340,8 +376,10 @@ export const bookingApi = {
   switchToCash: (id: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/switch-to-cash`).then((r) => r.data.data),
 
-  cancel: (id: string, reason: string) =>
-    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/cancel`, { reason }).then((r) => r.data.data),
+  cancel: (id: string, reason: string, options?: StaffCancelOptions) =>
+    apiClient
+      .post<ApiSuccess<Booking & { late_cancellation_charge?: LateCancellationCharge | null }>>(`/bookings/${id}/cancel`, { reason, ...options })
+      .then((r) => r.data.data),
 
   reschedule: (id: string, scheduled_date: string, scheduled_slot: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/reschedule`, { scheduled_date, scheduled_slot }).then((r) => r.data.data),

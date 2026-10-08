@@ -1,25 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, HandCoins, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, HandCoins, LockOpen, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
-import { Button, Card, DataTable, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
+import { Button, Card, DataTable, ErrorState, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
 import { bookingServiceLabel, toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
 import { toTitle } from "../../lib/titleCase";
 import { CaptainPicker } from "../../components/manager/CaptainPicker";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { CustomerEditedChip } from "../../components/shared/BookingStaffExtras";
+import { moneyOf, TIP_METHOD_LABELS, type StaffBooking, type TipMethod } from "../../api/staffBookings";
 import { EditBookingModal } from "../../components/shared/EditBookingModal";
 import { TipModal } from "../../components/shared/TipModal";
+import { StaffCancelDialog } from "../../components/shared/StaffCancelDialog";
 import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
-import { ISSUE_LABELS, isOpenIssue, needsCaptain } from "../../lib/constants";
+import { isArrivalLocked, isOpenIssue, issueLabel, needsCaptain } from "../../lib/constants";
 import type { SortOrder } from "../../lib/useBookingFilters";
 import { useLiveChannel } from "../../lib/socket";
 import type { ApiPaginated } from "../../lib/api-client";
@@ -85,6 +88,8 @@ const PRIORITY_OPTIONS: ("high" | "medium" | "low")[] = ["high", "medium", "low"
 // bookings a center has, each one is reachable — none silently falls off
 // the end of "the newest 100".
 const PAGE_SIZE = 100;
+// Infinite lists stop their timer refetch beyond this many loaded pages.
+const MAX_POLLED_PAGES = 3;
 const nextPage = (last: ApiPaginated<Booking>) => (last.meta.page < last.meta.total_pages ? last.meta.page + 1 : undefined);
 
 /** "Sedan · Star Wash" — staff always see the car TYPE with the wash. */
@@ -110,7 +115,7 @@ function WhatHappened({ booking }: { booking: Booking }) {
     );
   }
   if (booking.issue_flag) {
-    const label = ISSUE_LABELS[booking.issue_flag] || booking.issue_flag;
+    const label = issueLabel(booking.issue_flag);
     if (isOpenIssue(booking)) {
       return (
         <span className="flex items-center gap-1 text-xs font-medium text-amber-700">
@@ -165,7 +170,6 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const [resolveNote, setResolveNote] = useState("");
 
   const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
-  const [cancelReason, setCancelReason] = useState("");
 
   const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
 
@@ -175,7 +179,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const [doneBooking, setDoneBooking] = useState<Booking | null>(null);
   const [doneWhatsApp, setDoneWhatsApp] = useState(true);
   // Add / edit the tip on a job the manager did (the visit's current tip alongside).
-  const [tipFor, setTipFor] = useState<{ booking: Booking; tip: number } | null>(null);
+  const [tipFor, setTipFor] = useState<{ booking: Booking; tip: number; method: TipMethod } | null>(null);
 
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const { data: center } = useQuery({ queryKey: ["center-detail-for-queue", centerId], queryFn: () => adminServiceCenterApi.get(centerId), enabled: !!centerId });
@@ -189,8 +193,10 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     getNextPageParam: nextPage,
     enabled: !!centerId,
     // Live-pushed over "center-bookings:{centerId}" (see below) — this
-    // interval is just the reconnect-window fallback.
-    refetchInterval: 60000,
+    // interval is just the reconnect-window fallback. An interval refetch
+    // re-reads every loaded page, so it stops once a manager has paged
+    // deep (the live push still refreshes the list).
+    refetchInterval: (query) => ((query.state.data?.pages.length ?? 0) > MAX_POLLED_PAGES ? false : 60000),
     refetchIntervalInBackground: true,
   });
   const attentionItems = useMemo(() => attentionQuery.data?.pages.flatMap((p) => p.data) ?? [], [attentionQuery.data]);
@@ -241,11 +247,12 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     queryClient.invalidateQueries({ queryKey: ["center-bookings", centerId] });
   });
 
-  const { data: captains } = useQuery({
+  const captainsQuery = useQuery({
     queryKey: ["center-captains-list", centerId],
     queryFn: () => staffDirectoryApi.captainsForCenter(centerId, { page: 1, page_size: 100 }),
     enabled: !!centerId,
   });
+  const captains = captainsQuery.data;
 
   // A self-assigned booking's captain_id is the MANAGER's own id, which
   // never appears in the captains-only list above — without this check it
@@ -263,7 +270,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   // last one's failure.
   useEffect(() => {
     setError("");
-  }, [reschedulingBooking, resolvingBooking, cancellingBooking]);
+  }, [reschedulingBooking, resolvingBooking]);
 
   // Excludes anything already flagged (isOpenIssue) — once the automated
   // sweep has flagged a booking (e.g. its window fully expired with no
@@ -369,7 +376,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       setAssigningBooking(null);
       setCaptainId("");
       setError("");
-      pushToast({ tone: "success", title: "Assigned to you" });
+      pushToast({ tone: "success", title: "Assigned To You" });
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -390,7 +397,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     mutationFn: (id: string) => bookingApi.softDelete(id),
     onSuccess: () => {
       invalidate();
-      pushToast({ tone: "success", title: "Moved to recycle bin" });
+      pushToast({ tone: "success", title: "Moved To Recycle Bin" });
     },
     onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
@@ -398,7 +405,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const priorityMutation = useMutation({
     mutationFn: ({ id, priority }: { id: string; priority: "high" | "medium" | "low" }) => bookingApi.updatePriority(id, priority),
     onSuccess: invalidate,
-    onError: (err) => pushToast({ tone: "error", title: "Couldn't change the priority", message: getErrorMessage(err) }),
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Change The Priority", message: getErrorMessage(err) }),
   });
 
   const prioritySelector = (b: Booking) => (
@@ -428,6 +435,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     </div>
   );
 
+  // Too many wrong arrival codes: the manager called the customer and the
+  // captain, and lets the captain try again.
+  const unlockMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.unlockArrivalCode(id),
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Arrival Check Unlocked", message: "The captain can enter the code again." });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Unlock", message: getErrorMessage(err) }),
+  });
+
   const resolveMutation = useMutation({
     // The server requires a reason (3–300 characters) — the old "optional"
     // field sent nothing and every blank resolve failed with a 422.
@@ -437,7 +455,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       setResolvingBooking(null);
       setResolveNote("");
       setError("");
-      pushToast({ tone: "success", title: "Issue resolved" });
+      pushToast({ tone: "success", title: "Issue Resolved" });
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -454,30 +472,10 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       });
       pushToast({
         tone: "success",
-        title: "Marked as done",
+        title: "Marked As Done",
         message: `${res.booking_numbers.join(" + ")}${doneWhatsApp ? " · customer notified on WhatsApp" : ""}`,
       });
       setDoneBooking(null);
-      setError("");
-    },
-    onError: (err) => setError(getErrorMessage(err)),
-  });
-
-  const cancelMutation = useMutation({
-    // A car on a visit is never cancelled alone from here — the manager
-    // made one decision about one visit, so this cancels every vehicle on
-    // it. (A customer can still drop a single car themselves from their
-    // own booking page; this button is the manager's "cancel the booking"
-    // action, and a visit only ever reads as one booking to them.) The two
-    // endpoints return different shapes; the caller only cares it worked.
-    mutationFn: async (): Promise<void> => {
-      if (cancellingBooking!.booking_group_id) await bookingApi.cancelGroup(cancellingBooking!.booking_group_id, cancelReason);
-      else await bookingApi.cancel(cancellingBooking!.id, cancelReason);
-    },
-    onSuccess: () => {
-      invalidate();
-      setCancellingBooking(null);
-      setCancelReason("");
       setError("");
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -528,16 +526,40 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       ? (doneGroup || [doneBooking]).filter((x) => x.status !== "cancelled")
       : [doneBooking]
     : [];
-  const doneUnpaid = doneVisit.some((x) => x.status !== "completed" && x.payment_status !== "paid");
+  const doneDue = doneVisit.filter((x) => x.status !== "completed").reduce((sum, x) => sum + moneyOf(x as StaffBooking).due, 0);
+  const doneUnpaid = doneDue > 0 || doneVisit.some((x) => x.status !== "completed" && x.payment_status !== "paid");
 
   // Sits inside a row that now opens the booking detail drawer on click
   // (DataTable's onRowClick) — stopPropagation here so clicking any of
   // these action buttons doesn't ALSO trigger that row-open behavior.
-  const bookingActions = (b: Booking, visitTip = Number(b.tip_amount) || 0) => (
+  const bookingActions = (
+    b: Booking,
+    visitTip = Number(b.tip_amount) || 0,
+    tipMethod: TipMethod = (b as StaffBooking).tip_method === "online" ? "online" : "cash",
+  ) => (
     <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
       {b.status === "completed" && b.completed_by_role === "manager" && (user?.role === "manager" || user?.role === "admin") && (
-        <Button size="sm" variant="outline" onClick={() => setTipFor({ booking: b, tip: visitTip })}>
-          <HandCoins className="h-3.5 w-3.5" /> {visitTip > 0 ? `Tip ₹${visitTip}` : "Add Tip"}
+        <Button size="sm" variant="outline" onClick={() => setTipFor({ booking: b, tip: visitTip, method: tipMethod })}>
+          <HandCoins className="h-3.5 w-3.5" /> {visitTip > 0 ? `Tip ₹${visitTip} (${TIP_METHOD_LABELS[tipMethod]})` : "Add Tip"}
+        </Button>
+      )}
+      {isArrivalLocked(b) && (
+        <Button
+          size="sm"
+          isLoading={unlockMutation.isPending && unlockMutation.variables === b.id}
+          disabled={unlockMutation.isPending}
+          onClick={async () => {
+            if (
+              await confirm({
+                title: "Unlock The Arrival Check?",
+                message: "Only after you've spoken to the customer and the captain — the captain gets fresh tries at the 4-digit code.",
+                confirmLabel: "Unlock",
+              })
+            )
+              unlockMutation.mutate(b.id);
+          }}
+        >
+          <LockOpen className="h-3.5 w-3.5" /> Unlock Arrival Check
         </Button>
       )}
       {needsCaptain(b) && (
@@ -654,7 +676,9 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
         </button>
       </div>
 
-      {view === "attention" ? (
+      {view === "attention" && attentionQuery.isError && !attentionQuery.data ? (
+        <ErrorState message="Couldn't load the queue." busy={attentionQuery.isFetching} onRetry={() => void attentionQuery.refetch()} />
+      ) : view === "attention" ? (
         <div className="space-y-8">
           <section>
             <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--color-text-secondary)]">
@@ -752,6 +776,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                       </div>
                       <div className="flex flex-col items-end gap-1.5">
                         <StatusBadge status={b.status} />
+                        <CustomerEditedChip booking={b as StaffBooking} />
                         {prioritySelector(b)}
                       </div>
                     </div>
@@ -798,7 +823,9 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               </div>
             </div>
           )}
-          {!lateQuery.isLoading && visibleLateStarts.length === 0 ? (
+          {lateQuery.isError && !lateQuery.data ? (
+            <ErrorState message="Couldn't load late starts." busy={lateQuery.isFetching} onRetry={() => void lateQuery.refetch()} />
+          ) : !lateQuery.isLoading && visibleLateStarts.length === 0 ? (
             <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">
               {lateStartBookings.length === 0 ? "No late starts recorded." : "No late starts match these filters."}
             </p>
@@ -882,6 +909,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               cars of the same trip to two different captains. */}
           <DataTable<BookingSlab & { id: string }>
             isLoading={allQuery.isLoading}
+            error={allQuery.isError ? allQuery.error : undefined}
+            onRetry={() => void allQuery.refetch()}
             data={toSlabs(allItems).map((slab) => ({ ...slab, id: slab.key }))}
             emptyTitle="No Bookings"
             onRowClick={(slab) => setSelectedBooking(slab.primary)}
@@ -922,9 +951,26 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               { header: "Date", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${formatSlot(slab.primary.scheduled_slot)}` },
               { header: "Captain", accessor: (slab) => captainName(slab.primary.captain_id) },
               { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
-              { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
+              {
+                header: "Status",
+                accessor: (slab) => (
+                  <div className="flex flex-col items-start gap-1">
+                    <StatusBadge status={slab.status} />
+                    {slab.bookings.some((x) => x.payment_status === "partially_paid") && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">Part Paid</span>}
+                    {slab.bookings.filter((x) => (x as StaffBooking).customer_edited_at).slice(0, 1).map((x) => <CustomerEditedChip key={x.id} booking={x as StaffBooking} />)}
+                  </div>
+                ),
+              },
               { header: "What Happened", accessor: (slab) => <WhatHappened booking={slab.primary} /> },
-              { header: "", accessor: (slab) => bookingActions(actionTarget(slab), slab.bookings.reduce((sum, x) => sum + (Number(x.tip_amount) || 0), 0)) },
+              {
+                header: "",
+                accessor: (slab) =>
+                  bookingActions(
+                    actionTarget(slab),
+                    slab.bookings.reduce((sum, x) => sum + (Number(x.tip_amount) || 0), 0),
+                    (slab.bookings.find((x) => (Number(x.tip_amount) || 0) > 0) as StaffBooking | undefined)?.tip_method === "online" ? "online" : "cash",
+                  ),
+              },
             ]}
           />
           {allPages > 1 && (
@@ -962,6 +1008,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             <CaptainPicker
               bookingId={assigningBooking.id}
               captains={captains?.data || []}
+              captainsError={captainsQuery.isError && !captains ? { onRetry: () => void captainsQuery.refetch(), busy: captainsQuery.isFetching } : null}
               centerBookings={dayBookings?.data || []}
               scheduledDate={assigningBooking.scheduled_date}
               selectedId={captainId}
@@ -1022,7 +1069,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             </p>
             {doneUnpaid && (
               <p className="rounded-xl bg-[#F7F9FC] p-3 text-xs text-gray-600">
-                Payment is recorded as <span className="font-semibold text-[#0E1A33]">collected in cash by you</span>.
+                {doneDue > 0 ? <span className="font-mono-num font-semibold text-[#0E1A33]">₹{Math.round(doneDue)} due </span> : "What's due "}
+                is recorded as <span className="font-semibold text-[#0E1A33]">cash you collected</span> — collect it before you close the job.
               </p>
             )}
             <Switch
@@ -1044,42 +1092,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
         )}
       </Modal>
 
-      <TipModal booking={tipFor?.booking ?? null} currentTip={tipFor?.tip ?? 0} onClose={() => setTipFor(null)} />
+      <TipModal booking={tipFor?.booking ?? null} currentTip={tipFor?.tip ?? 0} currentMethod={tipFor?.method} onClose={() => setTipFor(null)} />
 
-      <Modal open={!!cancellingBooking} onClose={() => setCancellingBooking(null)} title={cancellingBooking?.booking_group_id ? "Cancel Visit" : "Cancel Booking"}>
-        <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
-          {cancellingBooking?.booking_group_id
-            ? "This cancels every vehicle on this visit outright — the customer and captain (if assigned) are notified."
-            : "This cancels the booking outright — the customer and captain (if assigned) are notified."}
-        </p>
-        <textarea
-          className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-          rows={3}
-          placeholder="Reason (min 3 characters)"
-          maxLength={300}
-          value={cancelReason}
-          onChange={(e) => setCancelReason(e.target.value)}
-        />
-        {error && <p className="mt-2 text-sm text-[var(--color-error)]">{error}</p>}
-        <div className="mt-4 flex gap-2">
-          <Button variant="outline" className="flex-1" onClick={() => setCancellingBooking(null)}>
-            Back
-          </Button>
-          <Button
-            variant="danger"
-            className="flex-1"
-            isLoading={cancelMutation.isPending}
-            disabled={cancelReason.trim().length < 3}
-            onClick={() => cancelMutation.mutate()}
-          >
-            Cancel Booking
-          </Button>
-        </div>
-      </Modal>
+      <StaffCancelDialog booking={cancellingBooking} onClose={() => setCancellingBooking(null)} />
 
       <BookingDetailDrawer
         booking={selectedBooking}
         onClose={() => setSelectedBooking(null)}
+        onCancel={(b) => {
+          setSelectedBooking(null);
+          setCancellingBooking(b);
+        }}
         captainName={selectedBooking ? captainName(selectedBooking.captain_id) : null}
         centerName={center?.name}
       />

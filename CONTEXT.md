@@ -259,10 +259,11 @@ cp .env.example .env   # point VITE_API_URL at the backend
 npm run dev
 ```
 
-Demo accounts created by `seed.py` (check the script for current values, but as of this
-session): `admin@doorstepvehiclecare.in` / `Admin@12345`,
-`manager.indore@doorstepvehiclecare.in` / `Manager@12345`,
-`captain.indore@doorstepvehiclecare.in` / `Captain@12345`.
+Demo accounts created by `seed.py` — LOCAL databases only (it refuses to create
+staff on a remote/production database): `admin@doorstepvehiclecare.in`,
+`manager.indore@doorstepvehiclecare.in`, `captain.indore@doorstepvehiclecare.in`.
+Passwords: `SEED_ADMIN_PASSWORD` / `SEED_MANAGER_PASSWORD` / `SEED_CAPTAIN_PASSWORD`
+if set, otherwise the local-only dev defaults in `backend/app/seed.py`.
 
 ---
 

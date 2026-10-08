@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MapPin, Pencil, Plus, Trash2 } from "lucide-react";
 import { addressApi } from "../../api/profile";
-import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, PageLoader } from "../../components/ui";
 import { LocationPicker, type LocationValue } from "../../components/shared/LocationPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -23,7 +23,7 @@ const emptyForm = {
 export default function AddressesPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
-  const { data: addresses, isLoading } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
+  const { data: addresses, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
@@ -36,7 +36,13 @@ export default function AddressesPage() {
     mutationFn: () => {
       const payload = {
         ...form,
-        line1: location ? [form.line1, location.area, location.city].filter(Boolean).join(", ") : form.line1,
+        // The pin's area/city ride along once — an edited address already
+        // carries them in line1, and re-pinning used to append them again.
+        line1: location
+          ? [form.line1.trim(), ...[location.area, location.city].filter((part) => part && !form.line1.toLowerCase().includes(part.toLowerCase()))]
+              .filter(Boolean)
+              .join(", ")
+          : form.line1,
         latitude: form.latitude ?? undefined,
         longitude: form.longitude ?? undefined,
       };
@@ -89,6 +95,8 @@ export default function AddressesPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !addresses ? (
+        <ErrorState message="Couldn't load your addresses." busy={isFetching} onRetry={() => void refetch()} />
       ) : !addresses?.length ? (
         <EmptyState icon={MapPin} title="No Addresses Yet" action={<Button variant="info" onClick={() => setOpen(true)}>Add Address</Button>} />
       ) : (

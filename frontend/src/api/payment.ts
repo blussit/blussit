@@ -59,6 +59,8 @@ export interface BookingPaymentState {
   last_failure: { reason: string; at?: string | null } | null;
   /** Money received that couldn't be applied — being fixed or refunded. */
   attention: { amount: number; message: string; at?: string | null } | null;
+  /** Paid online, then cancelled: the money is owed back (due) or returned. */
+  refund?: { status: "due" | "refunded"; amount: number; refunded_at?: string | null } | null;
   confirming: boolean;
 }
 
@@ -85,13 +87,20 @@ export const paymentApi = {
   bookingState: (bookingId: string) =>
     apiClient.get<ApiSuccess<BookingPaymentState>>(`/payments/bookings/${bookingId}/state`).then((r) => r.data.data),
   // Admin: a parked payment was refunded/activated — take it off the queue.
-  resolveAttention: (id: string, note: string) =>
-    apiClient.post<ApiSuccess<{ id: string; resolved: boolean }>>(`/payments/attention/${encodeURIComponent(id)}/resolve`, { note }).then((r) => r.data.data),
-  // Captain doorstep settlement (see CollectPaymentModal).
-  // A booking on a multi-car visit settles the VISIT: amount and vehicles
-  // cover every car on it, and "paid" means every car is paid.
-  collectCash: (bookingId: string) =>
-    apiClient.post<ApiSuccess<CollectResult>>("/payments/collect/cash", { booking_id: bookingId }).then((r) => r.data.data),
+  // `outcome: "refunded"` records the refund itself (refund_amount for a
+  // partial one, else all of it) — the booking then reads "Refunded".
+  resolveAttention: (id: string, note: string, outcome?: "refunded" | "activated" | "other", refundAmount?: number) =>
+    apiClient
+      .post<ApiSuccess<{ id: string; resolved: boolean }>>(`/payments/attention/${encodeURIComponent(id)}/resolve`, {
+        note,
+        ...(outcome ? { outcome } : {}),
+        ...(outcome === "refunded" && refundAmount ? { refund_amount: refundAmount } : {}),
+      })
+      .then((r) => r.data.data),
+  // Captain doorstep settlement. A booking on a multi-car visit settles the
+  // VISIT: amount and vehicles cover every car on it, and "paid" means every
+  // car is paid. Cash is recorded only through captainOnsiteApi.collectCash,
+  // which always quotes the expected amount (409 AMOUNT_DUE_CHANGED guard).
   collectLink: (bookingId: string) =>
     apiClient.post<ApiSuccess<{ short_url: string; amount: number }>>("/payments/collect/link", { booking_id: bookingId }).then((r) => r.data.data),
   collectStatus: (bookingId: string) =>
@@ -131,6 +140,10 @@ export interface CollectionsRow {
   washes_count: number;
   /** Of washes_count, how many drew on a subscription/plan. */
   plan_washes_count: number;
+  /** Rupees managers took off jobs they did (already out of the amounts). */
+  manager_discount_amount?: number;
+  /** Tips on manager-done jobs (already inside the amounts). */
+  tip_amount?: number;
 }
 
 export interface CollectionsReport {
@@ -138,6 +151,10 @@ export interface CollectionsReport {
   totals: Omit<CollectionsRow, "captain_id" | "captain_name" | "employee_id" | "service_center_id" | "center_name">;
   /** Admin roll-up only. */
   subscriptions?: { online_amount: number; cash_amount: number; count: number; cash_count: number };
+  /** Admin roll-up only: society plan money. */
+  society?: { online_amount: number; cash_amount: number; count: number; cash_count: number };
+  /** Admin roll-up only: online money owed back (due) / returned in the range. */
+  refunds?: { due_amount: number; due_count: number; refunded_amount: number; refunded_count: number };
   attention?: {
     id?: string;
     reason?: string | null;
@@ -154,5 +171,7 @@ export interface CollectionsReport {
     plan_name?: string | null;
     vehicle_type_name?: string | null;
     service_name?: string | null;
+    /** "due" = a paid-then-cancelled booking whose money must go back. */
+    refund_status?: string | null;
   }[];
 }

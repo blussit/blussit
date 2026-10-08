@@ -6,6 +6,7 @@ import {
   Building,
   Building2,
   CalendarDays,
+  CalendarX2,
   Car,
   ClipboardList,
   CreditCard,
@@ -32,8 +33,10 @@ import { CustomerLookup } from "../../components/shared/CustomerLookup";
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/admin", icon: LayoutDashboard, end: true },
   { label: "Bookings", to: "/admin/bookings", icon: ListChecks },
+  { label: "Cancellation Charges", to: "/admin/charges", icon: CalendarX2 },
   { label: "WhatsApp", to: "/admin/whatsapp", icon: MessageCircle },
   { label: "Purchased Plans", to: "/admin/purchased-plans", icon: CreditCard },
+  { label: "Custom Plans", to: "/admin/custom-plans", icon: Layers },
   { label: "Societies", to: "/admin/societies", icon: Building },
   { label: "Society Planner", to: "/admin/society-planner", icon: CalendarDays },
   { label: "Users", to: "/admin/users", icon: Users },
@@ -69,7 +72,7 @@ export default function AdminLayout() {
     item.to === "/admin/whatsapp" ? { ...item, badge: waBadge?.unread_conversations || 0 } : item,
   );
   return (
-    <DashboardShell navItems={items} portalLabel="Super Admin" brand headerRight={<CustomerLookup />}>
+    <DashboardShell navItems={items} portalLabel="Super Admin" headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

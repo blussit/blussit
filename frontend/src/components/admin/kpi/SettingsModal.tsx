@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
-import { Button, Input, Modal, Select, Spinner } from "../../ui";
+import { Button, ErrorState, Input, Modal, Select, Spinner } from "../../ui";
 import { kpiApi, type BusinessSettings, type MarketingEntry } from "../../../api/admin";
 import { toTitle } from "../../../lib/titleCase";
 
@@ -14,7 +14,7 @@ const SOURCES = ["instagram", "facebook", "google", "organic", "referral", "offl
 
 export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: { open: boolean; onClose: () => void; initialTab?: "costs" | "marketing" }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ["business-settings"], queryFn: kpiApi.getSettings, enabled: open });
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["business-settings"], queryFn: kpiApi.getSettings, enabled: open });
   const [tab, setTab] = useState<"costs" | "marketing">(initialTab);
   const [form, setForm] = useState<BusinessSettings | null>(null);
   const [entry, setEntry] = useState<MarketingEntry>({ date: new Date().toISOString().slice(0, 10), source: "instagram", campaign: "", spend: 0, leads: 0, customers: 0, revenue: 0 });
@@ -42,7 +42,9 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
 
   return (
     <Modal open={open} onClose={onClose} title="Business Inputs" maxWidth="max-w-2xl">
-      {isLoading || !form ? (
+      {isError && !data ? (
+        <ErrorState message="Couldn't load the business inputs." onRetry={() => void refetch()} busy={isFetching} />
+      ) : isLoading || !form ? (
         <div className="flex justify-center py-10"><Spinner /></div>
       ) : (
         <div className="space-y-4">

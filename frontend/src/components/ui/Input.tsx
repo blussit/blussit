@@ -67,8 +67,10 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, labe
 
   // Same v2 field box as Select/DatePicker/TimePicker (ui/fieldStyles), so a
   // text field and a dropdown side by side line up and look like one set.
+  // min-w-0: a text box in a flex row may shrink instead of pushing the
+  // row past a 320 px screen (an <input>'s intrinsic width is ~170 px).
   return (
-    <div className="w-full">
+    <div className="w-full min-w-0">
       {label && (
         <label htmlFor={inputId} className={FIELD_LABEL}>
           {label}

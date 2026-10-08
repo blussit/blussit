@@ -7,6 +7,8 @@ import { adminServiceCenterApi } from "../../api/admin";
 import { uploadApi } from "../../api/upload";
 import { Badge, Button, Card, CardBody, CardHeader, Input } from "../../components/ui";
 import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
+import { StaffPhoneVerify } from "../../components/shared/StaffPhoneVerify";
+import { WhatsAppAlertsCard } from "../../components/manager/WhatsAppAlertsSwitch";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -138,13 +140,13 @@ export default function ProfilePage() {
             <div className="mt-1 space-y-0.5 text-sm text-[var(--color-text-secondary)]">
               {center && (
                 <p className="flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5" /> {center.name}
+                  <Building2 className="h-3.5 w-3.5 shrink-0" /> {center.name}
                   {center.location?.city ? `, ${center.location.city}` : ""}
                 </p>
               )}
               {user?.email && (
-                <p className="flex items-center gap-1.5">
-                  <Mail className="h-3.5 w-3.5" /> {user.email}
+                <p className="flex min-w-0 items-center gap-1.5">
+                  <Mail className="h-3.5 w-3.5 shrink-0" /> <span className="min-w-0 break-all">{user.email}</span>
                 </p>
               )}
               {user?.phone && (
@@ -157,6 +159,8 @@ export default function ProfilePage() {
           </div>
         </div>
       </Card>
+
+      <StaffPhoneVerify onVerified={() => setProfileMsg("Phone verified.")} />
 
       <Card>
         <CardHeader className="flex items-center gap-2">
@@ -202,6 +206,8 @@ export default function ProfilePage() {
           </Button>
         </CardBody>
       </Card>
+
+      {user?.role === "manager" && <WhatsAppAlertsCard />}
 
       <Card>
         <CardHeader className="flex items-center gap-2">

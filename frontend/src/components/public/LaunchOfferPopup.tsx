@@ -238,7 +238,7 @@ export function LaunchOfferPopup({
               </div>
 
               <div className="flex flex-col justify-center px-6 pb-6 pt-5 sm:px-7 sm:py-8">
-                <span className="inline-flex w-fit items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-extrabold uppercase tracking-wide text-[#0E1A33]" style={{ backgroundColor: "#FCD116" }}>
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-extrabold uppercase tracking-wide text-[#0E1A33]" style={{ backgroundColor: "#FFD21F" }}>
                   <Zap className="h-3.5 w-3.5" fill="currentColor" strokeWidth={0} />
                   {offer.tag}
                 </span>
@@ -255,7 +255,7 @@ export function LaunchOfferPopup({
                     <span className="text-[17px] font-medium text-[#94A3B8] line-through">{INR(offer.original)}</span>
                   )}
                   {off != null && (
-                    <span className="rounded-full px-3 py-1 text-[13px] font-extrabold text-[#0E1A33]" style={{ backgroundColor: "#FCD116" }}>
+                    <span className="rounded-full px-3 py-1 text-[13px] font-extrabold text-[#0E1A33]" style={{ backgroundColor: "#FFD21F" }}>
                       {off}% OFF
                     </span>
                   )}

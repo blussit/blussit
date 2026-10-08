@@ -18,4 +18,5 @@ class LeaveRequestRepository(BaseRepository):
         return await self.find_many({"captain_id": captain_id}, page=page, page_size=page_size)
 
     async def list_for_center_pending(self, captain_ids: list[str], page: int, page_size: int):
-        return await self.find_many({"captain_id": {"$in": captain_ids}, "status": "pending"}, page=page, page_size=page_size)
+        # None also matches requests filed before status was written (pending).
+        return await self.find_many({"captain_id": {"$in": captain_ids}, "status": {"$in": ["pending", None]}}, page=page, page_size=page_size)

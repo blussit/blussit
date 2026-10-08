@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Building2, CalendarClock, Gift, RefreshCw, RotateCcw, Sun } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { vehicleApi } from "../../api/profile";
-import { Badge, Button, Card, EmptyState, Modal, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Modal, PageLoader } from "../../components/ui";
 import { usePassPurchase } from "../../components/customer/usePassPurchase";
 import { PassStatusBadge } from "../../components/customer/PassStatusBadge";
 import { CustomPlanEnquiryModal } from "../../components/shared/CustomPlanEnquiryModal";
@@ -13,8 +13,12 @@ import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
-import { passHeadlinePrice } from "../../lib/passPricing";
-import { buyAgainCandidates, isSocietyPass, passPlanName, passState, societyPassPath } from "../../lib/passState";
+import { passHeadlinePrice, passPriceFor } from "../../lib/passPricing";
+import { buyAgainCandidates, isCustomPlanPass, isSocietyPass, passPlanName, passState, societyPassPath } from "../../lib/passState";
+import { customPlansMeApi, MY_CUSTOM_PLANS_QUERY_KEY } from "../../api/customPlansMe";
+import { arrangeCustomPlans, CustomPlanCard } from "../../components/customer/CustomPlanCard";
+import { lastBookingDay, lastBookingDayText } from "../../components/customer/passDates";
+import { carFromPass, isCarBoundPass, PlanWashSheet } from "../../components/customer/PlanWashSheet";
 import { NextPremiumWash } from "../../components/society/schedule/ResidentScheduleCard";
 import type { UserSubscription } from "../../types";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
@@ -44,8 +48,19 @@ export default function SubscriptionsPage() {
   const queryClient = useQueryClient();
   const purchase = usePassPurchase();
 
-  const { data: plans, isLoading: plansLoading } = useQuery({ queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) });
-  const { data: mySubs, isLoading: subsLoading } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
+  const {
+    data: plans,
+    isLoading: plansLoading,
+    isError: plansFailed,
+    isFetching: plansFetching,
+    refetch: refetchPlans,
+  } = useQuery({ queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) });
+  const {
+    data: mySubs,
+    isLoading: subsLoading,
+    isError: subsFailed,
+    refetch: refetchSubs,
+  } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-subscriptions"], queryFn: () => catalogApi.services({ page_size: 100 }) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const services = servicesData?.data || [];
@@ -55,17 +70,40 @@ export default function SubscriptionsPage() {
   const { data: myVehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: hasSociety });
   const plateOf = (id?: string | null) => (myVehicles || []).find((v) => v.id === id)?.registration_number || "";
 
-  const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string } | null>(null);
+  const [upgradingSub, setUpgradingSub] = useState<{ id: string; planId: string; serviceId?: string | null; vehicleType?: string | null } | null>(null);
   const [upgradeError, setUpgradeError] = useState("");
   const [enquiryOpen, setEnquiryOpen] = useState(false);
   const [showAllPast, setShowAllPast] = useState(false);
+  // A pass bought for one car books through the car-bound sheet (the server
+  // never auto-applies it to a by-type booking). ?book=<id> opens it.
+  const [planWashSub, setPlanWashSub] = useState<UserSubscription | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const bookParam = searchParams.get("book");
+  useEffect(() => {
+    if (!bookParam || !mySubs) return;
+    const sub = mySubs.find((s) => s.id === bookParam);
+    if (sub && isCarBoundPass(sub) && passState(sub) === "active") setPlanWashSub(sub);
+    const next = new URLSearchParams(searchParams);
+    next.delete("book");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookParam, mySubs]);
+  // A pass action (cancel, auto-pay off) that failed — shown on that pass's card.
+  const [passError, setPassError] = useState<{ id: string; text: string } | null>(null);
 
   const invalidateSubs = () => queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
 
-  const cancelMutation = useMutation({ mutationFn: subscriptionApi.cancel, onSuccess: invalidateSubs });
+  const cancelMutation = useMutation({
+    mutationFn: subscriptionApi.cancel,
+    onMutate: () => setPassError(null),
+    onSuccess: invalidateSubs,
+    onError: (err, id) => setPassError({ id, text: getErrorMessage(err) }),
+  });
   const autoPayOffMutation = useMutation({
     mutationFn: (id: string) => subscriptionApi.setAutoPay(id, false),
+    onMutate: () => setPassError(null),
     onSuccess: invalidateSubs,
+    onError: (err, id) => setPassError({ id, text: getErrorMessage(err) }),
   });
   const upgradeMutation = useMutation({
     mutationFn: (newPlanId: string) => subscriptionApi.upgrade(upgradingSub!.id, newPlanId),
@@ -77,11 +115,32 @@ export default function SubscriptionsPage() {
     onError: (err) => setUpgradeError(getErrorMessage(err)),
   });
 
-  const upgradeTargets = upgradingSub
-    ? (plans || []).filter((p) => (plans?.find((cp) => cp.id === upgradingSub.planId)?.upgrade_to_plan_ids || []).includes(p.id))
-    : [];
+  /** Plans this one can move to that are actually on sale right now (the
+   *  list holds active plans only) — a stale id alone never offers "Upgrade". */
+  const upgradeTargetsFor = (planId: string) => {
+    const ids = plans?.find((cp) => cp.id === planId)?.upgrade_to_plan_ids || [];
+    return (plans || []).filter((p) => p.id !== planId && p.is_active !== false && ids.includes(p.id));
+  };
+  const upgradeTargets = upgradingSub ? upgradeTargetsFor(upgradingSub.planId) : [];
+  // The server refuses a move to a plan that costs more for this car + wash
+  // ("buy it once your current plan ends") — don't offer one as an upgrade.
+  const costsMore = (targetId: string): boolean => {
+    if (!upgradingSub) return false;
+    const current = plans?.find((p) => p.id === upgradingSub.planId);
+    const target = plans?.find((p) => p.id === targetId);
+    const service = services.find((s) => s.id === upgradingSub.serviceId);
+    if (!current || !target || !service || !upgradingSub.vehicleType) return false;
+    return passPriceFor(target, service, upgradingSub.vehicleType) > passPriceFor(current, service, upgradingSub.vehicleType);
+  };
 
-  const subs = mySubs || [];
+  // Custom-plan passes are shown per cart (one card for all its cars) from
+  // GET /subscriptions/custom-plans/my — never as single passes here.
+  const subs = (mySubs || []).filter((s) => !isCustomPlanPass(s));
+  const hasCustomPasses = (mySubs || []).some(isCustomPlanPass);
+  const customQuery = useQuery({ queryKey: MY_CUSTOM_PLANS_QUERY_KEY, queryFn: customPlansMeApi.my, staleTime: 30_000 });
+  const carts = customQuery.data || [];
+  // Each live plan carries its upcoming renewal; ended / refunded ones are Past.
+  const { live: liveCarts, past: endedCarts } = arrangeCustomPlans(carts);
   const running = subs.filter((s) => passState(s) !== "ended");
   // Society cars are shown together, one card per society (they share one
   // plan, one page and one manager); every other pass keeps its own card.
@@ -108,7 +167,8 @@ export default function SubscriptionsPage() {
     const first = cars[0];
     const path = cars.map(societyPassPath).find(Boolean) || null;
     const paused = cars.every((c) => passState(c) === "paused");
-    const till = cars.map((c) => c.end_date).sort().slice(-1)[0];
+    // The latest last booking day across the society's cars.
+    const latest = [...cars].sort((a, b) => String(a.last_bookable_day || a.end_date).localeCompare(String(b.last_bookable_day || b.end_date))).slice(-1)[0];
     return (
       <Card key={`society-${first.society_id}`} className="p-5" data-testid="society-plan-card">
         <div className="flex items-start justify-between gap-3">
@@ -125,7 +185,7 @@ export default function SubscriptionsPage() {
         </div>
 
         <p className="mt-4 flex items-center gap-1.5 text-xs text-gray-600">
-          <Sun className="h-3.5 w-3.5 text-[#0A66F0]" /> Daily wash every morning · valid till {format(till)}
+          <Sun className="h-3.5 w-3.5 text-[#0A66F0]" /> Daily Wash Every Morning · {lastBookingDayText(latest)}
         </p>
 
         <ul className="mt-3 space-y-2">
@@ -145,6 +205,11 @@ export default function SubscriptionsPage() {
                   </span>
                 </div>
                 {passState(c) === "active" && <NextPremiumWash subscriptionId={c.id} className="mt-1.5" />}
+                {c.in_extension && c.last_bookable_day && left > 0 && (
+                  <p className="mt-1.5 text-xs font-semibold text-[#0A66F0]" data-testid="plan-extension-note">
+                    {lastBookingDayText(c)} · Extended
+                  </p>
+                )}
               </li>
             );
           })}
@@ -169,7 +234,7 @@ export default function SubscriptionsPage() {
     // cancel here — it books (a day ahead) and renews on its society page.
     const society = isSocietyPass(sub);
     const societyPath = society ? societyPassPath(sub) : null;
-    const canUpgrade = !society && isActive && !!plan?.upgrade_to_plan_ids?.length;
+    const canUpgrade = !society && isActive && !!plan && upgradeTargetsFor(plan.id).length > 0;
     const left = sub.remaining_service_count ?? 0;
     const pct = sub.total_service_count ? Math.round((left / sub.total_service_count) * 100) : 0;
     const covers = coversLine(sub);
@@ -202,13 +267,17 @@ export default function SubscriptionsPage() {
           {sub.auto_renew ? <RefreshCw className="h-3.5 w-3.5" /> : <CalendarClock className="h-3.5 w-3.5" />}
           {society
             ? state === "used_up"
-              ? `Premium washes used · daily washes till ${format(sub.end_date)}`
-              : `Valid till ${format(sub.end_date)} · book a day ahead, renew on your society page`
+              ? `Premium washes used · daily washes till ${lastBookingDay(sub)}`
+              : `${lastBookingDayText(sub)} · book a day ahead, renew on your society page`
             : state === "renewing"
             ? "Your next month starts once the auto-pay charge goes through."
             : state === "used_up"
-              ? `All washes used · ${sub.auto_renew ? "renews" : "valid till"} ${format(sub.end_date)}`
-              : `${sub.auto_renew ? "Renews" : "Valid till"} ${format(sub.end_date)}`}
+              ? sub.auto_renew
+                ? `All washes used · renews ${format(sub.end_date)}`
+                : `All washes used · ${lastBookingDayText(sub)}`
+              : sub.auto_renew
+                ? `Renews ${format(sub.end_date)}`
+                : lastBookingDayText(sub)}
         </p>
 
         {society && isActive && <NextPremiumWash subscriptionId={sub.id} className="mt-2" />}
@@ -231,12 +300,19 @@ export default function SubscriptionsPage() {
         {state !== "paused" && !society && (
           <div className="mt-4 flex flex-wrap gap-2">
             {isActive && (
-              <Button variant="info" size="sm" onClick={() => navigate(`/app/book?subscription=${sub.id}`)}>
+              <Button variant="info" size="sm" onClick={() => (isCarBoundPass(sub) ? setPlanWashSub(sub) : navigate(`/app/book?subscription=${sub.id}`))}>
                 Book Now
               </Button>
             )}
             {canUpgrade && (
-              <Button size="sm" variant="outline" onClick={() => setUpgradingSub({ id: sub.id, planId: sub.plan_id })}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setUpgradeError("");
+                  setUpgradingSub({ id: sub.id, planId: sub.plan_id, serviceId: sub.service_id, vehicleType: sub.vehicle_type });
+                }}
+              >
                 Upgrade
               </Button>
             )}
@@ -250,7 +326,7 @@ export default function SubscriptionsPage() {
                     await confirm({
                       title: "Turn Off Auto-Pay?",
                       message: left > 0
-                        ? `Your ${left} remaining wash${left === 1 ? "" : "es"} stay usable until ${format(sub.end_date)} — it just won't renew after that.`
+                        ? `Your ${left} remaining wash${left === 1 ? "" : "es"} stay usable — Last Booking Day: ${lastBookingDay(sub)}. It just won't renew after that.`
                         : state === "renewing"
                           ? "It won't renew again."
                           : `It won't renew on ${format(sub.end_date)}.`,
@@ -266,6 +342,8 @@ export default function SubscriptionsPage() {
               <Button
                 size="sm"
                 variant="ghost"
+                isLoading={cancelMutation.isPending && cancelMutation.variables === sub.id}
+                disabled={cancelMutation.isPending}
                 onClick={async () => {
                   if (
                     await confirm({
@@ -282,6 +360,7 @@ export default function SubscriptionsPage() {
             )}
           </div>
         )}
+        {passError?.id === sub.id && <p className="mt-2 text-sm text-[var(--color-error)]">{passError.text}</p>}
       </Card>
     );
   };
@@ -289,7 +368,7 @@ export default function SubscriptionsPage() {
   const endedLine = (sub: UserSubscription) => {
     if (sub.effective_status === "cancelled") return "Cancelled";
     if (new Date(sub.end_date).getTime() > Date.now()) return `All ${sub.total_service_count} washes used`;
-    return `Ended ${format(sub.end_date)}`;
+    return `Ended ${lastBookingDay(sub)}`;
   };
 
   const renderPast = (sub: UserSubscription) => {
@@ -306,7 +385,7 @@ export default function SubscriptionsPage() {
           <p className="truncate text-xs text-gray-400">{endedLine(sub)}</p>
         </div>
         {canBuy ? (
-          <Button variant="info" size="sm" className="shrink-0" onClick={() => buyAgain(sub)}>
+          <Button variant="info" size="sm" className="shrink-0" disabled={purchase.purchaseHeld} onClick={() => buyAgain(sub)}>
             <RotateCcw className="h-3.5 w-3.5" /> Buy Again
           </Button>
         ) : (
@@ -337,21 +416,46 @@ export default function SubscriptionsPage() {
         <h2 className="mb-4 font-semibold text-[#0E1A33]">Your Passes</h2>
         {subsLoading ? (
           <PageLoader />
-        ) : !subs.length ? (
+        ) : subsFailed && !mySubs ? (
+          <Card className="p-6 text-center">
+            <p className="text-sm text-[#5F6878]">Couldn't load your passes.</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void refetchSubs()}>
+              Try Again
+            </Button>
+          </Card>
+        ) : !subs.length && !carts.length && !hasCustomPasses ? (
           <EmptyState icon={Gift} title="No Passes Yet" description="Pick one below." />
-        ) : !running.length ? (
+        ) : !running.length && !liveCarts.length ? (
           <p className="text-sm text-gray-500">No active pass right now.</p>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {liveCarts.map(({ cart, renewal }) => (
+              <CustomPlanCard key={cart.id} cart={cart} renewal={renewal} />
+            ))}
             {societyGroups.map(renderSocietyGroup)}
             {runningPasses.map(renderRunning)}
           </div>
         )}
+        {customQuery.isError && (hasCustomPasses || !mySubs) && (
+          <p className="mt-3 text-sm text-[#5F6878]">
+            Couldn't load your custom plan.{" "}
+            <button type="button" onClick={() => void customQuery.refetch()} className="font-semibold text-[#0A66F0] underline underline-offset-2">
+              Try Again
+            </button>
+          </p>
+        )}
       </div>
 
-      {past.length > 0 && (
+      {(past.length > 0 || endedCarts.length > 0) && (
         <div>
           <h2 className="mb-4 font-semibold text-[#0E1A33]">Past Passes</h2>
+          {endedCarts.length > 0 && (
+            <div className="mb-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {endedCarts.map((cart) => (
+                <CustomPlanCard key={cart.id} cart={cart} />
+              ))}
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">{pastShown.map(renderPast)}</div>
           {past.length > PAST_SHOWN && (
             <button type="button" onClick={() => setShowAllPast((v) => !v)} className="mt-3 text-sm font-medium text-gray-600 hover:text-[#0E1A33]">
@@ -365,6 +469,8 @@ export default function SubscriptionsPage() {
         <h2 className="mb-4 font-semibold text-[#0E1A33]">Get A Pass</h2>
         {plansLoading ? (
           <PageLoader />
+        ) : plansFailed && !plans ? (
+          <ErrorState message="Couldn't load the passes on sale." busy={plansFetching} onRetry={() => void refetchPlans()} />
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {(plans || []).map((plan) => {
@@ -382,7 +488,7 @@ export default function SubscriptionsPage() {
                   )}
                   <p className="mt-1 text-xs text-gray-500">{washesPerCycle(plan)}</p>
                   {!!menuNames.length && <p className="mt-2 text-xs text-gray-600">Choose from: {menuNames.join(", ")}</p>}
-                  <Button variant="info" className="mt-4 w-full" onClick={() => purchase.start(plan)}>
+                  <Button variant="info" className="mt-4 w-full" disabled={purchase.purchaseHeld} onClick={() => purchase.start(plan)}>
                     Choose Pass
                   </Button>
                 </Card>
@@ -406,26 +512,50 @@ export default function SubscriptionsPage() {
 
       {purchase.sheet}
 
+      <PlanWashSheet
+        cars={planWashSub ? [carFromPass(planWashSub, typeNameOf(planWashSub.vehicle_type), serviceName(planWashSub.service_id))] : []}
+        open={!!planWashSub}
+        onClose={() => setPlanWashSub(null)}
+      />
+
       <CustomPlanEnquiryModal open={enquiryOpen} onClose={() => setEnquiryOpen(false)} defaultName={user?.full_name} defaultPhone={user?.phone} />
 
-      <Modal open={!!upgradingSub} onClose={() => setUpgradingSub(null)} title="Upgrade Pass">
+      <Modal
+        open={!!upgradingSub}
+        onClose={() => {
+          setUpgradingSub(null);
+          setUpgradeError("");
+        }}
+        title="Upgrade Pass"
+      >
         <div className="space-y-3">
           {upgradeTargets.length === 0 ? (
             <p className="text-sm text-gray-600">No upgrade is available from your current pass.</p>
           ) : (
             <>
-              <p className="text-xs text-gray-500">Your washes reset to the new pass's allowance. Auto-pay, if on, stops — turn it on again when you renew.</p>
-              {upgradeTargets.map((p) => (
-                <Card key={p.id} className="flex items-center justify-between p-4">
-                  <div>
-                    <p className="font-medium text-[#0E1A33]">{titleCase(p.name)}</p>
-                    <p className="text-xs text-gray-500">{washesPerCycle(p)}</p>
-                  </div>
-                  <Button variant="info" size="sm" isLoading={upgradeMutation.isPending} onClick={() => upgradeMutation.mutate(p.id)}>
-                    Upgrade
-                  </Button>
-                </Card>
-              ))}
+              <p className="text-xs text-gray-500">
+                You switch to the new pass's allowance for this cycle — washes you've already used still count. Auto-pay, if on, stops — turn it on again when you renew.
+              </p>
+              {upgradeTargets.map((p) => {
+                const pricier = costsMore(p.id);
+                return (
+                  <Card key={p.id} className="flex items-center justify-between gap-3 p-4">
+                    <div className="min-w-0">
+                      <p className="font-medium text-[#0E1A33]">{titleCase(p.name)}</p>
+                      <p className="text-xs text-gray-500">{pricier ? "Costs more — buy it when your current pass ends." : washesPerCycle(p)}</p>
+                    </div>
+                    <Button
+                      variant="info"
+                      size="sm"
+                      disabled={pricier || upgradeMutation.isPending}
+                      isLoading={upgradeMutation.isPending && upgradeMutation.variables === p.id}
+                      onClick={() => upgradeMutation.mutate(p.id)}
+                    >
+                      Upgrade
+                    </Button>
+                  </Card>
+                );
+              })}
             </>
           )}
           {upgradeError && <p className="text-sm text-[var(--color-error)]">{upgradeError}</p>}

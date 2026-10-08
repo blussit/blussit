@@ -1,4 +1,4 @@
-import { apiClient } from "../lib/api-client";
+import { apiClient, UPLOAD_TIMEOUT_MS } from "../lib/api-client";
 
 export const uploadApi = {
   // Uploads the raw file and gets back a short URL to store on the record —
@@ -13,6 +13,7 @@ export const uploadApi = {
       // client's default "application/json" header would otherwise win and
       // the server would never see a valid multipart body.
       headers: { "Content-Type": undefined },
+      timeout: UPLOAD_TIMEOUT_MS,
     });
     return data.data.url;
   },
@@ -21,6 +22,7 @@ export const uploadApi = {
     formData.append("file", file);
     const { data } = await apiClient.post<{ data: { url: string } }>("/uploads/document", formData, {
       headers: { "Content-Type": undefined },
+      timeout: UPLOAD_TIMEOUT_MS,
     });
     return data.data.url;
   },

@@ -5,13 +5,14 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.authz import ensure_own_center
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.models.enums import LeaveStatus
 from app.repositories.captain_location_repository import CaptainLocationRepository
 from app.repositories.staff_ops_repository import AttendanceRepository, LeaveRequestRepository
 from app.repositories.user_repository import UserRepository
 from app.services.notification_service import NotificationService
 from app.schemas.staff_ops_schema import CheckInRequest, CheckOutRequest, LeaveRequestCreate, LeaveReviewRequest
 from app.utils.serializers import serialize_doc, serialize_list
-from app.utils.timezone import now_ist
+from app.utils.timezone import now_ist, to_ist
 
 
 class AttendanceService:
@@ -89,6 +90,7 @@ class AttendanceService:
 
 class LeaveService:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.repo = LeaveRequestRepository(db)
         self.user_repo = UserRepository(db)
         self.notifications = NotificationService(db)
@@ -98,18 +100,47 @@ class LeaveService:
         doc["captain_id"] = captain_id
         doc["start_date"] = doc["start_date"].isoformat()
         doc["end_date"] = doc["end_date"].isoformat()
+        # Set explicitly: the doc is built from the REQUEST schema, so the
+        # model's "pending" default never reached Mongo — the manager's
+        # pending list (status == "pending") never showed the request, and
+        # review() answered "already reviewed".
+        doc["status"] = LeaveStatus.PENDING.value
         created = await self.repo.create(doc)
         return serialize_doc(created)
 
     async def list_for_captain(self, captain_id: str, page: int, page_size: int):
         items, total = await self.repo.list_for_captain(captain_id, page, page_size)
-        return serialize_list(items), total
+        # Requests filed before the fix carry no status — they are pending.
+        return [{**i, "status": i.get("status") or LeaveStatus.PENDING.value} for i in serialize_list(items)], total
 
     async def list_pending_for_center(self, service_center_id: str, page: int, page_size: int):
         captains, _ = await self.user_repo.list_by_role("captain", 1, 1000, extra_filters={"service_center_id": service_center_id})
         captain_ids = [str(c["_id"]) for c in captains]
         items, total = await self.repo.list_for_center_pending(captain_ids, page, page_size)
         return serialize_list(items), total
+
+    async def _jobs_during(self, leave: dict) -> list[tuple[dict, str]]:
+        """(booking, IST date) for every live job assigned to this captain
+        that falls on one of the leave's days. A captain holds only a
+        handful of live jobs, so they're read and dated here (scheduled_date
+        is a naive IST wall-clock value — app.utils.timezone.to_ist)."""
+        from app.services.user_service import CAPTAIN_LIVE_JOB_STATUSES
+
+        rows = await self.db.bookings.find(
+            {"captain_id": leave["captain_id"], "status": {"$in": CAPTAIN_LIVE_JOB_STATUSES}, "is_deleted": {"$ne": True}},
+            {"booking_number": 1, "scheduled_date": 1},
+        ).to_list(length=500)
+        start, end = str(leave.get("start_date") or ""), str(leave.get("end_date") or "")
+        out = []
+        for b in rows:
+            when = b.get("scheduled_date")
+            if not isinstance(when, datetime):
+                continue
+            day = to_ist(when).date().isoformat()
+            if start <= day <= end:
+                out.append((b, day))
+        out.sort(key=lambda pair: pair[1])
+        return out
 
     async def review(self, leave_id: str, payload: LeaveReviewRequest, reviewer_id: str,
                      actor_role: str = "admin", actor_center_id: str | None = None) -> dict:
@@ -122,9 +153,24 @@ class LeaveService:
         # admin's to review, not any manager's.
         captain = await self.user_repo.find_by_id(leave["captain_id"])
         ensure_own_center(actor_role, actor_center_id, (captain or {}).get("service_center_id"))
+        if payload.status.value == LeaveStatus.APPROVED.value:
+            # CAP-07: approving leave over jobs already assigned on those
+            # days left them on a captain who won't turn up. Refused with
+            # the bookings named — reassign them, then approve. (Once the
+            # leave is approved, assign_captain refuses him for those days.)
+            clashes = await self._jobs_during(leave)
+            if clashes:
+                listed = ", ".join(f"{b.get('booking_number') or b['_id']} ({d})" for b, d in clashes[:8])
+                more = f" and {len(clashes) - 8} more" if len(clashes) > 8 else ""
+                raise BadRequestException(
+                    f"This captain has {len(clashes)} job(s) assigned during this leave — {listed}{more}. "
+                    "Reassign them to another captain first, then approve the leave."
+                )
         # Claim the pending row atomically so two reviewers can't both win.
         data = {"status": payload.status.value, "review_note": payload.review_note, "reviewed_by": reviewer_id}
-        updated = await self.repo.update_if(leave_id, {"status": "pending"}, data)
+        # None also matches a missing field: rows filed before status was
+        # written are still pending.
+        updated = await self.repo.update_if(leave_id, {"status": {"$in": [LeaveStatus.PENDING.value, None]}}, data)
         if updated is None:
             raise BadRequestException("This leave request has already been reviewed")
         # Tell the captain — filing a request that silently changes state

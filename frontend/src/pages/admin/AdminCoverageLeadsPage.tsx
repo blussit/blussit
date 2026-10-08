@@ -16,7 +16,7 @@ import { toTitle } from "../../lib/titleCase";
  */
 export default function AdminCoverageLeadsPage() {
   const [page, setPage] = useState(1);
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["coverage-leads", page],
     queryFn: () => coverageLeadApi.list({ page, page_size: 50 }),
     placeholderData: keepPreviousData,
@@ -64,6 +64,8 @@ export default function AdminCoverageLeadsPage() {
       <DataTable<CoverageLead>
         isLoading={isLoading}
         data={data?.data || []}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle="No Coverage Requests Yet"
         emptyDescription="When someone from an unserved area tries to book on the website, their details will appear here."
         columns={[

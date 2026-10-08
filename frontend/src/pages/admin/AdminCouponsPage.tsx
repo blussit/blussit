@@ -28,7 +28,7 @@ export default function AdminCouponsPage() {
   const confirm = useConfirm();
   const { push: pushToast } = useToast();
   const [page, setPage] = useState(1);
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error: listError, refetch } = useQuery({
     queryKey: ["admin-coupons", page],
     queryFn: () => adminCouponApi.list({ page, page_size: 30 }),
     placeholderData: keepPreviousData,
@@ -141,6 +141,8 @@ export default function AdminCouponsPage() {
       <DataTable<Coupon>
         isLoading={isLoading}
         data={data?.data || []}
+        error={listError}
+        onRetry={() => void refetch()}
         emptyTitle="No Coupons Yet"
         columns={[
           { header: "Code", accessor: (c) => <span className="font-mono-num font-semibold">{c.code}</span> },

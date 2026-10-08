@@ -21,5 +21,5 @@ class WithdrawalRequestRepository(BaseRepository):
     async def list_for_captain(self, captain_id: str, page: int, page_size: int):
         return await self.find_many({"captain_id": captain_id}, page=page, page_size=page_size)
 
-    async def list_pending(self, page: int, page_size: int):
-        return await self.find_many({"status": "pending"}, page=page, page_size=page_size)
+    async def list_pending(self, page: int, page_size: int, status: str = "pending"):
+        return await self.find_many({"status": status}, page=page, page_size=page_size)

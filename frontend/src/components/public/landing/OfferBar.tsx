@@ -6,7 +6,7 @@ import { INR, titleCase } from "./shared";
 const ROTATE_MS = 4000;
 const CLOSED_KEY = "blussit:offerBarClosed";
 
-const YELLOW = "#FCD116";
+const YELLOW = "#FFD21F";
 const NAVY = "#0E1A33";
 const BLUE = "#1769FF";
 const PINK = "#FFE7E7";
@@ -95,7 +95,7 @@ export function OfferBar({
             className="flex min-w-0 items-center gap-1.5 rounded-full p-1 transition-transform min-[360px]:gap-2 min-[360px]:p-1.5 hover:scale-[1.01] active:scale-[0.99] sm:gap-2.5 sm:p-2"
           >
             <span
-              className="flex shrink-0 items-center gap-1 rounded-full px-2 py-1.5 text-[9.5px] min-[360px]:px-2.5 font-extrabold uppercase tracking-[0.03em] text-[#111827] sm:gap-1.5 sm:px-4 sm:py-2 sm:text-[10px]"
+              className="flex shrink-0 items-center gap-1 rounded-full px-2 py-1.5 text-[10px] min-[360px]:px-2.5 font-extrabold uppercase tracking-[0.03em] text-[#111827] sm:gap-1.5 sm:px-4 sm:py-2 sm:text-[10px]"
               style={{ backgroundColor: YELLOW }}
             >
               <Zap className="h-3 w-3 sm:h-3.5 sm:w-3.5" fill="currentColor" strokeWidth={0} />
@@ -123,7 +123,7 @@ export function OfferBar({
               <>
                 <span className="hidden h-6 w-px shrink-0 bg-gray-200 sm:block" />
                 <span
-                  className="shrink-0 whitespace-nowrap rounded-full px-1.5 py-1 text-[9px] font-extrabold sm:px-2.5 sm:text-[10px]"
+                  className="shrink-0 whitespace-nowrap rounded-full px-1.5 py-1 text-[10px] font-extrabold sm:px-2.5 sm:text-[10px]"
                   style={{ backgroundColor: PINK, color: PINK_TEXT }}
                 >
                   {off}% OFF
@@ -143,7 +143,7 @@ export function OfferBar({
           type="button"
           onClick={close}
           aria-label="Close offer"
-          className="absolute -right-1 -top-3.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-[#0E1A33] text-white shadow-md ring-2 ring-white transition hover:bg-black"
+          className="absolute -right-1 -top-3.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-[#0E1A33] text-white shadow-md ring-2 ring-white transition hover:bg-[#0A66F0]"
         >
           <X className="h-3 w-3" strokeWidth={3} />
         </button>

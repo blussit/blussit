@@ -26,9 +26,14 @@ export interface User {
   // first self-service booking/subscription) — see PhoneVerificationModal.
   phone_verified?: boolean;
   phone_verification_stale?: boolean;
+  /** Staff only: the person proved this phone themselves (OTP). Until then
+   *  a staff account can't reset its own password by phone. */
+  phone_self_verified?: boolean;
   // Customer's own switch: true = no WhatsApp reminders/offers (booking
   // updates still go out). Absent on older accounts = opted in.
   marketing_opt_out?: boolean;
+  /** Managers: "WhatsApp me new bookings" (on unless switched off). */
+  whatsapp_new_booking_alerts?: boolean;
   created_at: string;
   // Only ever populated for captains, and only by the manager/admin-scoped
   // staff-directory endpoints (staffDirectoryApi.captainsForCenter) — see
@@ -205,6 +210,12 @@ export interface BookingPolicy {
   // (see the backend's captain_missed_window flag).
   captain_start_lockout_hours: number;
   wallet_gating_enabled: boolean;
+  /** Late-cancellation charge (whole rupees) — added to the customer's
+   *  NEXT booking: cancelled 1–4 h before the slot, under 1 h, or after the
+   *  captain left. More than 4 h before is free. */
+  cancellation_fee_1_to_4h?: number;
+  cancellation_fee_under_1h?: number;
+  cancellation_fee_after_captain_left?: number;
 }
 
 // What the customer picks — see BookingService.available_slots. remaining
@@ -387,6 +398,26 @@ export interface Booking {
    *  only — no "pay cash instead", no cash collection. */
   prepaid_only?: boolean;
   total_amount: number;
+  /** A late-cancellation charge from an earlier booking, carried by this
+   *  one — already INCLUDED in total_amount. */
+  cancellation_charge?: number;
+  cancellation_charge_ids?: string[];
+  /** Rupees the manager took off a job he did (already out of total_amount). */
+  manager_discount?: number;
+  manager_discount_by_name?: string | null;
+  manager_discount_at?: string | null;
+  tip_updated_by_name?: string | null;
+  tip_updated_at?: string | null;
+  /** Online payment owed back / returned after a cancel (payment_status
+   *  "refund_due" / "refunded"). */
+  refunded_amount?: number | null;
+  refunded_at?: string | null;
+  /** Too many wrong arrival codes — the captain can't proceed until a
+   *  manager unlocks it. */
+  arrival_code_locked?: boolean;
+  arrival_code_failures?: number;
+  /** "I've reached" was tapped without a GPS fix. */
+  arrival_no_gps?: boolean;
   vehicle_registration_number?: string | null;
   vehicle_verified?: boolean;
   vehicle_verified_at?: string | null;
@@ -508,6 +539,7 @@ export interface WithdrawalRequest {
   captain_id: string;
   amount: number;
   status: "pending" | "approved" | "rejected" | "paid";
+  captain_name?: string | null;
   review_note?: string | null;
   reviewed_by?: string | null;
   created_at: string;
@@ -559,22 +591,25 @@ export interface UserSubscription {
   plan_name?: string;
   // AUTHORITATIVE AGAIN on a pass: the ONE car it belongs to, named at
   // purchase. Null only on pre-pass subscriptions, which redeem by vehicle
-  // TYPE instead (see lib/planTier.ts).
+  // TYPE instead (the server decides eligibility).
   vehicle_id?: string | null;
   /** The one main service this pass covers. Null on pre-pass subscriptions. */
   service_id?: string | null;
   // The vehicle-type TIER this subscription was bought at (VehicleType id).
   // Redeemable on that type or any type the plan prices cheaper — never a
   // costlier one. Null/absent = pre-tier purchase, plan.vehicle_types alone
-  // governs. See lib/planTier.ts for the shared eligibility math.
+  // governs. The server does the eligibility math.
   vehicle_type?: string | null;
   purchased_price?: number | null;
-  status: "active" | "expired" | "cancelled" | "paused";
+  /** `scheduled` (PLANS-2): a custom-plan renewal waiting for the old
+   *  period to end — shown "Starts …", never bookable before `starts_on`. */
+  status: "active" | "expired" | "cancelled" | "paused" | "scheduled";
   // Computed at read time — "expired" whenever end_date has passed, even if
   // the stored `status` field hasn't been lazily flipped yet (only actually
   // using a subscription triggers that write). Prefer this over `status`
-  // for any "is this actually usable right now" display/filtering.
-  effective_status: "active" | "expired" | "cancelled" | "paused";
+  // for any "is this actually usable right now" display/filtering. A
+  // scheduled pass whose start has come reads "active".
+  effective_status: "active" | "expired" | "cancelled" | "paused" | "scheduled";
   total_service_count: number;
   remaining_service_count: number;
   total_by_category?: Record<string, number>;
@@ -613,6 +648,54 @@ export interface UserSubscription {
   society_form_path?: string | null;
   /** Bucket-wash days per 30-day cycle (society passes only). */
   bucket_days?: number | null;
+  /** Pass extension (any pass kind since 2026-10-07): manager-granted days
+   *  after the 30-day period, remaining washes only, ≤ 10 per period. */
+  extension_days?: number;
+  extension_days_left?: number;
+  can_extend?: boolean;
+  extended_until?: string | null;
+  usable_until?: string | null;
+  /** YYYY-MM-DD — the last day a booking can be dated on. */
+  last_bookable_day?: string | null;
+  /** Its human form, "6 Nov 2026" — shown as "Last Booking Day: …". */
+  last_booking_day_label?: string | null;
+  in_extension?: boolean;
+  extensions?: PassExtension[];
+  /** Custom multi-car plan pass: `plan_kind` "custom", its cart, the car's
+   *  plate and per-service quotas (service id → washes). */
+  plan_kind?: string | null;
+  custom_plan_id?: string | null;
+  registration_number?: string | null;
+  total_by_service?: Record<string, number> | null;
+  remaining_by_service?: Record<string, number> | null;
+  /** /subscriptions/my: the per-service quotas with names. */
+  services?: PassServiceQuota[] | null;
+  /** A scheduled renewal: its first day (YYYY-MM-DD) and "6 Nov 2026". */
+  starts_on?: string | null;
+  starts_on_label?: string | null;
+  /** Renewal links (PLANS-2): the pass this one renews / the cart that renewed it. */
+  renewal_of_subscription_id?: string | null;
+  renewed_by_custom_plan_id?: string | null;
+}
+
+/** One service's washes on a custom-plan pass. */
+export interface PassServiceQuota {
+  service_id: string;
+  service_name: string;
+  total: number;
+  remaining: number;
+}
+
+/** One manager/admin grant of extra days on a society pass. */
+export interface PassExtension {
+  days: number;
+  by?: string | null;
+  by_name?: string | null;
+  role?: string | null;
+  note?: string | null;
+  at?: string | null;
+  period_end?: string | null;
+  extended_until?: string | null;
 }
 
 export interface ServiceCenter {

@@ -2,16 +2,19 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.vehicle_type_controller import VehicleTypeController
-from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin
+from app.core.dependencies import CurrentUser, get_catalogue_viewer, get_current_user, get_db, is_catalogue_editor, require_admin
 from app.schemas.vehicle_type_schema import VehicleTypeCreateRequest, VehicleTypeUpdateRequest
 
 router = APIRouter(prefix="/vehicle-types", tags=["Vehicle Types"])
 
 
 @router.get("")
-async def list_vehicle_types(active_only: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Public — every vehicle/booking/subscription picker across every role needs this list."""
-    return await VehicleTypeController(db).list(active_only)
+async def list_vehicle_types(
+    active_only: bool = False, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Public — every vehicle/booking/subscription picker across every role
+    needs this list. Switched-off types only for admins/managers."""
+    return await VehicleTypeController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
 @router.post("", dependencies=[Depends(require_admin)])

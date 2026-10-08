@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Phone, MessageCircle } from "lucide-react";
+import { trackContact } from "../../lib/metaPixel";
 
 // Matches the public contact number displayed in the site footer. A Vite env
 // value can replace it for a different production WhatsApp business account.
@@ -15,6 +16,7 @@ const PANEL_GAP = 12;
 export function openBlussitWhatsApp(text?: unknown) {
   const phone = import.meta.env.VITE_WHATSAPP_NUMBER || DEFAULT_WHATSAPP_NUMBER;
   const message = encodeURIComponent(typeof text === "string" && text.trim() ? text : "Hi Blussit, I would like to book a car wash.");
+  trackContact("whatsapp");
   window.open(`https://wa.me/${phone}?text=${message}`, "_blank", "noopener,noreferrer");
 }
 
@@ -103,6 +105,10 @@ export function WhatsAppFloatingButton() {
     };
   }, []);
 
+  // No document while pages are pre-rendered at build time; the button
+  // appears as soon as the page loads.
+  if (typeof document === "undefined") return null;
+
   return createPortal(
     <div
       ref={stackRef}
@@ -115,7 +121,7 @@ export function WhatsAppFloatingButton() {
         aria-label="Call Blussit to book"
         className="group flex h-[40px] flex-row items-center gap-2 outline-none sm:h-[58px]"
       >
-        <span className="hidden rounded-[10px] border border-white/[0.08] bg-[#181818] px-3.5 py-2.5 text-left leading-tight 2xl:block shadow-[0_8px_24px_rgba(0,0,0,0.30)] transition-shadow duration-200 group-hover:shadow-[0_10px_28px_rgba(0,0,0,0.38)] sm:px-3.5 sm:py-2.5">
+        <span className="hidden rounded-[10px] border border-white/[0.12] bg-[#0E1A33] px-3.5 py-2.5 text-left leading-tight 2xl:block shadow-[0_8px_24px_rgba(0,0,0,0.30)] transition-shadow duration-200 group-hover:shadow-[0_10px_28px_rgba(0,0,0,0.38)] sm:px-3.5 sm:py-2.5">
           <span className="block text-[11px] font-medium text-white/60 sm:text-[12px]">Tap To Call</span>
           <span className="mt-0.5 block whitespace-nowrap text-[14px] font-bold text-white sm:text-[16px]">Call To Book</span>
         </span>
@@ -131,7 +137,7 @@ export function WhatsAppFloatingButton() {
         onClick={() => openBlussitWhatsApp()}
         className="group flex h-[40px] flex-row items-center gap-2 outline-none sm:h-[58px]"
       >
-        <span className="hidden rounded-[10px] border border-white/[0.08] bg-[#181818] px-3.5 py-2.5 text-left leading-tight 2xl:block shadow-[0_8px_24px_rgba(0,0,0,0.30)] transition-shadow duration-200 group-hover:shadow-[0_10px_28px_rgba(0,0,0,0.38)] sm:px-3.5 sm:py-2.5">
+        <span className="hidden rounded-[10px] border border-white/[0.12] bg-[#0E1A33] px-3.5 py-2.5 text-left leading-tight 2xl:block shadow-[0_8px_24px_rgba(0,0,0,0.30)] transition-shadow duration-200 group-hover:shadow-[0_10px_28px_rgba(0,0,0,0.38)] sm:px-3.5 sm:py-2.5">
           <span className="block text-[11px] font-medium text-white/60 sm:text-[12px]">Need Help?</span>
           <span className="mt-0.5 block whitespace-nowrap text-[14px] font-bold text-white sm:text-[16px]">Chat With Us</span>
         </span>

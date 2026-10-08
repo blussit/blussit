@@ -68,7 +68,7 @@ interface PanelPosition {
   openUpward: boolean;
 }
 
-export function DatePicker({ label, value, onChange, min, max, error, required, disabled, placeholder = "Select date", id, className }: DatePickerProps) {
+export function DatePicker({ label, value, onChange, min, max, error, required, disabled, placeholder = "Select Date", id, className }: DatePickerProps) {
   const fieldId = id || label?.toLowerCase().replace(/\s+/g, "-");
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<PanelPosition | null>(null);
@@ -120,7 +120,8 @@ export function DatePicker({ label, value, onChange, min, max, error, required, 
       const rect = wrapperRef.current.getBoundingClientRect();
       const viewportW = window.innerWidth;
       const viewportH = window.innerHeight;
-      const width = Math.max(272, Math.min(288, viewportW - margin * 2));
+      // Never wider than the screen, even below 288 px.
+      const width = Math.min(288, viewportW - margin * 2);
       const openUpward = viewportH - rect.bottom < estimatedHeight && rect.top > estimatedHeight;
       const top = openUpward ? Math.max(margin, rect.top - estimatedHeight - 6) : rect.bottom + 6;
       const left = Math.min(Math.max(rect.left, margin), Math.max(margin, viewportW - width - margin));

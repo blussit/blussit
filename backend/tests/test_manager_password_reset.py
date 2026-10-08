@@ -26,7 +26,19 @@ async def rig(db, cleanup):
 
 
 @pytest.mark.asyncio
-async def test_reset_generates_a_working_password_and_never_returns_it(rig, cleanup):
+async def test_reset_generates_a_working_password_and_never_returns_it(rig, cleanup, monkeypatch):
+    from app.services.whatsapp_service import WhatsAppService
+
+    # The temp password reaches the customer's WhatsApp and nowhere else —
+    # not even our own outbox — so the test catches it on the way out.
+    sent = {}
+    real = WhatsAppService.send_temp_password
+
+    async def spy(self, phone, password):
+        sent["pw"] = password
+        return await real(self, phone, password)
+
+    monkeypatch.setattr(WhatsAppService, "send_temp_password", spy)
     auth = AuthService(rig["db"])
     original = await rig["db"].users.find_one({"_id": ObjectId(rig["customer_id"])})
     cleanup.append(("whatsapp_outbox", {"phone": original["phone"]}))
@@ -38,13 +50,10 @@ async def test_reset_generates_a_working_password_and_never_returns_it(rig, clea
     assert updated["password_hash"] != original["password_hash"]
     assert updated["must_change_password"] is True
 
-    # The only place the plaintext temp password exists is the WhatsApp
-    # outbox record (simulating what actually reached the customer) —
-    # recover it from there ONLY to prove login now works with it.
     outbox_entry = await rig["db"].whatsapp_outbox.find_one({"phone": original["phone"]}, sort=[("created_at", -1)])
     assert outbox_entry is not None
-    assert "Temporary password:" in outbox_entry["message"]
-    temp_password = outbox_entry["message"].split("Temporary password:")[1].split("\n")[0].strip()
+    assert outbox_entry["kind"] == "temp_password" and sent["pw"] not in outbox_entry["message"]
+    temp_password = sent["pw"]
     assert verify_password(temp_password, updated["password_hash"])
 
     login_result = await auth.login(original["phone"], temp_password)

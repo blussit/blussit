@@ -38,7 +38,7 @@ export default function ManagerComplaintsPage() {
   const [selected, setSelected] = useState<Complaint | null>(null);
   const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["center-complaints-page", centerId, status, category, debouncedSearch, page],
     queryFn: () =>
       complaintApi.forCenter(centerId, { status: status || undefined, category: category || undefined, search: debouncedSearch || undefined, page, page_size: PAGE_SIZE }),
@@ -105,6 +105,8 @@ export default function ManagerComplaintsPage() {
       <DataTable<Complaint>
         isLoading={isLoading}
         data={data?.data || []}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle={status === "open" && !debouncedSearch ? "No Open Complaints" : "No Complaints Match"}
         onRowClick={(c) => setSelected(c)}
         columns={[

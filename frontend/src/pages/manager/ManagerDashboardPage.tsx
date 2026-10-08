@@ -21,12 +21,12 @@ import {
 } from "lucide-react";
 import { analyticsApi, kpiApi, type ManagerDashboard } from "../../api/admin";
 import { paymentApi } from "../../api/payment";
-import { EmptyState } from "../../components/ui";
+import { EmptyState, ErrorState } from "../../components/ui";
 import { CollectionsReportCard } from "../../components/shared/CollectionsReport";
 import { RevenueDrillModal } from "../../components/admin/kpi/RevenueDrillModal";
 import { DeltaPill, formatINR } from "../../components/admin/kpi/charts";
 import { useAuth } from "../../context/AuthContext";
-import { ISSUE_LABELS } from "../../lib/constants";
+import { issueLabel } from "../../lib/constants";
 import { formatDay } from "../../lib/date";
 import { carAndService, toTitle } from "../../lib/titleCase";
 import { PERIODS, REVENUE_SCOPES, type RevenueScope } from "../../lib/kpiPeriods";
@@ -97,6 +97,9 @@ export default function ManagerDashboardPage() {
     );
   }
 
+  // A failed read with nothing cached: one error card, and no skeletons
+  // left pulsing underneath it as if still loading.
+  const failed = isError && !data;
   const periodLabel = PERIODS.find((p) => p.key === periodKey)?.label || "";
   const prevNoun = periodKey === "today" ? "yesterday" : "the previous period";
 
@@ -115,7 +118,7 @@ export default function ManagerDashboardPage() {
           <button
             type="button"
             onClick={() => navigate("/manager/new-booking")}
-            className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-4 text-sm font-bold text-[#0E1A33] shadow-[0_8px_20px_-12px_rgba(232,169,0,0.8)] transition hover:bg-[#FFC800] sm:flex-none"
+            className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-4 text-sm font-bold text-[#0E1A33] shadow-[0_8px_20px_-12px_rgba(232,169,0,0.8)] transition hover:bg-[#F5C400] sm:flex-none"
           >
             <CalendarPlus className="h-4 w-4" /> New Booking
           </button>
@@ -129,17 +132,10 @@ export default function ManagerDashboardPage() {
         </div>
       </div>
 
-      {isError && !data ? (
-        <div className="rounded-[14px] border border-[#FAD4D4] bg-[#FFF5F5] p-4 text-sm text-[#B42318]">
-          Couldn't load the dashboard.{" "}
-          <button type="button" className="font-semibold underline" onClick={() => refetch()}>
-            Try Again
-          </button>
-        </div>
-      ) : null}
+      {failed ? <ErrorState message="Couldn't load the dashboard." onRetry={() => void refetch()} busy={isFetching} /> : null}
 
       {/* 1. Needs a decision now */}
-      {isLoading || !data ? <SkeletonRow /> : <AttentionStrip ops={data.ops} today={data.today} />}
+      {failed ? null : isLoading || !data ? <SkeletonRow /> : <AttentionStrip ops={data.ops} today={data.today} />}
 
       {/* 2. Sales */}
       <section className="space-y-3">
@@ -152,7 +148,7 @@ export default function ManagerDashboardPage() {
             busy={isFetching && !isLoading}
           />
         </div>
-        {isLoading || !data ? (
+        {failed ? null : isLoading || !data ? (
           <SkeletonRow tall />
         ) : (
           <SalesBlock
@@ -455,7 +451,7 @@ function AttentionStrip({ ops, today }: { ops: ManagerDashboard["ops"]; today: M
                       .join("")}
                   </span>
                   <span className="rounded-full bg-[#FFF5F5] px-2.5 py-0.5 text-xs font-semibold text-[#B42318]">
-                    {toTitle(ISSUE_LABELS[b.issue_flag] || b.issue_flag)}
+                    {issueLabel(b.issue_flag)}
                   </span>
                 </Link>
               </li>
@@ -547,8 +543,8 @@ function Tile({
 }) {
   const body = (
     <>
-      <span className="flex items-center gap-1.5 text-[13px] font-medium text-[#5F6878]">
-        <Icon className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{label}</span>
+      <span className="flex items-start gap-1.5 text-[13px] font-medium leading-snug text-[#5F6878]">
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span className="min-w-0 break-words">{label}</span>
       </span>
       <span className="font-mono-num mt-2.5 text-[22px] font-bold leading-none text-[#0E1A33] sm:text-[26px]">{value}</span>
       {typeof value === "number" && previous != null ? (
@@ -623,10 +619,17 @@ function SlotBoard({ today }: { today: ManagerDashboard["today"] }) {
               <span className="font-medium text-[#0E1A33]">
                 {s.label}
                 {s.is_closed && <span className="ml-2 rounded-full bg-[#F3F4F6] px-1.5 py-px text-[10px] font-semibold text-[#5F6878]">Closed</span>}
+                {!s.is_closed && s.capacity_configured === false && (
+                  <span className="ml-2 rounded-full bg-[#FFF6E0] px-1.5 py-px text-[10px] font-semibold text-[#B45309]" title="No seats are set for this slot, so it takes no bookings — set its capacity in Slot Capacity.">
+                    Not Set Up
+                  </span>
+                )}
               </span>
               <span className="text-xs text-[#5F6878]">
                 <span className="font-mono-num font-bold text-[#0E1A33]">{s.cars}</span> car{s.cars === 1 ? "" : "s"}
-                {s.capacity ? (
+                {s.capacity_configured === false ? (
+                  <> · No Seats Set</>
+                ) : s.capacity ? (
                   <>
                     {" "}
                     · {s.visits}/{s.capacity} seats

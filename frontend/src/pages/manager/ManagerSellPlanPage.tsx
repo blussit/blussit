@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Banknote, Check, Copy, CreditCard, Gauge, Power, RefreshCw } from "lucide-react";
@@ -18,6 +18,45 @@ import type { SubscriptionPlan } from "../../types";
 
 type DiscountMode = "none" | "amount" | "coupon";
 
+// The link just created survives a refresh (this tab): losing it sent the
+// manager back to the form, and a second submit made a second payable link.
+const OFFER_KEY = "blussit:manager-sell-plan-offer";
+const OFFER_KEEP_MS = 12 * 60 * 60 * 1000;
+interface KeptOffer {
+  result: ManagerOfferResult;
+  soldWhat: string;
+  name: string;
+  sentOnWhatsApp: boolean;
+  at: number;
+}
+function readKeptOffer(): KeptOffer | null {
+  try {
+    const kept = JSON.parse(sessionStorage.getItem(OFFER_KEY) || "null") as KeptOffer | null;
+    return kept && kept.result && Date.now() - kept.at < OFFER_KEEP_MS ? kept : null;
+  } catch {
+    return null;
+  }
+}
+function keepOffer(kept: KeptOffer | null) {
+  try {
+    if (kept) sessionStorage.setItem(OFFER_KEY, JSON.stringify(kept));
+    else sessionStorage.removeItem(OFFER_KEY);
+  } catch {
+    // storage blocked — the card still shows until the page is left
+  }
+}
+/** An unpaid link the server already holds for this customer + plan, if the
+ *  preview reports one (the server reuses it instead of minting another). */
+/** The server sends the offer's id as `id` (older responses: `order_id`). */
+type OpenOffer = { id?: string; order_id?: string; short_url?: string; amount?: number; kind?: ManagerOfferResult["kind"]; recurring?: boolean; coupon_code?: string | null; created_at?: string | null };
+function openOfferOf(preview: unknown): OpenOffer | null {
+  const p = preview as { open_offer?: OpenOffer | null; existing_offer?: OpenOffer | null } | undefined;
+  const raw = p?.open_offer || p?.existing_offer || null;
+  if (!raw) return null;
+  const offer = { ...raw, order_id: raw.id || raw.order_id };
+  return offer.short_url || offer.order_id ? offer : null;
+}
+
 /**
  * Manager sells a plan over the phone or at the door: name + phone find or
  * create the customer, plan + vehicle type + service price it exactly like
@@ -33,7 +72,12 @@ export default function ManagerSellPlanPage() {
   const confirm = useConfirm();
   const { user } = useAuth();
 
-  const { data: plans } = useQuery({ queryKey: ["subscription-plans-for-sale"], queryFn: () => subscriptionApi.plans(true) });
+  const {
+    data: plans,
+    isError: plansFailed,
+    isFetching: plansFetching,
+    refetch: refetchPlans,
+  } = useQuery({ queryKey: ["subscription-plans-for-sale"], queryFn: () => subscriptionApi.plans(true) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-manager-offer"], queryFn: () => catalogApi.services({ page_size: 100 }) });
 
@@ -53,7 +97,13 @@ export default function ManagerSellPlanPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<ManagerOfferResult | null>(null);
+  const [kept] = useState(readKeptOffer);
+  const [result, setResult] = useState<ManagerOfferResult | null>(kept?.result ?? null);
+  // Restored after a refresh: the plan/type/service pickers are empty, so
+  // the card shows what was saved with the link.
+  const [keptLabel, setKeptLabel] = useState<{ soldWhat: string; name: string; sentOnWhatsApp: boolean } | null>(
+    kept ? { soldWhat: kept.soldWhat, name: kept.name, sentOnWhatsApp: kept.sentOnWhatsApp } : null
+  );
   const [copied, setCopied] = useState(false);
 
   const plan = plans?.find((p) => p.id === planId) || null;
@@ -75,8 +125,12 @@ export default function ManagerSellPlanPage() {
     return baseGroups(onMenu, vehicleType).map((g) => g.primary);
   }, [servicesData, plan, vehicleType]);
 
-  // A clean form whenever a different plan is picked.
+  // A clean form whenever a different plan is picked (not on the first
+  // render — that would drop a link restored after a refresh).
+  const lastPlanId = useRef(planId);
   useEffect(() => {
+    if (lastPlanId.current === planId) return;
+    lastPlanId.current = planId;
     setVehicleType(null);
     setServiceId(null);
     setResult(null);
@@ -127,6 +181,21 @@ export default function ManagerSellPlanPage() {
     !previewError && !discountTooBig &&
     (discountMode !== "coupon" || preview?.coupon_valid !== false);
   const [voiding, setVoiding] = useState(false);
+  const openOffer = openOfferOf(preview);
+
+  const showOpenOffer = () => {
+    if (!openOffer) return;
+    const shown: ManagerOfferResult = {
+      kind: openOffer.kind || (openOffer.recurring ? "autopay" : "link"),
+      recurring: !!openOffer.recurring,
+      amount: openOffer.amount ?? preview?.final_price ?? 0,
+      short_url: openOffer.short_url,
+      order_id: openOffer.order_id,
+    };
+    setResult(shown);
+    setKeptLabel({ soldWhat, name: name.trim(), sentOnWhatsApp: true });
+    keepOffer({ result: shown, soldWhat, name: name.trim(), sentOnWhatsApp: true, at: Date.now() });
+  };
 
   const submit = async () => {
     setError("");
@@ -138,6 +207,17 @@ export default function ManagerSellPlanPage() {
     if (!serviceId) next.service = "Pick a service.";
     setFieldErrors(next);
     if (Object.keys(next).length) return;
+    if (submitting) return;
+    // Cash activates the plan and books the money at once — confirm it.
+    if (!recurring && paymentMethod === "cash") {
+      const amount = preview?.final_price;
+      const ok = await confirm({
+        title: "Mark As Paid In Cash?",
+        message: `${amount != null ? `₹${amount} ` : ""}collected in cash from ${name.trim() || "the customer"} — the plan starts now and the cash is recorded against you. This can't be undone here.`,
+        confirmLabel: "Yes, Activate Plan",
+      });
+      if (!ok) return;
+    }
 
     setSubmitting(true);
     try {
@@ -154,6 +234,10 @@ export default function ManagerSellPlanPage() {
         send_whatsapp: sendWhatsApp,
       });
       setResult(out);
+      if (out.kind !== "cash") {
+        setKeptLabel({ soldWhat, name: name.trim(), sentOnWhatsApp: sendWhatsApp });
+        keepOffer({ result: out, soldWhat, name: name.trim(), sentOnWhatsApp: sendWhatsApp, at: Date.now() });
+      }
       queryClient.invalidateQueries({ queryKey: ["center-subscription-overview"] });
       if (out.kind === "cash") {
         pushToast({ tone: "success", title: "Plan activated", message: `₹${out.amount} collected in cash.` });
@@ -180,6 +264,8 @@ export default function ManagerSellPlanPage() {
     try {
       await subscriptionApi.managerOfferVoid(result.order_id);
       pushToast({ tone: "success", title: "Offer cancelled" });
+      keepOffer(null);
+      setKeptLabel(null);
       setResult(null);
     } catch (err) {
       pushToast({ tone: "error", title: "Couldn't cancel", message: getErrorMessage(err) });
@@ -200,6 +286,8 @@ export default function ManagerSellPlanPage() {
   };
 
   const startAnother = () => {
+    keepOffer(null);
+    setKeptLabel(null);
     setResult(null);
     setName("");
     setPhone("");
@@ -234,7 +322,11 @@ export default function ManagerSellPlanPage() {
 
       {result ? (
         <div className="max-w-xl rounded-2xl border border-[#E4E9F1] bg-white p-5">
-          {soldWhat && <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">{soldWhat}{name.trim() ? ` · ${name.trim()}` : ""}</p>}
+          {(() => {
+            const what = soldWhat || keptLabel?.soldWhat || "";
+            const who = name.trim() || keptLabel?.name || "";
+            return what ? <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">{what}{who ? ` · ${who}` : ""}</p> : null;
+          })()}
           {result.kind === "cash" ? (
             <>
               <p className="flex items-center gap-2 text-sm font-semibold text-[#0E1A33]">
@@ -248,7 +340,7 @@ export default function ManagerSellPlanPage() {
                 {result.kind === "autopay" ? "/month" : ""}
               </p>
               <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                {sendWhatsApp ? "Already sent to the customer on WhatsApp." : "Not sent — copy it and share it yourself."}
+                {(keptLabel ? keptLabel.sentOnWhatsApp : sendWhatsApp) ? "Already sent to the customer on WhatsApp." : "Not sent — copy it and share it yourself."}
               </p>
               <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#E4E9F1] bg-[#F7F9FC] px-3.5 py-2.5">
                 <span className="min-w-0 flex-1 truncate font-mono-num text-sm text-[#0E1A33]">{result.short_url}</span>
@@ -292,6 +384,14 @@ export default function ManagerSellPlanPage() {
               </option>
             ))}
           </Select>
+          {plansFailed && !plans && (
+            <p role="alert" className="-mt-4 text-sm text-[var(--color-text-secondary)]">
+              Couldn't load the plans.{" "}
+              <button type="button" disabled={plansFetching} onClick={() => void refetchPlans()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                {plansFetching ? "Trying…" : "Try Again"}
+              </button>
+            </p>
+          )}
 
           {plan && (
             <>
@@ -444,6 +544,14 @@ export default function ManagerSellPlanPage() {
                     {preview.already_has_pass && (
                       <p className="mt-2 text-sm text-[var(--color-error)]">This number already has an active pass for that vehicle type and service.</p>
                     )}
+                    {openOffer && !preview.already_has_pass && (
+                      <p className="mt-2 text-sm text-[#0E1A33]">
+                        An unpaid link for this plan was already sent{openOffer.amount != null ? ` (₹${openOffer.amount})` : ""} — use it instead of sending another.{" "}
+                        <button type="button" onClick={showOpenOffer} className="font-semibold text-[#0A66F0] hover:underline">
+                          Show Link
+                        </button>
+                      </p>
+                    )}
                   </>
                 ) : (
                   <p className="text-sm text-gray-500">Pick a vehicle type and a service to see the price.</p>
@@ -463,7 +571,7 @@ export default function ManagerSellPlanPage() {
 
               {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
-              <Button className="w-full" disabled={!canSubmit} isLoading={submitting} onClick={submit}>
+              <Button className="w-full" disabled={!canSubmit || submitting} isLoading={submitting} onClick={submit}>
                 {recurring ? "Send Auto-Pay Link" : paymentMethod === "cash" ? "Mark As Paid — Activate Plan" : "Send Payment Link"}
               </Button>
             </>

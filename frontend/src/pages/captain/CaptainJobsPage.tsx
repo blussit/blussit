@@ -10,7 +10,7 @@ import { toSlabs } from "../../lib/bookingGroups";
 import { useActiveJobs } from "../../components/captain/CaptainShell";
 import { JobListItem } from "../../components/captain/JobListItem";
 import { currentCar, needsManager } from "../../components/captain/jobState";
-import { Btn, PageTitle, Panel } from "../../components/captain/ui";
+import { Btn, LoadError, PageTitle, Panel } from "../../components/captain/ui";
 import { cn } from "../../lib/cn";
 
 const HISTORY_PAGE_SIZE = 20;
@@ -32,6 +32,9 @@ export default function CaptainJobsPage() {
   const ordered = [...upcoming.filter((s) => !needsManager(currentCar(s))), ...upcoming.filter((s) => needsManager(currentCar(s)))];
   const done = toSlabs(history.data?.pages.flatMap((p) => p.data) ?? []);
   const loading = tab === "upcoming" ? active.isLoading : history.isLoading;
+  // A failed read with nothing cached — an error card, never "No jobs".
+  const failedQuery = tab === "upcoming" ? active : history;
+  const failed = failedQuery.isError && !failedQuery.data;
   const list = tab === "upcoming" ? ordered : done;
 
   return (
@@ -61,6 +64,14 @@ export default function CaptainJobsPage() {
             <Panel key={i} className="h-[76px] animate-pulse bg-[#EEF3FA]"><span /></Panel>
           ))}
         </div>
+      ) : failed ? (
+        <LoadError
+          title={t("captain.v2.loadFailed")}
+          sub={t("captain.v2.loadFailedSub")}
+          retryLabel={t("captain.v2.tryAgain")}
+          busy={failedQuery.isFetching}
+          onRetry={() => void failedQuery.refetch()}
+        />
       ) : !list.length ? (
         <Panel className="px-4 py-10 text-center">
           <p className="text-[15px] font-bold text-[#0E1A33]">{tab === "upcoming" ? t("captain.v2.noJobs") : t("captain.v2.noDone")}</p>

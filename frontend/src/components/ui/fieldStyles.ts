@@ -31,7 +31,7 @@ export function fieldBox({
   compact?: boolean;
 }): string {
   return cn(
-    "w-full rounded-[12px] border bg-white px-3.5 text-sm text-[#0E1A33] transition-[border-color,box-shadow] duration-150",
+    "w-full min-w-0 rounded-[12px] border bg-white px-3.5 text-sm text-[#0E1A33] transition-[border-color,box-shadow] duration-150",
     compact ? "h-10" : "h-11",
     "focus:outline-none focus-visible:outline-none",
     "disabled:cursor-not-allowed disabled:bg-[#F5F7FA] disabled:text-[#5F6878]",

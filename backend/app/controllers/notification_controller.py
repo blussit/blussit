@@ -28,6 +28,21 @@ class NotificationController:
         result["unread_count"] = unread
         return result
 
+    async def get_preferences(self, current_user: CurrentUser):
+        return success(await self.service.get_preferences(current_user.id))
+
+    async def update_preferences(self, current_user: CurrentUser, payload):
+        result = await self.service.set_preferences(
+            current_user.id, current_user.role, payload.whatsapp_new_booking_alerts, payload.user_id
+        )
+        return success(result, "Notification preferences updated")
+
+    async def send_universal_message(self, current_user: CurrentUser, payload):
+        result = await self.service.send_universal_message(
+            current_user.id, current_user.role, current_user.service_center_id, payload.customer_id, payload.message
+        )
+        return success(result, "Message sent" if result["status"] == "sent" else "Message not delivered on WhatsApp")
+
     async def mark_read(self, current_user: CurrentUser, notification_id: str):
         result = await self.service.mark_read(current_user.id, notification_id)
         return success(result, "Notification marked as read")

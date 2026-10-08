@@ -1,6 +1,6 @@
 import axios from "axios";
 import { paymentApi, type PaymentStatusResult, type VerifyPaymentResult } from "../api/payment";
-import { getErrorMessage } from "./api-client";
+import { getErrorCode, getErrorMessage } from "./api-client";
 
 /**
  * Razorpay Standard Web Checkout, end to end: create the server-side
@@ -177,7 +177,15 @@ export async function payWithRazorpay(
   hooks?: PaymentHooks
 ): Promise<VerifyPaymentResult> {
   await loadCheckout();
-  const created = await paymentApi.createOrder(order);
+  let created: Awaited<ReturnType<typeof paymentApi.createOrder>>;
+  try {
+    created = await paymentApi.createOrder(order);
+  } catch (err) {
+    // A payment for this is captured and still being confirmed: opening a
+    // second checkout would take the money twice.
+    if (getErrorCode(err) === "PAYMENT_CONFIRMING") throw new PaymentPendingConfirmation();
+    throw err;
+  }
   onCreated?.(created);
   // Impossible to confuse a sandbox payment with a real one: the checkout
   // itself is labelled, and the console says so for anyone watching.
@@ -196,7 +204,7 @@ export async function payWithRazorpay(
       ...(created.subscription_id ? { subscription_id: created.subscription_id } : { order_id: created.order_id }),
       name: created.mode === "test" ? "BLUSSIT (TEST MODE)" : "BLUSSIT",
       description: created.mode === "test" ? `TEST — ${created.description}` : created.description,
-      theme: { color: "#E8A900" },
+      theme: { color: "#0A66F0" },
       prefill: {
         name: prefill?.name || undefined,
         email: prefill?.email || undefined,

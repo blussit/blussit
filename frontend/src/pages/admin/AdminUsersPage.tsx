@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
+import { KeyRound, Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
-import { Button, DataTable, Input, Modal, Select, StatusBadge } from "../../components/ui";
+import { Button, DataTable, ErrorState, Input, Modal, Select, StatusBadge } from "../../components/ui";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { StaffResetPasswordDialog } from "../../components/shared/StaffResetPasswordDialog";
+import { ManagerAlertsToggle } from "../../components/manager/WhatsAppAlertsSwitch";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
@@ -45,6 +47,7 @@ export default function AdminUsersPage() {
   // A customer's name opens their full purchase history (bookings + plans);
   // get_customer_360 is customer-only, so staff rows don't get this.
   const [detailCustomerId, setDetailCustomerId] = useState<string | null>(null);
+  const [resetFor, setResetFor] = useState<User | null>(null);
 
   // Search runs on the server (name / phone / email across every page), a
   // beat after the last keystroke so typing never fires a request per letter.
@@ -56,13 +59,20 @@ export default function AdminUsersPage() {
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error: usersError, refetch: refetchUsers } = useQuery({
     queryKey: ["admin-users", role, debounced, page],
     queryFn: () => adminUserApi.list({ role: role || undefined, search: debounced || undefined, page, page_size: 15 }),
     placeholderData: keepPreviousData, // the old rows stay put while the new ones load — no flash
   });
 
-  const { data: centers } = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  const centersQuery = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  const centers = centersQuery.data;
+  // A failed centers read would leave the picker on "Not Assigned" only —
+  // which reads as "this person has no center". Say it failed instead.
+  const centersError =
+    centersQuery.isError && !centers ? (
+      <ErrorState message="Couldn't load service centers." onRetry={() => void centersQuery.refetch()} busy={centersQuery.isFetching} className="p-4" />
+    ) : null;
 
   const createStaffMutation = useMutation({
     // Blank optional fields go as "absent", never "" — an empty email was a
@@ -73,7 +83,7 @@ export default function AdminUsersPage() {
         full_name: form.full_name.trim(),
         password: form.password,
         role: form.role,
-        email: form.email.trim() || undefined,
+        email: form.email.trim().toLowerCase() || undefined,
         phone: form.phone || undefined,
         service_center_id: form.service_center_id || undefined,
       }),
@@ -191,6 +201,8 @@ export default function AdminUsersPage() {
       <DataTable<User>
         isLoading={isLoading}
         data={data?.data || []}
+        error={usersError}
+        onRetry={() => void refetchUsers()}
         emptyTitle={debounced ? `No Users Match “${search.trim()}”` : "No Users Found"}
         onRowClick={(u) => (u.role === "customer" ? setDetailCustomerId(u.id) : openEdit(u))}
         columns={[
@@ -198,6 +210,19 @@ export default function AdminUsersPage() {
           { header: "Contact", accessor: (u) => u.email || u.phone || "—" },
           { header: "Role", accessor: (u) => <span className="capitalize">{u.role}</span> },
           { header: "Status", accessor: (u) => <StatusBadge status={u.status} /> },
+          ...(role === "" || role === "manager"
+            ? [
+                {
+                  header: "WhatsApp Alerts",
+                  accessor: (u: User) =>
+                    u.role === "manager" ? (
+                      <ManagerAlertsToggle userId={u.id} enabled={u.whatsapp_new_booking_alerts !== false} name={u.full_name} />
+                    ) : (
+                      <span className="text-gray-300">—</span>
+                    ),
+                },
+              ]
+            : []),
           {
             header: "",
             accessor: (u) => (
@@ -205,6 +230,11 @@ export default function AdminUsersPage() {
                 <Button size="sm" variant="outline" onClick={() => openEdit(u)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>
+                {u.role !== "customer" && u.id !== me?.id && (
+                  <Button size="sm" variant="outline" onClick={() => setResetFor(u)}>
+                    <KeyRound className="h-3.5 w-3.5" /> Reset Password
+                  </Button>
+                )}
                 {u.id === me?.id ? null : u.status !== "suspended" ? (
                   <Button
                     size="sm"
@@ -288,7 +318,7 @@ export default function AdminUsersPage() {
           }}
         >
           <Input label="Full Name" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} required />
-          <Input label="Email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          <Input label="Email" type="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value.toLowerCase() })} />
           <Input
             label="Phone"
             type="tel"
@@ -320,6 +350,7 @@ export default function AdminUsersPage() {
               </option>
             ))}
           </Select>
+          {centersError}
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createStaffMutation.isPending}>
             Create Account
@@ -369,6 +400,7 @@ export default function AdminUsersPage() {
                   </option>
                 ))}
               </Select>
+              {centersError}
               {editForm.role === "manager" && !editForm.service_center_id && (
                 <p className="text-xs text-amber-600">
                   A manager with no center can't sell/assign plans, or see their own Subscriptions or KPI pages.
@@ -384,6 +416,7 @@ export default function AdminUsersPage() {
       </Modal>
 
       <CustomerDetailDrawer customerId={detailCustomerId} onClose={() => setDetailCustomerId(null)} />
+      <StaffResetPasswordDialog staff={resetFor} onClose={() => setResetFor(null)} />
     </div>
   );
 }

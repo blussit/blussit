@@ -88,7 +88,7 @@ export default function ForgotPasswordPage() {
       initial={{ opacity: 0, x: shouldReduceMotion ? 0 : -10 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ duration: 0.35, ease: "easeOut" }}
-      className="relative flex min-h-dvh flex-col overflow-x-hidden lg:h-dvh lg:overflow-hidden bg-[#FDF9EE] text-[#111111]"
+      className="relative flex min-h-dvh flex-col overflow-x-hidden lg:h-dvh lg:overflow-hidden bg-[#F4F8FF] text-[#0E1A33]"
     >
       <PublicNavbar />
       {/* =========================================================
@@ -96,11 +96,11 @@ export default function ForgotPasswordPage() {
           Figma-matched composition:
           - full viewport, no page scroll
           - photo occupies the left side
-          - soft photo-to-cream fade in the center
+          - soft photo-to-ground fade in the center
           - compact, wider login card positioned on the right
           - NO bottom feature strip
       ========================================================= */}
-      <section className="relative min-h-0 w-full flex-1 overflow-hidden bg-[#FDF9EE]">
+      <section className="relative min-h-0 w-full flex-1 overflow-hidden bg-[#F4F8FF]">
         {/* Left photography */}
         <div className="absolute inset-y-0 left-0 w-[58%] overflow-hidden">
           <img
@@ -110,32 +110,32 @@ export default function ForgotPasswordPage() {
           />
 
           {/* Gentle warm treatment */}
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/5 via-transparent to-[#FDF9EE]/10" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/5 via-transparent to-[#F4F8FF]/10" />
 
           {/* Wide feathered edge — no hard vertical split */}
-          <div className="pointer-events-none absolute inset-y-0 right-0 w-[42%] bg-gradient-to-r from-transparent via-[#FDF9EE]/26 to-[#FDF9EE]" />
+          <div className="pointer-events-none absolute inset-y-0 right-0 w-[42%] bg-gradient-to-r from-transparent via-[#F4F8FF]/26 to-[#F4F8FF]" />
         </div>
 
         {/* Additional centre/right fade */}
-      <div className="pointer-events-none absolute inset-y-0 left-[38%] right-0 bg-gradient-to-r from-transparent via-[#FDF9EE]/30 to-[#FDF9EE]/94" />
-        {/* Figma-style cream background decorations */}
+      <div className="pointer-events-none absolute inset-y-0 left-[38%] right-0 bg-gradient-to-r from-transparent via-[#F4F8FF]/30 to-[#F4F8FF]/94" />
+        {/* Soft background decorations */}
         <div className="pointer-events-none absolute right-0 top-0 h-full w-[42%] overflow-hidden">
-          <div className="absolute -right-[170px] top-[13%] h-[560px] w-[560px] rounded-full border border-[#E9C875]/30" />
-          <div className="absolute -right-[230px] top-[8%] h-[700px] w-[700px] rounded-full border border-[#E9C875]/18" />
-          <div className="absolute right-[6%] top-[8%] h-[120px] w-[120px] opacity-60 [background-image:radial-gradient(#E8B642_1.35px,transparent_1.35px)] [background-size:16px_16px]" />
+          <div className="absolute -right-[170px] top-[13%] h-[560px] w-[560px] rounded-full border border-[#0A66F0]/12" />
+          <div className="absolute -right-[230px] top-[8%] h-[700px] w-[700px] rounded-full border border-[#0A66F0]/8" />
+          <div className="absolute right-[6%] top-[8%] h-[120px] w-[120px] opacity-60 [background-image:radial-gradient(#9DBDF5_1.35px,transparent_1.35px)] [background-size:16px_16px]" />
         </div>
 
         {/* Professional-care badge */}
         <div className="absolute left-[2.2vw] top-[2.2vh] z-30 flex items-center gap-2 rounded-full border border-white/75 bg-white/90 px-3 py-1.5 shadow-[0_7px_20px_rgba(30,27,20,0.09)] backdrop-blur-md">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F1AA00]">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#0A66F0]">
             <BadgeShieldIcon />
           </span>
 
           <div className="leading-[1.08]">
-            <p className="text-[10.5px] font-black uppercase tracking-[0.04em] text-[#151515]">
+            <p className="text-[11px] font-black uppercase tracking-[0.04em] text-[#0E1A33]">
               Professional Care
             </p>
-            <p className="mt-0.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-[#687181]">
+            <p className="mt-0.5 text-[11px] font-bold uppercase tracking-[0.04em] text-[#5F6878]">
               At Your Doorstep
             </p>
           </div>
@@ -149,7 +149,11 @@ export default function ForgotPasswordPage() {
             3. Reduce internal vertical spacing.
             4. Keep everything inside one viewport.
         ====================================================== */}
-        <div className="absolute right-[12vw] top-1/2 z-30 w-[390px] max-w-[calc(100vw-48px)] -translate-y-1/2">
+        {/* Phones/tablets: in the page flow (the section grows with it) — an
+            absolutely centred card was clipped by the section on short
+            screens and when the keyboard opened. Desktop keeps the Figma
+            placement. */}
+        <div className="relative z-30 mx-auto mb-8 mt-[76px] w-[calc(100%-32px)] max-w-[390px] lg:absolute lg:right-[12vw] lg:top-1/2 lg:mx-0 lg:my-0 lg:w-[390px] lg:max-w-[calc(100vw-48px)] lg:-translate-y-1/2">
           <div className="flex w-full flex-col rounded-[20px] border border-white/90 bg-white/[0.96] px-[26px] py-[30px] shadow-[0_16px_46px_rgba(39,33,20,0.09)] backdrop-blur-[4px]">
             {/* Logo */}
             <Link
@@ -162,15 +166,15 @@ export default function ForgotPasswordPage() {
                 alt="BLUSSIT"
                 className="h-auto w-[142px] object-contain"
               />
-              <span className="mt-0.5 whitespace-nowrap text-[7px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
+              <span className="mt-1 text-center text-[11px] font-bold uppercase leading-tight tracking-[0.06em] text-[#0A66F0]">
                 Premium Car Wash At Doorstep.
               </span>
             </Link>
             {step === "request" && (
               <>
                 <div className="mb-5 text-left">
-                  <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">
-                    Reset your password
+                  <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0E1A33]">
+                    Reset Your Password
                   </h1>
                   <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
                     Enter your email or phone to receive a reset code.
@@ -178,8 +182,8 @@ export default function ForgotPasswordPage() {
                 </div>
                 <form onSubmit={requestOtp}>
                   <label className="block">
-                    <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">
-                      Email or phone number
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0E1A33]">
+                      Email Or Phone Number
                     </span>
                     <div className="relative">
                       <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2">
@@ -188,10 +192,13 @@ export default function ForgotPasswordPage() {
                       <input
                         type="text"
                         value={identifier}
-                        onChange={(e) => setIdentifier(e.target.value)}
+                        onChange={(e) => setIdentifier(e.target.value.toLowerCase())}
                         required
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
                         placeholder="Enter your email or phone"
-                        className="h-[43px] w-full rounded-[9px] border border-[#D9DDE3] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10"
+                        className="h-[43px] w-full rounded-[9px] border border-[#D8E6F7] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#0A66F0] focus:ring-4 focus:ring-[#0A66F0]/10"
                       />
                     </div>
                   </label>
@@ -203,9 +210,9 @@ export default function ForgotPasswordPage() {
                   <button
                     type="submit"
                     disabled={isLoading}
-                    className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] hover:shadow-[0_10px_24px_rgba(245,180,0,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#0A66F0] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(10,102,240,0.18)] transition-all hover:bg-[#0857D0] hover:shadow-[0_10px_24px_rgba(10,102,240,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <span>{isLoading ? "Sending..." : "Send reset code"}</span>
+                    <span>{isLoading ? "Sending…" : "Send Reset Code"}</span>
                   </button>
                 </form>
               </>
@@ -214,8 +221,8 @@ export default function ForgotPasswordPage() {
             {step === "reset" && (
               <>
                 <div className="mb-5 text-left">
-                  <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">
-                    Enter reset code
+                  <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0E1A33]">
+                    Enter Reset Code
                   </h1>
                   <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
                     We sent a 6-digit code {sentTo} {phone ? <span className="font-medium">+91 {phone}</span> : <>the number on file for <span className="font-medium">{identifier}</span></>}.
@@ -223,8 +230,8 @@ export default function ForgotPasswordPage() {
                 </div>
                 <form onSubmit={resetPassword}>
                   <label className="block">
-                    <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">
-                      Reset code
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0E1A33]">
+                      Reset Code
                     </span>
                     <div className="relative">
                       <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2">
@@ -238,13 +245,13 @@ export default function ForgotPasswordPage() {
                         onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
                         required
                         placeholder="6-digit code"
-                        className="h-[43px] w-full rounded-[9px] border border-[#D9DDE3] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10"
+                        className="h-[43px] w-full rounded-[9px] border border-[#D8E6F7] bg-white pl-[48px] pr-4 text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#0A66F0] focus:ring-4 focus:ring-[#0A66F0]/10"
                       />
                     </div>
                   </label>
                   <label className="mt-3 block">
-                    <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">
-                      New password
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0E1A33]">
+                      New Password
                     </span>
                     <div className="relative">
                       <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2">
@@ -256,7 +263,7 @@ export default function ForgotPasswordPage() {
                         onChange={(e) => setNewPassword(e.target.value)}
                         required
                         placeholder="At least 8 characters"
-                        className="h-[43px] w-full rounded-[9px] border border-[#D9DDE3] bg-white pl-[48px] pr-[48px] text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10"
+                        className="h-[43px] w-full rounded-[9px] border border-[#D8E6F7] bg-white pl-[48px] pr-[48px] text-[12.5px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#0A66F0] focus:ring-4 focus:ring-[#0A66F0]/10"
                       />
                       <button
                         type="button"
@@ -281,11 +288,11 @@ export default function ForgotPasswordPage() {
                     ) : (
                       <button
                         type="button"
-                        className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50"
+                        className="font-semibold text-[#0A66F0] hover:text-[#0857D0] disabled:opacity-50"
                         disabled={isLoading}
                         onClick={() => void sendCode(channel === "widget" ? ["widget", "backend"] : undefined)}
                       >
-                        Resend code
+                        Resend Code
                       </button>
                     )}
                     <button
@@ -300,15 +307,15 @@ export default function ForgotPasswordPage() {
                         setCooldown(0);
                       }}
                     >
-                      Change email / phone
+                      Change Email / Phone
                     </button>
                   </div>
                   <button
                     type="submit"
                     disabled={isLoading || otp.length < 6 || newPassword.length < 8}
-                    className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] hover:shadow-[0_10px_24px_rgba(245,180,0,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#0A66F0] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(10,102,240,0.18)] transition-all hover:bg-[#0857D0] hover:shadow-[0_10px_24px_rgba(10,102,240,0.23)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <span>{isLoading ? "Resetting..." : "Reset password"}</span>
+                    <span>{isLoading ? "Resetting…" : "Reset Password"}</span>
                   </button>
                 </form>
               </>
@@ -317,15 +324,15 @@ export default function ForgotPasswordPage() {
             {step === "done" && (
               <div className="text-center pb-2">
                 <CheckCircle2 className="mx-auto mt-2 h-10 w-10 text-[#009A65]" />
-                <h1 className="mt-4 text-[24px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">
-                  Password reset
+                <h1 className="mt-4 text-[24px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0E1A33]">
+                  Password Reset
                 </h1>
                 <p className="mt-2 text-[13px] leading-5 text-[#747C8A]">
                   You can now log in with your new password.
                 </p>
                 <Link to="/login">
-                  <button className="group relative mt-6 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] hover:shadow-[0_10px_24px_rgba(245,180,0,0.23)]">
-                    <span>Back to login</span>
+                  <button className="group relative mt-6 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#0A66F0] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(10,102,240,0.18)] transition-all hover:bg-[#0857D0] hover:shadow-[0_10px_24px_rgba(10,102,240,0.23)]">
+                    <span>Back To Login</span>
                   </button>
                 </Link>
               </div>
@@ -336,9 +343,9 @@ export default function ForgotPasswordPage() {
                 Remember your password?{" "}
                 <Link
                   to="/login"
-                  className="font-semibold text-[#D99700] hover:text-[#B87900]"
+                  className="font-semibold text-[#0A66F0] hover:text-[#0857D0]"
                 >
-                  Log in
+                  Log In
                 </Link>
               </p>
             )}

@@ -1,11 +1,11 @@
 /**
  * WhatsApp CRM & Messaging panel — an ADDITION to the admin dashboard,
- * reusing its shell/theme. One sidebar entry, five internal sections:
- * Inbox (default) / Contacts / Templates / Campaigns / Analytics.
+ * reusing its shell/theme. One sidebar entry, six internal sections:
+ * Inbox (default) / Contacts / Templates / Campaigns / Analytics / Settings.
  */
 import { useSearchParams } from "react-router-dom";
 import { InboxView } from "../../components/admin/whatsapp/InboxView";
-import { AnalyticsView, CampaignsView, ContactsView, TemplatesView } from "../../components/admin/whatsapp/panels";
+import { AnalyticsView, CampaignsView, ContactsView, TemplatesView, WhatsAppSettingsView } from "../../components/admin/whatsapp/panels";
 
 const TABS = [
   { key: "inbox", label: "Inbox" },
@@ -13,6 +13,7 @@ const TABS = [
   { key: "templates", label: "Templates" },
   { key: "campaigns", label: "Campaigns" },
   { key: "analytics", label: "Analytics" },
+  { key: "settings", label: "Settings" },
 ] as const;
 
 export default function AdminWhatsAppPage() {
@@ -45,6 +46,7 @@ export default function AdminWhatsAppPage() {
       {tab === "templates" && <TemplatesView />}
       {tab === "campaigns" && <CampaignsView />}
       {tab === "analytics" && <AnalyticsView />}
+      {tab === "settings" && <WhatsAppSettingsView />}
     </div>
   );
 }

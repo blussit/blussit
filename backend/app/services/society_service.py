@@ -34,7 +34,7 @@ from app.utils.geo import haversine_km
 from app.utils.money import round_rupees, split_whole_rupees
 from app.utils.slots import format_slot_12h
 from app.utils.text import normalize_plate, slugify
-from app.utils.timezone import from_stored, now_ist, to_ist
+from app.utils.timezone import day_label, from_stored, now_ist, to_ist
 # Plan month = same day next month; full-month bucket allowance follows it.
 from app.services.society_month import plan_month_end, sub_bucket_allowance  # noqa: E402
 
@@ -159,8 +159,11 @@ def plan_price_for(plan: dict, vehicle_type: str) -> tuple[int, int] | None:
     return sell_r, max(sell_r, round_rupees(mrp))
 
 
-def plan_visible_to(plan: dict, society_id: str, customer_id: str | None) -> bool:
-    """Who may see/buy a society plan (docs §1.1)."""
+def plan_visible_to(plan: dict, society_id: str, customer_id: str | None, *, staff: bool = False) -> bool:
+    """Who may see/buy a society plan (docs §1.1). `staff`: a manager /
+    admin acting for a phone they typed — a personal plan shows only when
+    it is tied to THIS society (a phone lookup must not reveal a
+    customer's personal plans made for elsewhere)."""
     if plan.get("plan_type") != PLAN_TYPE or not plan.get("is_active") or plan.get("is_deleted"):
         return False
     scope = plan.get("society_scope") or "template"
@@ -170,7 +173,8 @@ def plan_visible_to(plan: dict, society_id: str, customer_id: str | None) -> boo
     if scope == "society":
         return society_id in society_ids
     if scope == "customer":
-        return bool(customer_id) and plan.get("society_customer_id") == customer_id and (not society_ids or society_id in society_ids)
+        here = society_id in society_ids if staff else (not society_ids or society_id in society_ids)
+        return bool(customer_id) and plan.get("society_customer_id") == customer_id and here
     return False
 
 
@@ -183,6 +187,44 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 def _iso(dt: datetime | None) -> str | None:
     return from_stored(dt).isoformat() if dt else None
+
+
+def _parse_instant(value) -> datetime | None:
+    """An ISO instant frozen on an order (e.g. society_renewal_end)."""
+    if isinstance(value, datetime):
+        return _aware(value)
+    try:
+        return _aware(datetime.fromisoformat(value)) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_day(until: datetime | None) -> str | None:
+    """The last IST day a booking can be dated on before `until` (a pass
+    covers bookings dated before the day its period ends)."""
+    return (from_stored(until).date() - timedelta(days=1)).isoformat() if until else None
+
+
+def _last_day_label(until: datetime | None) -> str | None:
+    """That day as people read it — "Last Booking Day: 19 Oct 2026" shows
+    this ("19 Oct 2026")."""
+    return day_label(from_stored(until).date() - timedelta(days=1)) if until else None
+
+
+def _live_pass_refusal(plate: str, live: dict | None, tail: str = "") -> str:
+    """"MP09AB1234 already has an active plan (Last Booking Day: 19 Oct
+    2026)" — every refusal names the day (founder, 2026-10-07)."""
+    from app.services.subscription_service import last_booking_day_text
+
+    last = last_booking_day_text(live) if live else None
+    return f"{plate} already has an active plan{f' ({last})' if last else ''}{tail}."
+
+
+def _renewed_past(sub: dict, cycle_end: datetime) -> bool:
+    """This pass already runs past the cycle a renewal was priced for —
+    something else renewed it since."""
+    end = _aware(sub.get("end_date"))
+    return end is not None and end > cycle_end
 
 
 def today_ist() -> date:
@@ -201,9 +243,21 @@ def bucket_window(sub: dict, on: date) -> tuple[date, date]:
 
 
 def sub_is_live(sub: dict, now: datetime | None = None) -> bool:
+    """Inside its plan month — the daily bucket wash and the automatic
+    schedule run only then (never during an extension)."""
     now = now or now_ist()
     end = _aware(sub.get("end_date"))
     return sub.get("status") == SubscriptionStatus.ACTIVE.value and (end is None or end > now)
+
+
+def sub_is_usable(sub: dict, now: datetime | None = None) -> bool:
+    """Its remaining premium washes can still be booked: inside the plan
+    month, or inside an extension a manager/admin granted."""
+    from app.services.subscription_service import pass_usable_until
+
+    now = now or now_ist()
+    until = pass_usable_until(sub)
+    return sub.get("status") == SubscriptionStatus.ACTIVE.value and (until is None or until > now)
 
 
 def online_payment_available() -> bool:
@@ -211,22 +265,62 @@ def online_payment_available() -> bool:
 
 
 async def ensure_society_lead_time(db, subscription_id: str | None, scheduled_date, source: str) -> None:
-    """Called by BookingService.create_booking: a customer-channel booking
-    that spends a SOCIETY pass must be for tomorrow or later (IST). Staff
-    booking on a resident's behalf are exempt."""
-    if source not in ("app", "whatsapp") or not subscription_id or not ObjectId.is_valid(str(subscription_id)):
+    """Called by BookingService.create_booking (every pass booking, every
+    channel) and by a customer's reschedule:
+      - any pass covers only bookings dated inside its own period (or a
+        society pass's extension) — founder rule, PASS-3, whatever the
+        channel;
+      - a customer-channel booking that spends a SOCIETY pass must be for
+        tomorrow or later (IST). Staff booking on a resident's behalf are
+        exempt from that one."""
+    from app.services.subscription_service import booking_day, ensure_pass_covers_date
+
+    if not subscription_id or not ObjectId.is_valid(str(subscription_id)):
         return
-    sub = await db.user_subscriptions.find_one({"_id": ObjectId(subscription_id)}, {"society_id": 1})
-    if not sub or not sub.get("society_id"):
+    sub = await db.user_subscriptions.find_one({"_id": ObjectId(subscription_id)}, {"society_id": 1, "end_date": 1, "extended_until": 1})
+    if not sub:
         return
-    if isinstance(scheduled_date, datetime):
-        day = to_ist(scheduled_date).date()
-    else:
-        day = datetime.strptime(str(scheduled_date)[:10], "%Y-%m-%d").date()
-    if day <= today_ist():
-        raise BadRequestException(
-            "Society plan washes are booked a day ahead — pick tomorrow or later, or switch off your plan to book a paid wash today."
-        )
+    if source in ("app", "whatsapp") and sub.get("society_id"):
+        day = booking_day(scheduled_date)
+        if day is not None and day <= today_ist():
+            raise BadRequestException(
+                "Society plan washes are booked a day ahead — pick tomorrow or later, or switch off your plan to book a paid wash today."
+            )
+    ensure_pass_covers_date(sub, scheduled_date)
+
+
+async def society_revenue(db, s: datetime, e: datetime, service_center_id: str | None = None) -> dict:
+    """Society plan money in [s, e) — its own revenue line next to booking
+    and monthly-pass revenue (SOC-1). Read from the society_payments ledger
+    (docs/SOCIETY_PLANS.md §1.3: one row per activation / renewal actually
+    applied, cash or online — revenue reports read this), windowed by when
+    the row was written: exactly the definition PaymentService.
+    admin_collections uses for its society line, so the KPI tiles and the
+    Collections report agree. An online payment that couldn't be applied is
+    parked (needs attention), never counted as revenue. `service_center_id`
+    scopes to one center (every ledger row carries its society's center).
+    Returns rupees: {amount, online_amount, cash_amount, online_count,
+    cash_count}."""
+    match: dict = {"created_at": {"$gte": s, "$lt": e}}
+    if service_center_id:
+        match["service_center_id"] = service_center_id
+    rows = await db.society_payments.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": None,
+            "amount": {"$sum": {"$ifNull": ["$amount", 0]}},
+            "count": {"$sum": 1},
+            "cash_amount": {"$sum": {"$cond": [{"$eq": ["$method", "cash"]}, {"$ifNull": ["$amount", 0]}, 0]}},
+            "cash_count": {"$sum": {"$cond": [{"$eq": ["$method", "cash"]}, 1, 0]}},
+        }},
+    ]).to_list(length=1)
+    row = rows[0] if rows else {}
+    total = round(float(row.get("amount") or 0), 2)
+    cash = round(float(row.get("cash_amount") or 0), 2)
+    return {
+        "amount": total, "online_amount": round(total - cash, 2), "cash_amount": cash,
+        "online_count": int(row.get("count") or 0) - int(row.get("cash_count") or 0), "cash_count": int(row.get("cash_count") or 0),
+    }
 
 
 class SocietyService:
@@ -288,14 +382,24 @@ class SocietyService:
         ensure_own_center(actor_role, actor_center_id, society.get("service_center_id"))
         return society
 
-    async def society_by_token(self, token: str) -> dict:
+    async def society_by_token(self, token: str, *, resident_id: str | None = None) -> dict:
         """The public form's only key. Unknown, rotated or switched-off links
-        all read as 'not found' — nothing confirms a guess."""
+        all read as 'not found' — nothing confirms a guess. A switched-off
+        FORM only stops new sign-ups: `resident_id` (the signed-in customer)
+        with a plan or request here still opens their hub — it is where
+        they pay, renew and withdraw."""
         token = (token or "").strip()
         if len(token) < 16 or len(token) > 64:
             raise NotFoundException("This society link isn't valid any more")
         society = await self.societies.find_one({"form_token": token})
-        if not society or not society.get("is_active", True) or not society.get("form_enabled", True):
+        if not society:
+            raise NotFoundException("This society link isn't valid any more")
+        # A switched-off form — or a society switched off while residents
+        # still hold plans there (SOC-3) — stays open to those residents.
+        closed = not society.get("form_enabled", True) or not society.get("is_active", True)
+        if closed and not (resident_id and await self.enrollments.collection.count_documents(
+            {"society_id": str(society["_id"]), "customer_id": resident_id, "status": {"$ne": "cancelled"}, "is_deleted": {"$ne": True}}, limit=1,
+        )):
             raise NotFoundException("This society link isn't valid any more")
         return society
 
@@ -369,7 +473,7 @@ class SocietyService:
             "prices": prices,
         }
 
-    async def plans_for(self, society: dict, customer_id: str | None) -> list[dict]:
+    async def plans_for(self, society: dict, customer_id: str | None, *, staff: bool = False) -> list[dict]:
         """Plans offered in this society (to this customer, if known)."""
         sid = str(society["_id"])
         query: dict = {
@@ -382,12 +486,40 @@ class SocietyService:
         if customer_id:
             query["$or"].append({"society_scope": "customer", "society_customer_id": customer_id})
         plans = await self.plans.collection.find(query).sort([("display_order", 1), ("created_at", 1)]).to_list(length=100)
-        plans = [p for p in plans if plan_visible_to(p, sid, customer_id)]
+        plans = [p for p in plans if plan_visible_to(p, sid, customer_id, staff=staff)]
         card = await self.rate_card()
         car_types = await self._car_types(card["premium_service_ids"] + [p.get("society_premium_service_id") for p in plans])
         services = await self._services_by_id([p.get("society_premium_service_id") for p in plans])
+        # A customised combination is offered at TODAY's rate card: an auto
+        # plan priced from an older card stays with the residents already
+        # on it (they renew at their price) but is never offered again (SOC-2).
+        plans = [p for p in plans if not p.get("auto_created") or self._auto_plan_current(p, card, services.get(p.get("society_premium_service_id") or ""), car_types)]
         views = [await self.plan_view(p, car_types, services) for p in plans]
         return [v for v in views if v["prices"]]
+
+    @staticmethod
+    def _combo_prices(card: dict, service: dict, car_types: list[dict], days: int, count: int) -> tuple[dict, dict]:
+        """(selling, MRP) per car type for a customised combination at this
+        rate card — whole rupees, only the types the service is offered for."""
+        selling, mrps = {}, {}
+        for t in car_types:
+            if service_offered_for(service, t["id"]):
+                selling[t["id"]], mrps[t["id"]] = custom_price(card, service, t["id"], days, count)
+        return selling, mrps
+
+    @classmethod
+    def _auto_plan_current(cls, plan: dict, card: dict, service: dict | None, car_types: list[dict]) -> bool:
+        """An auto plan matches the rate card when its frozen per-type prices
+        are exactly what the card gives that combination today."""
+        if not service:
+            return False
+        selling, mrps = cls._combo_prices(card, service, car_types, int(plan.get("society_bucket_days") or 0), int(plan.get("society_premium_count") or 0))
+
+        def same(stored: dict | None, fresh: dict) -> bool:
+            stored = {k: float(v) for k, v in (stored or {}).items()}
+            return stored == {k: float(v) for k, v in fresh.items()}
+
+        return bool(selling) and same(plan.get("vehicle_type_discounted_prices"), selling) and same(plan.get("vehicle_type_prices"), mrps)
 
     async def _premium_service_checked(self, service_id: str, allowed_ids: list[str] | None = None) -> dict:
         service = await self._service(service_id)
@@ -397,16 +529,29 @@ class SocietyService:
             raise BadRequestException("That premium wash isn't offered for society plans.")
         return service
 
-    async def resolve_choice(self, society: dict, choice, customer_id: str | None, *, create: bool) -> tuple[dict, dict]:
+    async def resolve_choice(self, society: dict, choice, customer_id: str | None, *, create: bool, staff: bool = False) -> tuple[dict, dict]:
         """(plan, premium service) for a PlanChoice. A customised combination
         finds — or, with create=True, makes — the society's own auto plan
         for it, priced from the rate card at this moment."""
         sid = str(society["_id"])
         if choice.plan_id:
             plan = await self.plans.find_by_id(choice.plan_id) if ObjectId.is_valid(choice.plan_id) else None
-            if not plan or not plan_visible_to(plan, sid, customer_id):
+            if not plan or not plan_visible_to(plan, sid, customer_id, staff=staff):
                 raise NotFoundException("That plan isn't available in this society.")
             service = await self._premium_service_checked(plan.get("society_premium_service_id") or "")
+            if plan.get("auto_created"):
+                # A customised combination picked from a page loaded before a
+                # rate-card change: it is offered at today's card (SOC-2).
+                card = await self.rate_card()
+                if not self._auto_plan_current(plan, card, service, await self._car_types([plan.get("society_premium_service_id")])):
+                    from types import SimpleNamespace
+
+                    combo = SimpleNamespace(
+                        bucket_days=int(plan.get("society_bucket_days") or 0),
+                        premium_service_id=plan.get("society_premium_service_id"),
+                        premium_count=int(plan.get("society_premium_count") or 0),
+                    )
+                    return await self.resolve_choice(society, SimpleNamespace(plan_id=None, custom=combo), customer_id, create=create, staff=staff)
             return plan, service
 
         combo = choice.custom
@@ -418,21 +563,22 @@ class SocietyService:
         if combo.premium_count not in card["premium_count_options"]:
             raise BadRequestException("Pick one of the offered premium-wash counts.")
         service = await self._premium_service_checked(combo.premium_service_id, card["premium_service_ids"])
+        car_types = await self._car_types([combo.premium_service_id])
+        selling, mrps = self._combo_prices(card, service, car_types, combo.bucket_days, combo.premium_count)
+        if not selling:
+            raise BadRequestException("That premium wash isn't offered for cars.")
+        # The society's auto plan for this combination AT THIS RATE CARD:
+        # versioned by the prices the card gives it today, so a rate-card
+        # change makes (on first use) a new version for new residents, while
+        # residents already on an older version keep renewing at theirs.
         match = {
             "plan_type": PLAN_TYPE, "auto_created": True, "is_active": True, "is_deleted": {"$ne": True},
             "society_ids": sid, "society_bucket_days": combo.bucket_days,
             "society_premium_service_id": combo.premium_service_id, "society_premium_count": combo.premium_count,
         }
-        existing = await self.plans.collection.find_one(match)
-        if existing:
-            return existing, service
-        car_types = await self._car_types([combo.premium_service_id])
-        selling, mrps = {}, {}
-        for t in car_types:
-            if service_offered_for(service, t["id"]):
-                selling[t["id"]], mrps[t["id"]] = custom_price(card, service, t["id"], combo.bucket_days, combo.premium_count)
-        if not selling:
-            raise BadRequestException("That premium wash isn't offered for cars.")
+        for existing in await self.plans.collection.find(match).sort("created_at", -1).to_list(length=50):
+            if self._auto_plan_current(existing, card, service, car_types):
+                return existing, service
         draft = self._plan_doc(
             name=combo_name(combo.bucket_days, combo.premium_count, service.get("name") or "premium wash"),
             description="Custom plan for this society.",
@@ -611,12 +757,19 @@ class SocietyService:
         return center
 
     async def create_society(self, payload, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
-        if actor_role == "admin" and payload.service_center_id:
-            center = await self.db.service_centers.find_one({"_id": ObjectId(payload.service_center_id)}) if ObjectId.is_valid(payload.service_center_id) else None
-            if not center:
+        # Always the pin's center: premium washes are booked at the
+        # society's address, which resolves the center from the pin — a
+        # society filed under another center would send its bookings there
+        # (its captains can't take them, its manager can't see them).
+        center = await self._resolve_center(payload.latitude, payload.longitude, payload.pincode)
+        if actor_role == "admin" and payload.service_center_id and payload.service_center_id != str(center["_id"]):
+            chosen = await self.db.service_centers.find_one({"_id": ObjectId(payload.service_center_id)}, {"name": 1}) if ObjectId.is_valid(payload.service_center_id) else None
+            if not chosen:
                 raise BadRequestException("Pick a valid service center.")
-        else:
-            center = await self._resolve_center(payload.latitude, payload.longitude, payload.pincode)
+            raise BadRequestException(
+                f"This pin is served by {center.get('name') or 'another center'}, not {chosen.get('name') or 'the center you picked'} — "
+                "pick that center or fix the pin."
+            )
         center_id = str(center["_id"])
         if actor_role == "manager":
             if not actor_center_id:
@@ -624,12 +777,24 @@ class SocietyService:
             if center_id != actor_center_id:
                 raise BadRequestException(f"This location is served by {center.get('name') or 'another center'}, not your center.")
         lead_id = getattr(payload, "lead_id", None)
+        lead_before = None
         if lead_id:
             from app.services.society_support_service import SocietyLeadService
 
-            # Checked before anything is written: only a request this actor
-            # may see can be marked registered.
-            await SocietyLeadService(self.db)._lead_for(lead_id, actor_role, actor_center_id)
+            # Claimed before anything is written (SOC-6): only a request this
+            # actor may see, and only once — a second simultaneous
+            # registration from the same request is refused (409).
+            lead_before = await SocietyLeadService(self.db).claim_for_registration(lead_id, actor_id, actor_role, actor_center_id)
+        try:
+            return await self._create_society_doc(payload, center_id, actor_id, actor_role, actor_center_id, lead_id)
+        except BaseException:
+            if lead_before is not None:
+                from app.services.society_support_service import SocietyLeadService
+
+                await SocietyLeadService(self.db).release_registration(lead_before)
+            raise
+
+    async def _create_society_doc(self, payload, center_id: str, actor_id: str, actor_role: str, actor_center_id: str | None, lead_id: str | None) -> dict:
         doc = payload.model_dump(exclude={"service_center_id", "lead_id"})
         doc.update({
             "service_center_id": center_id,
@@ -654,13 +819,33 @@ class SocietyService:
     # which silently switched off the captain's far-from-society check.
     _CLEARABLE_SOCIETY_FIELDS = frozenset({"area", "state", "contact_name", "contact_phone", "notes"})
 
-    async def update_society(self, society: dict, payload) -> dict:
+    async def update_society(self, society: dict, payload, actor_role: str = "admin") -> dict:
         data = {
             k: v for k, v in payload.model_dump(exclude_unset=True).items()
             if v is not None or k in self._CLEARABLE_SOCIETY_FIELDS
         }
-        if "latitude" in data and data.get("latitude") is not None:
-            center = await self._resolve_center(data["latitude"], data["longitude"], data.get("pincode") or society.get("pincode"))
+        if "is_active" in data and bool(data["is_active"]) != bool(society.get("is_active", True)):
+            # Switching a society off strands whoever paid for it (hub,
+            # captain list, schedule all stop): admin-only, and never while
+            # anyone still holds a live plan there (SOC-3).
+            if actor_role != "admin":
+                raise ForbiddenException("Only an admin can switch a society on or off.")
+            if not data["is_active"]:
+                live = await self._live_plan_count(str(society["_id"]))
+                if live:
+                    raise ConflictException(
+                        f"{live} car{'s' if live != 1 else ''} still have a live plan in this society — "
+                        "switch the form off to stop new sign-ups, and switch the society off once their plans have ended or been cancelled."
+                    )
+        elif "is_active" in data:
+            data.pop("is_active")
+        if data.get("latitude") is not None or data.get("pincode"):
+            # The pin (or the pincode it falls back to) must still resolve to
+            # the society's own center — bookings follow the pin.
+            center = await self._resolve_center(
+                data.get("latitude", society.get("latitude")), data.get("longitude", society.get("longitude")),
+                data.get("pincode") or society.get("pincode"),
+            )
             if str(center["_id"]) != society.get("service_center_id"):
                 raise BadRequestException("That pin is served by another center — register it there instead.")
         for key in ("name", "address_line", "city", "pincode"):
@@ -669,13 +854,22 @@ class SocietyService:
         updated = await self.societies.update_by_id(str(society["_id"]), data)
         return await self.society_detail(updated)
 
+    async def _live_plan_count(self, society_id: str) -> int:
+        """Cars holding a plan here that can still be used (plan month or a
+        granted extension)."""
+        now = now_ist()
+        return await self.db.user_subscriptions.count_documents({
+            "society_id": society_id, "status": SubscriptionStatus.ACTIVE.value, "is_deleted": {"$ne": True},
+            "$or": [{"end_date": None}, {"end_date": {"$gt": now}}, {"extended_until": {"$gt": now}}],
+        })
+
     async def rotate_link(self, society: dict) -> dict:
         updated = await self.societies.update_by_id(str(society["_id"]), {"form_token": secrets.token_urlsafe(18), "form_enabled": True})
         return await self.society_detail(updated)
 
     async def captains_for_center(self, center_id: str) -> list[dict]:
         rows = await self.db.users.find(
-            {"role": "captain", "service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$ne": "suspended"}},
+            {"role": "captain", "service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$nin": ["suspended", "inactive"]}},
             {"full_name": 1, "phone": 1, "employee_id": 1},
         ).sort("full_name", 1).to_list(length=200)
         return [{"id": str(r["_id"]), "name": r.get("full_name"), "phone": r.get("phone"), "employee_id": r.get("employee_id")} for r in rows]
@@ -724,25 +918,23 @@ class SocietyService:
             return {}
         now = now_ist()
         enroll = await self.db.society_enrollments.aggregate([
-            {"$match": {"society_id": {"$in": society_ids}, "is_deleted": {"$ne": True}}},
-            {"$group": {
-                "_id": "$society_id",
-                "residents": {"$sum": {"$cond": [{"$eq": ["$status", "active"]}, 1, 0]}},
-                "requests": {"$sum": {"$cond": [{"$in": ["$status", list(OPEN_STATUSES)]}, 1, 0]}},
-            }},
+            {"$match": {"society_id": {"$in": society_ids}, "status": {"$in": list(OPEN_STATUSES)}, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": "$society_id", "requests": {"$sum": 1}}},
         ]).to_list(length=None)
+        # Residents = people holding a LIVE plan here, counted once each — an
+        # enrollment stays "active" after every car on it lapsed (SOC-9).
         cars = await self.db.user_subscriptions.aggregate([
             {"$match": {"society_id": {"$in": society_ids}, "status": "active", "end_date": {"$gt": now}, "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$society_id", "cars": {"$sum": 1}}},
+            {"$group": {"_id": "$society_id", "cars": {"$sum": 1}, "residents": {"$addToSet": "$customer_id"}}},
         ]).to_list(length=None)
         from app.services.society_support_service import open_issue_counts
 
         issues = await open_issue_counts(self.db, society_ids)
         out: dict[str, dict] = {sid: {"residents": 0, "requests": 0, "active_cars": 0, "open_issues": issues.get(sid, 0)} for sid in society_ids}
         for r in enroll:
-            out[r["_id"]].update(residents=r["residents"], requests=r["requests"])
+            out[r["_id"]]["requests"] = r["requests"]
         for r in cars:
-            out[r["_id"]]["active_cars"] = r["cars"]
+            out[r["_id"]].update(active_cars=r["cars"], residents=len(r["residents"]))
         return out
 
     async def society_detail(self, society: dict) -> dict:
@@ -858,12 +1050,15 @@ class SocietyService:
     # Public form + quoting
     # ------------------------------------------------------------------
 
-    async def public_form(self, society: dict, customer_id: str | None) -> dict:
+    async def public_form(self, society: dict, customer_id: str | None, *, staff: bool = False) -> dict:
         card = await self.rate_card()
         services = await self._services_by_id(card["premium_service_ids"])
         return {
             "society": {"name": society.get("name"), "area": society.get("area"), "city": society.get("city")},
-            "plans": await self.plans_for(society, customer_id),
+            # False: the form is switched off — only an existing resident's
+            # hub opens (new sign-ups are refused).
+            "form_enabled": bool(society.get("form_enabled", True)),
+            "plans": await self.plans_for(society, customer_id, staff=staff),
             "customise": {
                 "enabled": bool(card.get("allow_customise")),
                 "bucket_day_options": [{"days": d, "label": bucket_label(d)} for d in card["bucket_day_options"]],
@@ -875,8 +1070,8 @@ class SocietyService:
             "lead_days": 1,
         }
 
-    async def quote(self, society: dict, choice, vehicle_types: list[str], customer_id: str | None) -> dict:
-        plan, service = await self.resolve_choice(society, choice, customer_id, create=False)
+    async def quote(self, society: dict, choice, vehicle_types: list[str], customer_id: str | None, *, staff: bool = False) -> dict:
+        plan, service = await self.resolve_choice(society, choice, customer_id, create=False, staff=staff)
         names = await self._type_names()
         cars = []
         for vt in vehicle_types:
@@ -986,7 +1181,14 @@ class SocietyService:
     # Enrollment
     # ------------------------------------------------------------------
 
-    async def _ensure_vehicle(self, customer_id: str, vehicle_type: str, plate: str, type_name: str) -> dict:
+    async def _ensure_vehicle(
+        self, customer_id: str, vehicle_type: str, plate: str, type_name: str, *, retype: bool = True, create: bool = True,
+    ) -> dict | None:
+        """The customer's saved car with this plate (made if missing).
+        `retype=False` (staff adding a resident by phone — the account may
+        be anyone's): an existing car is never changed, a type mismatch is
+        refused instead. `create=False` (a read-only preview, with
+        retype=False): the same refusals, None when no such car is saved."""
         from app.schemas.profile_schema import VehicleCreateRequest
         from app.services.profile_service import VehicleService
 
@@ -996,13 +1198,20 @@ class SocietyService:
         )
         if existing:
             if existing.get("vehicle_type") != vehicle_type:
+                if not retype:
+                    names = await self._type_names()
+                    saved = names.get(existing.get("vehicle_type") or "") or "another car type"
+                    raise BadRequestException(f"{plate} is saved on this customer's account as {saved} — pick {saved} for it.")
                 # Refuse BEFORE retyping the saved car: a car already on a
                 # live pass must keep the type that pass was sold for.
-                if await self._live_pass_on(customer_id, str(existing["_id"])):
-                    raise BadRequestException(f"{plate} already has an active plan.")
+                live = await self._live_pass_on(customer_id, str(existing["_id"]))
+                if live:
+                    raise BadRequestException(_live_pass_refusal(plate, live))
                 await self.db.vehicles.update_one({"_id": existing["_id"]}, {"$set": {"vehicle_type": vehicle_type, "updated_at": now_ist()}})
                 existing["vehicle_type"] = vehicle_type
             return existing
+        if not create:
+            return None
         created = await VehicleService(self.db).create(
             customer_id,
             VehicleCreateRequest(vehicle_type=vehicle_type, brand=type_name or "Car", model="", registration_number=plate, acknowledge_shared_registration=True),
@@ -1010,6 +1219,11 @@ class SocietyService:
         return await self.db.vehicles.find_one({"_id": ObjectId(created["id"])})
 
     async def _ensure_address(self, customer_id: str, society: dict, flat: str) -> str:
+        """The customer's address for this flat in this society: the
+        matching saved one (its society-derived fields — pin, street — kept
+        in step with the society), else a new one. Another flat never
+        rewrites a saved address: bookings already point at it, and staff
+        adding a resident by phone may be acting on someone else's account."""
         sid = str(society["_id"])
         fields = {
             "label": "Society",
@@ -1022,8 +1236,14 @@ class SocietyService:
             "latitude": society.get("latitude"),
             "longitude": society.get("longitude"),
         }
-        existing = await self.db.addresses.find_one({"owner_id": customer_id, "society_id": sid, "is_deleted": {"$ne": True}})
+        existing = await self.db.addresses.find_one(
+            {"owner_id": customer_id, "society_id": sid, "line1": fields["line1"], "is_deleted": {"$ne": True}}
+        )
         if existing:
+            from app.services.profile_service import freeze_live_bookings_for_address
+
+            # Live bookings keep the place they were booked to (spec 1.3).
+            await freeze_live_bookings_for_address(self.db, existing)
             await self.db.addresses.update_one({"_id": existing["_id"]}, {"$set": {**fields, "updated_at": now_ist()}})
             return str(existing["_id"])
         has_any = await self.db.addresses.count_documents({"owner_id": customer_id, "is_deleted": {"$ne": True}}, limit=1)
@@ -1035,18 +1255,81 @@ class SocietyService:
         return str(result.inserted_id)
 
     async def _live_pass_on(self, customer_id: str, vehicle_id: str) -> dict | None:
+        from app.services.subscription_service import pass_blocks_new
+
         now = now_ist()
+        # A scheduled custom-plan renewal holds the car too (PLANS-2).
         subs = await self.db.user_subscriptions.find(
-            {"customer_id": customer_id, "vehicle_id": vehicle_id, "status": "active", "is_deleted": {"$ne": True}}
+            {"customer_id": customer_id, "vehicle_id": vehicle_id, "status": {"$in": ["active", "scheduled"]}, "is_deleted": {"$ne": True}}
         ).to_list(length=20)
-        return next((s for s in subs if (_aware(s.get("end_date")) or now) > now), None)
+        live = next((s for s in subs if pass_blocks_new(s, now)), None)
+        return live or await self._plate_on_society_pass(vehicle_id, now)
+
+    async def _plate_on_society_pass(self, vehicle_id: str, now: datetime) -> dict | None:
+        """A live SOCIETY pass on the same plate saved under any other car
+        record — another account (a family member signing up separately)
+        included. One car, one society pass: the captain would otherwise
+        wash it twice and two plans pay for it."""
+        vehicle = await self.db.vehicles.find_one(
+            {"_id": ObjectId(vehicle_id)}, {"registration_number_normalized": 1, "registration_number": 1}
+        ) if ObjectId.is_valid(vehicle_id or "") else None
+        normalized = (vehicle or {}).get("registration_number_normalized") or normalize_plate((vehicle or {}).get("registration_number") or "")
+        if not normalized:
+            return None
+        twins = await self.db.vehicles.find(
+            {"registration_number_normalized": normalized, "_id": {"$ne": vehicle["_id"]}}, {"_id": 1, "owner_id": 1}
+        ).to_list(length=20)
+        if not twins:
+            return None
+        # (customer, vehicle, status) is the indexed pass lookup.
+        subs = await self.db.user_subscriptions.find({
+            "$or": [{"customer_id": t.get("owner_id"), "vehicle_id": str(t["_id"]), "status": "active"} for t in twins],
+            "society_id": {"$nin": [None, ""]}, "is_deleted": {"$ne": True},
+        }).to_list(length=20)
+        from app.services.subscription_service import pass_blocks_new
+
+        return next((s for s in subs if pass_blocks_new(s, now)), None)
+
+    async def _plate_key(self, vehicle_id: str, registration_number: str | None) -> str | None:
+        vehicle = await self.db.vehicles.find_one(
+            {"_id": ObjectId(vehicle_id)}, {"registration_number_normalized": 1, "registration_number": 1}
+        ) if ObjectId.is_valid(vehicle_id or "") else None
+        return (vehicle or {}).get("registration_number_normalized") or normalize_plate((vehicle or {}).get("registration_number") or registration_number or "") or None
+
+    async def _claim_keys(self, customer_id: str, vehicle_id: str, registration_number: str | None) -> list[str]:
+        """A society pass occupies its car AND its plate (across accounts)."""
+        from app.services.subscription_service import pass_claim_keys
+
+        return pass_claim_keys(customer_id, vehicle_id=vehicle_id, society_plate=await self._plate_key(vehicle_id, registration_number))
+
+    async def _hold_claims(self, sub: dict) -> bool:
+        """Before a renewal brings a lapsed pass back: its car and plate
+        must still be its own (or free). True = held by this pass now."""
+        from app.services.subscription_service import PASS_CLAIMS, PassClaimConflict, bind_pass_claim, claim_pass
+
+        if not sub.get("vehicle_id"):
+            return True
+        sid = str(sub["_id"])
+        for key in await self._claim_keys(sub["customer_id"], sub["vehicle_id"], None):
+            try:
+                claim = await claim_pass(self.db, [key], sub["customer_id"])
+            except PassClaimConflict:
+                held = await self.db[PASS_CLAIMS].find_one({"_id": key})
+                if (held or {}).get("subscription_id") != sid:
+                    return False
+                continue
+            await bind_pass_claim(self.db, claim, sid)
+        return True
 
     async def enroll(self, society: dict, payload, customer: dict, *, source: str, actor_id: str | None = None) -> dict:
         customer_id = str(customer["_id"])
         sid = str(society["_id"])
         if not society.get("is_active", True):
             raise BadRequestException("This society isn't taking new residents right now.")
-        plan, service = await self.resolve_choice(society, payload, customer_id, create=True)
+        # Staff type a phone — the account behind it may be anyone's: only
+        # this society's plans, and that customer's saved cars are not retyped.
+        by_staff = source == "manager"
+        plan, service = await self.resolve_choice(society, payload, customer_id, create=True, staff=by_staff)
         names = await self._type_names()
         # A coupon is checked now (the resident is known: per-resident limit
         # too) and frozen on the request; it is COUNTED only on activation.
@@ -1059,10 +1342,13 @@ class SocietyService:
         cars = []
         for car in payload.cars:
             priced = self._car_price(plan, service, car.vehicle_type, names)
-            vehicle = await self._ensure_vehicle(customer_id, car.vehicle_type, car.registration_number, names.get(car.vehicle_type, ""))
+            vehicle = await self._ensure_vehicle(
+                customer_id, car.vehicle_type, car.registration_number, names.get(car.vehicle_type, ""), retype=not by_staff,
+            )
             vid = str(vehicle["_id"])
-            if await self._live_pass_on(customer_id, vid):
-                raise BadRequestException(f"{car.registration_number} already has an active plan.")
+            live = await self._live_pass_on(customer_id, vid)
+            if live:
+                raise BadRequestException(_live_pass_refusal(car.registration_number, live))
             cars.append({
                 "vehicle_id": vid, "vehicle_type": car.vehicle_type, "registration_number": car.registration_number,
                 "price": priced["price"], "mrp": priced["mrp"], "subscription_id": None, "status": "pending",
@@ -1133,8 +1419,12 @@ class SocietyService:
 
     async def enrollment_view(
         self, enrollment: dict, subs: dict[str, dict] | None = None, bucket_used: dict[str, int] | None = None,
-        names: dict[str, str] | None = None, service_names: dict[str, str] | None = None,
+        names: dict[str, str] | None = None, service_names: dict[str, str] | None = None, *, staff: bool = False,
     ) -> dict:
+        """`staff`: adds the extension controls/history (who extended a pass
+        is staff detail; the resident sees only until when)."""
+        from app.services.subscription_service import PASS_EXTENSION_MAX_DAYS, extension_view, in_extension, pass_usable_until
+
         names = names if names is not None else await self._type_names()
         subs = subs if subs is not None else await self._subs_by_id([c.get("subscription_id") for c in enrollment.get("cars") or []])
         if service_names is None:
@@ -1147,9 +1437,13 @@ class SocietyService:
             sub_view = None
             if sub:
                 end = _aware(sub.get("end_date"))
-                live = sub_is_live(sub, now)
+                # Bookable: inside the plan month or a granted extension.
+                live = sub_is_usable(sub, now)
                 can_renew = c.get("status") == "active" and sub.get("status") != "cancelled" and end is not None and end - now <= RENEW_WINDOW
                 renew_open = renew_open or can_renew
+                until = pass_usable_until(sub)
+                extended = _aware(sub.get("extended_until"))
+                used = int(sub.get("extension_days") or 0)
                 sub_view = {
                     "id": str(sub["_id"]),
                     "status": "active" if live else ("cancelled" if sub.get("status") == "cancelled" else "expired"),
@@ -1158,7 +1452,22 @@ class SocietyService:
                     "end_date": _iso(sub.get("end_date")),
                     "cycle_start": _iso(sub.get("cycle_start") or sub.get("start_date")),
                     "can_renew": can_renew,
+                    # Extension (founder rule): "Book remaining washes until".
+                    "extension_days": used,
+                    "extended_until": _iso(extended) if extended else None,
+                    "bookable_until": _iso(until) if until else None,
+                    "last_bookable_day": _last_day(until),
+                    "last_booking_day_label": _last_day_label(until),
+                    "in_extension": in_extension(sub, now),
                 }
+                if staff:
+                    sub_view["extension_days_left"] = max(0, PASS_EXTENSION_MAX_DAYS - used)
+                    sub_view["can_extend"] = (
+                        sub.get("status") in ("active", "expired") and int(sub.get("remaining_service_count") or 0) > 0
+                        and end is not None and end - now <= RENEW_WINDOW and used < PASS_EXTENSION_MAX_DAYS
+                        and end + timedelta(days=PASS_EXTENSION_MAX_DAYS) > now
+                    )
+                    sub_view["extensions"] = [extension_view(e) for e in sub.get("extensions") or []]
             cars.append({
                 "vehicle_id": c.get("vehicle_id"),
                 "vehicle_type": c.get("vehicle_type"),
@@ -1263,7 +1572,7 @@ class SocietyService:
         usage = await self._bucket_usage(sid, [s for s in subs.values() if s.get("status") == "active"])
         names = await self._type_names()
         service_names = await self._service_names([e.get("premium_service_id") for e in rows])
-        return [await self.enrollment_view(e, subs, usage, names, service_names) for e in rows]
+        return [await self.enrollment_view(e, subs, usage, names, service_names, staff=True) for e in rows]
 
     async def get_enrollment(self, enrollment_id: str) -> dict:
         enrollment = await self.enrollments.find_by_id(enrollment_id) if ObjectId.is_valid(enrollment_id or "") else None
@@ -1288,7 +1597,8 @@ class SocietyService:
         names = await self._type_names()
         service_names = await self._service_names([e.get("premium_service_id") for e in rows])
         views = [await self.enrollment_view(e, subs, usage, names, service_names) for e in rows]
-        live_sub_ids = [k for k, s in subs.items() if sub_is_live(s)]
+        # Bookable passes — a granted extension's bookings count as upcoming.
+        live_sub_ids = [k for k, s in subs.items() if sub_is_usable(s)]
         upcoming = []
         if live_sub_ids:
             # Today onwards only — a past wash still "pending" is not upcoming.
@@ -1331,16 +1641,19 @@ class SocietyService:
 
     async def activate(
         self, enrollment: dict, *, method: str, actor_id: str | None, order: dict | None = None, note: str | None = None,
-        expected_revision: int | None = None, coupon_code: str | None = None, remove_coupon: bool = False,
+        expected_revision: int | None = None, coupon_code: str | None = None, remove_coupon: bool = False, notify: bool = True,
     ) -> dict:
         """Requested/awaiting-payment -> active: one pass per car. Claimed
         atomically, so a double tap or a webhook racing the verify can only
         activate once. A car that meanwhile got another live pass is
         skipped (and reported) — never double-passed. A coupon on the
         request (or applied now by staff) takes its whole-rupee discount off
-        and is counted once, here."""
+        and is counted once, here. `notify=False`: the caller confirms to
+        the resident itself (the result carries the message as `notice`)."""
         eid = str(enrollment["_id"])
         pending = [c for c in enrollment.get("cars") or [] if c.get("status") == "pending"]
+        if order is None and not (await self.societies.find_by_id(enrollment.get("society_id") or "") or {}).get("is_active", True):
+            raise BadRequestException("This society is switched off — it isn't taking new residents.")
         if order is None and pending:
             clashes = [c for c in pending if await self._live_pass_on(enrollment["customer_id"], c["vehicle_id"])]
             if len(clashes) == len(pending):
@@ -1384,36 +1697,54 @@ class SocietyService:
                 cars.append({**car, "status": "skipped", "note": "Car already had another active plan"})
                 skipped.append(car["registration_number"])
                 continue
+            # Insert-first claim on the car and its plate (SOC-5): a second
+            # account with the same plate, or the same car in another
+            # society, activating at this very moment can't both get a pass.
+            from app.services.subscription_service import PassClaimConflict, bind_pass_claim, claim_pass, release_pass_claim
+
+            try:
+                claim = await claim_pass(self.db, await self._claim_keys(claimed["customer_id"], car["vehicle_id"], car.get("registration_number")), claimed["customer_id"])
+            except PassClaimConflict:
+                cars.append({**car, "status": "skipped", "note": "Car already had another active plan"})
+                skipped.append(car["registration_number"])
+                continue
             share = int(share_of.get(car["vehicle_id"], 0))
-            sub = await self.subs.create({
-                "customer_id": claimed["customer_id"],
-                "plan_id": claimed["plan_id"],
-                "service_center_id": claimed.get("service_center_id"),
-                "vehicle_id": car["vehicle_id"],
-                "service_id": claimed.get("premium_service_id"),
-                "vehicle_type": car["vehicle_type"],
-                "purchased_price": float(car["price"]),
-                "amount_paid": float(int(car["price"]) - share),
-                "coupon_code": claimed.get("coupon_code") if share else None,
-                "payment_method": method,
-                "status": SubscriptionStatus.ACTIVE.value,
-                "total_service_count": count,
-                "remaining_service_count": count,
-                "total_by_category": {},
-                "remaining_by_category": {},
-                "start_date": now,
-                "end_date": end,
-                "auto_renew": False,
-                "razorpay_subscription_id": None,
-                "renewal_count": 0,
-                "plan_kind": PLAN_TYPE,
-                "society_id": claimed["society_id"],
-                "enrollment_id": eid,
-                "bucket_days": int(claimed.get("bucket_days") or 0),
-                "cycle_start": now,
-                "prev_cycle_start": None,
-                "granted_by": actor_id,
-            })
+            try:
+                sub = await self.subs.create({
+                    "customer_id": claimed["customer_id"],
+                    "plan_id": claimed["plan_id"],
+                    "service_center_id": claimed.get("service_center_id"),
+                    "vehicle_id": car["vehicle_id"],
+                    "service_id": claimed.get("premium_service_id"),
+                    "vehicle_type": car["vehicle_type"],
+                    "purchased_price": float(car["price"]),
+                    "amount_paid": float(int(car["price"]) - share),
+                    "coupon_code": claimed.get("coupon_code") if share else None,
+                    "payment_method": method,
+                    "status": SubscriptionStatus.ACTIVE.value,
+                    "total_service_count": count,
+                    "remaining_service_count": count,
+                    "total_by_category": {},
+                    "remaining_by_category": {},
+                    "start_date": now,
+                    "end_date": end,
+                    "auto_renew": False,
+                    "razorpay_subscription_id": None,
+                    "renewal_count": 0,
+                    "plan_kind": PLAN_TYPE,
+                    "society_id": claimed["society_id"],
+                    "enrollment_id": eid,
+                    "bucket_days": int(claimed.get("bucket_days") or 0),
+                    "cycle_start": now,
+                    "prev_cycle_start": None,
+                    "granted_by": actor_id,
+                    "extension_days": 0,
+                    "extended_until": None,
+                })
+            except BaseException:
+                await release_pass_claim(self.db, claim)
+                raise
+            await bind_pass_claim(self.db, claim, str(sub["_id"]))
             created_ids.append(str(sub["_id"]))
             cars.append({**car, "status": "active", "subscription_id": str(sub["_id"]), "discount": share})
         activated_cars = [c for c in cars if c.get("subscription_id") in created_ids]
@@ -1436,6 +1767,7 @@ class SocietyService:
             # meantime). An online payment for it is parked by the caller.
             update["status"] = "awaiting_payment" if order else "requested"
         await self.enrollments.update_by_id(eid, update)
+        notice = None
         if created_ids:
             await self.payments.create({
                 "society_id": claimed["society_id"], "enrollment_id": eid, "customer_id": claimed["customer_id"],
@@ -1445,14 +1777,16 @@ class SocietyService:
                 "collected_by": actor_id if method == "cash" else None,
                 "razorpay_order_id": (order or {}).get("razorpay_order_id"),
             })
-            await self._tell_resident(
-                claimed["customer_id"], "Society plan active",
+            notice = (
+                "Society plan active",
                 f"Your {claimed.get('plan_name')} at {society.get('name')} is active for "
                 f"{', '.join(c['registration_number'] for c in cars if c.get('subscription_id') in created_ids)}. "
                 f"Valid till {end.strftime('%d %b %Y')}.",
             )
+            if notify:
+                await self._tell_resident(claimed["customer_id"], *notice)
         fresh = await self.get_enrollment(eid)
-        return {"enrollment": await self.enrollment_view(fresh), "activated": len(created_ids), "skipped": skipped}
+        return {"enrollment": await self.enrollment_view(fresh), "activated": len(created_ids), "skipped": skipped, "notice": notice}
 
     @staticmethod
     def _revision_match(expected_revision: int) -> list[dict]:
@@ -1539,15 +1873,22 @@ class SocietyService:
 
     async def renew(
         self, enrollment: dict, *, method: str, actor_id: str | None, order: dict | None = None, subscription_ids: list[str] | None = None,
-        coupon_code: str | None = None,
+        coupon_code: str | None = None, notify: bool = True,
     ) -> dict:
         """Next plan month for every car in its renewal window (or the
         exact cars an online renewal order was minted for). A coupon (staff
         cash renewal, or the one an online renewal order was priced with)
-        comes off in whole rupees and is counted once per renewal."""
+        comes off in whole rupees and is counted once per renewal.
+        `notify=False`: the caller confirms to the resident itself."""
+        # The cycle an online renewal was priced for (payment_quote): a car
+        # already renewed past it — the hub checkout AND a WhatsApp link both
+        # paid — is not renewed again; renewed < paid for parks the order.
+        frozen = _parse_instant((order or {}).get("society_renewal_end"))
         if subscription_ids:
             subs = list((await self._subs_by_id(subscription_ids)).values())
             subs = [s for s in subs if s.get("enrollment_id") == str(enrollment["_id"]) and s.get("status") != SubscriptionStatus.CANCELLED.value]
+            if frozen is not None:
+                subs = [s for s in subs if not _renewed_past(s, frozen)]
             # Paid for, but the car moved to another plan meanwhile: skipped,
             # so the order is parked for a human (renewed < paid for).
             subs = [s for s in subs if not await self._car_on_another_pass(s)]
@@ -1555,6 +1896,11 @@ class SocietyService:
                 raise BadRequestException("Nothing left to renew on this enrollment.")
         else:
             subs = await self._renewable_subs(enrollment)
+        # A lapsed pass coming back: its car and plate must still be its own
+        # — another account's society pass may have taken the plate (SOC-5).
+        subs = [s for s in subs if await self._hold_claims(s)]
+        if not subs:
+            raise BadRequestException("These cars are on another active plan now — nothing to renew here.")
         count = int(enrollment.get("premium_count") or 0)
         prices = {c.get("subscription_id"): int(c.get("price") or 0) for c in enrollment.get("cars") or []}
         coupon, discount_total = None, 0
@@ -1570,24 +1916,30 @@ class SocietyService:
             read_end = sub.get("end_date")
             # Guarded on the doc we read: a booking spending quota meanwhile
             # just makes us re-read and try again (fields recomputed from the
-            # fresh doc). A cash renewal whose car was renewed by someone
-            # else in between (a double tap, or the resident paying online)
-            # stops — one payment never buys two cycles. An online order
-            # always applies: that money is in, for its own cycle.
+            # fresh doc). A renewal whose car was renewed by someone else in
+            # between (a double tap, the resident paying online, a second
+            # paid link) stops — one payment never buys two cycles. A legacy
+            # online order (no frozen cycle) still applies, as before.
             for _ in range(5):
                 price = prices.get(str(sub["_id"]))
-                fields = self._renewal_fields(sub, count, None if price is None else price - shares.get(str(sub["_id"]), 0), method, now_ist())
+                fields = self._renewal_fields(
+                    sub, count, None if price is None else price - shares.get(str(sub["_id"]), 0), method, now_ist(),
+                    held=await self._held_washes(sub),
+                )
                 result = await self.subs.update_if(str(sub["_id"]), {"updated_at": sub.get("updated_at")}, fields)
                 if result is not None:
                     renewed.append(str(sub["_id"]))
                     break
                 fresh = await self.subs.find_by_id(str(sub["_id"]))
-                if not fresh or (order is None and fresh.get("end_date") != read_end):
+                if not fresh:
+                    break
+                if fresh.get("end_date") != read_end and (order is None or (frozen is not None and _renewed_past(fresh, frozen))):
                     break
                 sub = fresh
         gross = sum(prices.get(s, 0) for s in renewed)
         discount = sum(shares.get(s, 0) for s in renewed)
         amount = gross - discount
+        notice = None
         if renewed:
             payment = await self.payments.create({
                 "society_id": enrollment["society_id"], "enrollment_id": str(enrollment["_id"]), "customer_id": enrollment["customer_id"],
@@ -1599,26 +1951,45 @@ class SocietyService:
             })
             if coupon and discount:
                 await self._record_coupon(coupon, enrollment["customer_id"], f"society-renewal:{payment['_id']}")
-            await self._tell_resident(enrollment["customer_id"], "Society plan renewed", f"{enrollment.get('plan_name')} renewed for {len(renewed)} car{'s' if len(renewed) != 1 else ''}.")
+            notice = ("Society plan renewed", f"{enrollment.get('plan_name')} renewed for {len(renewed)} car{'s' if len(renewed) != 1 else ''}.")
+            if notify:
+                await self._tell_resident(enrollment["customer_id"], *notice)
         fresh = await self.get_enrollment(str(enrollment["_id"]))
-        return {"enrollment": await self.enrollment_view(fresh), "renewed": len(renewed), "amount": amount, "discount": discount}
+        return {"enrollment": await self.enrollment_view(fresh), "renewed": len(renewed), "amount": amount, "discount": discount, "notice": notice}
+
+    async def _held_washes(self, sub: dict) -> int:
+        """Premium washes this pass has spent on bookings still to happen —
+        cancelling one gives its wash back (restore_consumption)."""
+        rows = await self.db.bookings.find(
+            {"customer_id": sub.get("customer_id"), "subscription_id": str(sub["_id"]),
+             "status": {"$in": LIVE_BOOKING_STATUSES}, "is_deleted": {"$ne": True}},
+            {"subscription_consumption": 1},
+        ).to_list(length=100)
+        return sum(int((r.get("subscription_consumption") or {}).get("flat_count") or 0) for r in rows)
 
     @staticmethod
-    def _renewal_fields(sub: dict, count: int, price: int | None, method: str, now: datetime) -> dict:
+    def _renewal_fields(sub: dict, count: int, price: int | None, method: str, now: datetime, held: int = 0) -> dict:
         """The next plan month for one car's pass, from the doc as read.
         Early (before end_date): starts at the old end and keeps the unused
-        premium washes; late: starts now with a fresh quota."""
+        premium washes; late: starts now with a fresh quota. `held`: washes
+        already spent on bookings still to happen — an early renewal's total
+        keeps room for them, or cancelling one (restore_consumption clamps
+        at the total) would swallow a wash that was paid for."""
         old_end = _aware(sub.get("end_date")) or now
         early = old_end > now
         new_start = old_end if early else now
         remaining = (int(sub.get("remaining_service_count") or 0) + count) if early else count
+        cycle_start = sub.get("cycle_start") or sub.get("start_date")
+        # An early renewal already waiting to start (cycle_start ahead): the
+        # cycle running today is still the one prev_cycle_start points at.
+        waiting = early and sub.get("prev_cycle_start") and (_aware(cycle_start) or now) > now
         fields = {
             "status": SubscriptionStatus.ACTIVE.value,
-            "total_service_count": remaining,
+            "total_service_count": remaining + max(0, int(held)) if early else remaining,
             "remaining_service_count": remaining,
             "end_date": plan_month_end(new_start),
             "cycle_start": new_start,
-            "prev_cycle_start": (sub.get("cycle_start") or sub.get("start_date")) if early else None,
+            "prev_cycle_start": (sub["prev_cycle_start"] if waiting else cycle_start) if early else None,
             "renewal_count": int(sub.get("renewal_count") or 0) + 1,
             "last_renewed_at": now,
             "amount_paid": float(price if price is not None else sub.get("purchased_price") or 0),
@@ -1626,6 +1997,10 @@ class SocietyService:
             "expiry_reminder_sent": False,
             "wash_reminder_sent_at": None,
             "used_up_notice_sent_at": None,
+            # A new plan month: the old one's extension is over (its history
+            # stays in `extensions`), and this month has its own 10 days.
+            "extension_days": 0,
+            "extended_until": None,
         }
         if not early:
             fields["start_date"] = now
@@ -1635,15 +2010,17 @@ class SocietyService:
         """True when this pass's car has picked up a DIFFERENT live pass
         meanwhile (e.g. the society pass lapsed and the car was enrolled
         again) — renewing it would put two live passes on one car."""
+        from app.services.subscription_service import pass_blocks_new
+
         if not sub.get("vehicle_id"):
             return False
         now = now_ist()
         others = await self.db.user_subscriptions.find(
             {"customer_id": sub.get("customer_id"), "vehicle_id": sub["vehicle_id"], "_id": {"$ne": sub["_id"]},
-             "status": "active", "is_deleted": {"$ne": True}},
-            {"end_date": 1},
+             "status": {"$in": ["active", "scheduled"]}, "is_deleted": {"$ne": True}},
+            {"end_date": 1, "extended_until": 1, "society_id": 1, "status": 1, "auto_renew": 1, "razorpay_subscription_id": 1, "autopay_state": 1},
         ).to_list(length=20)
-        return any((_aware(o.get("end_date")) or now) > now for o in others)
+        return any(pass_blocks_new(o, now) for o in others)
 
     async def cancel(self, enrollment: dict, *, vehicle_ids: list[str] | None, actor_id: str, reason: str | None = None) -> dict:
         eid = str(enrollment["_id"])
@@ -1655,12 +2032,28 @@ class SocietyService:
                 {"_id": enrollment["_id"], "status": {"$in": list(OPEN_STATUSES)}},
                 {"$set": {"status": "cancelled", "cancelled_at": now, "cancel_reason": reason, "updated_at": now}},
             )
+            if not result.modified_count:
+                # It moved on meanwhile — most likely a payment activated it
+                # in the same instant. Saying "Cancelled" would be false.
+                fresh = await self.get_enrollment(eid)
+                if fresh.get("status") == "active":
+                    raise BadRequestException("This request was just paid and is active now — cancel its cars instead.")
+                raise BadRequestException("This request changed just now — reload and try again.")
             # A withdrawn request never keeps a coupon use — if one was
             # counted (an activation that couldn't place any car falls back
             # to an open request), it goes back to the resident.
-            if result.modified_count and enrollment.get("coupon_usage_recorded") and enrollment.get("coupon_code"):
+            if enrollment.get("coupon_usage_recorded") and enrollment.get("coupon_code"):
                 await self._reverse_coupon(enrollment["coupon_code"], enrollment["customer_id"], f"society:{eid}")
                 await self.enrollments.update_by_id(eid, {"coupon_usage_recorded": False})
+            # Staff turning a request down: the resident hears it (SOC-7) —
+            # in-app and on WhatsApp. A resident withdrawing it knows already.
+            if actor_id != enrollment.get("customer_id"):
+                society = await self.societies.find_by_id(enrollment["society_id"]) or {}
+                await self._tell_resident(
+                    enrollment["customer_id"], "Society plan request declined",
+                    f"Your request for {enrollment.get('plan_name') or 'a society plan'} at {society.get('name') or 'your society'} "
+                    "was declined by the society manager." + (f" Reason: {reason}" if reason else "") + " Call them for details.",
+                )
         else:
             targets = set(vehicle_ids or [c.get("vehicle_id") for c in enrollment.get("cars") or []])
             cars = []
@@ -1672,16 +2065,94 @@ class SocietyService:
                 cars.append(c)
             if not sub_ids:
                 raise BadRequestException("Nothing to cancel — pick an active car.")
+            oids = [ObjectId(s) for s in sub_ids if s and ObjectId.is_valid(s)]
+            # Only passes this call actually cancels (a double-tapped cancel
+            # must not flag a second refund for the same car).
+            cancelling = await self.db.user_subscriptions.find(
+                {"_id": {"$in": oids}, "status": {"$ne": SubscriptionStatus.CANCELLED.value}}
+            ).to_list(length=len(oids) or 1)
             await self.db.user_subscriptions.update_many(
-                {"_id": {"$in": [ObjectId(s) for s in sub_ids if s and ObjectId.is_valid(s)]}},
+                {"_id": {"$in": oids}},
                 {"$set": {"status": SubscriptionStatus.CANCELLED.value, "auto_renew": False, "updated_at": now}},
             )
+            from app.services.subscription_service import release_pass_claims_for
+
+            await release_pass_claims_for(self.db, [
+                (s, await self._claim_keys(s.get("customer_id"), s.get("vehicle_id"), None)) for s in cancelling if s.get("vehicle_id")
+            ])
             update: dict = {"cars": cars, "updated_at": now}
             if not any(c.get("status") == "active" for c in cars):
                 update.update(status="cancelled", cancelled_at=now, cancel_reason=reason)
             await self.enrollments.update_by_id(eid, update)
+            await self._drop_from_resident_rules(eid, [s for s in sub_ids if s])
+            await self._flag_refunds(enrollment, cancelling, cars, reason)
+            society = await self.societies.find_by_id(enrollment["society_id"]) or {}
+            plates = [c.get("registration_number") for c in cars if c.get("subscription_id") in sub_ids]
+            await self._tell_resident(
+                enrollment["customer_id"], "Society plan cancelled",
+                f"Your {enrollment.get('plan_name') or 'society plan'} at {society.get('name') or 'your society'} is cancelled for "
+                f"{', '.join(p for p in plates if p)}." + (f" Reason: {reason}" if reason else ""),
+            )
         fresh = await self.get_enrollment(eid)
         return await self.enrollment_view(fresh)
+
+    async def _flag_refunds(self, enrollment: dict, cancelled: list[dict], cars: list[dict], reason: str | None) -> None:
+        """Cars whose current plan month was paid ONLINE were just cancelled:
+        the money is still with us and nothing refunds it automatically. One
+        refund-due row per car in the admin attention queue (PaymentService.
+        flag_refund_due — keyed on payment + pass, so a retried cancel
+        records it once). Cash refunds stay with the manager who holds the
+        cash. Best-effort: the cancellation itself already happened (SOC-11)."""
+        online = [s for s in cancelled if s.get("payment_method") == "online" and float(s.get("amount_paid") or 0) > 0]
+        if not online:
+            return
+        try:
+            from app.services.payment_service import PaymentService
+
+            plates = {c.get("subscription_id"): c.get("registration_number") for c in cars}
+            fallback = await self.db.payment_orders.find_one(
+                {"purpose": "society", "society_enrollment_id": str(enrollment["_id"]), "status": {"$in": ["paid", "paid_attention"]},
+                 "kind": {"$ne": "duplicate_payment"}},
+                sort=[("paid_at", -1), ("created_at", -1)],
+            )
+            rows = []
+            for s in online:
+                sid = str(s["_id"])
+                ledger = await self.db.society_payments.find_one({"subscription_ids": sid, "method": "online"}, sort=[("created_at", -1)])
+                order = await self.db.payment_orders.find_one(
+                    {"razorpay_order_id": ledger["razorpay_order_id"]}
+                ) if ledger and ledger.get("razorpay_order_id") else None
+                rows.append({
+                    "_id": sid,
+                    "customer_id": s.get("customer_id"),
+                    "payment_status": "paid",
+                    "payment_method": "online",
+                    "booking_number": f"Society plan {plates.get(sid) or ''}".strip(),
+                    "total_amount": float(s.get("amount_paid") or 0),
+                    "razorpay_payment_id": (order or fallback or {}).get("razorpay_payment_id"),
+                })
+            await PaymentService(self.db).flag_refund_due(rows, f"society plan cancelled{': ' + reason if reason else ''}")
+        except Exception:  # noqa: BLE001 — never undo the cancellation over the trail
+            logger.exception("Could not flag refunds for society enrollment %s", enrollment.get("_id"))
+
+    async def _drop_from_resident_rules(self, enrollment_id: str, sub_ids: list[str]) -> None:
+        """Cancelled cars leave their resident's repeat wash; a repeat wash
+        left with no car stops, and its not-yet-booked days go — they would
+        otherwise keep materializing (and being 'booked' empty) forever."""
+        from app.services.society_schedule_service import SocietyScheduleService
+
+        if not sub_ids:
+            return
+        rules = self.db.society_schedule_rules
+        base = {"kind": "resident", "enrollment_id": enrollment_id, "is_deleted": {"$ne": True}}
+        await rules.update_many({**base, "subscription_ids": {"$in": sub_ids}}, {"$pull": {"subscription_ids": {"$in": sub_ids}}})
+        emptied = await rules.find({**base, "is_active": True, "subscription_ids": {"$size": 0}}, {"_id": 1}).to_list(length=50)
+        if not emptied:
+            return
+        await rules.update_many({"_id": {"$in": [r["_id"] for r in emptied]}}, {"$set": {"is_active": False, "updated_at": now_ist()}})
+        schedule = SocietyScheduleService(self.db)
+        for r in emptied:
+            await schedule._clear_future(str(r["_id"]))
 
     # -- online payment (called by PaymentService) ------------------------
 
@@ -1697,9 +2168,13 @@ class SocietyService:
             prices = {c.get("subscription_id"): int(c.get("price") or 0) for c in enrollment.get("cars") or []}
             sub_ids = [str(s["_id"]) for s in subs]
             amount = sum(prices.get(s, 0) for s in sub_ids)
+            ends = [_aware(s["end_date"]) for s in subs if s.get("end_date")]
             reference = {
                 "receipt": f"socr-{enrollment_id[-10:]}", "society_enrollment_id": enrollment_id,
                 "society_renewal": True, "society_subscription_ids": sub_ids,
+                # The cycle this payment renews (see renew): one string, so
+                # it also fits the gateway's order notes.
+                **({"society_renewal_end": max(ends).isoformat()} if ends else {}),
             }
             if coupon_code:
                 c = await self.coupon_discount(coupon_code, amount, customer_id)
@@ -1708,9 +2183,12 @@ class SocietyService:
             return int(amount * 100), f"Renewal — {enrollment.get('plan_name')} ({len(sub_ids)} car{'s' if len(sub_ids) != 1 else ''})"[:255], reference
         if enrollment.get("status") not in OPEN_STATUSES:
             raise BadRequestException("This society plan is already active." if enrollment.get("status") == "active" else "This request was cancelled.")
+        if not society.get("is_active", True):
+            raise BadRequestException("This society isn't taking new residents right now.")
         for car in enrollment.get("cars") or []:
-            if car.get("status") == "pending" and await self._live_pass_on(customer_id, car["vehicle_id"]):
-                raise BadRequestException(f"{car['registration_number']} already has an active plan — remove it and submit again.")
+            live = await self._live_pass_on(customer_id, car["vehicle_id"]) if car.get("status") == "pending" else None
+            if live:
+                raise BadRequestException(_live_pass_refusal(car["registration_number"], live, " — remove it and submit again"))
         discount = self._request_discount(enrollment)
         if discount:
             # The coupon frozen on the request must still be good now
@@ -1739,22 +2217,106 @@ class SocietyService:
             enrollment = await self.get_enrollment(order.get("society_enrollment_id") or "")
         except NotFoundException:
             return {"ok": False}
+        eid = str(enrollment["_id"])
+        # A paid WhatsApp link is confirmed to the resident by PaymentService
+        # ("payment received — your society plan is active/renewed") when it
+        # settles cleanly; saying it here too sent two messages. A payment
+        # that ends up parked gets no such message, so ours goes out then.
+        by_link = order.get("kind") == "link"
         if order.get("society_renewal"):
-            result = await self.renew(enrollment, method="online", actor_id=None, order=order, subscription_ids=order.get("society_subscription_ids"))
+            try:
+                result = await self.renew(
+                    enrollment, method="online", actor_id=None, order=order, subscription_ids=order.get("society_subscription_ids"), notify=not by_link,
+                )
+            except BadRequestException:
+                return {"ok": False, "enrollment_id": eid}
             paid_for = len(order.get("society_subscription_ids") or [])
-            return {"ok": result["renewed"] == paid_for and paid_for > 0, "enrollment_id": str(enrollment["_id"])}
-        if int(enrollment.get("revision") or 1) != int(order.get("society_revision") or 1):
-            return {"ok": False, "enrollment_id": str(enrollment["_id"])}
-        expected = (self._pending_total(enrollment) - self._request_discount(enrollment)) * 100
-        if expected != int(order.get("amount_paise") or 0):
-            return {"ok": False, "enrollment_id": str(enrollment["_id"])}
+            ok = result["renewed"] == paid_for and paid_for > 0
+            if result["renewed"]:
+                # Paid: any other unpaid renewal link for this cycle must not
+                # take the money again.
+                await self._void_renewal_links(eid)
+        else:
+            if int(enrollment.get("revision") or 1) != int(order.get("society_revision") or 1):
+                return {"ok": False, "enrollment_id": eid}
+            expected = (self._pending_total(enrollment) - self._request_discount(enrollment)) * 100
+            if expected != int(order.get("amount_paise") or 0):
+                return {"ok": False, "enrollment_id": eid}
+            try:
+                result = await self.activate(
+                    enrollment, method="online", actor_id=None, order=order, expected_revision=int(order.get("society_revision") or 1), notify=not by_link,
+                )
+            except (BadRequestException, ConflictException):
+                return {"ok": False, "enrollment_id": eid}
+            ok = result["activated"] > 0 and not result["skipped"]
+        if by_link and not ok and result.get("notice"):
+            await self._tell_resident(enrollment["customer_id"], *result["notice"])
+        return {"ok": ok, "enrollment_id": eid}
+
+    async def _void_renewal_links(self, enrollment_id: str) -> None:
+        from app.services.payment_service import PaymentService
+
         try:
-            result = await self.activate(
-                enrollment, method="online", actor_id=None, order=order, expected_revision=int(order.get("society_revision") or 1),
-            )
-        except (BadRequestException, ConflictException):
-            return {"ok": False, "enrollment_id": str(enrollment["_id"])}
-        return {"ok": result["activated"] > 0 and not result["skipped"], "enrollment_id": str(enrollment["_id"])}
+            await PaymentService(self.db).void_society_links(enrollment_id, "renewed online", renewal=True)
+        except Exception:  # noqa: BLE001 — the renewal stands; an unvoided link is parked if paid
+            logger.exception("Could not void renewal links for society enrollment %s", enrollment_id)
+
+    # ------------------------------------------------------------------
+    # Pass extension (founder rule 2026-10-07)
+    # ------------------------------------------------------------------
+
+    async def extend_pass(
+        self, society_id: str, subscription_id: str, days: int, *, note: str | None, actor_id: str, actor_role: str,
+        actor_center_id: str | None,
+    ) -> dict:
+        """A manager (the society's own center) or an admin gives a society
+        pass a few more days so its REMAINING premium washes can still be
+        booked. The rules live in UserSubscriptionService.extend_pass (one
+        rule for every pass kind since 2026-10-07): at most
+        PASS_EXTENSION_MAX_DAYS per plan month, in the last days or after
+        the end, washes left, guarded write, history, revive claim re-check.
+        The daily bucket wash and the automatic schedule do NOT run during
+        an extension (sub_is_live). Returns this module's pass_view."""
+        from app.services.subscription_service import UserSubscriptionService
+
+        return await UserSubscriptionService(self.db).extend_pass(
+            subscription_id, days, note=note, actor_id=actor_id, actor_role=actor_role,
+            actor_center_id=actor_center_id, society_id=society_id,
+        )
+
+    async def pass_view(self, sub: dict, *, staff: bool = True) -> dict:
+        """One society pass for staff screens / the extend response: the
+        plan month, its extension and (staff) the extension history."""
+        from app.services.subscription_service import PASS_EXTENSION_MAX_DAYS, extension_view, in_extension, pass_usable_until
+
+        now = now_ist()
+        until = pass_usable_until(sub)
+        extended = _aware(sub.get("extended_until"))
+        used = int(sub.get("extension_days") or 0)
+        enrollment = await self.enrollments.find_by_id(sub.get("enrollment_id") or "") if sub.get("enrollment_id") else None
+        plate = next((c.get("registration_number") for c in (enrollment or {}).get("cars") or [] if c.get("subscription_id") == str(sub["_id"])), None)
+        view = {
+            "id": str(sub["_id"]),
+            "society_id": sub.get("society_id"),
+            "enrollment_id": sub.get("enrollment_id"),
+            "customer_id": sub.get("customer_id"),
+            "vehicle_id": sub.get("vehicle_id"),
+            "registration_number": plate,
+            "status": "active" if sub_is_usable(sub, now) else ("cancelled" if sub.get("status") == SubscriptionStatus.CANCELLED.value else "expired"),
+            "remaining": int(sub.get("remaining_service_count") or 0),
+            "total": int(sub.get("total_service_count") or 0),
+            "end_date": _iso(sub.get("end_date")),
+            "extension_days": used,
+            "extension_days_left": max(0, PASS_EXTENSION_MAX_DAYS - used),
+            "extended_until": _iso(extended) if extended else None,
+            "bookable_until": _iso(until) if until else None,
+            "last_bookable_day": _last_day(until),
+            "last_booking_day_label": _last_day_label(until),
+            "in_extension": in_extension(sub, now),
+        }
+        if staff:
+            view["extensions"] = [extension_view(e) for e in sub.get("extensions") or []]
+        return view
 
     # ------------------------------------------------------------------
     # Premium bookings
@@ -1762,7 +2324,11 @@ class SocietyService:
 
     async def book_premium(
         self, payload, *, actor_id: str, actor_role: str, actor_center_id: str | None, society_id: str | None = None,
+        allow_extension: bool = True,
     ) -> dict:
+        """`allow_extension=False` (the automatic schedule): only inside the
+        plan month — a granted extension is for the resident and the manager
+        to book the remaining washes by hand."""
         from app.models.enums import PaymentMethod
         from app.schemas.booking_schema import BookingCreateRequest, BookingGroupCreateRequest, GroupVehicleRequest
         from app.services.booking_service import BookingService
@@ -1790,9 +2356,12 @@ class SocietyService:
             source = "staff"
         else:
             raise ForbiddenException("You can't book this")
+        from app.services.subscription_service import pass_usable_until
+
         now = now_ist()
+        live = sub_is_usable if allow_extension else sub_is_live
         for s in rows:
-            if not sub_is_live(s, now):
+            if not live(s, now):
                 raise BadRequestException("This society plan has ended — renew it to book premium washes.")
             if int(s.get("remaining_service_count") or 0) < 1:
                 raise BadRequestException("No premium washes left this cycle on one of these cars.")
@@ -1802,6 +2371,20 @@ class SocietyService:
             raise BadRequestException("Pick a valid date.") from exc
         if source == "app" and day.date() <= today_ist():
             raise BadRequestException("Premium washes are booked at least a day ahead — pick tomorrow or later.")
+        # The wash must fall inside the plan month it is paid from (the
+        # scheduler's rule too) — or inside an extension a manager/admin
+        # granted — not just the pass be live today.
+        def last_instant(s: dict):
+            return pass_usable_until(s) if allow_extension else _aware(s.get("end_date"))
+
+        ends_at = [last_instant(s) for s in rows if s.get("end_date")]
+        ends = min(from_stored(x).date() for x in ends_at) if ends_at else None
+        if ends is not None and day.date() >= ends:
+            extended = allow_extension and any(s.get("extended_until") for s in rows)
+            raise BadRequestException(
+                f"This plan {'extension' if extended else 'month'} ends on {ends.day} {ends.strftime('%b')} — pick an earlier day"
+                + (", or renew first to book after it." if not extended else ".")
+            )
         enrollment = await self.get_enrollment(rows[0].get("enrollment_id") or "")
         address_id = await self._ensure_address(customer_id, society, enrollment.get("flat") or "Flat")
         booking = BookingService(self.db)
@@ -1844,9 +2427,20 @@ class SocietyService:
     # Captain: today's societies + attendance
     # ------------------------------------------------------------------
 
+    async def captain_center(self, captain_id: str) -> str | None:
+        """The captain's CURRENT center (a society assignment made while
+        they were at another center doesn't follow them)."""
+        user = await self.db.users.find_one(
+            {"_id": ObjectId(captain_id), "role": "captain", "is_deleted": {"$ne": True}}, {"service_center_id": 1}
+        ) if ObjectId.is_valid(captain_id or "") else None
+        return (user or {}).get("service_center_id") or None
+
     async def _society_for_captain(self, society_id: str, captain_id: str) -> dict:
         society = await self.societies.find_by_id(society_id) if ObjectId.is_valid(society_id or "") else None
         if not society or not society.get("is_active", True) or self.today_captain_id(society) != captain_id:
+            raise ForbiddenException("You're not today's captain for this society.")
+        center_id = await self.captain_center(captain_id)
+        if not center_id or society.get("service_center_id") != center_id:
             raise ForbiddenException("You're not today's captain for this society.")
         return society
 
@@ -1917,8 +2511,11 @@ class SocietyService:
 
     async def captain_today(self, captain_id: str) -> dict:
         today = today_ist().isoformat()
+        center_id = await self.captain_center(captain_id)
+        if not center_id:
+            return {"date": today, "societies": []}
         societies = await self.societies.collection.find({
-            "is_active": True, "is_deleted": {"$ne": True},
+            "is_active": True, "is_deleted": {"$ne": True}, "service_center_id": center_id,
             "$or": [{"daily_captain_id": captain_id}, {"substitute.captain_id": captain_id, "substitute.date": today}],
         }).to_list(length=50)
         mine = [s for s in societies if self.today_captain_id(s, today) == captain_id]

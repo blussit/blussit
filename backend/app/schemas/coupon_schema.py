@@ -1,9 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.models.enums import CouponType
+
+
+def _aware(value: datetime) -> datetime:
+    """Comparable whichever way the client sent it (with or without "Z")."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 class CouponCreateRequest(BaseModel):
@@ -30,8 +35,14 @@ class CouponCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_offer_shape(self) -> "CouponCreateRequest":
+        # The same rules CouponService.update enforces on an edit — a new
+        # coupon used to slip past them (a 150% coupon was accepted).
         if self.offer_kind == "standard" and self.value <= 0:
             raise ValueError("Standard coupons need a discount value")
+        if self.coupon_type == CouponType.PERCENTAGE and self.value > 100:
+            raise ValueError("A percentage discount can't be more than 100%")
+        if _aware(self.valid_until) <= _aware(self.valid_from):
+            raise ValueError("The end date must be after the start date")
         if self.offer_kind == "free_addon_with_service" and (not self.eligible_service_keywords or not self.free_addon_keywords):
             raise ValueError("Free add-on offers need eligible service and free add-on keywords")
         return self

@@ -169,18 +169,26 @@ class ComplaintService:
     async def _ticket_handlers(self, complaint: dict) -> list[str]:
         """Who hears about a customer's reply: the ticket's center's
         managers (the center's own manager_id first), else the admins."""
+        # "inactive" switches an account off exactly like "suspended"
+        # (authz.account_switched_off) — neither hears about tickets.
+        on_duty = {"$nin": ["suspended", "inactive"]}
         ids: list[str] = []
         center_id = complaint.get("service_center_id")
         if center_id:
             center = await self.center_repo.find_by_id(center_id)
-            if center and center.get("manager_id"):
-                ids.append(str(center["manager_id"]))
             managers, _ = await self.user_repo.find_many(
-                {"role": "manager", "service_center_id": center_id, "status": {"$ne": "suspended"}}, page=1, page_size=20,
+                {"role": "manager", "service_center_id": center_id, "status": on_duty}, page=1, page_size=20,
             )
-            ids.extend(str(m["_id"]) for m in managers)
+            on_duty_ids = [str(m["_id"]) for m in managers]
+            # The center's own manager_id first — when he is still on duty.
+            own = str((center or {}).get("manager_id") or "")
+            if own in on_duty_ids:
+                ids.append(own)
+            elif ObjectId.is_valid(own) and await self.user_repo.find_one({"_id": ObjectId(own), "status": on_duty}):
+                ids.append(own)
+            ids.extend(on_duty_ids)
         if not ids:
-            admins, _ = await self.user_repo.find_many({"role": "admin", "status": {"$ne": "suspended"}}, page=1, page_size=5)
+            admins, _ = await self.user_repo.find_many({"role": "admin", "status": on_duty}, page=1, page_size=5)
             ids.extend(str(a["_id"]) for a in admins)
         return list(dict.fromkeys(ids))
 

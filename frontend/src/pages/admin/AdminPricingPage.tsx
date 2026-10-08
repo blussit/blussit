@@ -8,7 +8,8 @@ import { SettingsHistory } from "../../components/admin/SettingsHistory";
 import { walletApi } from "../../api/wallet";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
-import { Badge, Button, Card, CardBody, DataTable, Input, PageLoader } from "../../components/ui";
+import { useConfirm } from "../../context/ConfirmContext";
+import { Badge, Button, Card, CardBody, DataTable, ErrorState, Input, PageLoader } from "../../components/ui";
 import { format } from "../../lib/date";
 import { toTitle } from "../../lib/titleCase";
 import type { BookingPolicy, PricingConfig, WithdrawalRequest } from "../../types";
@@ -36,7 +37,10 @@ type NumericPolicyKey =
   | "arrival_to_start_tolerance_minutes"
   | "delay_tolerance_minutes"
   | "photo_geofence_radius_m"
-  | "repeat_reminder_days";
+  | "repeat_reminder_days"
+  | "cancellation_fee_1_to_4h"
+  | "cancellation_fee_under_1h"
+  | "cancellation_fee_after_captain_left";
 
 interface PolicyField {
   key: NumericPolicyKey;
@@ -74,6 +78,15 @@ const POLICY_GROUPS: { title: string; appliesTo: string; fields: PolicyField[] }
     ],
   },
   {
+    title: "Late Cancellation Charge",
+    appliesTo: "Customer Cancel · Staff Cancel (At The Customer's Request) · Cancellation Policy Page",
+    fields: [
+      { key: "cancellation_fee_1_to_4h", label: "Cancelled 1–4 Hours Before", unit: "₹", effect: "Put on the customer's account and added to their next booking. More than 4 hours before is always free.", min: 0, max: 2000 },
+      { key: "cancellation_fee_under_1h", label: "Cancelled Under 1 Hour Before", unit: "₹", effect: "Same — for a cancel less than an hour before the slot (or after it started).", min: 0, max: 2000 },
+      { key: "cancellation_fee_after_captain_left", label: "Cancelled After The Captain Left", unit: "₹", effect: "Same — once the captain is on the way. 0 turns a tier off.", min: 0, max: 2000 },
+    ],
+  },
+  {
     title: "Checks & Reminders",
     appliesTo: "Captain App · WhatsApp · Customer Notifications",
     fields: [
@@ -104,11 +117,40 @@ export default function AdminPricingPage() {
   const [policySaved, setPolicySaved] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
 
-  const { data: config, isLoading } = useQuery({ queryKey: ["pricing-config"], queryFn: adminPricingApi.get });
-  const { data: policy, isLoading: policyLoading } = useQuery({ queryKey: ["booking-policy"], queryFn: adminBookingPolicyApi.get });
-  const { data: withdrawals, isLoading: withdrawalsLoading } = useQuery({
+  const confirm = useConfirm();
+  const {
+    data: config,
+    isLoading,
+    isError: configFailed,
+    isFetching: configFetching,
+    refetch: refetchConfig,
+  } = useQuery({ queryKey: ["pricing-config"], queryFn: adminPricingApi.get });
+  const {
+    data: policy,
+    isLoading: policyLoading,
+    isError: policyFailed,
+    isFetching: policyFetching,
+    refetch: refetchPolicy,
+  } = useQuery({ queryKey: ["booking-policy"], queryFn: adminBookingPolicyApi.get });
+  const {
+    data: withdrawals,
+    isLoading: withdrawalsLoading,
+    error: withdrawalsError,
+    refetch: refetchWithdrawals,
+  } = useQuery({
     queryKey: ["pending-withdrawals"],
     queryFn: () => walletApi.pendingWithdrawals({ page: 1, page_size: 50 }),
+  });
+
+  // Approved = already taken out of the wallet, waiting for the bank transfer.
+  const {
+    data: payouts,
+    isLoading: payoutsLoading,
+    error: payoutsError,
+    refetch: refetchPayouts,
+  } = useQuery({
+    queryKey: ["pending-withdrawals", "approved"],
+    queryFn: () => walletApi.pendingWithdrawals({ status: "approved", page: 1, page_size: 50 }),
   });
 
   const invalidatePolicy = () => {
@@ -116,16 +158,20 @@ export default function AdminPricingPage() {
     queryClient.invalidateQueries({ queryKey: ["settings-history", "booking_policy"] });
   };
 
-  // The endpoint takes the whole config, so each section sends the saved
-  // values for every field it doesn't own.
-  const savePricing = (patch: Partial<Omit<PricingConfig, "updated_at">>) =>
-    adminPricingApi.set({
-      per_km_rate: Number(config?.per_km_rate ?? 0),
-      default_captain_service_fee: Number(config?.default_captain_service_fee ?? 0),
-      customer_free_km: Number(config?.customer_free_km ?? 5),
-      customer_per_km_rate: Number(config?.customer_per_km_rate ?? 2),
-      ...patch,
-    });
+  // The endpoint requires the two captain-pay fields on every save, so a
+  // section sends their LOADED values when it doesn't change them; the
+  // distance fields are optional there and are sent only when changed (the
+  // server keeps the stored ones). Never a save without a loaded config —
+  // that used to write defaults (₹0 fee, 5 km free) over the live values.
+  const savePricing = (patch: Partial<Omit<PricingConfig, "updated_at">>) => {
+    if (!config) return Promise.reject(new Error("The current pricing didn't load — reload it before saving."));
+    return adminPricingApi.set({
+      per_km_rate: Number(patch.per_km_rate ?? config.per_km_rate),
+      default_captain_service_fee: Number(patch.default_captain_service_fee ?? config.default_captain_service_fee),
+      ...(patch.customer_free_km !== undefined ? { customer_free_km: patch.customer_free_km } : {}),
+      ...(patch.customer_per_km_rate !== undefined ? { customer_per_km_rate: patch.customer_per_km_rate } : {}),
+    } as Omit<PricingConfig, "updated_at">);
+  };
   const invalidatePricing = () => {
     queryClient.invalidateQueries({ queryKey: ["pricing-config"] });
     queryClient.invalidateQueries({ queryKey: ["settings-history", "pricing_config"] });
@@ -186,7 +232,7 @@ export default function AdminPricingPage() {
   });
 
   const reviewMutation = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: "approved" | "rejected" | "paid" }) => walletApi.reviewWithdrawal(id, status),
+    mutationFn: ({ id, status }: { id: string; status: "approved" | "rejected" | "paid"; amount?: number }) => walletApi.reviewWithdrawal(id, status),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["pending-withdrawals"] }),
     onError: (e) => pushToast({ tone: "error", title: getErrorMessage(e) }),
   });
@@ -201,6 +247,21 @@ export default function AdminPricingPage() {
   });
 
   if (isLoading || policyLoading) return <PageLoader />;
+  const pricingUnavailable = configFailed && !config;
+  const policyUnavailable = policyFailed && !policy;
+  const reviewWithdrawal = async (w: WithdrawalRequest, status: "approved" | "rejected" | "paid") => {
+    if (reviewMutation.isPending) return;
+    const ok = await confirm(
+      status === "approved"
+        ? { title: `Approve ₹${w.amount} Withdrawal?`, message: "The captain is told it's approved and the amount is set aside for payout.", confirmLabel: "Approve" }
+        : status === "paid"
+          ? { title: `Mark ₹${w.amount} As Paid?`, message: "Only after the bank transfer has gone through — the captain is told it's paid.", confirmLabel: "Mark Paid" }
+          : w.status === "approved"
+            ? { title: `Cancel ₹${w.amount} Payout?`, message: "The amount goes back into the captain's wallet and they're told it was cancelled.", confirmLabel: "Cancel Payout", tone: "danger" }
+            : { title: `Reject ₹${w.amount} Withdrawal?`, message: "The request is closed and the captain is told it was rejected.", confirmLabel: "Reject", tone: "danger" }
+    );
+    if (ok) reviewMutation.mutate({ id: w.id, status, amount: w.amount });
+  };
 
   const currentOf = (key: NumericPolicyKey) => (policy as Record<string, unknown> | undefined)?.[key];
   const dirtyCount = Object.values(policyForm).filter((v) => v !== undefined && v !== "").length;
@@ -223,7 +284,10 @@ export default function AdminPricingPage() {
             What a captain earns per booking, frozen on each booking when it's created: travel (₹ per km from the center) plus a flat
             service fee. A service can set its own fee in the Services page; this is the default.
           </p>
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {pricingUnavailable && (
+            <ErrorState className="mt-4" message="Couldn't load the current pricing — saving is off until it loads." busy={configFetching} onRetry={() => void refetchConfig()} />
+          )}
+          <div className={`mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 ${pricingUnavailable ? "hidden" : ""}`}>
             <Input
               label="Travel Pay (₹ Per Km)"
               type="number"
@@ -245,7 +309,7 @@ export default function AdminPricingPage() {
           </div>
           {error && <p className="mt-2 text-sm text-[var(--color-error)]">{error}</p>}
           {saved && <p className="mt-2 text-sm text-[var(--color-success)]">Captain pay updated.</p>}
-          <Button className="mt-4" isLoading={saveMutation.isPending} disabled={!perKm && !captainFee} onClick={() => saveMutation.mutate()}>
+          <Button className="mt-4" isLoading={saveMutation.isPending} disabled={!config || (!perKm && !captainFee)} onClick={() => saveMutation.mutate()}>
             <IndianRupee className="h-4 w-4" /> Save Captain Pay
           </Button>
           <SettingsHistory
@@ -267,7 +331,10 @@ export default function AdminPricingPage() {
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             Applies only to services marked "Charge distance" in the Services page — once per visit, for the distance past the free km.
           </p>
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {pricingUnavailable && (
+            <ErrorState className="mt-4" message="Couldn't load the current distance charge — saving is off until it loads." busy={configFetching} onRetry={() => void refetchConfig()} />
+          )}
+          <div className={`mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 ${pricingUnavailable ? "hidden" : ""}`}>
             <Input
               label="Free Km"
               type="number"
@@ -291,7 +358,7 @@ export default function AdminPricingPage() {
           </div>
           {distanceError && <p className="mt-2 text-sm text-[var(--color-error)]">{distanceError}</p>}
           {distanceSaved && <p className="mt-2 text-sm text-[var(--color-success)]">Distance charge updated.</p>}
-          <Button className="mt-4" isLoading={saveDistanceMutation.isPending} disabled={!freeKm && !customerRate} onClick={() => saveDistanceMutation.mutate()}>
+          <Button className="mt-4" isLoading={saveDistanceMutation.isPending} disabled={!config || (!freeKm && !customerRate)} onClick={() => saveDistanceMutation.mutate()}>
             <MapPin className="h-4 w-4" /> Save Distance Charge
           </Button>
         </CardBody>
@@ -305,7 +372,10 @@ export default function AdminPricingPage() {
             Type a new value only where you want a change — empty boxes keep their current value, shown under each field.
           </p>
 
-          <div className="mt-5 space-y-7">
+          {policyUnavailable && (
+            <ErrorState className="mt-4" message="Couldn't load the booking rules — saving and switches are off until they load." busy={policyFetching} onRetry={() => void refetchPolicy()} />
+          )}
+          <div className={`mt-5 space-y-7 ${policyUnavailable ? "hidden" : ""}`}>
             {POLICY_GROUPS.map((group) => (
               <div key={group.title}>
                 <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
@@ -333,12 +403,13 @@ export default function AdminPricingPage() {
 
           {policyError && <p className="mt-2 text-sm text-[var(--color-error)]">{policyError}</p>}
           {policySaved && <p className="mt-2 text-sm text-[var(--color-success)]">Booking rules updated — live everywhere.</p>}
-          <Button className="mt-5" isLoading={savePolicyMutation.isPending} disabled={!dirtyCount} onClick={() => savePolicyMutation.mutate()}>
+          <Button className="mt-5" isLoading={savePolicyMutation.isPending} disabled={!policy || !dirtyCount} onClick={() => savePolicyMutation.mutate()}>
             <Clock className="h-4 w-4" /> {dirtyCount ? `Save ${dirtyCount} Change${dirtyCount > 1 ? "s" : ""}` : "Save Booking Rules"}
           </Button>
 
-          {/* Switches */}
-          <div className="mt-6 space-y-3 border-t border-gray-100 pt-5">
+          {/* Switches — hidden when the rules didn't load: an unknown state
+              shown as ON would flip the live setting OFF on the first tap. */}
+          <div className={`mt-6 space-y-3 border-t border-gray-100 pt-5 ${policyUnavailable ? "hidden" : ""}`}>
             <Switch
               label="'Time For A Wash?' Reminders"
               description="A gentle nudge after a customer's last wash (days set above). WhatsApp goes out only through the approved marketing template, never to opted-out customers."
@@ -369,14 +440,62 @@ export default function AdminPricingPage() {
 
       <Card>
         <CardBody>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Awaiting Payout</h2>
+          <p className="mb-4 mt-1 text-sm text-[var(--color-text-secondary)]">Approved withdrawals — send the bank transfer, then mark it paid. Cancelling returns the money to the captain&apos;s wallet.</p>
+          <DataTable<WithdrawalRequest>
+            data={payouts?.data ?? []}
+            isLoading={payoutsLoading}
+            error={payoutsError}
+            onRetry={() => void refetchPayouts()}
+            emptyTitle="Nothing Awaiting Payout"
+            emptyDescription="Approved withdrawals wait here until they're paid."
+            columns={[
+              { header: "Captain", accessor: (w) => (w.captain_name ? <span className="font-medium">{w.captain_name}</span> : <span className="font-mono-num text-xs">{w.captain_id}</span>) },
+              { header: "Amount", accessor: (w) => <span className="font-mono-num font-semibold">₹{w.amount}</span> },
+              { header: "Requested", accessor: (w) => format(w.created_at) },
+              { header: "Status", accessor: () => <Badge tone="info">Approved</Badge> },
+              {
+                header: "Action",
+                accessor: (w) => (
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      isLoading={reviewMutation.isPending && reviewMutation.variables?.id === w.id && reviewMutation.variables?.status === "paid"}
+                      disabled={reviewMutation.isPending}
+                      onClick={() => void reviewWithdrawal(w, "paid")}
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Mark Paid
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      isLoading={reviewMutation.isPending && reviewMutation.variables?.id === w.id && reviewMutation.variables?.status === "rejected"}
+                      disabled={reviewMutation.isPending}
+                      onClick={() => void reviewWithdrawal(w, "rejected")}
+                    >
+                      <XCircle className="h-3.5 w-3.5" /> Cancel Payout
+                    </Button>
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody>
           <h2 className="mb-4 font-semibold text-[var(--color-text-primary)]">Pending Withdrawal Requests</h2>
           <DataTable<WithdrawalRequest>
             data={withdrawals?.data ?? []}
             isLoading={withdrawalsLoading}
+            error={withdrawalsError}
+            onRetry={() => void refetchWithdrawals()}
             emptyTitle="No Pending Withdrawals"
             emptyDescription="Captain withdrawal requests will show up here for review."
             columns={[
-              { header: "Captain ID", accessor: (w) => <span className="font-mono-num text-xs">{w.captain_id}</span> },
+              { header: "Captain", accessor: (w) => (w.captain_name ? <span className="font-medium">{w.captain_name}</span> : <span className="font-mono-num text-xs">{w.captain_id}</span>) },
               { header: "Amount", accessor: (w) => <span className="font-mono-num font-semibold">₹{w.amount}</span> },
               { header: "Requested", accessor: (w) => format(w.created_at) },
               { header: "Status", accessor: (w) => <Badge tone="warning">{toTitle(w.status)}</Badge> },
@@ -384,10 +503,22 @@ export default function AdminPricingPage() {
                 header: "Action",
                 accessor: (w) => (
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline" isLoading={reviewMutation.isPending} onClick={() => reviewMutation.mutate({ id: w.id, status: "approved" })}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      isLoading={reviewMutation.isPending && reviewMutation.variables?.id === w.id && reviewMutation.variables?.status === "approved"}
+                      disabled={reviewMutation.isPending}
+                      onClick={() => void reviewWithdrawal(w, "approved")}
+                    >
                       <CheckCircle2 className="h-3.5 w-3.5" /> Approve
                     </Button>
-                    <Button size="sm" variant="ghost" isLoading={reviewMutation.isPending} onClick={() => reviewMutation.mutate({ id: w.id, status: "rejected" })}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      isLoading={reviewMutation.isPending && reviewMutation.variables?.id === w.id && reviewMutation.variables?.status === "rejected"}
+                      disabled={reviewMutation.isPending}
+                      onClick={() => void reviewWithdrawal(w, "rejected")}
+                    >
                       <XCircle className="h-3.5 w-3.5" /> Reject
                     </Button>
                   </div>

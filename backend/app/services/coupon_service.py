@@ -3,7 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
 from app.models.enums import CouponType
-from app.repositories.coupon_repository import CouponRepository, CouponUsageRepository
+from app.repositories.coupon_repository import CouponRepository, CouponUsageRepository, CouponUserCounterRepository
 from app.schemas.coupon_schema import CouponCreateRequest, CouponUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.timezone import from_stored, now_ist
@@ -14,6 +14,7 @@ class CouponService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = CouponRepository(db)
         self.usage_repo = CouponUsageRepository(db)
+        self.user_counters = CouponUserCounterRepository(db)
 
     async def list_all(self, page: int, page_size: int, active_only: bool = False):
         filters = {"is_active": True} if active_only else {}
@@ -128,9 +129,18 @@ class CouponService:
         discount = self._standard_discount(coupon, order_value)
         return coupon, discount
 
+    # What an anonymous "is this offer live?" lookup may say about a code:
+    # the customer-facing terms. Usage counters/limits and admin metadata
+    # stay internal (a full doc told a code-guesser how close a coupon was
+    # to its cap and how often each customer may reuse it).
+    _PUBLIC_OFFER_FIELDS = (
+        "id", "code", "description", "coupon_type", "value", "min_order_value", "max_discount_amount",
+        "offer_kind", "eligible_service_keywords", "free_addon_keywords", "is_active", "valid_from", "valid_until",
+    )
+
     async def validate_public_offer(self, code: str) -> dict:
-        coupon = await self._valid_coupon(code, 0, None)
-        return serialize_doc(coupon)
+        coupon = serialize_doc(await self._valid_coupon(code, 0, None))
+        return {k: coupon.get(k) for k in self._PUBLIC_OFFER_FIELDS}
 
     async def validate_and_compute_booking_discount(
         self,
@@ -178,27 +188,38 @@ class CouponService:
             raise BadRequestException("Add the free offer item to claim this offer.")
         return coupon, float(min(round_rupees(discount), round_rupees(order_value)))
 
+    # The coupon's own cap: no limit (missing, null or 0 — the same reading
+    # _valid_coupon gives it), or fewer uses than the limit. $ifNull because
+    # {$eq: ["$total_usage_limit", null]} is FALSE for a doc that simply has
+    # no such field, which made such a coupon unusable.
+    _UNDER_TOTAL_LIMIT = {"$or": [
+        {"$in": [{"$ifNull": ["$total_usage_limit", None]}, [None, 0]]},
+        {"$lt": [{"$ifNull": ["$total_used", 0]}, "$total_usage_limit"]},
+    ]}
+
     async def record_usage(self, coupon_id: str, user_id: str, booking_id: str) -> None:
-        """The counter bump is guarded by an atomic $expr condition on the
-        SAME update — two concurrent bookings racing for a coupon's last
-        remaining slot can no longer both read "still under the limit" and
-        both win (a real check-then-act race the old plain $inc had). Order
-        matters: bump the coupon counter first and only insert the usage
-        record if that succeeds, so a losing race never leaves an orphaned
-        usage doc behind. (The per-user limit isn't given the same atomic
-        treatment — usage_limit_per_user can be >1, so there's no single
-        counter field to guard the way total_usage_limit has; the race
-        window there is a single customer double-submitting against their
-        own limit, much narrower than many different customers racing a
-        shared global cap.)"""
+        """Spends one use, atomically on BOTH limits: the customer's own
+        (usage_limit_per_user, a guarded $inc on their counter doc — see
+        CouponUserCounterRepository) and the coupon's total (a guarded $inc
+        on the coupon itself). A request that loses either race gets an
+        error and leaves nothing behind; only then is the usage row (the
+        per-booking record reverse_usage undoes) written."""
+        coupon = await self.repo.find_by_id(coupon_id)
+        if not coupon:
+            raise BadRequestException("Invalid coupon code")
+        per_user = coupon.get("usage_limit_per_user", 1)
+        per_user = 1 if per_user is None else int(per_user)
+        claimed = await self.user_counters.claim(
+            coupon_id, user_id, per_user, lambda: self.usage_repo.count_for_user(coupon_id, user_id)
+        )
+        if not claimed:
+            raise BadRequestException("You have already used this coupon the maximum number of times")
         result = await self.repo.collection.update_one(
-            {
-                "_id": self.repo._oid(coupon_id),
-                "$expr": {"$or": [{"$eq": ["$total_usage_limit", None]}, {"$lt": ["$total_used", "$total_usage_limit"]}]},
-            },
+            {"_id": self.repo._oid(coupon_id), "$expr": self._UNDER_TOTAL_LIMIT},
             {"$inc": {"total_used": 1}},
         )
         if result.matched_count == 0:
+            await self.user_counters.release(coupon_id, user_id)
             raise BadRequestException("This coupon has just reached its usage limit — please try a different code.")
         await self.usage_repo.create({"coupon_id": coupon_id, "user_id": user_id, "booking_id": booking_id})
 
@@ -214,3 +235,4 @@ class CouponService:
         deleted = await self.usage_repo.collection.delete_one({"coupon_id": str(coupon["_id"]), "user_id": user_id, "booking_id": booking_id})
         if deleted.deleted_count:
             await self.repo.collection.update_one({"_id": coupon["_id"]}, {"$inc": {"total_used": -1}})
+            await self.user_counters.release(str(coupon["_id"]), user_id)

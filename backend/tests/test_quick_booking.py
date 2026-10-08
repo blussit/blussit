@@ -14,7 +14,7 @@ from app.schemas.booking_schema import QuickAddress, QuickBookingLine, QuickBook
 from app.services.auth_service import AuthService
 from app.services.booking_service import BookingService
 from tests.conftest import cleanup, db  # noqa: F401 — fixtures
-from tests.factories import get_hatchback_type_id, get_star_wash_service_id, make_captain, make_service_center
+from tests.factories import get_hatchback_type_id, get_star_wash_service_id, make_captain, make_recorded_photo_url, make_service_center, own_upload_url
 
 
 def _tomorrow() -> str:
@@ -172,7 +172,7 @@ async def test_one_code_verifies_every_car_on_the_visit(rig, cleanup):
     # Either car can be started now — pick the one he DIDN'T type the code on.
     from app.schemas.booking_schema import PhotoCaptureRequest
 
-    started = await bs.capture_before_photo(ids[0], PhotoCaptureRequest(image_url="https://x/before.jpg", latitude=22.7, longitude=75.8), captain_id)
+    started = await bs.capture_before_photo(ids[0], PhotoCaptureRequest(image_url=await make_recorded_photo_url(rig["db"], captain_id, "before"), latitude=22.7, longitude=75.8), captain_id)
     assert started["status"] == "service_started"
     other = await db.bookings.find_one({"_id": ObjectId(ids[1])})
     assert other["status"] == "captain_on_the_way" and other["vehicle_verified"] is True

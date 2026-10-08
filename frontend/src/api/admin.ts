@@ -1,4 +1,4 @@
-import { API_BASE_URL, apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
+import { API_BASE_URL, apiClient, UPLOAD_TIMEOUT_MS, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
 import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
 
@@ -318,6 +318,8 @@ export interface ManagerDashboard {
     date: string;
     slots: {
       key: string; label: string; cars: number; visits: number; capacity: number | null;
+      /** false = no capacity set for this slot: it takes NO bookings. */
+      capacity_configured?: boolean;
       unassigned: number; in_progress: number; completed: number; is_closed: boolean;
     }[];
     cars: number; visits: number; capacity: number | null; load_pct: number | null;
@@ -481,6 +483,67 @@ export type WaContactProfile = {
   stats: { total_bookings: number; completed: number; cancelled: number; last_service: string | null; lifetime_value: number; avg_rating_given: number | null; is_repeat: boolean } | null;
 };
 
+/** Why WhatsApp would NOT reach people (managers who can't get alerts,
+ *  unapproved templates, Meta refusing our credentials…). */
+export interface WaConfigWarning {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  user_id?: string | null;
+  name?: string | null;
+  service_center_id?: string | null;
+}
+
+/** One template the app uses (Admin → WhatsApp → Templates → Submit). */
+export interface WaCatalogueTemplate {
+  key: string;
+  name: string;
+  /** The newest version on Meta (name_v2…), if any. */
+  live_name?: string | null;
+  /** Meta status of the newest version, or NOT_SUBMITTED. */
+  status: string;
+  meta_category?: string | null;
+  rejected_reason?: string | null;
+  can_submit: boolean;
+  /** The name Submit would use (the next version after a rejection). */
+  submit_name?: string | null;
+  category: string;
+  body: string;
+  examples?: string[] | null;
+  button_text?: string | null;
+  button_url?: string | null;
+  events?: string[] | null;
+  note?: string | null;
+}
+
+export interface WaSettings {
+  google_review_url: string;
+}
+
+export interface WaDeliveryHealth {
+  days: number;
+  config_warnings?: WaConfigWarning[];
+  /** Queued sends by status: sending (first try in flight), pending (waiting
+   *  to retry), sent, failed (refused for good), dead (gave up after
+   *  retries), undelivered (accepted by Meta, then not delivered). */
+  queue: Record<string, number>;
+  failures_by_reason: Record<string, number>;
+  /** Free text refused outside the 24-hour window / no template. */
+  refused_outside_window: number;
+  recent_failures: {
+    id: string;
+    user_id?: string | null;
+    phone?: string | null;
+    title?: string | null;
+    event?: string | null;
+    status?: string | null;
+    failure?: string | null;
+    error?: string | null;
+    attempts?: number | null;
+    at?: string | null;
+  }[];
+}
+
 export const whatsappCrmApi = {
   /** Newest first; pass the last row's `last_message_at` as `before` for the next (older) page. */
   conversations: (filter = "all", search = "", before?: string | null, limit?: number) =>
@@ -508,6 +571,12 @@ export const whatsappCrmApi = {
       .then((r) => r.data.data),
   agents: () => apiClient.get<ApiSuccess<{ id: string; name: string; role: string }[]>>("/whatsapp/crm/agents").then((r) => r.data.data),
   badge: () => apiClient.get<ApiSuccess<{ unread_conversations: number }>>("/whatsapp/crm/badge").then((r) => r.data.data),
+  /** What did NOT reach people on WhatsApp in the last `days`. */
+  // `fresh`: skip the server's 15-second cache (the card's Refresh button).
+  deliveryHealth: (days = 7, fresh = false) =>
+    apiClient
+      .get<ApiSuccess<WaDeliveryHealth>>("/whatsapp/crm/delivery-health", { params: { days, ...(fresh ? { fresh: 1 } : {}) } })
+      .then((r) => r.data.data),
   defaultTags: () => apiClient.get<ApiSuccess<{ tags: string[] }>>("/whatsapp/crm/tags").then((r) => r.data.data),
   analytics: (days = 30) => apiClient.get<ApiSuccess<Record<string, never> & Record<string, unknown>>>("/whatsapp/crm/analytics", { params: { days } }).then((r) => r.data.data),
   templates: (params?: { sendable?: boolean }) =>
@@ -520,10 +589,19 @@ export const whatsappCrmApi = {
   createTemplate: (payload: { name: string; category: string; language: string; body: string; button_text?: string; button_url?: string }) =>
     apiClient.post("/whatsapp/crm/templates", payload),
   setTemplateDisabled: (name: string, paused: boolean) => apiClient.patch(`/whatsapp/crm/templates/${name}/disabled`, { paused }),
+  /** Every template the app uses, with Meta's status and what Submit would send. */
+  templateCatalogue: () => apiClient.get<ApiSuccess<WaCatalogueTemplate[]>>("/whatsapp/crm/templates/catalogue").then((r) => r.data.data),
+  submitCatalogueTemplate: (key: string) =>
+    apiClient
+      .post<ApiSuccess<{ name: string; status: string; note?: string }>>(`/whatsapp/crm/templates/catalogue/${encodeURIComponent(key)}/submit`)
+      .then((r) => r.data.data),
+  settings: () => apiClient.get<ApiSuccess<WaSettings>>("/whatsapp/crm/settings").then((r) => r.data.data),
+  /** google_review_url: https:// only; "" clears it (review requests stop). */
+  updateSettings: (payload: Partial<WaSettings>) => apiClient.put<ApiSuccess<WaSettings>>("/whatsapp/crm/settings", payload).then((r) => r.data.data),
   uploadMedia: (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return apiClient.post<ApiSuccess<{ media_id: string; media_type: string; filename: string; size: number }>>("/whatsapp/crm/media", form, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data.data);
+    return apiClient.post<ApiSuccess<{ media_id: string; media_type: string; filename: string; size: number }>>("/whatsapp/crm/media", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: UPLOAD_TIMEOUT_MS }).then((r) => r.data.data);
   },
   mediaUrl: (mediaId: string) => `${API_BASE_URL}/whatsapp/crm/media/${mediaId}`,
   /** The attachment itself, fetched WITH the admin's bearer token (a bare

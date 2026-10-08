@@ -5,10 +5,13 @@ import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, LogOut, Pencil
 import { bookingApi } from "../../api/booking";
 import { analyticsApi } from "../../api/admin";
 import { reviewApi } from "../../api/engagement";
-import { Badge, Button, Card, DataTable, Select, StatusBadge } from "../../components/ui";
+import { Badge, Button, Card, DataTable, ErrorState, Select, StatusBadge } from "../../components/ui";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { EditBookingModal } from "../../components/shared/EditBookingModal";
+import { StaffCancelDialog } from "../../components/shared/StaffCancelDialog";
+import { CustomerEditedChip } from "../../components/shared/BookingStaffExtras";
+import type { StaffBooking } from "../../api/staffBookings";
 import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import BookingQueuePage from "../manager/BookingQueuePage";
 import { useBookingFilters } from "../../lib/useBookingFilters";
@@ -37,12 +40,13 @@ export default function AdminBookingsPage() {
   // straight away instead of the bare center picker.
   const [params, setParams] = useSearchParams();
   const highlightId = params.get("highlight");
-  const { data: highlighted } = useQuery({
+  const highlightQuery = useQuery({
     queryKey: ["admin-highlight-booking", highlightId],
     queryFn: () => bookingApi.get(highlightId!),
     enabled: !!highlightId,
     retry: false,
   });
+  const highlighted = highlightQuery.data;
   useEffect(() => {
     if (highlighted?.service_center_id) setSelectedCenterId(highlighted.service_center_id);
   }, [highlighted]);
@@ -61,6 +65,21 @@ export default function AdminBookingsPage() {
   );
   return (
     <>
+      {/* The booking a notification pointed at didn't load — say so rather
+          than silently landing on the center picker. */}
+      {highlightId && highlightQuery.isError && !highlighted && (
+        <p role="alert" className="mb-4 text-sm text-[var(--color-text-secondary)]">
+          Couldn't open that booking.{" "}
+          <button
+            type="button"
+            className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+            disabled={highlightQuery.isFetching}
+            onClick={() => void highlightQuery.refetch()}
+          >
+            Try Again
+          </button>
+        </p>
+      )}
       {view}
       <BookingDetailDrawer booking={highlightId && highlighted ? highlighted : null} onClose={clearHighlight} />
     </>
@@ -68,7 +87,7 @@ export default function AdminBookingsPage() {
 }
 
 function ServiceCenterOverview({ onSelect, onShowRecycleBin }: { onSelect: (centerId: string) => void; onShowRecycleBin: () => void }) {
-  const { data, isLoading } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
 
   return (
     <div className="space-y-6">
@@ -84,6 +103,8 @@ function ServiceCenterOverview({ onSelect, onShowRecycleBin }: { onSelect: (cent
 
       {isLoading ? (
         <p className="text-sm text-[var(--color-text-secondary)]">Loading…</p>
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load service centers." onRetry={() => void refetch()} busy={isFetching} />
       ) : !data?.length ? (
         <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">No active service centers yet.</p>
       ) : (
@@ -135,6 +156,7 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
   const [status, setStatus] = useState("");
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
+  const [cancellingBooking, setCancellingBooking] = useState<Booking | null>(null);
   // Read-only browse (reviews, ratings, every status at a glance) is the
   // default; "Manage" swaps in the SAME queue a manager works from —
   // reassign/self-assign a captain, mark done, cancel, resolve an issue —
@@ -150,7 +172,7 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
   const filterKey = `${status}|${debouncedSearch}|${dateFrom}|${dateTo}|${sortOrder}`;
   useEffect(() => setPage(1), [filterKey]);
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["admin-center-bookings", centerId, status, debouncedSearch, dateFrom, dateTo, sortOrder, page],
     queryFn: () =>
       bookingApi.forCenter(centerId, {
@@ -170,11 +192,14 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
   const { data: centers } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
   const centerName = centers?.find((c) => c.service_center_id === centerId)?.name;
 
-  const { data: reviews } = useQuery({
+  const reviewsQuery = useQuery({
     queryKey: ["admin-center-bookings-reviews", centerId],
     queryFn: () => reviewApi.forCenter(centerId, { page: 1, page_size: 100 }),
     enabled: !manageMode,
   });
+  const reviews = reviewsQuery.data;
+  // Failed reviews read: every row would say "No Review Yet" — not true.
+  const reviewsFailed = reviewsQuery.isError && !reviews;
   const reviewByBooking = new Map((reviews?.data || []).map((r) => [r.booking_id, r]));
 
   const slabs = toSlabs(data?.data || []).map((slab) => ({ ...slab, id: slab.key }));
@@ -290,12 +315,28 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
         <BookingFilterBar search={search} onSearchChange={setSearch} sortOrder={sortOrder} onSortOrderChange={setSortOrder} dateFrom={dateFrom} onDateFromChange={setDateFrom} dateTo={dateTo} onDateToChange={setDateTo} />
       </div>
 
+      {reviewsFailed && (
+        <p role="alert" className="text-sm text-[var(--color-text-secondary)]">
+          Couldn't load reviews for these bookings.{" "}
+          <button
+            type="button"
+            className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+            disabled={reviewsQuery.isFetching}
+            onClick={() => void reviewsQuery.refetch()}
+          >
+            Try Again
+          </button>
+        </p>
+      )}
+
       {/* One row per VISIT: several cars wash on one trip are one job to
           dispatch and one bill, so they share a row that lists every car.
           The drawer that opens from it shows each car's own work. */}
       <DataTable<BookingSlab & { id: string }>
         isLoading={isLoading}
         data={slabs}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle={debouncedSearch || dateFrom || dateTo || status ? "No Bookings Match" : "No Bookings"}
         onRowClick={(slab) => setSelectedBooking(slab.primary)}
         columns={[
@@ -335,10 +376,39 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
                 </span>
               ),
           },
+          {
+            header: "Added On Site",
+            accessor: (slab) => {
+              const added = slab.bookings.flatMap((b) => (b as StaffBooking).added_services || []);
+              if (!added.length) return <span className="text-gray-300">—</span>;
+              const by = added[added.length - 1];
+              return (
+                <span className="text-xs" data-testid="admin-added-on-site">
+                  <span className="font-medium">{added.map((a) => `${toTitle(a.name)}${a.qty > 1 ? ` ×${a.qty}` : ""}`).join(", ")}</span>
+                  <span className="block text-[var(--color-text-secondary)]">
+                    Added On Site By {by.by_name || toTitle(by.role)}
+                    {by.role && by.by_name ? ` (${toTitle(by.role)})` : ""}
+                    {by.stage === "completed" ? " · After The Wash" : ""}
+                  </span>
+                </span>
+              );
+            },
+          },
           { header: "Slot", accessor: (slab) => `${format(slab.primary.scheduled_date)} · ${formatSlot(slab.primary.scheduled_slot)}` },
           { header: "Amount", accessor: (slab) => <span className="font-mono-num">₹{slab.totalAmount}</span> },
           { header: "Priority", accessor: (slab) => <Badge tone={slab.primary.priority === "high" ? "error" : "neutral"}>{toTitle(slab.primary.priority)}</Badge> },
-          { header: "Status", accessor: (slab) => <StatusBadge status={slab.status} /> },
+          {
+            header: "Status",
+            accessor: (slab) => (
+              <div className="flex flex-col items-start gap-1">
+                <StatusBadge status={slab.status} />
+                {slab.bookings.some((x) => x.payment_status === "partially_paid") && (
+                  <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">Part Paid</span>
+                )}
+                {slab.bookings.filter((x) => (x as StaffBooking).customer_edited_at).slice(0, 1).map((x) => <CustomerEditedChip key={x.id} booking={x as StaffBooking} />)}
+              </div>
+            ),
+          },
           {
             header: "Review",
             accessor: (slab) => {
@@ -349,7 +419,8 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
                 .filter(Boolean)
                 .map((r) => r!.captain_rating ?? r!.service_rating ?? r!.rating)
                 .filter((v): v is number => typeof v === "number");
-              if (!ratings.length) return <span className="text-xs text-[var(--color-text-secondary)]">No Review Yet</span>;
+              if (!ratings.length)
+                return <span className="text-xs text-[var(--color-text-secondary)]">{reviewsFailed ? "—" : "No Review Yet"}</span>;
               const rating = ratings.reduce((a, b) => a + b, 0) / ratings.length;
               return (
                 <span className="flex items-center gap-1 text-xs">
@@ -399,7 +470,12 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
         centerName={centerName}
         onEdit={openEdit}
         onDelete={requestDelete}
+        onCancel={(b) => {
+          setSelectedBooking(null);
+          setCancellingBooking(b);
+        }}
       />
+      <StaffCancelDialog booking={cancellingBooking} onClose={() => setCancellingBooking(null)} />
       <EditBookingModal
         booking={editingBooking}
         onClose={() => setEditingBooking(null)}
@@ -428,7 +504,7 @@ function RecycleBinView({ onBack, backLabel }: { onBack: () => void; backLabel: 
     queryClient.invalidateQueries({ queryKey: ["admin-center-summaries"] });
   };
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-recycle-bin"],
     queryFn: () => bookingApi.recycleBin({ page: 1, page_size: 100 }),
     // Deletes from the manager queue (admin "Manage" mode) don't invalidate this key.
@@ -532,6 +608,8 @@ function RecycleBinView({ onBack, backLabel }: { onBack: () => void; backLabel: 
       <DataTable<BookingSlab & { id: string }>
         isLoading={isLoading}
         data={slabs}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle="Recycle Bin Is Empty"
         columns={[
           {

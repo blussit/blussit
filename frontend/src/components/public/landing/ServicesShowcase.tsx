@@ -6,7 +6,7 @@ import { scrollToSection } from "../../../lib/sections";
 import { useAuth } from "../../../context/AuthContext";
 import { catalogApi } from "../../../api/catalog";
 import type { Service } from "../../../types";
-import { INR, groupServices, parseIncludes, priceView, serviceImage, titleCase, type ServiceGroup } from "./shared";
+import { INR, groupServices, parseIncludes, priceView, serviceImage, serviceImageSrcSet, titleCase, type ServiceGroup } from "./shared";
 
 const NAVY = "#0E1A33";
 const BLUE = "#0A66F0";
@@ -43,9 +43,10 @@ export function ServicesShowcase({ row, id, title, subtitle }: { row?: boolean; 
       <div className="container-page">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <p className="text-[14px] font-extrabold uppercase tracking-[0.1em] md:text-[15px]" style={{ color: BLUE }}>
-              Our services
-            </p>
+            {/* The section's heading for search engines and screen readers — styled as the small label it always was. */}
+            <h2 className="text-[14px] font-extrabold uppercase tracking-[0.1em] md:text-[15px]" style={{ color: BLUE }}>
+              Our Car Wash Services
+            </h2>
             {title && (
               <h2
                 className="mt-2 font-display text-[23px] font-extrabold leading-[1.15] tracking-[-0.02em] sm:text-[30px] lg:text-[38px]"
@@ -245,6 +246,8 @@ function ServiceCard({ group, index }: { group: ServiceGroup<Service>; index: nu
         <div className="aspect-[16/10] w-full overflow-hidden bg-[#F3F6FA]">
           <img
             src={serviceImage(s, index)}
+            srcSet={serviceImageSrcSet(serviceImage(s, index))}
+            sizes="(min-width: 1024px) 300px, 45vw"
             alt={titleCase(s.name)}
             loading="lazy"
             decoding="async"

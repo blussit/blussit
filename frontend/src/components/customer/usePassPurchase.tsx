@@ -1,12 +1,37 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay } from "../../lib/razorpay";
+import { trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
+import { stashThankYouToken } from "../../lib/thankYou";
 import type { SubscriptionPlan } from "../../types";
 import { PassPurchaseSheet, type PassPrefill } from "./PassPurchaseSheet";
 
 const AUTO_PAY_FALLBACK = "Auto-pay couldn't be set up — you paid once. You can buy again when it ends.";
+
+// A pass payment that is confirming / under review blocks buying again for
+// a while (this tab, surviving a refresh) — a second checkout was accepted
+// and parked for a refund. The server refuses one too (PAYMENT_CONFIRMING).
+const HOLD_KEY = "blussit:pass-payment-pending";
+const HOLD_MS = 5 * 60 * 1000;
+const HELD_NOTE = "Your last plan payment is still being confirmed — no need to pay again. It shows under My Plans in a few minutes.";
+function readHold(): number {
+  try {
+    const at = Number(sessionStorage.getItem(HOLD_KEY) || 0);
+    return at && Date.now() - at < HOLD_MS ? at : 0;
+  } catch {
+    return 0;
+  }
+}
+function writeHold(at: number) {
+  try {
+    if (at) sessionStorage.setItem(HOLD_KEY, String(at));
+    else sessionStorage.removeItem(HOLD_KEY);
+  } catch {
+    // storage blocked — the in-memory hold still applies
+  }
+}
 
 /**
  * Buying a monthly pass, end to end — the sheet, Razorpay checkout and the
@@ -28,6 +53,24 @@ export function usePassPurchase() {
   // Auto-pay can silently become a one-time payment when the gateway won't
   // set up a mandate — the customer must be told which one they bought.
   const autoPayUnavailable = useRef(false);
+  const [heldAt, setHeldAt] = useState(readHold);
+  const held = heldAt > 0;
+  const hold = (at: number) => {
+    setHeldAt(at);
+    writeHold(at);
+  };
+  // Release when the window passes; meanwhile keep the plans list fresh so
+  // the confirmed pass appears by itself.
+  useEffect(() => {
+    if (!heldAt) return;
+    const poll = window.setInterval(() => void queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] }), 15_000);
+    const release = window.setTimeout(() => hold(0), Math.max(0, heldAt + HOLD_MS - Date.now()));
+    return () => {
+      window.clearInterval(poll);
+      window.clearTimeout(release);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heldAt]);
   // The sheet (and `plan`) can close mid-checkout — keep the name for the note.
   const buyingName = useRef<string | undefined>(undefined);
 
@@ -39,6 +82,7 @@ export function usePassPurchase() {
       setNote("");
       autoPayUnavailable.current = false;
       buyingName.current = plan?.name;
+      trackInitiateCheckout({ contentType: "plan", contentName: plan?.name });
       return payWithRazorpay(
         { purpose: "subscription", plan_id: plan!.id, vehicle_type: args.vehicleType, service_id: args.serviceId, auto_pay: args.autoPay },
         { name: user?.full_name, email: user?.email, contact: user?.phone },
@@ -48,6 +92,7 @@ export function usePassPurchase() {
         {
           onConfirming: () => {
             setPlan(null);
+            hold(Date.now());
             setNote("Payment done — confirming it with the bank…");
           },
           onFailed: (reason) => setError(`Payment failed — ${reason}`),
@@ -56,17 +101,24 @@ export function usePassPurchase() {
     },
     onSuccess: (result) => {
       invalidateSubs();
+      hold(0);
       const planName = result.subscription?.plan_name || buyingName.current;
       const fallback = autoPayUnavailable.current;
+      const paid = result.subscription?.purchased_price;
+      if (result.subscription && paid && paid > 0) {
+        trackPurchase({ value: paid, eventId: `plan:${result.subscription.id}`, contentType: "plan", contentName: planName });
+      }
       setPlan(null);
       setError("");
       // The thank-you ticket goes to whichever request confirmed the
       // purchase first; a later confirmation just shows the pass here.
       if (result.confirmation_token) {
-        const query = new URLSearchParams({ token: result.confirmation_token });
-        if (planName) query.set("plan", planName);
-        if (fallback) query.set("autopay", "off");
-        navigate(`/thank-you?${query.toString()}`);
+        // The ticket rides in router state + this tab's storage, never the
+        // URL (analytics record every URL — see lib/thankYou.ts).
+        stashThankYouToken(result.confirmation_token);
+        navigate("/thank-you", {
+          state: { token: result.confirmation_token, type: "subscription", plan_name: planName || undefined, autopay_off: fallback || undefined },
+        });
       } else {
         setNote(`Payment received — ${planName || "your pass"} is active.${fallback ? ` ${AUTO_PAY_FALLBACK}` : ""}`);
       }
@@ -75,6 +127,7 @@ export function usePassPurchase() {
       invalidateSubs();
       if (err instanceof PaymentPendingConfirmation || err instanceof PaymentNeedsAttention) {
         setPlan(null);
+        hold(Date.now());
         setNote(err.message);
         return;
       }
@@ -94,6 +147,10 @@ export function usePassPurchase() {
   });
 
   const start = (next: SubscriptionPlan, nextPrefill?: PassPrefill | null) => {
+    if (held || mutation.isPending) {
+      setNote(HELD_NOTE);
+      return;
+    }
     setPrefill(nextPrefill ?? null);
     setError("");
     setPlan(next);
@@ -111,5 +168,7 @@ export function usePassPurchase() {
     />
   );
 
-  return { start, sheet, note, clearNote: () => setNote(""), isPaying: mutation.isPending };
+  /** A payment is in flight or being confirmed — buy buttons should be off. */
+  const purchaseHeld = held || mutation.isPending;
+  return { start, sheet, note, clearNote: () => setNote(""), isPaying: mutation.isPending, purchaseHeld };
 }

@@ -15,8 +15,8 @@ export function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--color-card-border)] px-6 py-14 text-center">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--ui-icon-bg,#f3f4f6)]">
-        <Icon className="h-6 w-6 text-[var(--ui-muted,#6b7280)]" />
+      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--ui-icon-bg,#EEF3FA)]">
+        <Icon className="h-6 w-6 text-[var(--ui-muted,#5F6878)]" />
       </div>
       <h3 className="text-base font-semibold text-[var(--color-text-primary)]">{title}</h3>
       {description && <p className="mt-1.5 max-w-sm text-sm text-[var(--color-text-secondary)]">{description}</p>}

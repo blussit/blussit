@@ -8,9 +8,10 @@ with a database on this machine — so it can never write to production.
 Idempotent: run it as often as you like.
 
 Accounts (customers log in with their phone + the dev OTP, 123456):
-  Admin     admin@doorstepvehiclecare.in          / Admin@12345
-  Manager   manager.indore@doorstepvehiclecare.in / Manager@12345
-  Captain   captain.indore@doorstepvehiclecare.in / Captain@12345
+  Admin     admin@doorstepvehiclecare.in
+  Manager   manager.indore@doorstepvehiclecare.in
+  Captain   captain.indore@doorstepvehiclecare.in
+    (passwords: SEED_*_PASSWORD, else the local-only defaults in app/seed.py)
   Customer  9000000001  new customer, no plan, no bookings
   Customer  9000000002  has an active monthly pass
   Customer  9000000003  has a completed wash in their history

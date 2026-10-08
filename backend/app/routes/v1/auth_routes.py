@@ -14,6 +14,7 @@ from app.schemas.user_schema import (
     RequestOtpRequest,
     ResetPasswordRequest,
     StaffCreateRequest,
+    StaffPasswordResetRequest,
     VerifyOtpRequest,
 )
 
@@ -88,6 +89,20 @@ async def create_staff(
     return await AuthController(db).create_staff(current_user, payload)
 
 
+@router.post("/staff/{user_id}/reset-password", dependencies=[Depends(require_manager_or_admin)])
+async def staff_reset_staff_password(
+    user_id: str,
+    payload: StaffPasswordResetRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The staff recovery path: an admin sets a temporary password for any
+    staff member (a manager: their own center's captains). The staff member
+    must replace it at the next login. "Forgot password" by code works for
+    staff only after they verified their phone themselves (verify-phone)."""
+    return await AuthController(db).staff_reset_staff_password(current_user, user_id, payload.temp_password)
+
+
 @router.post("/customers", dependencies=[Depends(require_manager_or_admin)])
 async def create_customer(
     payload: ManagerCreateCustomerRequest,
@@ -102,10 +117,10 @@ async def create_customer(
 
 @router.post("/verify-phone/request")
 async def request_phone_verification(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Sends an OTP to the LOGGED-IN customer's own phone — the gate a
-    first-time self-service booking/subscription blocks on until
-    completed (PhoneNotVerifiedException). Always the caller's own phone;
-    never takes a target identifier."""
+    """Sends an OTP to the LOGGED-IN user's own phone — any role. For a
+    customer it is the 90-day re-verification gate; for staff it is how they
+    prove the phone on file is theirs, which "Forgot password" by code then
+    requires. Always the caller's own phone; never takes a target identifier."""
     return await AuthController(db).request_phone_verification(current_user)
 
 

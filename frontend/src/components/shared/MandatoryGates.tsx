@@ -53,7 +53,7 @@ export function MandatoryGates() {
   if (user.must_change_password) {
     const valid = password.length >= 8 && password === confirm;
     return (
-      <Modal open onClose={() => undefined} title="Set Your Password">
+      <Modal open onClose={() => undefined} dismissible={false} title="Set Your Password">
         <div className="space-y-4">
           <div className="flex items-start gap-3 rounded-xl bg-[var(--color-primary-light)] p-3.5">
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-primary)]" />

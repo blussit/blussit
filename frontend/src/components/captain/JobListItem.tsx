@@ -46,7 +46,11 @@ export function JobListItem({ slab }: { slab: BookingSlab }) {
       <div className="min-w-0 flex-1">
         <p className="truncate text-[15px] font-bold text-[#0E1A33]">{what}</p>
         <p className="truncate text-[13px] text-[#5F6878]">
-          {done ? rupees(slab.totalAmount) : car.address_snapshot?.line1 || car.customer_name || ""}
+          {done
+            ? pay.paid
+              ? rupees(slab.totalAmount)
+              : t("captain.collect.title").replace("{amount}", rupees(pay.due))
+            : car.address_snapshot?.line1 || car.customer_name || ""}
         </p>
       </div>
       <Pill tone={status.tone}>{status.text}</Pill>

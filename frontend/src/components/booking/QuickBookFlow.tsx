@@ -23,7 +23,8 @@ import {
   UserRound,
 } from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
-import { bookingApi, type BookingQuotePayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { bookingApi, type BookingQuotePayload, type ManagerLogPayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { TIP_METHOD_LABELS, type TipMethod } from "../../api/staffBookings";
 import { addressApi } from "../../api/profile";
 import { adminServiceCenterApi } from "../../api/admin";
 import { Button, DiscountBadge, Input, Modal, OfferTag, Spinner, Switch, discountPercent } from "../ui";
@@ -32,6 +33,7 @@ import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { QtyStepper } from "../shared/QtyStepper";
 import { CustomerNamePhoneFields } from "../shared/CustomerNamePhoneFields";
+import { TipMethodToggle } from "../shared/TipModal";
 import { BookingOtpModal } from "./BookingOtpModal";
 import { BookHero } from "./BookHero";
 import { PickerField, PickerOption } from "./PickerField";
@@ -41,14 +43,17 @@ import { CARD, CTA, FIELD, dayParts, vehicleLabel, vehicleMeta } from "./booking
 import { CoverageLeadInline } from "../public/CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorCode, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
+import { stashThankYouToken } from "../../lib/thankYou";
+import { bookingEventId, trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
 import { ensureGoogleMaps } from "../../lib/googleMaps";
 import { daysAgoIST, formatSlot, formatTime12, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
-import { addonKit, baseGroups, bikeTypeIds, eligibleFor, variantCount, type BaseGroup } from "../../lib/serviceMix";
+import { addonKit, baseGroups, bikeTypeIds, eligibleFor, offeredAddons, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { INR, parseIncludes, priceForType, priceView, titleCase } from "../public/landing/shared";
 import { subscriptionApi } from "../../api/engagement";
+import type { WalletQuoteLines, WalletResultLines } from "../customer/money";
 import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption } from "../../types";
 
 /**
@@ -114,7 +119,8 @@ interface Draft {
 }
 const EMPTY_DRAFT: Draft = { typeId: "", count: 1, base: null, addons: [] };
 
-type Coverage = "idle" | "checking" | "covered" | "uncovered";
+// "error" = the check itself failed (network/server) — never shown as "not in your area".
+type Coverage = "idle" | "checking" | "covered" | "uncovered" | "error";
 
 const STEPS = ["What Are We Washing?", "Where And When?"];
 const LOG_STEPS = ["What Was Washed?", "Who, Where And When?"];
@@ -122,7 +128,7 @@ const LOG_STEPS = ["What Was Washed?", "Who, Where And When?"];
 // Manager / log wizard only (the customer flows use the v2 page below).
 /** The wizard's one key action — the v2 yellow CTA (navy text). */
 const MGR_CTA =
-  "inline-flex h-11 min-w-[150px] items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-5 text-sm font-bold text-[#0E1A33] shadow-[0_8px_20px_-12px_rgba(232,169,0,0.8)] transition hover:bg-[#FFC800] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none";
+  "inline-flex h-11 min-w-[150px] items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-5 text-sm font-bold text-[#0E1A33] shadow-[0_8px_20px_-12px_rgba(232,169,0,0.8)] transition hover:bg-[#F5C400] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none";
 const SECTION_LABEL = "mb-2 text-sm font-semibold text-[#0E1A33]";
 
 /** Every pickable box and chip in the manager wizard — the v2 booking look:
@@ -151,6 +157,31 @@ function firstWashPriceFor(s: Service, vt: string): number | null {
   return s.vehicle_type_discounted_prices?.[vt] ?? s.discounted_price ?? null;
 }
 
+/** The area check itself failed (network/server) — say so, never "not in your area". */
+function CoverageFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p className="text-[13px] text-[#5F6878]" role="alert">
+      Couldn't check your area —{" "}
+      <button type="button" onClick={onRetry} className="font-semibold text-[#0A66F0] hover:underline">
+        Try Again
+      </button>
+    </p>
+  );
+}
+
+/** A catalogue read that failed — a muted line with a retry, instead of a
+ *  "Loading…" that never ends or an empty list that looks like a fact. */
+function LoadFailed({ what, busy, onRetry, className = "" }: { what: string; busy: boolean; onRetry: () => void; className?: string }) {
+  return (
+    <p className={`text-[13px] text-[#5F6878] ${className}`} role="alert">
+      Couldn't load {what}.{" "}
+      <button type="button" onClick={onRetry} disabled={busy} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+        {busy ? "Trying…" : "Try Again"}
+      </button>
+    </p>
+  );
+}
+
 export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | "app" }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -167,8 +198,19 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [firstWashKnown, setFirstWashKnown] = useState<boolean | null>(null);
   const showFirstWash = firstWashKnown ?? (mode === "public" && !user);
 
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
-  const { data: catalogue, isLoading: servicesLoading } = useQuery({
+  const {
+    data: vehicleTypes,
+    isError: typesFailed,
+    isFetching: typesFetching,
+    refetch: refetchTypes,
+  } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
+  const {
+    data: catalogue,
+    isLoading: servicesLoading,
+    isError: servicesFailed,
+    isFetching: servicesFetching,
+    refetch: refetchServices,
+  } = useQuery({
     queryKey: ["public-services"],
     queryFn: () => catalogApi.services({ page_size: 100 }),
   });
@@ -209,6 +251,10 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // line list is reshuffled, so an index always means the same line.
   const [subscriptionOverride, setSubscriptionOverride] = useState<Record<number, boolean>>({});
   useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
+  // Whether line i uses the customer's pass. Booking: on unless switched
+  // off. Log A Done Job: OFF unless ticked — a pass is only used when the
+  // manager says so (the server only draws on one when use_subscription is true).
+  const planOn = (i: number) => (isLog ? subscriptionOverride[i] === true : subscriptionOverride[i] !== false);
   // null = nothing chosen yet (a default may be preselected), "" = "New address".
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
@@ -233,7 +279,18 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [altPhone, setAltPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // "You already have a booking…" — usually a retry after a lost response.
+  const [duplicateBooking, setDuplicateBooking] = useState<{ id: string; number?: string } | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // A different number: whatever the server said about the old one is stale.
+  useEffect(() => {
+    setFieldErrors((prev) => {
+      if (!prev.phone) return prev;
+      const next = { ...prev };
+      delete next.phone;
+      return next;
+    });
+  }, [phone]);
   const [otpOpen, setOtpOpen] = useState(false);
   // Kept for a retry on the same number: a widget token stays reusable, and
   // the server only spends a classic code once the booking has passed its
@@ -247,6 +304,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [discount, setDiscount] = useState("");
   // Log mode: the tip the customer gave — added to the job's total and revenue.
   const [tip, setTip] = useState("");
+  // How the tip itself was handed over (MONEY-2) — independent of the job's payment.
+  const [tipMethod, setTipMethod] = useState<TipMethod>("cash");
   // Manager booking of a prepaid service: the pay link the customer was sent.
   const [sentLink, setSentLink] = useState<{ numbers: string; link: string } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -303,6 +362,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         setSendWhatsApp(saved.sendWhatsApp !== false);
         setDiscount(typeof saved.discount === "string" ? saved.discount : "");
         setTip(typeof saved.tip === "string" ? saved.tip : "");
+        setTipMethod(saved.tipMethod === "online" ? "online" : "cash");
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
@@ -328,12 +388,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip })
+        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip, tipMethod })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip]);
+  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip, tipMethod]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -361,7 +421,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // customer's — so a repeat customer's visit reuses the address on file.
   const { data: customerAddresses } = useQuery({
     queryKey: ["customer-addresses", pickedCustomerId],
-    queryFn: () => addressApi.forCustomer(pickedCustomerId as string),
+    // 404 = a customer new to this center: no saved addresses, not an error.
+    queryFn: () => addressApi.forCustomer(pickedCustomerId as string).catch((e) => (getErrorStatus(e) === 404 ? [] : Promise.reject(e))),
     enabled: mode === "manager" && !!pickedCustomerId,
   });
   const savedAddresses = isCustomer ? myAddresses : mode === "manager" && pickedCustomerId ? customerAddresses : undefined;
@@ -447,6 +508,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       // Otherwise say so and let the customer pick; never guess a service
       // (a wrong one would silently skip the pass and charge full price).
       const sub = myPasses?.find((p) => p.id === subscriptionParam);
+      // A pass bought for ONE car is never applied to a by-type booking —
+      // it books on the plans page's car-bound sheet instead.
+      if (sub && sub.vehicle_id && sub.service_id && !sub.society_id) {
+        navigate(`/app/subscriptions?book=${sub.id}`, { replace: true });
+        return;
+      }
       const typeId = sub?.vehicle_type && types.some((t) => t.id === sub.vehicle_type) ? sub.vehicle_type : "";
       const svc = sub?.service_id ? services.find((s) => s.id === sub.service_id && !s.is_addon) : undefined;
       const usable = !!sub && sub.effective_status === "active" && (sub.remaining_service_count ?? 0) > 0;
@@ -620,7 +687,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // (manager) the picked customer's.
   const { data: customerPasses } = useQuery({
     queryKey: ["customer-active-passes", pickedCustomerId],
-    queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string),
+    // 404 = a customer new to this center: no plans here, not an error.
+    queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string).catch((e) => (getErrorStatus(e) === 404 ? [] : Promise.reject(e))),
     enabled: isManager && !!pickedCustomerId,
   });
   const passes = isCustomer ? myPasses : isManager && pickedCustomerId ? customerPasses : undefined;
@@ -646,7 +714,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     const taken = new Set<string>();
     lines.forEach((line, i) => {
       if (!line.payload) return;
-      const on = subscriptionOverride[i] !== false;
+      const on = planOn(i);
       const mine = new Set(taken);
       const subs: UserSubscription[] = [];
       for (let n = 0; n < line.payload.quantity; n++) {
@@ -713,12 +781,14 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const editingGroups = draft.typeId ? baseGroups(services, draft.typeId) : [];
   const editingKit = draft.typeId ? addonKit(services, draft.typeId, bikeIds) : null;
   const editingIsBike = bikeIds.has(draft.typeId);
+  // The add-on chips — the same filter every other add-on picker uses.
+  const editingAddons = draft.typeId ? offeredAddons(services, draft.typeId, bikeIds) : [];
 
   // use_subscription defaults true (server auto-applies a matching pass) —
   // false only for a line whose "use the plan" switch was turned off.
   const linesForPayload = (): QuickBookingLine[] =>
     lines
-      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: subscriptionOverride[i] !== false } : null))
+      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: planOn(i) } : null))
       .filter(Boolean) as QuickBookingLine[];
 
   // ---- the bill, from the server --------------------------------------------
@@ -751,22 +821,50 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // the server's price from the first screen). Console: on step 2.
   const quoteWanted = !!quoteRequest && (step === 1 || !isManager);
   const settledQuoteKey = useSettled(quoteWanted ? JSON.stringify(quoteRequest) : "", 450);
-  const { data: quote, error: quoteFailure, isFetching: quoting } = useQuery({
+  const {
+    data: quote,
+    error: quoteFailure,
+    isFetching: quoting,
+    refetch: refetchQuote,
+  } = useQuery({
     queryKey: ["booking-quote", mode, settledQuoteKey],
     queryFn: () => bookingApi.quote(JSON.parse(settledQuoteKey) as BookingQuotePayload),
     enabled: !!settledQuoteKey,
-    retry: false,
+    // One quiet retry on a blip; a refusal (4xx) is the answer.
+    retry: retryUnlessClientError(1),
     staleTime: 15_000,
   });
   // Only a quote for exactly what is on screen right now counts.
-  const liveQuote = quoteWanted && settledQuoteKey === JSON.stringify(quoteRequest) ? quote : undefined;
+  const currentQuoteKey = quoteWanted ? JSON.stringify(quoteRequest) : "";
+  const quoteIsCurrent = quoteWanted && settledQuoteKey === currentQuoteKey;
+  const liveQuote = quoteIsCurrent ? quote : undefined;
   useEffect(() => {
     if (quote) setFirstWashKnown(quote.first_time_eligible);
   }, [quote]);
   // A refusal the booking would also hit (e.g. a plan that can't be used)
-  // is shown; a network blip or rate limit just leaves the local estimate.
+  // is shown as such; a network blip, timeout, 5xx or rate limit means the
+  // price simply isn't confirmed — never a local estimate on the Book button.
   const quoteStatus = (quoteFailure as { response?: { status?: number } } | null)?.response?.status;
-  const quoteError = quoteWanted && quoteFailure && quoteStatus && quoteStatus < 500 && quoteStatus !== 429 ? getErrorMessage(quoteFailure) : "";
+  const quoteError = quoteIsCurrent && quoteFailure && quoteStatus && quoteStatus < 500 && quoteStatus !== 429 ? getErrorMessage(quoteFailure) : "";
+  const quoteUnavailable = quoteIsCurrent && !quote && !!quoteFailure && !quoteError;
+  // The server re-priced the booking (409 PRICE_CHANGED — e.g. the first-wash
+  // price doesn't apply to this number): that figure, for exactly this
+  // selection + number, is what the next tap confirms.
+  const [repriced, setRepriced] = useState<{ key: string; total: number; charge?: number } | null>(null);
+  const repriceKey = `${currentQuoteKey}|${validateIndianMobile(phone) || ""}`;
+  const repricedTotal = repriced && repriced.key === repriceKey && liveQuote ? repriced.total : null;
+  // The customer's wallet on this quote (spec 2026-10-07 §1.1) — display
+  // only: a negative balance is carried INTO total_amount ("Previous
+  // Balance Due"), credit is used on it ("Wallet Credit"). Older servers
+  // sent the late-cancellation charge as cancellation_charge instead.
+  const walletQuote = liveQuote as (typeof liveQuote & WalletQuoteLines) | undefined;
+  const walletDueField = walletQuote?.previous_balance_due ?? walletQuote?.wallet_due_carried;
+  /** A previous balance (or, on an older server, a late-cancellation charge) riding on this visit (in the total). */
+  const carriedCharge =
+    repricedTotal != null && repriced?.charge ? repriced.charge : liveQuote && !isLog ? (walletDueField ?? liveQuote.cancellation_charge) || 0 : 0;
+  const carriedLabel = walletDueField != null || (repricedTotal != null && !!repriced?.charge) ? "Previous Balance Due" : "Previous Cancellation Charge";
+  /** Wallet credit the server will use on this booking (never on a re-priced or logged one). */
+  const walletApplied = liveQuote && !isLog && repricedTotal == null ? Math.max(0, walletQuote?.wallet_applied || 0) : 0;
 
   const total = liveQuote ? liveQuote.subtotal : lines.reduce((n, l) => n + l.subtotal, 0);
   const regularTotal = liveQuote ? liveQuote.regular_subtotal : lines.reduce((n, l) => n + l.regularSubtotal, 0);
@@ -778,7 +876,14 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const travelQuote = liveQuote ? liveQuote.travel : travel;
   const travelDue = !isLog && !!travelQuote && (liveQuote ? true : billed.some((s) => s.charges_travel));
   const travelCharge = travelDue && travelQuote ? travelQuote.charge : 0;
-  const payable = liveQuote && !isLog ? liveQuote.total_amount : displayTotal + travelCharge;
+  const payable = liveQuote && !isLog ? (repricedTotal ?? liveQuote.total_amount) : displayTotal + travelCharge;
+  /** What the customer actually pays now — the total less wallet credit (display only; the booking still sends `payable`). */
+  const amountToPay =
+    liveQuote && !isLog && repricedTotal == null && typeof walletQuote?.amount_payable === "number"
+      ? Math.max(0, walletQuote.amount_payable)
+      : Math.max(0, Math.round((payable - walletApplied) * 100) / 100);
+  /** Book is live only with a server price for exactly what is on screen. */
+  const priceConfirmed = isLog || (!!liveQuote && !quoteError);
   // Online only: a billed prepaid service, or (self-serve) extras on a plan
   // wash — the server parks both until paid.
   const prepaidName = isLog ? undefined : liveQuote ? liveQuote.prepaid_service || undefined : billed.find((s) => s.prepaid_only)?.name;
@@ -817,7 +922,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const setCount = (next: number) => {
     const clamped = Math.max(1, Math.min(10, next));
     if (otherVehicles + clamped > maxVehicles) {
-      pushToast({ tone: "error", title: `Up to ${maxVehicles} vehicles on one visit`, message: "Book the rest as a second visit." });
+      pushToast({ tone: "error", title: `Up To ${maxVehicles} Vehicles On One Visit`, message: "Book the rest as a second visit." });
       return;
     }
     setDraft((d) => ({ ...d, count: clamped }));
@@ -829,7 +934,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const addAnother = () => {
     if (!draftReady) return;
     if (otherVehicles + draft.count >= maxVehicles) {
-      pushToast({ tone: "error", title: `Up to ${maxVehicles} vehicles on one visit`, message: "Book the rest as a second visit." });
+      pushToast({ tone: "error", title: `Up To ${maxVehicles} Vehicles On One Visit`, message: "Book the rest as a second visit." });
       return;
     }
     setAdded((a) => [...a, draft]);
@@ -870,8 +975,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     setTravel(null);
   };
 
+  // Re-runs the last coverage check after a failed one ("Try Again").
+  const retryCoverage = useRef<(() => void) | null>(null);
+
   async function chooseSavedAddress(a: Address) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void chooseSavedAddress(a);
     setSavedAddressId(a.id);
     setPinned(null);
     setCoverage("checking");
@@ -892,12 +1001,13 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         setCoverage("uncovered");
       }
     } catch {
-      if (seq === addressSeq.current) setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("error");
     }
   }
 
   async function onPin(v: LocationValue) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void onPin(v);
     setPinned(v);
     if (v.pincode) setPincode(v.pincode);
     setCoverage("checking");
@@ -920,7 +1030,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         setCoverage("uncovered");
       }
     } catch {
-      if (seq === addressSeq.current) setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("error");
     }
   }
 
@@ -931,6 +1041,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [pinRequired, setPinRequired] = useState(false);
   async function checkPincode(pin: string) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void checkPincode(pin);
     latestPincode.current = pin;
     setCoverage("checking");
     setCheckedPincode(pin);
@@ -952,7 +1063,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           setCoverage("uncovered");
         }
       } catch {
-        if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("uncovered");
+        if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("error");
       }
       return;
     }
@@ -969,7 +1080,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         setCoverage("uncovered");
       }
     } catch {
-      if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("uncovered");
+      if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("error");
     }
   }
 
@@ -1120,7 +1231,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     setError("");
     setSubmitting(true);
     try {
-      const result = await bookingApi.managerLogCompleted({
+      const logPayload: ManagerLogPayload & { tip_method?: TipMethod } = {
         customer_name: name.trim(),
         customer_phone: validateIndianMobile(phone) || phone.trim(),
         lines: linesForPayload(),
@@ -1131,24 +1242,28 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         payment_method: finalTotal > 0 ? paymentMethod : "cash",
         discount_amount: discountNum > 0 ? discountNum : undefined,
         tip_amount: tipNum || undefined,
+        tip_method: tipNum > 0 ? tipMethod : undefined,
         send_whatsapp: sendWhatsApp,
-      });
+      };
+      const result = await bookingApi.managerLogCompleted(logPayload);
       try {
         sessionStorage.removeItem(storageKey);
       } catch {
         // ignore
       }
       queryClient.invalidateQueries({
-        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|center-captains)/.test(q.queryKey[0]),
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|manager-dashboard|center-captains)/.test(q.queryKey[0]),
       });
       pushToast({
         tone: "success",
-        title: "Job logged as done",
+        title: "Job Logged As Done",
         message: `${result.booking_numbers.join(" + ")} · ₹${result.total_amount}${sendWhatsApp ? " · customer notified on WhatsApp" : ""}`,
       });
       navigate("/manager/bookings");
     } catch (err) {
-      setError(getErrorMessage(err));
+      const message = getErrorMessage(err);
+      if (getErrorCode(err) === "ACCOUNT_INACTIVE" || getErrorCode(err) === "STAFF_ACCOUNT_PHONE") setFieldErrors((prev) => ({ ...prev, phone: message }));
+      setError(message);
     } finally {
       setSubmitting(false);
     }
@@ -1161,6 +1276,13 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       return;
     }
     const canonicalPhone = validateIndianMobile(phone) || phone.trim();
+    // Never book on a price the customer wasn't shown by the server.
+    if (!liveQuote || quoteError) {
+      setError(quoteError || "Couldn't confirm the price — try again.");
+      if (!quoteError) void refetchQuote();
+      return;
+    }
+    const expectedTotal = repricedTotal ?? liveQuote.total_amount;
     const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? verified.proof : undefined);
     if (needsOtp && !proof) {
       setOtpError("");
@@ -1168,6 +1290,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       return;
     }
     setError("");
+    setDuplicateBooking(null);
     setSubmitting(true);
     try {
       const payload: QuickBookingPayload = {
@@ -1183,6 +1306,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
         hold_key: getSlotHolderKey(),
+        expected_total: expectedTotal,
       };
       if (savedAddressId) payload.address_id = savedAddressId;
       else
@@ -1211,7 +1335,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         const linkMissing = payMethod === "online" && !!prepaidName;
         pushToast({
           tone: linkMissing ? "warning" : "success",
-          title: "Booking created",
+          title: "Booking Created",
           message: linkMissing
             ? `${result.booking_numbers.join(" + ")} · the payment link couldn't be sent.`
             : `${result.booking_numbers.join(" + ")} · service code ${result.service_code || "—"}`,
@@ -1222,9 +1346,31 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       if (isCustomer) {
         queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
         queryClient.invalidateQueries({ queryKey: ["addresses"] });
+        queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+        // Wallet credit was used / a previous balance was carried in.
+        queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
       }
-      navigate(`/thank-you?token=${result.confirmation_token}`, {
+      // The slot just booked (or held) is no longer free for the next visitor on this tab.
+      queryClient.invalidateQueries({ queryKey: ["available-slots"] });
+      // A pay-online booking isn't real until it's paid — that Purchase
+      // comes from the payment instead. A ₹0 visit fully covered by a plan
+      // was already counted when the plan was bought.
+      if (!result.awaiting_payment && result.total_amount > 0 && result.bookings[0]) {
+        trackPurchase({
+          value: result.total_amount,
+          eventId: bookingEventId(result.booking_group_id, result.bookings[0].id),
+          contentType: "booking",
+          contentName: lines.map(lineLabel).join(" + "),
+          numItems: result.vehicle_count,
+        });
+      }
+      if (result.confirmation_token) stashThankYouToken(result.confirmation_token);
+      // Replaces the confirm step: Back from the confirmation must not land
+      // on a booking form (with a stale #confirm) that was already used.
+      navigate("/thank-you", {
+        replace: true,
         state: {
+          token: result.confirmation_token,
           type: "booking",
           booking_number: result.booking_numbers.join(" + "),
           scheduled_date: date,
@@ -1234,10 +1380,52 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           payment_link: result.payment_link,
           awaiting_payment: result.awaiting_payment,
           total_amount: result.total_amount,
+          payment_method: result.total_amount > 0 ? payload.payment_method : undefined,
+          cancellation_charge: result.cancellation_charge || 0,
+          wallet_applied: (result as typeof result & WalletResultLines).wallet_applied || 0,
+          wallet_due_carried: (result as typeof result & WalletResultLines).wallet_due_carried || 0,
+          amount_due: (result as typeof result & WalletResultLines).amount_due,
         },
       });
     } catch (err) {
       const message = getErrorMessage(err);
+      if (getErrorCode(err) === "PRICE_CHANGED") {
+        // The server's price moved since the quote (or differs for this
+        // number): show the new one and wait for a fresh tap — never book
+        // it silently.
+        const details = ((err as { response?: { data?: { details?: Record<string, unknown> } } }).response?.data?.details || {}) as Record<string, unknown>;
+        const fresh = [details.total_amount, details.new_total, details.current_total, details.total].find((v) => typeof v === "number") as number | undefined;
+        // A late-cancellation charge on the customer's account only shows
+        // up once the number is proven (after the OTP) — say that's why.
+        const carriedRaw = typeof details.previous_balance_due === "number" ? details.previous_balance_due : details.cancellation_charge;
+        const carried = typeof carriedRaw === "number" ? carriedRaw : 0;
+        const chargeCaused = carried > 0 && !((walletDueField ?? liveQuote?.cancellation_charge ?? 0) > 0);
+        if (fresh != null) setRepriced({ key: repriceKey, total: fresh, charge: chargeCaused ? carried : 0 });
+        setError(
+          fresh != null && chargeCaused
+            ? `Your total is now ${INR(fresh)} — it includes ${INR(carried)} previous balance due on your Blussit wallet. Tap the button again to confirm.`
+            : fresh != null
+              ? `The price for this booking is now ${INR(fresh)}. Check the total and tap the button again to confirm.`
+              : "The price for this booking has changed. Check the new total and tap the button again to confirm."
+        );
+        void queryClient.invalidateQueries({ queryKey: ["booking-quote"] });
+        return;
+      }
+      if (getErrorCode(err) === "DUPLICATE_BOOKING" || /already have (a )?booking/i.test(message)) {
+        // Usually a retry after a lost response: the first attempt went
+        // through. Point at it instead of a bare refusal.
+        const details = ((err as { response?: { data?: { details?: Record<string, unknown> } } }).response?.data?.details || {}) as Record<string, unknown>;
+        setDuplicateBooking({ id: typeof details.booking_id === "string" ? details.booking_id : "", number: typeof details.booking_number === "string" ? details.booking_number : "" });
+        setError(message);
+        return;
+      }
+      // A suspended customer, or a staff member's own number: said right
+      // at the phone field, not as a booking failure.
+      if (getErrorCode(err) === "ACCOUNT_INACTIVE" || getErrorCode(err) === "STAFF_ACCOUNT_PHONE") {
+        setFieldErrors((prev) => ({ ...prev, phone: message }));
+        setError(message);
+        return;
+      }
       // The backend rejected the code (wrong/expired) — back to the popup.
       // A signed-in customer whose session lapsed mid-wizard reaches the
       // server as a guest — same answer: verify the number, then retry.
@@ -1288,9 +1476,11 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         ? { label: `Distance Charge · ${travelBeyondKm} km`, value: `₹${travelQuote.charge}` }
         : { label: "Distance Charge", value: `Free — within ${travelQuote.free_km} km` }
     );
+  if (carriedCharge > 0) billRows.push({ label: carriedLabel, value: `₹${Math.round(carriedCharge)}` });
+  if (walletApplied > 0) billRows.push({ label: "Wallet Credit", value: `−₹${Math.round(walletApplied)}` });
   if (discountNum > 0 && discountNum <= displayTotal) billRows.push({ label: "Discount", value: `−₹${discountNum}` });
-  if (tipNum > 0) billRows.push({ label: "Tip From Customer", value: `+₹${tipNum}` });
-  const shownTotal = isLog ? finalTotal : payable;
+  if (tipNum > 0) billRows.push({ label: `Tip From Customer (${TIP_METHOD_LABELS[tipMethod]})`, value: `+₹${tipNum}` });
+  const shownTotal = isLog ? finalTotal : amountToPay;
   // The first-wash price struck against what a returning customer pays.
   const struckTotal = showFirstWash && regularTotal > total ? shownTotal + (regularTotal - total) : null;
 
@@ -1314,13 +1504,26 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         <span className="min-w-0 flex-1 truncate text-sm text-[#5F6878]">{billRows.length ? "Total" : summary || "Pick Your Vehicle"}</span>
         <span className="text-right">
           {struckTotal != null && <span className="mr-1.5 text-xs text-[#9AA3B2] line-through">₹{struckTotal}</span>}
-          <span className="font-mono-num text-xl font-bold text-[#0E1A33]">₹{shownTotal}</span>
+          {!isLog && step === 1 && !liveQuote ? (
+            quoteUnavailable ? (
+              <span className="text-sm font-medium text-[#5F6878]">Price Not Confirmed</span>
+            ) : (
+              <span className="inline-block h-6 w-16 animate-pulse rounded-[6px] bg-[#EEF1F5] align-bottom" aria-label="Checking the price" />
+            )
+          ) : (
+            <span className="font-mono-num text-xl font-bold text-[#0E1A33]">₹{shownTotal}</span>
+          )}
         </span>
       </div>
       {!isLog && (
         <p className="flex items-center gap-1.5 text-xs text-[#5F6878]">
           <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#16A34A]" aria-hidden="true" />
-          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoting ? "Checking the price…" : "Estimated price — confirmed before you book."}
+          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoteUnavailable ? "Couldn't confirm the price." : quoting || step === 1 ? "Checking the price…" : "Estimated price — confirmed before you book."}
+          {quoteUnavailable && (
+            <button type="button" onClick={() => void refetchQuote()} disabled={quoting} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+              {quoting ? "Trying…" : "Try Again"}
+            </button>
+          )}
         </p>
       )}
       {(error || quoteError) && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error || quoteError}</p>}
@@ -1341,9 +1544,9 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
             Continue
           </button>
         ) : (
-          <button type="button" className={MGR_CTA} disabled={!step2Ready || submitting} aria-busy={submitting} onClick={() => void submit()}>
+          <button type="button" className={MGR_CTA} disabled={!step2Ready || submitting || !priceConfirmed} aria-busy={submitting} onClick={() => void submit()}>
             {submitting && <Spinner className="h-4 w-4" />}
-            {isLog ? "Save As Done" : !isManager && payable > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
+            {isLog ? "Save As Done" : !isManager && amountToPay > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
           </button>
         )}
       </div>
@@ -1482,6 +1685,14 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     setConfirmSlots(false);
     setFieldErrors({});
     setStep(1);
+    if (!isManager) {
+      trackInitiateCheckout({
+        value: liveQuote ? payable : undefined,
+        contentType: "booking",
+        contentName: lines.map(lineLabel).join(" + "),
+        numItems: lines.reduce((n, l) => n + l.count, 0),
+      });
+    }
     if (location.hash !== CONFIRM_HASH) {
       pushedConfirm.current = true;
       navigate({ search: location.search, hash: CONFIRM_HASH });
@@ -1556,23 +1767,46 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       : !mapsUp && line1.trim()
         ? `${line1.trim()}${pincode.trim() ? `, ${pincode.trim()}` : ""}`
         : "";
-  const lineTotal = (i: number) => liveQuote?.lines.find((l) => l.line_index === i)?.total ?? lineCost(i);
+  // Per-vehicle figures come from the live quote too ("—" until it lands).
+  const lineTotal = (i: number): number | null => (liveQuote ? (liveQuote.lines.find((l) => l.line_index === i)?.total ?? lineCost(i)) : null);
+  const lineTotalText = (i: number) => {
+    const t = lineTotal(i);
+    return t == null ? "—" : coveredUnits[i] > 0 && t === 0 ? "Covered" : INR(t);
+  };
   const lineService = (l: Line) => (l.base ? `${titleCase(l.isBike ? l.groups.find((g) => g.key === l.draft.base)?.label || l.base.name : l.base.name)}${l.addons.length ? ` + ${l.addons.map((a) => titleCase(a.name)).join(", ")}` : ""}` : "");
-  const pricePending = lines.length > 0 && !liveQuote && !quoteFailure;
+  // Only the server's price is ever shown as THE price: while it loads a
+  // placeholder, when it can't be fetched a retry — never a local estimate.
+  const pricePending = lines.length > 0 && !liveQuote && !quoteUnavailable && !quoteError;
+  // A guest's first-wash price depends on their number: until the quote
+  // was made WITH it, the price isn't final (a returning number pays the
+  // regular price). Signed-in customers are always quoted as themselves.
+  const quotedPhone = !!quoteRequest?.customer_phone;
+  const priceDependsOnNumber =
+    mode === "public" && !!liveQuote && liveQuote.first_time_savings > 0 && (!quotedPhone || liveQuote.first_time_confirmed === false);
   const priceNote = !lines.length
     ? "Pick your car type and service to see the price."
-    : liveQuote?.travel_pending || (!liveQuote && coverage !== "covered" && billed.some((s) => s.charges_travel))
+    : liveQuote?.travel_pending
       ? "Any distance charge shows once you add the address."
-      : liveQuote
-        ? "Price shown is final — no hidden charges."
-        : // No live server quote (still loading, or it failed): this is
-          // the local estimate — never call it final.
-          "Estimated price — confirmed before you book.";
-  const bookLabel = payable > 0 && payMethod === "online" ? `Book & Pay ${INR(payable)}` : "Confirm Booking";
+      : repricedTotal != null
+        ? "Updated for your number — this is the price you'll pay."
+        : liveQuote && priceDependsOnNumber
+          ? "First-wash price for new numbers — confirmed for yours before you book."
+          : liveQuote
+            ? "Price shown is final — no hidden charges."
+            : quoteUnavailable || quoteError
+              ? ""
+              : "Checking the price…";
+  const bookLabel = !liveQuote
+    ? quoteUnavailable || quoteError
+      ? "Price Not Confirmed"
+      : "Checking Price…"
+    : amountToPay > 0 && payMethod === "online"
+      ? `Book & Pay ${INR(amountToPay)}`
+      : "Confirm Booking";
 
   const billBlock = (
     <div className="space-y-2">
-      {lines.length > 0 && billRows.length > 0 && (
+      {lines.length > 0 && billRows.length > 0 && liveQuote && repricedTotal == null && (
         <div className="space-y-1.5 text-[13px] text-[#5F6878]">
           <div className="flex justify-between gap-3">
             <span>{lines.length > 1 ? "Services" : "Service"}</span>
@@ -1587,21 +1821,67 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         </div>
       )}
       <div className="flex items-end justify-between gap-3">
-        <span className="pb-1 text-[14px] font-semibold text-[#0E1A33]">{step === 1 ? "Total" : "Estimated Price"}</span>
+        <span className="pb-1 text-[14px] font-semibold text-[#0E1A33]">{step === 1 ? "Total" : "Price"}</span>
         <span className="text-right">
-          {!pricePending && struckTotal != null && <span className="mr-2 text-[14px] text-[#9AA3B2] line-through">{INR(struckTotal)}</span>}
+          {liveQuote && repricedTotal == null && struckTotal != null && <span className="mr-2 text-[14px] text-[#9AA3B2] line-through">{INR(struckTotal)}</span>}
           {pricePending ? (
             <span className="inline-block h-8 w-20 animate-pulse rounded-[8px] bg-[#EEF1F5] align-bottom" aria-label="Checking the price" />
           ) : (
-            <span className={`font-display text-[30px] font-extrabold leading-none tracking-[-0.02em] ${lines.length ? "text-[#0E1A33]" : "text-[#C3CBD8]"}`}>{lines.length ? INR(shownTotal) : "—"}</span>
+            <span className={`font-display text-[30px] font-extrabold leading-none tracking-[-0.02em] ${liveQuote ? "text-[#0E1A33]" : "text-[#C3CBD8]"}`}>{liveQuote ? INR(shownTotal) : "—"}</span>
           )}
         </span>
       </div>
-      <p className="flex items-start gap-1.5 text-[12px] text-[#5F6878]">
-        <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0 text-[#12A150]" aria-hidden="true" />
-        {priceNote}
-      </p>
+      {repricedTotal != null && carriedCharge > 0 && (
+        <p className="text-[12px] text-[#5F6878]" data-testid="carried-charge-note">
+          Includes {INR(carriedCharge)} {carriedLabel === "Previous Balance Due" ? "previous balance due" : "previous cancellation charge"}.
+        </p>
+      )}
+      {quoteUnavailable ? (
+        <p role="alert" className="text-[12px] font-medium text-[#5F6878]">
+          Couldn't confirm the price —{" "}
+          <button type="button" onClick={() => void refetchQuote()} disabled={quoting} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+            {quoting ? "Trying…" : "Try Again"}
+          </button>
+        </p>
+      ) : (
+        priceNote && (
+          <p className="flex items-start gap-1.5 text-[12px] text-[#5F6878]">
+            <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0 text-[#12A150]" aria-hidden="true" />
+            {priceNote}
+          </p>
+        )
+      )}
       {(error || quoteError) && <p className="text-[12px] font-medium text-[var(--color-error)]">{error || quoteError}</p>}
+      {duplicateBooking && isManager && duplicateBooking.id && (
+        <p className="text-[12px]">
+          <a
+            href={`/manager/bookings?highlight=${duplicateBooking.id}`}
+            onClick={(e) => {
+              e.preventDefault();
+              navigate(`/manager/bookings?highlight=${duplicateBooking.id}`);
+            }}
+            className="font-semibold text-[#0A66F0] hover:underline"
+          >
+            Open {duplicateBooking.number || "The Existing Booking"}
+          </a>
+        </p>
+      )}
+      {duplicateBooking && !isManager && (
+        <p className="text-[12px]">
+          <a
+            href={user?.role === "customer" ? (duplicateBooking.id ? `/app/bookings/${duplicateBooking.id}` : "/app/bookings") : "/login"}
+            onClick={(e) => {
+              e.preventDefault();
+              const target = duplicateBooking.id ? `/app/bookings/${duplicateBooking.id}` : "/app/bookings";
+              if (user?.role === "customer") navigate(target);
+              else navigate("/login", { state: { from: { pathname: target } } });
+            }}
+            className="font-semibold text-[#0A66F0] hover:underline"
+          >
+            {user?.role === "customer" ? (duplicateBooking.id ? `Open ${duplicateBooking.number || "Your Booking"}` : "See My Bookings") : "Log In To See Your Booking"}
+          </a>
+        </p>
+      )}
     </div>
   );
 
@@ -1611,9 +1891,9 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         Continue <ArrowRight className="h-5 w-5" />
       </button>
     ) : (
-      <button type="button" className={CTA} disabled={submitting} onClick={confirmBooking}>
+      <button type="button" className={CTA} disabled={submitting || !priceConfirmed} aria-busy={submitting} onClick={confirmBooking}>
         {submitting ? <Spinner className="h-5 w-5" /> : null}
-        {bookLabel} {!submitting && <ArrowRight className="h-5 w-5" />}
+        {bookLabel} {!submitting && priceConfirmed && <ArrowRight className="h-5 w-5" />}
       </button>
     );
   const secureNote = (
@@ -1650,7 +1930,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     {lineLabel(l).split(" · ")[0]}
                     <span className="block text-[12px] font-normal text-[#5F6878]">{lineService(l)}</span>
                   </span>
-                  <span className="shrink-0">{coveredUnits[i] > 0 && lineTotal(i) === 0 ? "Covered" : INR(lineTotal(i))}</span>
+                  <span className="shrink-0">{lineTotalText(i)}</span>
                 </li>
               ))}
             </ul>
@@ -1773,6 +2053,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       {coverage === "uncovered" && !pinRequired && (
         <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
       )}
+      {coverage === "error" && <CoverageFailed onRetry={() => retryCoverage.current?.()} />}
       {fieldErrors.location && (
         <p data-field-error="true" className="text-[12px] font-medium text-[var(--color-error)]">
           {fieldErrors.location}
@@ -1793,7 +2074,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         <SlotBoard centerId={slotCenter} date={date} onDateChange={setDate} value={slot} onChange={pickSlot} maxAdvanceDays={policy?.max_advance_days} heldSeconds={hold.secondsLeft} notice={slotNotice} />
       ) : (
         <div className="space-y-3">
-          <div className="flex gap-2">
+          {/* Clipped, never scrolled: five day tiles are wider than a phone. */}
+          <div className="flex gap-2 overflow-hidden">
             {[0, 1, 2, 3, 4].map((i) => (
               <div key={i} className="h-[58px] w-[76px] shrink-0 animate-pulse rounded-[12px] bg-[#F1F4F9]" />
             ))}
@@ -1902,6 +2184,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                   editing &&
                   (servicesLoading ? (
                     <p className="text-sm text-[#5F6878]">Loading services…</p>
+                  ) : servicesFailed && !catalogue ? (
+                    <LoadFailed what="services" busy={servicesFetching} onRetry={() => void refetchServices()} />
                   ) : editingGroups.length === 0 ? (
                     <p className="text-sm text-[#5F6878]">No services for this vehicle yet.</p>
                   ) : (
@@ -1964,11 +2248,11 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                         </div>
                       </div>
 
-                      {editing.base && editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
+                      {editing.base && editingKit && editingAddons.length > 0 && (
                         <div>
                           <p className={SECTION_LABEL}>Add-ons</p>
                           <div className="flex flex-wrap gap-2">
-                            {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
+                            {editingAddons.map((a) => {
                               const on = draft.addons.includes(a.id);
                               const per = unit(a, draft.typeId);
                               const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
@@ -1997,7 +2281,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     <Plus className="h-4 w-4" /> Add Another Vehicle
                   </Button>
                 )}
-                {!types.length && <p className="text-sm text-[#5F6878]">Loading vehicle types…</p>}
+                {!types.length &&
+                  (typesFailed && !vehicleTypes ? (
+                    <LoadFailed what="vehicle types" busy={typesFetching} onRetry={() => void refetchTypes()} />
+                  ) : (
+                    <p className="text-sm text-[#5F6878]">Loading vehicle types…</p>
+                  ))}
               </div>
             </div>
           )}
@@ -2051,6 +2340,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     placeholder="0"
                     hint={tipNum > 0 ? `Added to the total — ₹${finalTotal} with the tip, counted in revenue.` : "If the customer tipped, it's added to the total and revenue. You can also add it later from the booking."}
                   />
+                  {tipNum > 0 && (
+                    <div className="-mt-3">
+                      <p className={SECTION_LABEL}>Tip Given In</p>
+                      <TipMethodToggle value={tipMethod} onChange={setTipMethod} />
+                    </div>
+                  )}
 
                   {planTogglesNode}
 
@@ -2195,6 +2490,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     {coverage === "uncovered" && !pinRequired && (
                       <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
                     )}
+                    {coverage === "error" && <CoverageFailed onRetry={() => retryCoverage.current?.()} />}
                     {fieldErrors.location && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.location}</p>}
                   </div>
 
@@ -2221,7 +2517,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                   {planTogglesNode}
 
                   {/* How to pay */}
-                  {payable > 0 && (
+                  {amountToPay > 0 && (
                     <div>
                       <p className={SECTION_LABEL}>Payment</p>
                       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -2393,7 +2689,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
 
   const typePanel = (close: () => void) => (
     <div className="space-y-1">
-      {!types.length && <p className="px-3 py-4 text-[13px] text-[#5F6878]">Loading…</p>}
+      {!types.length &&
+        (typesFailed && !vehicleTypes ? (
+          <LoadFailed what="vehicle types" busy={typesFetching} onRetry={() => void refetchTypes()} className="px-3 py-4" />
+        ) : (
+          <p className="px-3 py-4 text-[13px] text-[#5F6878]">Loading…</p>
+        ))}
       {types.map((t) => {
         const meta = vehicleMeta(t);
         const on = draft.typeId === t.id;
@@ -2426,7 +2727,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     return (
       <div className="space-y-1">
         {servicesLoading && <p className="px-3 py-4 text-[13px] text-[#5F6878]">Loading services…</p>}
-        {!servicesLoading && !groups.length && <p className="px-3 py-4 text-[13px] text-[#5F6878]">No services for this vehicle yet.</p>}
+        {!servicesLoading && servicesFailed && !catalogue && (
+          <LoadFailed what="services" busy={servicesFetching} onRetry={() => void refetchServices()} className="px-3 py-4" />
+        )}
+        {!servicesLoading && !(servicesFailed && !catalogue) && !groups.length && (
+          <p className="px-3 py-4 text-[13px] text-[#5F6878]">No services for this vehicle yet.</p>
+        )}
         {groups.map((g) => {
           const on = shownServiceKey === g.key;
           const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag?.trim();
@@ -2488,7 +2794,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     );
   };
 
-  const addonList = editingKit ? [...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])] : [];
+  const addonList = editingAddons;
   const extrasRow =
     editing?.base ? (
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -2547,7 +2853,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           const li = lines.findIndex((x) => x.draft === d);
           const l = lines[li];
           if (!l) return null;
-          const cost = lineTotal(li);
           return (
             <div key={`${d.typeId}-${i}`} className="flex items-center gap-3 rounded-[14px] border border-[#E4E9F1] bg-[#FAFBFD] p-2.5">
               <span className="flex h-9 w-[54px] shrink-0 items-center justify-center rounded-[10px] bg-[#EEF3FA]">
@@ -2557,7 +2862,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                 <span className="block truncate text-[14px] font-semibold text-[#0E1A33]">{lineLabel(l).split(" · ")[0]}</span>
                 <span className="block truncate text-[12px] text-[#5F6878]">{lineService(l)}</span>
               </span>
-              <span className="shrink-0 text-[14px] font-semibold text-[#0E1A33]">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : INR(cost)}</span>
+              <span className="shrink-0 text-[14px] font-semibold text-[#0E1A33]">{lineTotalText(li)}</span>
               <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-[13px] font-semibold text-[#0A66F0] hover:underline">
                 Edit
               </button>
@@ -2761,7 +3066,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
 
                       {!(introSummary && lines.length === 1) && planChoice}
 
-                      {payable > 0 && (
+                      {amountToPay > 0 && (
                         <>
                           {divider}
                           {sectionTitle(<CreditCard className="h-4 w-4" />, "How Would You Like To Pay?")}

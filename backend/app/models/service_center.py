@@ -4,6 +4,12 @@ from pydantic import BaseModel
 
 from app.models.base import BusinessRecordBase
 
+# The real opening hours (founder, 2026-10-07): 7:00 AM – 7:00 PM. The
+# default for a new center and the fallback for one whose stored hours are
+# missing — every slot generator reads these, never its own literal.
+DEFAULT_WORKING_HOURS_START = "07:00"
+DEFAULT_WORKING_HOURS_END = "19:00"
+
 
 class ServiceCenterLocation(BaseModel):
     address: str
@@ -23,8 +29,8 @@ class ServiceCenterModel(BusinessRecordBase):
     manager_id: Optional[str] = None
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
-    working_hours_start: str = "08:00"
-    working_hours_end: str = "20:00"
+    working_hours_start: str = DEFAULT_WORKING_HOURS_START
+    working_hours_end: str = DEFAULT_WORKING_HOURS_END
     # Slot duration for THIS center — None falls back to the global
     # booking_policy default (see BookingPolicyService). Slots are always
     # generated from this center's own working_hours_start/end, never the
@@ -38,8 +44,8 @@ class ServiceCenterModel(BusinessRecordBase):
     # Fallback capacity applied to a slot the FIRST time anyone reserves
     # into it (i.e. before an admin has explicitly set/overridden that
     # exact date+slot's own capacity via the slot_capacity collection).
-    # None (unconfigured) is treated as effectively unrestricted (999) —
-    # see BookingService._default_slot_capacity — so a center nobody has
-    # touched capacity settings for never silently blocks all bookings.
+    # Unconfigured (None, and no capacity policy) FAILS CLOSED: the slot
+    # takes no bookings until capacity is set — see
+    # BookingService._default_slot_capacity. It used to mean 999 seats.
     default_slot_capacity: Optional[int] = None
     is_active: bool = True

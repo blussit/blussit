@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { Bell, BellOff, ChevronRight } from "lucide-react";
 import { notificationApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
-import { Button, Card, EmptyState, PageLoader } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorState, PageLoader } from "../../components/ui";
 import { formatDateTime } from "../../lib/date";
 import { notificationTargetPath } from "../../lib/notifications";
 import type { Notification } from "../../types";
@@ -14,7 +14,7 @@ export default function NotificationsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [page, setPage] = useState(1);
-  const { data, isLoading } = useQuery({ queryKey: ["notifications", page], queryFn: () => notificationApi.list({ page, page_size: 15 }) });
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["notifications", page], queryFn: () => notificationApi.list({ page, page_size: 15 }) });
 
   const markReadMutation = useMutation({
     mutationFn: notificationApi.markRead,
@@ -52,6 +52,8 @@ export default function NotificationsPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load your notifications." busy={isFetching} onRetry={() => void refetch()} />
       ) : !data?.data.length ? (
         user?.role === "manager" ? (
           <EmptyState icon={Bell} title="You're All Caught Up" description="Alerts clear once you open them or the job is done." />

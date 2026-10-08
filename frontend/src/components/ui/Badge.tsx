@@ -10,8 +10,8 @@ const toneClasses: Record<Tone, string> = {
   success: "bg-[var(--ui-success-bg,var(--color-accent-light))] text-[var(--color-success)]",
   warning: "bg-amber-50 text-amber-700",
   error: "bg-red-50 text-[var(--color-error)]",
-  // Light-yellow tint + dark text — never blue, never a solid fill.
-  info: "bg-[var(--ui-tint,#FFF4CD)] text-[var(--ui-tint-ink,#8A6600)]",
+  // Light blue tint + blue text — never a solid fill.
+  info: "bg-[var(--ui-tint,#E8F0FE)] text-[var(--ui-tint-ink,#0A66F0)]",
 };
 
 export function Badge({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: Tone }) {

@@ -1,5 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.authz import ensure_customer_in_scope
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
 from app.schemas.subscription_schema import (
@@ -8,6 +9,7 @@ from app.schemas.subscription_schema import (
     PassQuoteRequest,
     PlanEnquiryRequest,
     SubscribeRequest,
+    SubscriptionExtendRequest,
     SubscriptionPlanCreateRequest,
     SubscriptionPlanUpdateRequest,
     UpgradeSubscriptionRequest,
@@ -15,7 +17,7 @@ from app.schemas.subscription_schema import (
 from app.services.audit_service import AuditService
 from app.services.plan_enquiry_service import PlanEnquiryService
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
-from app.services.subscription_service import SubscriptionPlanService, UserSubscriptionService
+from app.services.subscription_service import SubscriptionPlanService, UserSubscriptionService, extension_message
 
 
 class SubscriptionPlanController:
@@ -52,6 +54,7 @@ class SubscriptionPlanController:
 
 class UserSubscriptionController:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.service = UserSubscriptionService(db)
         self.audit = AuditService(db)
         self.confirmations = PurchaseConfirmationService(db)
@@ -95,6 +98,9 @@ class UserSubscriptionController:
     async def list_for_customer(self, customer_id: str, current_user: CurrentUser | None = None):
         if current_user is None:
             return success(await self.service.list_for_customer(customer_id))
+        # MGR-04: a manager reads plans only of a customer known to their
+        # center (the same rule as the 360 view) — 404 otherwise.
+        await ensure_customer_in_scope(self.db, current_user.role, current_user.service_center_id, customer_id)
         return success(await self.service.list_for_customer(customer_id, current_user.role, current_user.service_center_id))
 
     async def center_overview(self, current_user: CurrentUser, service_center_id: str):
@@ -142,6 +148,19 @@ class UserSubscriptionController:
             current_user.id, current_user.role, "UPGRADE_SUBSCRIPTION", "user_subscriptions", subscription_id, {"new_plan_id": payload.new_plan_id}
         )
         return success(result, "Subscription upgraded")
+
+    async def extend(self, current_user: CurrentUser, subscription_id: str, payload: SubscriptionExtendRequest):
+        result = await self.service.extend_pass(
+            subscription_id, payload.days, note=payload.note, actor_id=current_user.id, actor_role=current_user.role,
+            actor_center_id=current_user.service_center_id,
+        )
+        await self.audit.log_action(
+            current_user.id, current_user.role, "EXTEND_PASS", "user_subscriptions", subscription_id,
+            {"days": payload.days, "note": payload.note, "extension_days": result.get("extension_days"),
+             "extended_until": result.get("extended_until"), "society_id": result.get("society_id"),
+             "custom_plan_id": result.get("custom_plan_id")},
+        )
+        return success(result, extension_message(payload.days, result))
 
     async def list_all_for_admin(self, pagination: PaginationParams):
         items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size)

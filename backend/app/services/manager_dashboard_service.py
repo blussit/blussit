@@ -29,7 +29,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.models.enums import BookingStatus
 from app.services.kpi_service import KpiService, _completed_in, _window_match
 from app.utils.money import round_rupees, split_whole_rupees
-from app.utils.slots import format_slot_12h, generate_slots
+from app.utils.slots import format_slot_12h
 from app.utils.timezone import now_ist
 
 _NOT_DELETED = {"is_deleted": {"$ne": True}}
@@ -190,9 +190,12 @@ class ManagerDashboardService:
         """Plans sold by THIS center in the period, per plan — the same
         payment_orders population (and center resolution) as the Sales
         tile's plan revenue, so the rows add up to it."""
-        from app.services.subscription_service import UserSubscriptionService
+        from app.services.custom_plan_service import TEMPLATE_PLAN_ID
+        from app.services.subscription_service import PLAN_ORDER_PURPOSES, UserSubscriptionService, custom_plan_refunds
 
-        match = {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}
+        # A custom multi-car plan is one order for all its cars: it groups
+        # under its hidden template plan ("Custom plan") and counts once.
+        match = {"purpose": {"$in": PLAN_ORDER_PURPOSES}, "status": "paid", "created_at": {"$gte": s, "$lt": e}}
         rows = await self.db.payment_orders.aggregate([
             *UserSubscriptionService._center_orders(match, center_id),
             {"$group": {"_id": "$plan_id", "n": {"$sum": 1}, "paise": {"$sum": {"$ifNull": ["$amount_paise", 0]}}}},
@@ -209,10 +212,32 @@ class ManagerDashboardService:
             }
             for r in rows
         ]
+        # Society plans are their own line (SOC-1) — the same figure as the
+        # Sales tile's society_revenue (KpiService.manager_overview).
+        from app.services.society_service import society_revenue
+
+        society = await society_revenue(self.db, s, e, center_id)
+        # Custom-plan cars refunded to the wallet in the period (PLANS-2):
+        # `revenue` stays gross; refunds + net beside it (and on the custom
+        # plan's own row).
+        refunds = round_rupees((await custom_plan_refunds(self.db, s, e, center_id))["amount"])
+        for item in items:
+            item_refunds = refunds if item["plan_id"] == TEMPLATE_PLAN_ID else 0
+            item["refunds"] = item_refunds
+            item["revenue_net"] = round_rupees(item["revenue"] - item_refunds)
+        revenue = sum(i["revenue"] for i in items)
         return {
             "items": items,
             "sold": sum(i["sold"] for i in items),
-            "revenue": sum(i["revenue"] for i in items),
+            "revenue": revenue,
+            "refunds": refunds,
+            "revenue_net": round_rupees(revenue - refunds),
+            "society": {
+                "payments": society["online_count"] + society["cash_count"],
+                "revenue": society["amount"],
+                "online_amount": society["online_amount"],
+                "cash_amount": society["cash_amount"],
+            },
         }
 
     # ------------------------------------------------------------ today
@@ -250,41 +275,42 @@ class ManagerDashboardService:
         caps = {d["slot_key"]: d for d in cap_docs}
 
         slot_keys: list[str] = []
+        defaults: dict = {}
         if center:
             from app.services.booking_policy_service import BookingPolicyService
+            from app.services.booking_service import BookingService, center_slots
 
             policy = await BookingPolicyService(self.db).get_policy()
-            duration = center.get("slot_duration_minutes") or policy.get("slot_duration_minutes") or 180
-            slot_keys = [sl["key"] for sl in generate_slots(
-                center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration
-            )]
+            # The engine's own slot list (center hours, else 7:00 AM –
+            # 7:00 PM) and starting capacities — never 08:00–20:00 / 999.
+            slot_keys = [sl["key"] for sl in center_slots(center, policy)]
+            untouched = [k for k in slot_keys if k not in caps]
+            if untouched:
+                try:
+                    defaults = await BookingService(self.db)._slot_capacity_defaults(center, today_str, untouched, policy)
+                except Exception:  # noqa: BLE001 — capacity is informative here, never fatal
+                    defaults = {}
         # Bookings filed under a key that is no longer generated (hours
         # changed, a logged walk-in) still belong on the board.
         extra = sorted(k for k in by_slot if k and k not in slot_keys)
-        default_cap = (center or {}).get("default_slot_capacity")
-
-        missing_policy = [k for k in slot_keys if k not in caps]
-        distribution: dict = {}
-        if missing_policy:
-            from app.services.capacity_policy_service import CapacityPolicyService
-
-            try:
-                distribution = (await CapacityPolicyService(self.db).get_effective_policy(center_id, today_str)).get("slot_distribution") or {}
-            except Exception:  # noqa: BLE001 — capacity is informative here, never fatal
-                distribution = {}
 
         slots = []
         for key in slot_keys + extra:
             r = by_slot.get(key) or {}
             cap_doc = caps.get(key)
-            capacity = cap_doc["capacity"] if cap_doc else distribution.get(key, default_cap)
+            # None = never configured: the slot takes NO bookings (fail
+            # closed), shown as 0 seats and flagged, never as open room.
+            capacity = cap_doc["capacity"] if cap_doc else defaults.get(key)
+            # A stored 999 is the old "unconfigured" fallback, not a real figure.
+            configured = isinstance(capacity, (int, float)) and capacity < 999
             visits = len(r.get("visits") or [])
             slots.append({
                 "key": key,
                 "label": format_slot_12h(key),
                 "cars": int(r.get("cars") or 0),
                 "visits": visits,
-                "capacity": int(capacity) if isinstance(capacity, (int, float)) and capacity < 999 else None,
+                "capacity": int(capacity) if configured else (None if capacity is not None else 0),
+                "capacity_configured": bool(configured),
                 "unassigned": int(r.get("unassigned") or 0),
                 "in_progress": int(r.get("in_progress") or 0),
                 "completed": int(r.get("completed") or 0),

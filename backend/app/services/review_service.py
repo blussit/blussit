@@ -14,6 +14,9 @@ from app.schemas.review_schema import ReviewCreateRequest, ReviewUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
 
 _EDITABLE_FIELDS = ("captain_rating", "captain_comment", "service_rating", "service_comment")
+# What GET /reviews (no login) may show — legacy rating/comment included
+# for reviews written before the captain/service split.
+_PUBLIC_REVIEW_FIELDS = ("id", *_EDITABLE_FIELDS, "rating", "comment", "created_at")
 
 
 class ReviewService:
@@ -94,8 +97,11 @@ class ReviewService:
         return serialize_list(reviews)
 
     async def list_public(self, page: int, page_size: int):
+        """Anonymous endpoint: the ratings and words only. The raw document
+        also carries who wrote it, which captain/center/booking it was, the
+        pre-edit original and who deleted what — none of it for strangers."""
         items, total = await self.repo.list_public(page, page_size)
-        return serialize_list(items), total
+        return [{k: r.get(k) for k in _PUBLIC_REVIEW_FIELDS} for r in serialize_list(items)], total
 
     async def list_all_for_admin(
         self, page: int, page_size: int, include_deleted: bool = False,

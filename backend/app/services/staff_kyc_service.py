@@ -9,8 +9,10 @@ submitted → ... Editing locks once verified — a manager must reject (with
 a note) to reopen it, so a verified identity can't silently drift.
 
 Aadhaar/PAN numbers are sensitive: every LIST surface gets them masked
-(last 4 only, via masked_kyc); the full numbers appear only on the
-captain's own profile and the manager's review screen.
+(last 4 only, via masked_kyc). The full numbers appear only on the
+captain's own profile and to an ADMIN — a manager's review screen shows
+the last 4 (DATA-1); the card images themselves stay viewable there, which
+is what the review actually checks.
 """
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -47,6 +49,18 @@ def _serialized(kyc: dict) -> dict:
     for key in ("submitted_at", "reviewed_at"):
         if out.get(key) is not None and not isinstance(out[key], str):
             out[key] = from_stored(out[key]).isoformat()
+    return out
+
+
+def _for_reviewer(kyc: dict, actor_role: str) -> dict:
+    """The review packet as this reviewer may see it: an admin gets the
+    full numbers, a manager the last 4 (DATA-1). Doc URLs, photo and
+    addresses are unchanged — the documents are what gets verified."""
+    out = _serialized(kyc)
+    if actor_role != "admin":
+        for key in ("aadhaar_number", "pan_number"):
+            if out.get(key):
+                out[key] = _mask_tail(str(out[key]))
     return out
 
 
@@ -89,6 +103,7 @@ class StaffKycService:
         missing = [label for key, label in KYC_REQUIRED if not str(data.get(key) or "").strip()]
         if missing:
             raise BadRequestException(f"Please add {', '.join(missing)} before sending for review.")
+        await self._ensure_own_documents(captain_id, data, current)
         kyc = {
             **{k: current.get(k) for k in ("reviewed_by", "reviewed_at")},
             **{k: v for k, v in data.items()},
@@ -108,9 +123,28 @@ class StaffKycService:
         await self.audit.log_action(captain_id, "captain", "SUBMIT_KYC", "staff", captain_id, {"status": "submitted"})
         return _serialized(kyc)
 
+    async def _ensure_own_documents(self, captain_id: str, data: dict, current: dict) -> None:
+        """The Aadhaar/PAN images must be files THIS captain uploaded (POST
+        /uploads/document records who uploaded what). Document downloads
+        used to be authorized by whichever account's packet named the URL,
+        so submitting another captain's document URL handed its Aadhaar to
+        whoever submitted it."""
+        db = self.user_repo.collection.database
+        for key, label in (("aadhaar_doc_url", "Aadhaar card photo"), ("pan_doc_url", "PAN card photo")):
+            url = data.get(key)
+            if await db.uploaded_documents.find_one({"url": url, "owner_id": captain_id}, {"_id": 1}):
+                continue
+            # A resubmission may carry a file from this captain's OWN earlier
+            # packet, uploaded before uploads were recorded — fine as long
+            # as no record says it belongs to somebody else.
+            legacy_own = url in (current.get("aadhaar_doc_url"), current.get("pan_doc_url"))
+            if legacy_own and not await db.uploaded_documents.find_one({"url": url}, {"_id": 1}):
+                continue
+            raise BadRequestException(f"Please upload your {label} again from this screen.")
+
     async def get_for_review(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> dict:
         captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
-        return _serialized(captain.get("captain_kyc") or {"status": "pending"})
+        return _for_reviewer(captain.get("captain_kyc") or {"status": "pending"}, actor_role)
 
     async def review(self, captain_id: str, payload: KycReviewRequest, reviewer_id: str, actor_role: str, actor_center_id: str | None) -> dict:
         captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
@@ -139,7 +173,7 @@ class StaffKycService:
             else (payload.note or "Please review and resubmit your documents from your profile.")
         )
         await self.notifications.notify(captain_id, title, message)
-        return _serialized(kyc)
+        return _for_reviewer(kyc, actor_role)
 
     async def _own_center_captain(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> dict:
         captain = await self.user_repo.find_by_id(captain_id)

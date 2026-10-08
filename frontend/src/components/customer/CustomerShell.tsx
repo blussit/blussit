@@ -12,7 +12,7 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, Building2, CalendarDays, CarFront, Gift, Home, LifeBuoy, LogOut, Plus, Tag, User as UserIcon, type LucideIcon } from "lucide-react";
+import { Bell, Building2, CalendarDays, CarFront, Gift, Home, LifeBuoy, LogOut, Plus, Tag, User as UserIcon, Wallet, type LucideIcon } from "lucide-react";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import { notificationApi, subscriptionApi } from "../../api/engagement";
 import { isSocietyPass, societyPassPath } from "../../lib/passState";
@@ -37,13 +37,14 @@ const TABS: Tab[] = [
   { label: "Home", to: "/app", icon: Home },
   { label: "Bookings", to: "/app/bookings", icon: CalendarDays },
   { label: "Plans", to: "/app/subscriptions", icon: Gift },
-  { label: "Profile", to: "/app/profile", icon: UserIcon, also: ["/app/garage", "/app/settings", "/app/addresses", "/app/support", "/app/notifications", "/app/offers"] },
+  { label: "Profile", to: "/app/profile", icon: UserIcon, also: ["/app/garage", "/app/settings", "/app/addresses", "/app/support", "/app/notifications", "/app/offers", "/app/wallet"] },
 ];
 
 const SIDEBAR: Tab[] = [
   { label: "Home", to: "/app", icon: Home },
   { label: "My Bookings", to: "/app/bookings", icon: CalendarDays },
   { label: "My Plans", to: "/app/subscriptions", icon: Gift },
+  { label: "My Wallet", to: "/app/wallet", icon: Wallet },
   { label: "My Garage", to: "/app/garage", icon: CarFront },
   { label: "Offers", to: "/app/offers", icon: Tag },
   { label: "Help & Support", to: "/app/support", icon: LifeBuoy },

@@ -40,7 +40,13 @@ async def site_visitors(period: str | None = None, start: str | None = None, end
 async def manager_summary(service_center_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Section 20 — a manager's own-center daily KPI view."""
     ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
-    return success(await AnalyticsService(db).manager_summary(service_center_id))
+    # Its quality strip aggregates the center's whole completed history —
+    # a minute of staleness (the dashboard polls every minute anyway) keeps
+    # that off the primary on every mount and live refresh.
+    return success(await report_cache.cached(
+        ("analytics", "manager-summary", service_center_id), _REPORT_TTL,
+        lambda: AnalyticsService(db).manager_summary(service_center_id),
+    ))
 
 
 @router.get("/kpis/manager-overview/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])

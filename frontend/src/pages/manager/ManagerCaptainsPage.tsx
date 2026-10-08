@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ClipboardList,
   IdCard,
+  KeyRound,
   Mail,
   MapPin,
   MessageSquareWarning,
@@ -28,6 +29,7 @@ import { reviewApi } from "../../api/engagement";
 import { uploadApi } from "../../api/upload";
 import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
+import { StaffResetPasswordDialog } from "../../components/shared/StaffResetPasswordDialog";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
@@ -36,6 +38,7 @@ import { validateIndianMobile } from "../../lib/validators";
 import { format, formatDateTime, formatSlot } from "../../lib/date";
 import { toTitle } from "../../lib/titleCase";
 import type { Booking, Review, User } from "../../types";
+import { PrivateDocumentLink } from "../../components/shared/PrivateDocument";
 
 const ACTIVE_JOB_STATUSES = ["assigned", "captain_on_the_way", "service_started"];
 
@@ -100,6 +103,7 @@ export default function ManagerCaptainsPage() {
   const [photoUploading, setPhotoUploading] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const [detailFor, setDetailFor] = useState<User | null>(null);
+  const [resetFor, setResetFor] = useState<User | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
 
@@ -206,6 +210,8 @@ export default function ManagerCaptainsPage() {
       setKycError("");
       queryClient.invalidateQueries({ queryKey: ["captain-kyc", detailFor?.id] });
       queryClient.invalidateQueries({ queryKey: ["center-captains-page"] });
+      // The assign pickers (booking queue) list only KYC-verified captains.
+      queryClient.invalidateQueries({ queryKey: ["center-captains-list"] });
     },
     onError: (err) => setKycError(getErrorMessage(err)),
   });
@@ -214,7 +220,7 @@ export default function ManagerCaptainsPage() {
     mutationFn: () =>
       adminUserApi.createStaff({
         full_name: form.full_name,
-        email: form.email || undefined,
+        email: form.email.trim().toLowerCase() || undefined,
         phone: validateIndianMobile(form.phone) || form.phone,
         password: form.password,
         role: "captain",
@@ -222,6 +228,7 @@ export default function ManagerCaptainsPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["center-captains-page"] });
+      queryClient.invalidateQueries({ queryKey: ["center-captains-list"] });
       setOpen(false);
       setForm(emptyForm);
       setError("");
@@ -237,9 +244,9 @@ export default function ManagerCaptainsPage() {
       queryClient.invalidateQueries({ queryKey: ["center-captains-page"] });
       queryClient.invalidateQueries({ queryKey: ["center-captains-list"] });
       if (saved && detailFor?.id === saved.id) setDetailFor({ ...detailFor, ...saved });
-      pushToast({ tone: "success", title: v.status === "suspended" ? "Captain suspended" : "Captain reactivated" });
+      pushToast({ tone: "success", title: v.status === "suspended" ? "Captain Suspended" : "Captain Reactivated" });
     },
-    onError: (err) => pushToast({ tone: "error", title: "Couldn't change the status", message: getErrorMessage(err) }),
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Change The Status", message: getErrorMessage(err) }),
   });
   const suspendCaptain = async (c: User) => {
     if (
@@ -452,7 +459,7 @@ export default function ManagerCaptainsPage() {
             hint="Required — job alerts and the customer's call button use this number."
             required
           />
-          <Input label="Email (Optional)" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          <Input label="Email (Optional)" type="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value.toLowerCase() })} />
           <div className="flex items-end gap-2">
             <Input
               label="Temporary Password"
@@ -515,22 +522,27 @@ export default function ManagerCaptainsPage() {
                         </a>
                       )}
                       {live.email && (
-                        <span className="flex items-center gap-1.5">
-                          <Mail className="h-3.5 w-3.5" /> {live.email}
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <Mail className="h-3.5 w-3.5 shrink-0" /> <span className="min-w-0 break-all">{live.email}</span>
                         </span>
                       )}
                     </div>
                   </div>
                 </div>
-                {live.status !== "suspended" ? (
-                  <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => void suspendCaptain(live)}>
-                    <UserX className="h-3.5 w-3.5" /> Suspend
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setResetFor(live)}>
+                    <KeyRound className="h-3.5 w-3.5" /> Reset Password
                   </Button>
-                ) : (
-                  <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => statusMutation.mutate({ id: live.id, status: "active" })}>
-                    Reactivate
-                  </Button>
-                )}
+                  {live.status !== "suspended" ? (
+                    <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => void suspendCaptain(live)}>
+                      <UserX className="h-3.5 w-3.5" /> Suspend
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="outline" isLoading={statusMutation.isPending} onClick={() => statusMutation.mutate({ id: live.id, status: "active" })}>
+                      Reactivate
+                    </Button>
+                  )}
+                </div>
               </div>
 
               {/* Section tabs — one topic per screen instead of one endless
@@ -603,10 +615,10 @@ export default function ManagerCaptainsPage() {
                         )}
                         <div className="min-w-0 space-y-1.5">
                           <p><span className="text-[var(--color-text-secondary)]">Aadhaar:</span> <span className="font-mono-num">{kyc.aadhaar_number || "—"}</span>{" "}
-                            {kyc.aadhaar_doc_url && <a href={kyc.aadhaar_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">View Doc</a>}
+                            {kyc.aadhaar_doc_url && <PrivateDocumentLink url={kyc.aadhaar_doc_url} label="Aadhaar" />}
                           </p>
                           <p><span className="text-[var(--color-text-secondary)]">PAN:</span> <span className="font-mono-num">{kyc.pan_number || "—"}</span>{" "}
-                            {kyc.pan_doc_url && <a href={kyc.pan_doc_url} target="_blank" rel="noreferrer" className="text-xs font-medium text-[var(--color-primary)] underline">View Doc</a>}
+                            {kyc.pan_doc_url && <PrivateDocumentLink url={kyc.pan_doc_url} label="PAN" />}
                           </p>
                           <p><span className="text-[var(--color-text-secondary)]">Local Address:</span> {kyc.local_address || "—"}</p>
                           <p><span className="text-[var(--color-text-secondary)]">Permanent:</span> {kyc.same_as_local ? "Same as local" : kyc.permanent_address || "—"}</p>
@@ -704,6 +716,7 @@ export default function ManagerCaptainsPage() {
           );
         })()}
       </Modal>
+      <StaffResetPasswordDialog staff={resetFor} onClose={() => setResetFor(null)} />
       <Modal open={!!previewPhoto} onClose={() => setPreviewPhoto(null)} title={previewPhoto?.name || "Captain Photo"} maxWidth="max-w-xl">
         {previewPhoto && <img src={previewPhoto.url} alt={previewPhoto.name} className="max-h-[70vh] w-full rounded-xl object-contain" />}
       </Modal>

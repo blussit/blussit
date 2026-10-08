@@ -40,19 +40,24 @@ def verify_webhook_subscription(mode: str | None, token: str | None, challenge: 
     """Pure verification logic, split out so it's directly unit-testable.
     An empty configured token never matches (refuses verification rather
     than accepting anything when unconfigured)."""
-    if mode == "subscribe" and settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN and token == settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN:
+    # Constant-time compare: `==` leaks how many leading characters of a
+    # guess were right, one timing sample at a time.
+    expected = settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN
+    if mode == "subscribe" and expected and hmac.compare_digest((token or "").encode(), expected.encode()):
         return challenge or ""
     raise ForbiddenException("Webhook verification failed")
 
 
 def verify_webhook_signature(raw_body: bytes, signature_header: str | None) -> bool:
     """True if the payload authenticates. With no app secret configured
-    this FAILS CLOSED outside DEBUG: an unsigned webhook in production
-    would let anyone who learns the URL impersonate any customer by phone
-    number (list/cancel/create their bookings via the bot). Dev keeps the
-    old convenience of accepting unsigned payloads for local testing."""
+    this FAILS CLOSED everywhere but a development run: an unsigned webhook
+    in production would let anyone who learns the URL impersonate any
+    customer by phone number (list/cancel/create their bookings via the
+    bot). DEBUG alone isn't enough — it used to default on when unset, so
+    a prod deploy missing both values accepted forged events. Local dev
+    keeps the convenience of accepting unsigned payloads."""
     if not settings.WHATSAPP_APP_SECRET:
-        return settings.DEBUG
+        return settings.APP_ENV == "development" and settings.DEBUG
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = hmac.new(settings.WHATSAPP_APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()

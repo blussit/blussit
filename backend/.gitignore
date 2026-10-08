@@ -1,9 +1,18 @@
 __pycache__/
 *.pyc
 .venv/
-.env
 *.egg-info/
 .pytest_cache/
+
+# Secrets: every env file except the committed placeholder examples.
+# Repeated here (the root .gitignore has it too) because `gcloud run deploy
+# --source backend` falls back to THIS file when backend/.gcloudignore is
+# missing — without these lines .env.production would be uploaded to Cloud
+# Build (DEP-07). backend/.gcloudignore must still be committed.
+.env
+.env.*
+!.env.example
+!.env.development.example
 
 # Backups written by app/scripts/delete_booking.py (run from here) before it
 # deletes anything — real customer/booking data pulled from production,

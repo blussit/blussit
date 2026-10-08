@@ -25,9 +25,10 @@ class PaymentController:
         return success(await self.service.create_order(current_user.id, payload))
 
     async def collect_cash(self, current_user: CurrentUser, payload: CollectPaymentRequest):
-        result = await self.service.captain_collect_cash(payload.booking_id, current_user.id)
+        result = await self.service.captain_collect_cash(payload.booking_id, current_user.id, payload.expected_amount)
         await self.audit.log_action(
-            current_user.id, current_user.role, "CASH_COLLECTED", "bookings", payload.booking_id, None
+            current_user.id, current_user.role, "CASH_COLLECTED", "bookings", payload.booking_id,
+            {"amount": result.get("amount"), "wallet_credit": result.get("wallet_credit")},
         )
         return success(result, "Cash collection recorded")
 
@@ -82,9 +83,12 @@ class PaymentController:
         return success(await self.service.booking_payment_state(current_user.id, booking_id))
 
     async def resolve_attention(self, current_user: CurrentUser, order_id: str, payload: ResolveAttentionRequest):
-        result = await self.service.resolve_attention(order_id, current_user.id, payload.note)
+        result = await self.service.resolve_attention(
+            order_id, current_user.id, payload.note, outcome=payload.outcome, refund_amount=payload.refund_amount,
+        )
         await self.audit.log_action(
-            current_user.id, current_user.role, "PAYMENT_ATTENTION_RESOLVED", "payment_orders", order_id, {"note": payload.note}
+            current_user.id, current_user.role, "PAYMENT_ATTENTION_RESOLVED", "payment_orders", order_id,
+            {"note": payload.note, "outcome": payload.outcome, "refund_amount": payload.refund_amount},
         )
         return success(result, "Marked as resolved")
 

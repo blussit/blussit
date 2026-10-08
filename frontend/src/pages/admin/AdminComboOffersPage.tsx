@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { catalogApi } from "../../api/catalog";
 import { adminComboOfferApi } from "../../api/admin";
-import { Badge, Button, DataTable, Input, Modal } from "../../components/ui";
+import { Badge, Button, DataTable, ErrorState, Input, Modal } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -22,8 +22,9 @@ export default function AdminComboOffersPage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
-  const { data: servicesData } = useQuery({ queryKey: ["admin-services-for-combo"], queryFn: () => catalogApi.services({ page_size: 100 }) });
-  const { data: combos, isLoading } = useQuery({ queryKey: ["admin-combos"], queryFn: () => adminComboOfferApi.list() });
+  const servicesQuery = useQuery({ queryKey: ["admin-services-for-combo"], queryFn: () => catalogApi.services({ page_size: 100 }) });
+  const servicesData = servicesQuery.data;
+  const { data: combos, isLoading, error: combosError, refetch: refetchCombos } = useQuery({ queryKey: ["admin-combos"], queryFn: () => adminComboOfferApi.list() });
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ComboOffer | null>(null);
@@ -112,6 +113,8 @@ export default function AdminComboOffersPage() {
       <DataTable<ComboOffer>
         isLoading={isLoading}
         data={combos || []}
+        error={combosError}
+        onRetry={() => void refetchCombos()}
         emptyTitle="No Combo Offers Yet"
         columns={[
           { header: "Name", accessor: (c) => toTitle(c.name) },
@@ -158,6 +161,14 @@ export default function AdminComboOffersPage() {
 
           <div>
             <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Services Included (Pick At Least 2)</p>
+            {servicesQuery.isError && !servicesData && (
+              <ErrorState
+                message="Couldn't load services."
+                onRetry={() => void servicesQuery.refetch()}
+                busy={servicesQuery.isFetching}
+                className="p-4"
+              />
+            )}
             <div className="flex flex-wrap gap-2">
               {services.map((s) => {
                 const selected = form.service_ids.includes(s.id);

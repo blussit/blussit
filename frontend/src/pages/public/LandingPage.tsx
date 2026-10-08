@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect } from "react";
+import { useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { PublicFooter } from "../../components/layout/PublicFooter";
@@ -16,9 +16,10 @@ import { useAuth } from "../../context/AuthContext";
 import { scrollToSection } from "../../lib/sections";
 
 /**
- * The whole public site in one page: hero → services → how it works →
- * plans → video reviews → written reviews → FAQ. The navbar and footer jump
- * to these sections (lib/sections.ts); /services and /plans redirect here.
+ * The home page: hero → services → how it works → plans → video reviews →
+ * written reviews → FAQ. The navbar jumps to these sections
+ * (lib/sections.ts); /services, /plans and the other search-landing pages
+ * (pages/public/seo) cover the same ground in depth.
  */
 export default function LandingPage() {
   const navigate = useNavigate();
@@ -57,18 +58,13 @@ export default function LandingPage() {
   const offer = offers[0] ?? null;
   const claimOffer = () => offer && bookService(offer.service.slug);
 
-  const themeScope = {
-    "--color-primary": "#000000",
-    "--color-primary-dark": "#000000",
-    "--color-secondary": "#FACC15",
-    "--color-accent": "#FACC15",
-  } as CSSProperties;
-
   return (
-    <div className="min-h-screen bg-white text-black selection:bg-black selection:text-white" style={themeScope}>
+    <div className="min-h-screen bg-white text-[#0E1A33]">
       <PageSeo path="/" />
       <PublicNavbar />
-      {offer && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
+      {/* Not over a visitor headed for a section (/#how-it-works from the
+          footer) — the popup locks scrolling, so they'd be stuck at the top. */}
+      {offer && !location.hash && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
       <div className="relative">
         {/* Desktop: the offer floats over the photo's sky. Phones/tablets: the
             hero floats it above the features row instead. */}

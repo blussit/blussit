@@ -79,6 +79,14 @@ async def _outbox(db, phone: str) -> list[dict]:
     return await db.whatsapp_outbox.find({"phone": phone}).to_list(None)
 
 
+@pytest.fixture(autouse=True)
+def _marked_done_on_the_bookings_day(monkeypatch):
+    """MGR-06: a booking is marked done on (or after) its own day, never
+    before — these bookings are for tomorrow, so the manager's mark-done
+    happens "on the day"."""
+    monkeypatch.setattr("app.services.booking_service._ist_today", lambda: "2999-12-31")
+
+
 async def _create_open_booking(rig, cleanup, phone: str, quantity: int = 1, day: int = 1) -> dict:
     """An ordinary website/phone booking waiting in the manager's queue."""
     _track(cleanup, phone)
@@ -713,8 +721,12 @@ async def test_customer_and_manager_messages_use_12_hour_slots(rig, cleanup):
     cleanup.append(("notifications", {"user_id": booking["customer_id"]}))
     _, _, _, wa_slot, _, _ = await BookingService(db)._wa_details(await db.bookings.find_one({"_id": ObjectId(booking["id"])}))
     assert wa_slot == "9:00 AM – 12:00 PM"
-    confirmation = await db.notifications.find_one({"user_id": booking["customer_id"], "title": {"$regex": "booked$"}})
+    # Title is "Booking confirmed" since NTF-07 (it was "<service> booked").
+    confirmation = await db.notifications.find_one({"user_id": booking["customer_id"], "title": "Booking confirmed"})
     assert confirmation and "9:00 AM – 12:00 PM" in confirmation["message"] and "09:00" not in confirmation["message"]
+    import re
+
+    assert not re.search(r"\b\d{4}-\d{2}-\d{2}\b", confirmation["message"]), "no ISO date in a customer message"
 
 
 # ------------------------------------------------ reconciliation / safety

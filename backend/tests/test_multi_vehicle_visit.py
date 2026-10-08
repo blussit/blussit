@@ -8,6 +8,8 @@ that safe: the seat is taken once, the travel is paid once, but the
 captain's CLOCK still reflects every car, so he can't be handed another job
 while he's on car three.
 """
+from types import SimpleNamespace
+from unittest.mock import ANY
 from datetime import timedelta
 
 import pytest
@@ -206,6 +208,9 @@ class _StubOrders:
 
 class _StubClient:
     order = _StubOrders()
+    # verify asks Razorpay what the signed payment is (PAY-09): captured,
+    # for the order and amount being verified (mock.ANY).
+    payment = SimpleNamespace(fetch=lambda pid: {"id": pid, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"})
 
 
 @pytest.fixture

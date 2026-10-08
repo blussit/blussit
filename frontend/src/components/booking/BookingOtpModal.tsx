@@ -126,7 +126,7 @@ export function BookingOtpModal({
 
         <button
           type="button"
-          className="flex h-[50px] w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] font-display text-[15px] font-bold text-[#0E1A33] transition hover:bg-[#FFC800] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex h-[50px] w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] font-display text-[15px] font-bold text-[#0E1A33] transition hover:bg-[#F5C400] disabled:cursor-not-allowed disabled:opacity-60"
           disabled={otp.length < 6 || sending || verifying}
           onClick={() => void verify(otp)}
         >

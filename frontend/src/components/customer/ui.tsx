@@ -26,7 +26,7 @@ const tones = {
   outline: "border border-[#CFDCF0] bg-white text-[#0A66F0] hover:border-[#0A66F0] hover:bg-[#F5F9FF]",
   soft: "bg-[#E8F0FE] text-[#0A66F0] hover:bg-[#DCE8FD]",
   ghost: "text-[#5F6878] hover:bg-[#EEF3FA] hover:text-[#0E1A33]",
-  yellow: "bg-[#FFD21F] text-[#0E1A33] hover:bg-[#F5C800]",
+  yellow: "bg-[#FFD21F] text-[#0E1A33] hover:bg-[#F5C400]",
   danger: "border border-[#F6D3D3] bg-white text-[#C62828] hover:bg-[#FFF5F5]",
 } as const;
 

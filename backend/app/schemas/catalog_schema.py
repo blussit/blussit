@@ -60,7 +60,7 @@ class ServiceUpdateRequest(BaseModel):
     vehicle_types: Optional[list[str]] = None
     # Same floor as create: an edit could save a ₹0 / 0-minute service.
     price: Optional[float] = Field(default=None, gt=0)
-    discounted_price: Optional[float] = None
+    discounted_price: Optional[float] = Field(default=None, ge=0)
     vehicle_type_prices: Optional[dict[str, float]] = None
     vehicle_type_discounted_prices: Optional[dict[str, float]] = None
     original_price: Optional[float] = Field(default=None, ge=0)
@@ -103,8 +103,8 @@ class ComboOfferUpdateRequest(BaseModel):
     description: Optional[str] = None
     service_ids: Optional[list[str]] = None
     vehicle_types: Optional[list[str]] = None
-    price: Optional[float] = None
-    discounted_price: Optional[float] = None
+    price: Optional[float] = Field(default=None, gt=0)
+    discounted_price: Optional[float] = Field(default=None, ge=0)
     vehicle_type_prices: Optional[dict[str, float]] = None
     vehicle_type_discounted_prices: Optional[dict[str, float]] = None
     image: Optional[str] = None

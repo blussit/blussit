@@ -60,6 +60,8 @@ export function SocietyListView({ basePath, isAdmin = false }: { basePath: strin
       <DataTable<SocietyRow>
         data={list.data?.rows || []}
         isLoading={list.isLoading}
+        error={list.error}
+        onRetry={() => void list.refetch()}
         emptyTitle="No Societies Yet"
         emptyDescription="Register one, then share its form link with the residents."
         onRowClick={(r) => navigate(`${basePath}/${r.id}`)}

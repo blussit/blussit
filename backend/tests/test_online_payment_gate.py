@@ -11,6 +11,7 @@ handed back.
 """
 import itertools
 from datetime import timedelta
+from unittest.mock import ANY
 
 import pytest
 from bson import ObjectId
@@ -40,8 +41,17 @@ class _StubOrders:
         return {"id": f"order_gate_{next(_seq):06d}", **payload}
 
 
+class _StubPayments:
+    """verify asks Razorpay what the signed payment is (PAY-09): captured,
+    for the order and amount being verified (mock.ANY)."""
+
+    def fetch(self, payment_id):
+        return {"id": payment_id, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"}
+
+
 class _StubClient:
     order = _StubOrders()
+    payment = _StubPayments()
 
 
 @pytest.fixture
@@ -252,3 +262,52 @@ async def test_no_captain_can_be_assigned_to_an_unpaid_booking(rig, db, cleanup)
             booking["id"], BookingAssignCaptainRequest(captain_id=captain_id),
             "manager-id", "manager", rig["center_id"],
         )
+
+
+
+class _StubLinkClient:
+    class payment_link:
+        @staticmethod
+        def create(payload):
+            return {"id": f"plink_gate_{next(_seq):06d}", "short_url": "https://rzp.io/l/gate", **payload}
+
+
+async def test_link_paid_booking_reports_a_meta_purchase_only_when_it_confirms_one(rig, db, gateway, monkeypatch):
+    """The payment-link page fires a Meta Pixel Purchase for a website
+    booking that was waiting on that payment — never for a link that pays
+    an already-confirmed booking (a captain's doorstep QR on a cash job),
+    which was counted when it was booked."""
+    import hashlib
+    import hmac
+
+    from app.routes.v1.payment_routes import _purchase_pixel
+
+    monkeypatch.setattr(payment_service, "_razorpay_client", lambda: _StubLinkClient())
+    svc = BookingService(db)
+    payments = PaymentService(db)
+
+    async def pay_by_link(booking_id: str) -> str:
+        doc = await db.bookings.find_one({"_id": ObjectId(booking_id)})
+        link = await payments.create_payment_link(doc, contact_phone=None, name=None)
+        order = await db.payment_orders.find_one({"razorpay_link_id": link["link_id"]})
+        msg = f"{link['link_id']}|{order['reference_id']}|paid|pay_{link['link_id']}"
+        await payments.verify_link_callback({
+            "razorpay_payment_link_id": link["link_id"], "razorpay_payment_link_reference_id": order["reference_id"],
+            "razorpay_payment_link_status": "paid", "razorpay_payment_id": f"pay_{link['link_id']}",
+            "razorpay_signature": hmac.new(b"stub_secret_key", msg.encode(), hashlib.sha256).hexdigest(),
+        })
+        return link["link_id"]
+
+    online = await _book(svc, rig, "online")
+    link_id = await pay_by_link(online["id"])
+    assert (await db.bookings.find_one({"_id": ObjectId(online["id"])}))["status"] == BookingStatus.PENDING.value
+    event = await payments.link_purchase_event(link_id)
+    assert event == {"value": online["total_amount"], "event_id": f"booking:{online['id']}"}
+    pixel = await _purchase_pixel(db, link_id)
+    assert "fbq('track', 'Purchase'" in pixel and f'"booking:{online["id"]}"' in pixel
+
+    cash = await _book(svc, rig, "cash", day_offset=3)
+    collected = await pay_by_link(cash["id"])
+    assert (await db.bookings.find_one({"_id": ObjectId(cash["id"])}))["payment_status"] == "paid"
+    assert await payments.link_purchase_event(collected) is None
+    assert await _purchase_pixel(db, collected) == ""

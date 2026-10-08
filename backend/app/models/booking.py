@@ -82,6 +82,15 @@ class BookingModel(BusinessRecordBase):
     # conflict/lateness math; see estimated_start_at below for that.
     slot_start: Optional[datetime] = None
     slot_end: Optional[datetime] = None
+    # Explicit seat ownership (audit BOOK-01..06): True while THIS booking
+    # holds one unit of the slot counter named by seat_key
+    # {service_center_id, date "YYYY-MM-DD", slot_key}. Set in the same
+    # transaction as the counter increment; every release is a guarded claim
+    # True -> False in the same transaction as the decrement. A visit holds
+    # one seat (on one car); a manager-logged job never holds one. See
+    # BookingService._take_seat / _release_seat / reconcile_slot_counters.
+    holds_seat: bool = False
+    seat_key: Optional[dict] = None
     # The actual expected instant THIS booking's captain starts THIS job —
     # set at assign_captain/reassign_captain time (defaults to slot_start
     # if the manager doesn't pick a finer time within the slot window).

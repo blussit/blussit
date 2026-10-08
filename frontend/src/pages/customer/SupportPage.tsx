@@ -13,7 +13,7 @@ import { complaintApi, subscriptionApi } from "../../api/engagement";
 import { vehicleApi } from "../../api/profile";
 import { SocietyIssueModal, type IssueSociety } from "../../components/society/SocietyIssueModal";
 import { bookingApi } from "../../api/booking";
-import { Button, EmptyState, Input, Modal, PageLoader, Select, StatusBadge } from "../../components/ui";
+import { Button, EmptyState, ErrorState, Input, Modal, PageLoader, Select, StatusBadge } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { format, formatDateTime } from "../../lib/date";
 import type { Complaint } from "../../types";
@@ -25,7 +25,7 @@ export default function SupportPage() {
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Complaint | null>(null);
   // While a ticket is open, check for the team's replies every 20 s.
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["my-complaints"],
     queryFn: () => complaintApi.mine({ page: 1, page_size: 50 }),
     refetchInterval: selected ? 20000 : false,
@@ -154,6 +154,8 @@ export default function SupportPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load your support requests." busy={isFetching} onRetry={() => void refetch()} />
       ) : !tickets.length ? (
         <EmptyState
           icon={LifeBuoy}

@@ -1,5 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.authz import customers_known_to_center, ensure_customer_in_scope
 from app.core.exceptions import NotFoundException
 from app.models.enums import UserRole
 from app.repositories.address_repository import AddressRepository
@@ -31,12 +32,22 @@ class CRMService:
         self.service_repo = ServiceRepository(db)
         self.vehicle_type_repo = VehicleTypeRepository(db)
 
-    async def find_customer_by_phone(self, phone: str) -> dict | None:
+    async def find_customer_by_phone(
+        self, phone: str, actor_role: str = "admin", actor_center_id: str | None = None,
+    ) -> dict | None:
         """Used by the manager 'book on behalf of a customer' flow. Never
-        leaks a staff account via a phone search — customers only."""
-        user = await self.user_repo.find_by_phone(phone)
-        if not user or user.get("role") != UserRole.CUSTOMER.value:
+        leaks a staff account via a phone search — customers only. Same
+        shape rule as search_customers' full-number match: a manager gets
+        only what booking needs (id, name, phone), never the email or
+        account flags of a customer their center may never have served;
+        an unlinked manager gets nothing."""
+        if actor_role != "admin" and not actor_center_id:
             return None
+        user = await self.user_repo.find_by_phone(phone)
+        if not user or user.get("role") != UserRole.CUSTOMER.value or user.get("is_deleted"):
+            return None
+        if actor_role != "admin":
+            return self._lookup_row(user)
         return UserPublic.from_doc(user).model_dump()
 
     # How many name matches a manager's typeahead looks through before
@@ -105,25 +116,9 @@ class CRMService:
         }
 
     async def _known_to_center(self, customer_ids: list[str], center_id: str) -> set[str]:
-        """Which of these customers this center has dealt with: a booking,
-        a plan its manager granted/sold, or a society enrolment there."""
-        db = self.user_repo.collection.database
-        known: set[str] = set(
-            await db.bookings.distinct("customer_id", {"customer_id": {"$in": customer_ids}, "service_center_id": center_id})
-        )
-        rest = [c for c in customer_ids if c not in known]
-        if rest:
-            known.update(await db.user_subscriptions.distinct(
-                "customer_id", {"customer_id": {"$in": rest}, "service_center_id": center_id},
-            ))
-        rest = [c for c in customer_ids if c not in known]
-        if rest:
-            society_ids = [str(s["_id"]) for s in await db.societies.find({"service_center_id": center_id}, {"_id": 1}).to_list(length=500)]
-            if society_ids:
-                known.update(await db.society_enrollments.distinct(
-                    "customer_id", {"customer_id": {"$in": rest}, "society_id": {"$in": society_ids}},
-                ))
-        return known
+        """Which of these customers this center has dealt with — the shared
+        rule in core/authz (customers_known_to_center)."""
+        return await customers_known_to_center(self.user_repo.collection.database, customer_ids, center_id)
 
     async def get_customer_360(self, customer_id: str, actor_role: str | None = None, actor_center_id: str | None = None) -> dict:
         user = await self.user_repo.find_by_id(customer_id)
@@ -132,6 +127,13 @@ class CRMService:
         # profile through a customer-CRM endpoint.
         if not user or user.get("role") != UserRole.CUSTOMER.value:
             raise NotFoundException("Customer not found")
+        # A manager may open only a customer THEIR center has dealt with
+        # (same relationship rule as the typeahead's name search). The
+        # narrowing further down scopes bookings/plans/complaints, but the
+        # profile, every saved address and every vehicle went out for ANY
+        # customer id — and an unlinked manager fell open to all of them.
+        # 404, not 403: an id outside the center must not confirm it exists.
+        await ensure_customer_in_scope(self.user_repo.collection.database, actor_role or "", actor_center_id, customer_id)
 
         # High page_size, not the usual UI-page 20/50 — lifetime_spend,
         # total_bookings and same_day_repeat_dates below all need the
@@ -211,7 +213,9 @@ class CRMService:
         service_ids = {sid for b in bookings for sid in (b.get("service_ids") or [])}
         # A monthly pass names one car type + one wash — shown on each plan row.
         service_ids.update(s.get("service_id") for s in subscriptions if s.get("service_id"))
-        booking_address_ids = {b.get("address_id") for b in bookings if b.get("address_id")}
+        # A booking shows its own address_snapshot (spec 1.3); only rows from
+        # before snapshots fall back to the saved address.
+        booking_address_ids = {b.get("address_id") for b in bookings if b.get("address_id") and not b.get("address_snapshot")}
         vehicle_type_ids = {b.get("vehicle_type") for b in bookings if b.get("vehicle_type")}
         vehicle_type_ids.update(v.get("vehicle_type") for v in vehicles if v.get("vehicle_type"))
         vehicle_type_ids.update(s.get("vehicle_type") for s in subscriptions if s.get("vehicle_type"))
@@ -226,7 +230,7 @@ class CRMService:
 
         enriched_bookings = []
         for b in bookings:
-            addr = booking_addresses.get(b.get("address_id") or "")
+            addr = b.get("address_snapshot") or booking_addresses.get(b.get("address_id") or "")
             enriched_bookings.append({
                 **b,
                 "vehicle_label": b.get("vehicle_label") or vehicle_type_names.get(b.get("vehicle_type") or "") or "Vehicle",

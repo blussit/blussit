@@ -6,6 +6,7 @@ export * from "./StatCard";
 export * from "./Badge";
 export * from "./Spinner";
 export * from "./EmptyState";
+export * from "./ErrorState";
 export * from "./Modal";
 export * from "./DataTable";
 export * from "./OtpInput";

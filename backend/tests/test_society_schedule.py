@@ -39,7 +39,8 @@ SLOTS = {k: slot_from_key(k) for k in ("08:00-11:00", "11:00-14:00", "14:00-17:0
 
 
 def _car(i: int, *, remaining: int = 2, total: int = 2, start: date = date(2026, 10, 1), end: date = date(2026, 11, 1), enrollment: str | None = None) -> Car:
-    return Car(sub_id=f"s{i}", vehicle_id=f"v{i}", enrollment_id=enrollment or f"e{i}", customer_id=f"c{i}", remaining=remaining,
+    # One enrollment belongs to one resident (customer).
+    return Car(sub_id=f"s{i}", vehicle_id=f"v{i}", enrollment_id=enrollment or f"e{i}", customer_id=f"c-{enrollment}" if enrollment else f"c{i}", remaining=remaining,
                cycle_start=start, end=end, total=total, minutes=45, flat=f"A-{i:02d}", plate=f"MP09X{i:04d}")
 
 
@@ -240,7 +241,8 @@ async def test_sweep_books_a_visit_day_once_with_captains_assigned(db, cleanup, 
     assert await db.notifications.count_documents({"user_id": rig.manager, "title": "Society visit booked"}) == 1
     assert await db.notifications.count_documents({"user_id": rig.manager, "title": {"$regex": "^New booking"}}) == 0
     # Residents got their normal booking confirmation.
-    assert await db.notifications.count_documents({"user_id": singles[0]["customer_id"], "title": {"$regex": "booked$"}}) == 1
+    # (Title is "Booking confirmed" since NTF-07 — it was "<service> booked".)
+    assert await db.notifications.count_documents({"user_id": singles[0]["customer_id"], "title": "Booking confirmed"}) == 1
 
     # Re-running the sweep books nothing more.
     await service.sweep(now=_in_hours())

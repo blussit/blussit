@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Megaphone, Save } from "lucide-react";
 import { adminHomepageConfigApi } from "../../api/admin";
-import { Button, Card, CardBody, Input, PageLoader } from "../../components/ui";
+import { Button, Card, CardBody, ErrorState, Input, PageLoader } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { SettingsHistory } from "../../components/admin/SettingsHistory";
 
 export default function AdminHomepageSettingsPage() {
   const queryClient = useQueryClient();
-  const { data: config, isLoading } = useQuery({ queryKey: ["homepage-config"], queryFn: adminHomepageConfigApi.get });
+  const { data: config, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["homepage-config"], queryFn: adminHomepageConfigApi.get });
 
   const [form, setForm] = useState({
     hero_badge_text: "",
@@ -54,6 +54,15 @@ export default function AdminHomepageSettingsPage() {
   });
 
   if (isLoading) return <PageLoader />;
+  // A failed read must not fall through to a blank form — saving that would
+  // wipe the live hero and banner text.
+  if (isError && !config)
+    return (
+      <div className="space-y-8">
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Homepage Settings</h1>
+        <ErrorState message="Couldn't load the homepage settings." onRetry={() => void refetch()} busy={isFetching} />
+      </div>
+    );
 
   return (
     <div className="space-y-8">

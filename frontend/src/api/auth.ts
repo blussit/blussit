@@ -58,6 +58,11 @@ export const authApi = {
   // never included in this response (see backend docstring).
   resetCustomerPassword: (customerId: string) =>
     apiClient.post<ApiSuccess<null>>(`/auth/customers/${customerId}/reset-password`).then((r) => r.data),
+
+  // Admin (any staff but themselves) / manager (own center's captains):
+  // sets a temporary password the staff member must change on next login.
+  resetStaffPassword: (userId: string, tempPassword: string) =>
+    apiClient.post<ApiSuccess<unknown>>(`/auth/staff/${userId}/reset-password`, { temp_password: tempPassword }).then((r) => r.data),
 };
 
 // ---- MSG91 OTP widget (server-verified) -----------------------------------

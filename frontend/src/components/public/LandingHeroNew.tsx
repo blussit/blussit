@@ -16,7 +16,12 @@ const HERO_DESKTOP_SMALL = "/img/hero-desktop-v2-1280.webp";
 // Phones/tablets: a square shot with open sky top-left for the copy and the
 // "Clean Cars Greener Indore" script top-right.
 const HERO_MOBILE_SRCSET = "/img/hero-mobile-v2-720.webp 720w, /img/hero-mobile-v2-1080.webp 1080w, /img/hero-mobile-v2-1254.webp 1254w";
-const HERO_MOBILE = "/img/hero-mobile-v2-1080.webp";
+// The desktop and phone layouts are separate blocks, one hidden per
+// breakpoint — but a hidden <img> still DOWNLOADS. Each photo therefore sits
+// in a <picture> whose source only matches its own breakpoint; elsewhere the
+// <img> falls back to this inline pixel, so a phone never pays for the
+// desktop photo (or the other way round) and the real one isn't slowed down.
+const NO_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 // The trust row. Change the numbers here as they grow.
 const CARS_wash = { to: 140, suffix: "+" };
@@ -118,8 +123,9 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
             the script and the whole car stay in view at every size. */}
         <picture>
           <source media="(min-width: 1440px)" srcSet={HERO_DESKTOP} />
+          <source media="(min-width: 1024px)" srcSet={HERO_DESKTOP_SMALL} />
           <img
-            src={HERO_DESKTOP_SMALL}
+            src={NO_IMAGE}
             alt="Blussit captain washing a car at the customer's doorstep"
             fetchPriority="high"
             className="animate-hero-zoom absolute bottom-0 right-0 top-0 h-full w-auto max-w-none origin-[75%_55%]"
@@ -187,14 +193,15 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
             spot — beside the "Clean Cars Greener Indore" script, above the car.
             Full width on tablets too, so the photo is never boxed in. */}
         <div className="relative aspect-square w-full overflow-hidden">
-          <img
-            src={HERO_MOBILE}
-            srcSet={HERO_MOBILE_SRCSET}
-            sizes="100vw"
-            alt="Blussit captain washing a car at the customer's doorstep"
-            fetchPriority="high"
-            className="animate-hero-zoom absolute inset-0 h-full w-full origin-[70%_60%] object-cover"
-          />
+          <picture>
+            <source media="(max-width: 1023px)" srcSet={HERO_MOBILE_SRCSET} sizes="100vw" />
+            <img
+              src={NO_IMAGE}
+              alt="Blussit captain washing a car at the customer's doorstep"
+              fetchPriority="high"
+              className="animate-hero-zoom absolute inset-0 h-full w-full origin-[70%_60%] object-cover"
+            />
+          </picture>
           <div
             className="pointer-events-none absolute inset-0"
             style={{ background: "radial-gradient(85% 60% at 0% 0%, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.62) 48%, rgba(255,255,255,0) 85%)" }}
@@ -283,7 +290,9 @@ function Features({ compact = false, className = "" }: { compact?: boolean; clas
         <div key={line1} className={`flex items-center ${compact ? "gap-[2vw]" : "gap-3"}`}>
           {i > 0 && <span className={`self-stretch border-l border-[#E4E9F1] ${compact ? "mr-[1.5vw]" : "mx-5"}`} aria-hidden="true" />}
           <span
-            className={`flex shrink-0 items-center justify-center rounded-full ${compact ? "h-[clamp(36px,9vw,60px)] w-[clamp(36px,9vw,60px)]" : "h-12 w-12"}`}
+            // Below 360 px the three points don't fit with their icons —
+            // the words stay, the circles go ("Professionals" was clipped).
+            className={`flex shrink-0 items-center justify-center rounded-full ${compact ? "h-[clamp(36px,9vw,60px)] w-[clamp(36px,9vw,60px)] max-[359px]:hidden" : "h-12 w-12"}`}
             style={{ backgroundColor: ICON_BG }}
           >
             <Icon />

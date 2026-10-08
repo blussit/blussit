@@ -31,7 +31,7 @@ export function DiscountBadge({ percent, className }: { percent: number | null; 
 export function OfferTag({ label, className }: { label?: string | null; className?: string }) {
   if (!label?.trim()) return null;
   return (
-    <span className={cn("inline-flex shrink-0 items-center rounded-full bg-black px-2 py-0.5 text-[11px] font-bold leading-4 text-white", className)}>
+    <span className={cn("inline-flex shrink-0 items-center rounded-full bg-[#0E1A33] px-2 py-0.5 text-[11px] font-bold leading-4 text-white", className)}>
       {label.trim()}
     </span>
   );

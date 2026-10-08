@@ -1,13 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { subscriptionApi } from "../../api/engagement";
-import { Modal, PageLoader, StatusBadge } from "../ui";
+import { ErrorState, Modal, PageLoader, StatusBadge } from "../ui";
 import { format, formatSlot } from "../../lib/date";
 
 /** "Click on that plan and check last when the service was claimed, how
  *  many remaining" — one plan's full spend history. Shared by the
  *  manager's Subscriptions page and the admin's Purchased plans page. */
 export function PlanUsageModal({ subscriptionId, onClose }: { subscriptionId: string | null; onClose: () => void }) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["subscription-usage", subscriptionId],
     queryFn: () => subscriptionApi.usageHistory(subscriptionId as string),
     enabled: !!subscriptionId,
@@ -15,7 +15,9 @@ export function PlanUsageModal({ subscriptionId, onClose }: { subscriptionId: st
 
   return (
     <Modal open={!!subscriptionId} onClose={onClose} title="Plan Usage">
-      {isLoading || !data ? (
+      {isError && !data ? (
+        <ErrorState message="Couldn't load this plan's usage." busy={isFetching} onRetry={() => void refetch()} />
+      ) : isLoading || !data ? (
         <PageLoader />
       ) : (
         <div className="space-y-4">

@@ -42,7 +42,8 @@ function toValue({ hour12, minute, period }: Parsed): string {
 function displayLabel(value: string | undefined): string {
   const parsed = parseValue(value);
   if (!parsed) return "";
-  return `${String(parsed.hour12).padStart(2, "0")}:${String(parsed.minute).padStart(2, "0")} ${parsed.period}`;
+  // "9:30 AM", not "09:30 AM" — the same 12-hour style as every other time.
+  return `${parsed.hour12}:${String(parsed.minute).padStart(2, "0")} ${parsed.period}`;
 }
 
 function parseHM(hm: string): { h: number; m: number } {

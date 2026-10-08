@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useLiveChannel } from "../../lib/socket";
+import { staffDirectoryApi } from "../../api/admin";
 import { ensureGoogleMaps, getLib } from "../../lib/googleMaps";
 
 // Same fix as MapPicker.tsx — Leaflet's default marker icon paths don't
@@ -38,6 +40,35 @@ export interface TrailPoint {
   longitude: number;
 }
 
+// The live push ("captain-location:{id}") only reaches sockets on the API
+// instance that received the ping — with several Cloud Run instances most
+// pings never arrive here. This poll re-reads the captain's newest
+// breadcrumb (the same /locations trail the manager map loads) as a
+// fallback, so the pin keeps moving either way.
+const POSITION_POLL_MS = 25_000;
+const todayStartIST = () => `${new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })}T00:00:00+05:30`;
+
+function usePositionPoll(captainId: string, capturedAt: string | null, apply: (lat: number, lng: number, at: string) => void) {
+  const latest = useRef(capturedAt);
+  latest.current = capturedAt;
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  const { data } = useQuery({
+    queryKey: ["captain-live-position", captainId],
+    // Only what's newer than the pin already shows — a tiny payload.
+    queryFn: () => staffDirectoryApi.locationTrail(captainId, latest.current || todayStartIST()),
+    refetchInterval: POSITION_POLL_MS,
+    staleTime: 0,
+  });
+  useEffect(() => {
+    if (!data?.length) return;
+    const at = (p: { at: string }) => new Date(p.at).getTime();
+    const newest = data.reduce((a, b) => (at(b) > at(a) ? b : a));
+    if (latest.current && at(newest) <= new Date(latest.current).getTime()) return;
+    applyRef.current(newest.latitude, newest.longitude, newest.at);
+  }, [data]);
+}
+
 function LeafletLiveCaptainMap({
   captainId,
   initialLatitude,
@@ -67,7 +98,7 @@ function LeafletLiveCaptainMap({
     if (trail && trail.length > 1) {
       trailRef.current = L.polyline(
         trail.map((p) => [p.latitude, p.longitude] as [number, number]),
-        { color: "#E8A900", weight: 3, opacity: 0.8, dashArray: "6 6" }
+        { color: "#0A66F0", weight: 3, opacity: 0.8, dashArray: "6 6" }
       ).addTo(mapRef.current);
     }
   }, [trail]);
@@ -91,18 +122,23 @@ function LeafletLiveCaptainMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useLiveChannel(`captain-location:${captainId}`, (message) => {
-    const lat = message.latitude as number | undefined;
-    const lng = message.longitude as number | undefined;
-    if (lat == null || lng == null || !mapRef.current) return;
+  const moveTo = (lat: number, lng: number, at: string) => {
+    if (!mapRef.current) return;
     if (markerRef.current) {
       markerRef.current.setLatLng([lat, lng]);
     } else {
       markerRef.current = L.marker([lat, lng], { icon: markerIcon }).addTo(mapRef.current);
     }
     mapRef.current.setView([lat, lng], Math.max(mapRef.current.getZoom(), 14));
-    setCapturedAt((message.captured_at as string | undefined) ?? new Date().toISOString());
+    setCapturedAt(at);
+  };
+  useLiveChannel(`captain-location:${captainId}`, (message) => {
+    const lat = message.latitude as number | undefined;
+    const lng = message.longitude as number | undefined;
+    if (lat == null || lng == null) return;
+    moveTo(lat, lng, (message.captured_at as string | undefined) ?? new Date().toISOString());
   });
+  usePositionPoll(captainId, capturedAt, moveTo);
 
   // Keeps the "Xs ago" label ticking even between pings.
   useEffect(() => {
@@ -153,7 +189,7 @@ function GoogleLiveCaptainMap({
         objectsRef.current.polyline = new gmaps.Polyline({
           path: trail.map((p) => ({ lat: p.latitude, lng: p.longitude })),
           map,
-          strokeColor: "#E8A900",
+          strokeColor: "#0A66F0",
           strokeOpacity: 0.8,
           strokeWeight: 3,
         });
@@ -186,16 +222,21 @@ function GoogleLiveCaptainMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useLiveChannel(`captain-location:${captainId}`, (message) => {
-    const lat = message.latitude as number | undefined;
-    const lng = message.longitude as number | undefined;
+  const moveTo = (lat: number, lng: number, at: string) => {
     const { map, marker } = objectsRef.current;
-    if (lat == null || lng == null || !map || !marker) return;
+    if (!map || !marker) return;
     marker.position = { lat, lng };
     map.panTo({ lat, lng });
     if (map.getZoom() < 14) map.setZoom(14);
-    setCapturedAt((message.captured_at as string | undefined) ?? new Date().toISOString());
+    setCapturedAt(at);
+  };
+  useLiveChannel(`captain-location:${captainId}`, (message) => {
+    const lat = message.latitude as number | undefined;
+    const lng = message.longitude as number | undefined;
+    if (lat == null || lng == null) return;
+    moveTo(lat, lng, (message.captured_at as string | undefined) ?? new Date().toISOString());
   });
+  usePositionPoll(captainId, capturedAt, moveTo);
 
   useEffect(() => {
     const timer = setInterval(() => forceTick((n) => n + 1), 5000);

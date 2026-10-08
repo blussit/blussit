@@ -7,8 +7,12 @@ class ReviewRepository(BaseRepository):
     async def list_public(self, page: int, page_size: int):
         return await self.find_many({"is_published": True}, page=page, page_size=page_size)
 
+    # A captain's newest reviews — bounded (PERF-03): a busy captain's
+    # lifetime of reviews is a page of history, never one unbounded list.
+    CAPTAIN_REVIEWS_LIMIT = 200
+
     async def list_for_captain(self, captain_id: str) -> list[dict]:
-        return await self.find_all_no_paginate({"captain_id": captain_id})
+        return await self.find_all_no_paginate({"captain_id": captain_id}, limit=self.CAPTAIN_REVIEWS_LIMIT)
 
     # GET /reviews/my: the customer's newest reviews, or just the ones for
     # the bookings asked about — never an unbounded list.

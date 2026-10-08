@@ -41,12 +41,16 @@ export function Modal({
   title,
   children,
   maxWidth = "max-w-lg",
+  dismissible = true,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
   maxWidth?: string;
+  /** false = a blocking dialog (its onClose is a no-op): no close ✕ that
+   *  looks like it should work but doesn't. */
+  dismissible?: boolean;
 }) {
   const titleId = useId();
   useDialogStack(open, onClose, titleId);
@@ -54,6 +58,8 @@ export function Modal({
   useBodyScrollLock(open);
   // Rendered on <body>: inside an animated/transformed card a `fixed` layer is
   // trapped in that card, so the dimmer covered only part of the page.
+  // No document while pages are pre-rendered at build time.
+  if (typeof document === "undefined") return null;
   return createPortal(
     <AnimatePresence>
       {open && (
@@ -70,17 +76,19 @@ export function Modal({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
             transition={{ duration: 0.18 }}
-            className={`relative z-10 w-full ${maxWidth} max-h-[85vh] overflow-y-auto rounded-2xl border border-[var(--color-card-border)] bg-white p-5 sm:p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)]`}
+            className={`relative z-10 w-full ${maxWidth} max-h-[85dvh] overflow-y-auto rounded-2xl border border-[var(--color-card-border)] bg-white p-5 sm:p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)]`}
           >
             <div className="mb-4 flex items-center justify-between gap-3">
-              <h3 id={titleId} className="min-w-0 text-lg font-semibold text-[var(--ui-ink,#000)]">{title}</h3>
-              <button
-                onClick={onClose}
-                aria-label="Close"
-                className="shrink-0 rounded-full p-1.5 text-gray-400 transition-colors hover:bg-[var(--ui-tint,#FFF4CD)] hover:text-[var(--ui-ink,#000)]"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <h3 id={titleId} className="min-w-0 text-lg font-semibold text-[var(--ui-ink,#0E1A33)]">{title}</h3>
+              {dismissible && (
+                <button
+                  onClick={onClose}
+                  aria-label="Close"
+                  className="shrink-0 rounded-full p-1.5 text-gray-400 transition-colors hover:bg-[var(--ui-tint,#E8F0FE)] hover:text-[var(--ui-ink,#0E1A33)]"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              )}
             </div>
             {children}
           </motion.div>

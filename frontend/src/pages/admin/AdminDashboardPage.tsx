@@ -14,7 +14,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Globe, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
 import { analyticsApi, kpiApi, adminUserApi } from "../../api/admin";
 import { bookingApi } from "../../api/booking";
-import { Card, CardBody, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
+import { Card, CardBody, ErrorState, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
 import { DatePicker } from "../../components/ui/DatePicker";
 import { DeltaPill, InfoTip, TargetChip, formatINR } from "../../components/admin/kpi/charts";
 import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, MarketingTab, OperationsTab } from "../../components/admin/kpi/sections";
@@ -79,7 +79,7 @@ export default function AdminDashboardPage() {
     [periodKey, custom],
   );
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["kpi", "overview", params],
     queryFn: () => kpiApi.section<OverviewData>("overview", params),
   });
@@ -89,6 +89,9 @@ export default function AdminDashboardPage() {
   });
 
   if (isLoading && !data) return <PageLoader />;
+  // A failed overview read left no tiles and "No exceptions need attention"
+  // — which reads as a quiet, healthy period. Say it failed instead.
+  const overviewFailed = isError && !data;
 
   const periodNoun = periodKey === "today" ? "yesterday" : "previous period";
   const cur = data?.current;
@@ -169,7 +172,7 @@ export default function AdminDashboardPage() {
               key={p.key}
               type="button"
               onClick={() => { setPeriodKey(p.key); setShowCustom(false); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-600 hover:border-[#C9D6EA]"}`}
             >
               {p.label}
             </button>
@@ -177,7 +180,7 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             onClick={() => { setShowCustom((v) => !v); if (custom.start && custom.end) setPeriodKey("custom"); }}
-            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
+            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-600 hover:border-[#C9D6EA]"}`}
           >
             <SlidersHorizontal className="h-3 w-3" /> Custom
           </button>
@@ -203,6 +206,7 @@ export default function AdminDashboardPage() {
 
       {/* PRIMARY — revenue is the headline, the rest are supporting tiles.
           Same console shape as every other panel in the product. */}
+      {overviewFailed && <ErrorState message="Couldn't load the business overview." onRetry={() => void refetch()} busy={isFetching} />}
       {hero && (
         <div>
           <div className="mb-1.5 flex gap-1.5">
@@ -211,7 +215,7 @@ export default function AdminDashboardPage() {
                 key={s.key}
                 type="button"
                 onClick={() => setRevenueScope(s.key)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-500 hover:border-black"}`}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-500 hover:border-[#C9D6EA]"}`}
               >
                 {s.label}
               </button>
@@ -277,7 +281,7 @@ export default function AdminDashboardPage() {
       </div>
 
       {/* Action required — only triggered exceptions, invisible when healthy. */}
-      {alerts.length > 0 ? (
+      {overviewFailed ? null : alerts.length > 0 ? (
         <Panel title="Action Required">
           <ul className="space-y-1.5">
             {alerts.map((a) => (
@@ -306,7 +310,7 @@ export default function AdminDashboardPage() {
               key={t.key}
               type="button"
               onClick={() => setTab(t.key)}
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-black text-white" : "text-gray-600 hover:bg-[#FFF4CD]"}`}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[#E8F0FE] text-[#0A66F0]" : "text-gray-600 hover:bg-[#EEF3FA]"}`}
             >
               {t.label}
             </button>

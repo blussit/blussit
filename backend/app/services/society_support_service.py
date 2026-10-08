@@ -59,13 +59,13 @@ async def _center_managers(db, center_id: str | None) -> list[str]:
     if not center_id:
         return []
     rows = await db.users.find(
-        {"role": "manager", "service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$ne": "suspended"}}, {"_id": 1}
+        {"role": "manager", "service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$nin": ["suspended", "inactive"]}}, {"_id": 1}
     ).to_list(length=20)
     return [str(r["_id"]) for r in rows]
 
 
 async def _admins(db) -> list[str]:
-    rows = await db.users.find({"role": "admin", "is_deleted": {"$ne": True}, "status": {"$ne": "suspended"}}, {"_id": 1}).to_list(length=10)
+    rows = await db.users.find({"role": "admin", "is_deleted": {"$ne": True}, "status": {"$nin": ["suspended", "inactive"]}}, {"_id": 1}).to_list(length=10)
     return [str(r["_id"]) for r in rows]
 
 
@@ -345,6 +345,29 @@ class SocietyLeadService:
             update["$set"]["staff_note"] = (data.get("staff_note") or "").strip() or None
         fresh = await self.collection.find_one_and_update({"_id": lead["_id"]}, update, return_document=ReturnDocument.AFTER)
         return self._view(fresh, await self._center_names([fresh.get("service_center_id")]))
+
+    async def claim_for_registration(self, lead_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """Insert-first claim before a society is created from this request
+        (SOC-6): flips it to "registered" atomically, so two simultaneous
+        "Register this society" taps (or two staff) can't both create one.
+        Returns the request as it was, for release_registration."""
+        lead = await self._lead_for(lead_id, actor_role, actor_center_id)
+        now = datetime.now(timezone.utc)
+        before = await self.collection.find_one_and_update(
+            {"_id": lead["_id"], "status": {"$ne": "registered"}, "is_deleted": {"$ne": True}},
+            {"$set": {"status": "registered", "registering_by": actor_id, "updated_at": now}},
+        )
+        if not before:
+            raise ConflictException("This society request is already registered as a society.")
+        return before
+
+    async def release_registration(self, before: dict) -> None:
+        """The society couldn't be created after all: the request goes back
+        to the status it had (only if nothing linked a society meanwhile)."""
+        await self.collection.update_one(
+            {"_id": before["_id"], "status": "registered", "society_id": before.get("society_id")},
+            {"$set": {"status": before.get("status") or "new", "updated_at": datetime.now(timezone.utc)}, "$unset": {"registering_by": ""}},
+        )
 
     async def mark_registered(self, lead_id: str, society: dict, actor_id: str, actor_role: str, actor_center_id: str | None) -> None:
         """Register-this-society shortcut: the request becomes 'registered'

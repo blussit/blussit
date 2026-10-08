@@ -3,7 +3,7 @@ import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { CalendarDays, ChevronLeft, ChevronRight, Timer } from "lucide-react";
 import { serviceCenterApi } from "../../api/catalog";
 import { formatTime12, todayIST } from "../../lib/date";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorMessage, getErrorStatus } from "../../lib/api-client";
 import { useLiveChannel } from "../../lib/socket";
 import { bookingDays, dayParts } from "./bookingTheme";
 import type { SlotAvailability } from "../../types";
@@ -56,9 +56,11 @@ export function SlotBoard({
     queryClient.invalidateQueries({ queryKey: ["available-slots", centerId, date] });
   });
 
+  // null = not known yet — still loading, OR the read failed (a failed day
+  // is never shown as "Full" nor skipped over as if it were).
   const openOn = (i: number): boolean | null => {
     const r = results[i];
-    if (!r || !r.data) return r?.isError ? false : null;
+    if (!r || !r.data) return null;
     return r.data.some((s) => s.status !== "full");
   };
 
@@ -168,7 +170,12 @@ export function SlotBoard({
             ))}
           </div>
         ) : current.isError ? (
-          <p className="text-[13px] text-[var(--color-error)]">{getErrorMessage(current.error)}</p>
+          <p className="text-[13px] text-[#5F6878]" role="alert">
+            Couldn't load the slots for this day{getErrorStatus(current.error) === undefined ? "" : ` — ${getErrorMessage(current.error)}`}.{" "}
+            <button type="button" disabled={current.isFetching} onClick={() => void current.refetch()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+              {current.isFetching ? "Trying…" : "Try Again"}
+            </button>
+          </p>
         ) : !slots.length ? (
           <p className="flex items-center gap-2 text-[13px] text-[#5F6878]">
             <CalendarDays className="h-4 w-4" /> No slots on this day — try another.

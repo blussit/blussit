@@ -43,7 +43,7 @@ export default function AdminAuditLogsPage() {
   useEffect(() => setPage(1), [centerId, module, role, adminInCenter]);
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["admin-audit-logs", page, centerId, module, role, adminInCenter],
     queryFn: () =>
       auditLogApi.list({
@@ -104,6 +104,8 @@ export default function AdminAuditLogsPage() {
         <DataTable<AuditLogRow>
           isLoading={isLoading}
           data={data?.data || []}
+          error={error}
+          onRetry={() => void refetch()}
           emptyTitle="No Matching Activity"
           emptyDescription="Try a wider filter — the trail keeps every action."
           onRowClick={setOpen}

@@ -1,33 +1,37 @@
 @import "tailwindcss";
 
 @theme {
-  /* CleanRide brand — dark navy/ink header & CTAs with an amber accent,
-     matching the approved Figma (doorstep car-wash, "CLEANRIDE" wordmark) */
-  --color-primary: #0A0A0A;
-  --color-primary-dark: #000000;
+  /* Blussit v2 — white ground, navy type (#0E1A33), one blue (#0A66F0) for
+     actions and "active", muted #5F6878, hairline borders #E4E9F1, light
+     blue tints (#E8F0FE) and yellow (#FFD21F) kept for the main CTAs.
+     These are the ROOT values, so anything outside a themed frame —
+     popups and toasts portalled to <body>, the public pages, the booking
+     flow, auth screens — reads v2 instead of the old black/gold palette.
+     (The staff portals' `staff-v2` and the customer app's `cust-v2` body
+     classes set the same values.) */
+  --color-primary: #0A66F0;
+  --color-primary-dark: #0857D0;
   /* Light tint for selected/active/highlight surfaces — always paired with
      primary-coloured text or a primary border, so it must stay light. */
-  --color-primary-light: #F3F3F3;
-  --color-secondary: #EAB308;
-  --color-secondary-light: #FEF9C3;
-  --color-accent: #EAB308;
-  --color-accent-light: #FEF9C3;
-  --color-surface: #F5F5F5;
-  /* One card hairline for the whole product — the light-yellow boundary
-     the founder approved. Set here (not only in the brand portals) so
-     customer, captain, manager and admin all read as one system. */
-  --color-card-border: #F3E5B5;
-  --color-text-primary: #0A0A0A;
-  --color-text-secondary: #525252;
-  /* Warm-white page surfaces below the hero (matches the pre-launch site),
-     with a slightly deeper tint for alternating bands and a warm hairline. */
-  --color-cream: #FFFCF5;
-  --color-cream-deep: #FFF7EA;
-  --color-cream-line: #EAE2D3;
-  --color-cream-line-soft: #F1EADD;
-  /* Brand gold — used sparingly (Book buttons, duration pills, plan CTAs). */
-  --color-gold: #E8A900;
-  --color-gold-dark: #D99A00;
+  --color-primary-light: #E8F0FE;
+  --color-secondary: #FFD21F;
+  --color-secondary-light: #FFF8D6;
+  --color-accent: #0A66F0;
+  --color-accent-light: #E7F6EC;
+  /* Soft tile/ground tint (also the default hairline for a bare `border`). */
+  --color-surface: #F6F8FC;
+  /* One card hairline for the whole product. */
+  --color-card-border: #E4E9F1;
+  --color-text-primary: #0E1A33;
+  --color-text-secondary: #5F6878;
+  /* Light page grounds for alternating bands, and their hairlines. */
+  --color-cream: #F6F8FC;
+  --color-cream-deep: #F4F8FF;
+  --color-cream-line: #E4E9F1;
+  --color-cream-line-soft: #EDF0F5;
+  /* The yellow CTA colour (kept under its old name). */
+  --color-gold: #FFD21F;
+  --color-gold-dark: #F5C800;
   --color-error: #DC2626;
   --color-warning: #F59E0B;
   --color-success: #16A34A;

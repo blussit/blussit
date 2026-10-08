@@ -101,6 +101,8 @@ class ZoneService:
             update["is_active"] = is_active
         if not update:
             raise BadRequestException("Nothing to update")
+        if not ObjectId.is_valid(zone_id):
+            raise NotFoundException("Zone not found")
         try:
             result = await self.db.service_zones.find_one_and_update(
                 {"_id": ObjectId(zone_id)}, {"$set": update}, return_document=True
@@ -112,6 +114,8 @@ class ZoneService:
         return serialize_doc(result)
 
     async def delete_zone(self, zone_id: str) -> None:
+        if not ObjectId.is_valid(zone_id):  # VAL-6: a malformed id is a 404, not a 500
+            raise NotFoundException("Zone not found")
         result = await self.db.service_zones.update_one({"_id": ObjectId(zone_id)}, {"$set": {"is_deleted": True, "is_active": False}})
         if not result.matched_count:
             raise NotFoundException("Zone not found")

@@ -6,6 +6,7 @@ import { contentApi } from "../../api/catalog";
 import { getErrorMessage } from "../../lib/api-client";
 import { openBlussitWhatsApp } from "./WhatsAppFloatingButton";
 import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
+import { trackContact } from "../../lib/metaPixel";
 
 type ContactForm = {
   name: string;
@@ -174,6 +175,7 @@ export function ContactUsModal({
           .join(" "),
       });
 
+      trackContact("contact form");
       setState("success");
     } catch (error) {
       setState("error");
@@ -182,17 +184,17 @@ export function ContactUsModal({
   };
 
   /*
-   * BLUSSIT THEME
-   * Navy  : #071A3D
-   * Blue  : #1677FF
-   * Yellow: #E8A900
+   * BLUSSIT v2 THEME
+   * Navy  : #0E1A33
+   * Blue  : #0A66F0
+   * Yellow: #FFD21F (the CTA)
    */
 
   const inputClass =
-    "mt-1 block h-[46px] w-full rounded-[10px] border border-[#D9E4F2] bg-white px-3.5 text-sm text-[#071A3D] placeholder:text-[#91A0B5] outline-none transition-all focus:border-[#1677FF] focus:ring-2 focus:ring-[#1677FF]/10 sm:h-[48px]";
+    "mt-1 block h-[46px] w-full rounded-[10px] border border-[#D9E4F2] bg-white px-3.5 text-sm text-[#0E1A33] placeholder:text-[#91A0B5] outline-none transition-all focus:border-[#0A66F0] focus:ring-2 focus:ring-[#0A66F0]/10 sm:h-[48px]";
 
   const labelClass =
-    "block text-[13px] font-semibold text-[#071A3D]";
+    "block text-[13px] font-semibold text-[#0E1A33]";
 
   const error = (message?: string) =>
     message && (
@@ -201,18 +203,26 @@ export function ContactUsModal({
       </p>
     );
 
+  // Pages are pre-rendered to HTML at build time (scripts/prerender.mjs),
+  // where there is no document to portal into — a closed modal is nothing.
+  if (typeof document === "undefined") return null;
+
   return createPortal(
     <AnimatePresence>
       {open && (
         <div
-          className="fixed inset-0 z-[100000] flex items-center justify-center p-3 sm:p-5"
+          // Scrolls itself: on a short phone (360×640) the form is taller than
+          // the screen — centred in a fixed box, its title, close button and
+          // Send were cut off with no way to reach them. my-auto still centres
+          // it whenever it fits.
+          className="fixed inset-0 z-[100000] flex items-start justify-center overflow-y-auto overscroll-contain p-3 sm:p-5"
           role="presentation"
         >
           {/* BACKDROP */}
           <motion.button
             type="button"
             aria-label="Close contact form"
-            className="absolute inset-0 cursor-default bg-[#071A3D]/45 backdrop-blur-[4px]"
+            className="fixed inset-0 cursor-default bg-[#0E1A33]/45 backdrop-blur-[4px]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -230,6 +240,7 @@ export function ContactUsModal({
             transition={{ duration: 0.2, ease: "easeOut" }}
             className="
               relative
+              my-auto
               w-full
               max-w-[620px]
               overflow-hidden
@@ -238,7 +249,7 @@ export function ContactUsModal({
               border-[#DCE8F7]
               bg-white
               p-[18px]
-              shadow-[0_24px_70px_rgba(7,26,61,0.20)]
+              shadow-[0_24px_70px_rgba(14,26,51,0.20)]
               sm:p-6
             "
           >
@@ -252,7 +263,7 @@ export function ContactUsModal({
                 h-[3px]
                 w-12
                 rounded-b-full
-                bg-[#E8A900]
+                bg-[#FFD21F]
               "
             />
 
@@ -275,10 +286,10 @@ export function ContactUsModal({
                 border
                 border-[#DCE8F7]
                 bg-white
-                text-[#1677FF]
-                shadow-[0_4px_14px_rgba(7,26,61,0.08)]
+                text-[#0A66F0]
+                shadow-[0_4px_14px_rgba(14,26,51,0.08)]
                 transition
-                hover:border-[#1677FF]
+                hover:border-[#0A66F0]
                 hover:bg-[#F2F7FF]
               "
             >
@@ -295,8 +306,8 @@ export function ContactUsModal({
                     items-center
                     justify-center
                     rounded-full
-                    bg-[#FFF6D8]
-                    text-[#E8A900]
+                    bg-[#E8F0FE]
+                    text-[#0A66F0]
                   "
                 >
                   <Check
@@ -307,7 +318,7 @@ export function ContactUsModal({
 
                 <h2
                   id="contact-modal-title"
-                  className="mt-5 text-2xl font-bold text-[#071A3D]"
+                  className="mt-5 text-2xl font-bold text-[#0E1A33]"
                 >
                   Message Sent Successfully
                 </h2>
@@ -324,14 +335,14 @@ export function ContactUsModal({
                     mt-6
                     h-11
                     rounded-[10px]
-                    bg-[#E8A900]
+                    bg-[#FFD21F]
                     px-7
                     text-sm
                     font-bold
-                    text-[#071A3D]
-                    shadow-[0_7px_18px_rgba(232,169,0,0.20)]
+                    text-[#0E1A33]
+                    shadow-[0_7px_18px_rgba(255,210,31,0.28)]
                     transition
-                    hover:bg-[#D99D00]
+                    hover:bg-[#F5C400]
                   "
                 >
                   Done
@@ -342,11 +353,11 @@ export function ContactUsModal({
                 {/* HEADER */}
                 <div className="pr-10">
                   <div className="flex items-center gap-2">
-                    <p className="text-[11px] font-bold tracking-[0.16em] text-[#1677FF]">
+                    <p className="text-[11px] font-bold tracking-[0.16em] text-[#0A66F0]">
                       GET IN TOUCH
                     </p>
 
-                    <span className="h-1.5 w-1.5 rounded-full bg-[#E8A900]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-[#FFD21F]" />
                   </div>
 
                   <h2
@@ -357,11 +368,11 @@ export function ContactUsModal({
                       font-bold
                       leading-tight
                       tracking-[-0.02em]
-                      text-[#071A3D]
+                      text-[#0E1A33]
                       sm:text-[26px]
                     "
                   >
-                    We&apos;re here to help.
+                    We&apos;re Here To Help.
                   </h2>
 
                   <p className="mt-1 text-[13px] leading-5 text-[#64748B]">
@@ -380,7 +391,7 @@ export function ContactUsModal({
                     {/* NAME */}
                     <label className={labelClass}>
                       Your Name{" "}
-                      <span className="text-[#E8A900]">*</span>
+                      <span className="text-[#C62828]">*</span>
 
                       <input
                         ref={nameRef}
@@ -399,7 +410,7 @@ export function ContactUsModal({
                     {/* PHONE */}
                     <label className={labelClass}>
                       WhatsApp / Phone{" "}
-                      <span className="text-[#E8A900]">*</span>
+                      <span className="text-[#C62828]">*</span>
 
                       <input
                         value={form.phone}
@@ -418,7 +429,7 @@ export function ContactUsModal({
                     {/* EMAIL */}
                     <label className={labelClass}>
                       Email Address{" "}
-                      <span className="text-[#E8A900]">*</span>
+                      <span className="text-[#C62828]">*</span>
 
                       <input
                         value={form.email}
@@ -461,8 +472,8 @@ export function ContactUsModal({
 
                   {/* TOPIC */}
                   <label className={labelClass}>
-                    How can we help?{" "}
-                    <span className="text-[#E8A900]">*</span>
+                    How Can We Help?{" "}
+                    <span className="text-[#C62828]">*</span>
 
                     <select
                       value={form.topic}
@@ -471,7 +482,7 @@ export function ContactUsModal({
                       }
                       className={inputClass}
                     >
-                      <option value="">Select a topic</option>
+                      <option value="">Select A Topic</option>
 
                       {topics.map((option) => (
                         <option
@@ -489,7 +500,7 @@ export function ContactUsModal({
                   {/* MESSAGE */}
                   <label className={labelClass}>
                     Message{" "}
-                    <span className="text-[#E8A900]">*</span>
+                    <span className="text-[#C62828]">*</span>
 
                     <textarea
                       value={form.message}
@@ -512,7 +523,7 @@ export function ContactUsModal({
                       items-start
                       gap-2.5
                       text-[13px]
-                      text-[#071A3D]
+                      text-[#0E1A33]
                     "
                   >
                     <input
@@ -525,7 +536,7 @@ export function ContactUsModal({
                         mt-0.5
                         h-4
                         w-4
-                        accent-[#E8A900]
+                        accent-[#0A66F0]
                       "
                     />
 
@@ -579,15 +590,15 @@ export function ContactUsModal({
                         font-medium
                         text-[#64748B]
                         transition
-                        hover:text-[#1677FF]
+                        hover:text-[#0A66F0]
                       "
                     >
-                      <MessageCircle className="h-4 w-4 text-[#1677FF]" />
+                      <MessageCircle className="h-4 w-4 text-[#0A66F0]" />
 
                       <span>
                         Prefer WhatsApp?{" "}
-                        <span className="font-semibold text-[#1677FF]">
-                          Chat with us →
+                        <span className="font-semibold text-[#0A66F0]">
+                          Chat With Us →
                         </span>
                       </span>
                     </button>
@@ -601,15 +612,15 @@ export function ContactUsModal({
                         w-full
                         shrink-0
                         rounded-[10px]
-                        bg-[#E8A900]
+                        bg-[#FFD21F]
                         px-5
                         text-sm
                         font-bold
-                        text-[#071A3D]
-                        shadow-[0_7px_18px_rgba(232,169,0,0.18)]
+                        text-[#0E1A33]
+                        shadow-[0_7px_18px_rgba(255,210,31,0.26)]
                         transition-all
                         hover:-translate-y-0.5
-                        hover:bg-[#D99D00]
+                        hover:bg-[#F5C400]
                         disabled:cursor-not-allowed
                         disabled:opacity-70
                         sm:h-12
@@ -617,7 +628,7 @@ export function ContactUsModal({
                       "
                     >
                       {state === "submitting"
-                        ? "Sending..."
+                        ? "Sending…"
                         : state === "error"
                           ? "Try Again"
                           : "Send Message →"}

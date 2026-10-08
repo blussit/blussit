@@ -16,7 +16,7 @@ const STATUS_TONE: Record<PlanEnquiry["status"], "warning" | "info" | "neutral">
 export default function AdminPlanEnquiriesPage() {
   const [page, setPage] = useState(1);
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-plan-enquiries", page],
     queryFn: () => adminPlanEnquiryApi.list({ page, page_size: 20 }),
   });
@@ -38,6 +38,8 @@ export default function AdminPlanEnquiriesPage() {
       <DataTable<PlanEnquiry>
         isLoading={isLoading}
         data={data?.data || []}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle="No Requests Yet"
         emptyDescription="Custom-plan requests from the website will show up here."
         columns={[

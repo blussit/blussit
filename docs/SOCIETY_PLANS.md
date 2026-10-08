@@ -484,3 +484,33 @@ Tests: `tests/test_society_schedule.py`, `tests/test_society_schedule_access.py`
 - Allocation is greedy per society; across societies on the same date, a
   captain double-booking is warned in the planner and resolved at booking
   time (the later day steps around his booked jobs or reports "captain busy").
+
+## 11. Pass period, extensions and switching off (2026-10-07)
+
+Founder rules, implemented in the 10-07 remediation pass (`subscription_service.py`,
+`society_service.py`; tests `tests/test_fix_plans_*.py`):
+
+- **A pass is a 30-day routine.** Its washes can be booked only for dates inside
+  the pass's own period (`pass_covers_date`). After the period ends, remaining
+  premium washes are frozen — the resident can't book them.
+- **Manager extension (society passes only).** A manager of the society's center,
+  or an admin, can extend a pass so the remaining washes can be booked:
+  `POST /societies/{society_id}/passes/{subscription_id}/extend {days, note}`.
+  - Allowed in the plan's last 3 days or after it ended, while washes remain.
+  - At most **10 days in total per plan month**; concurrent grants can't exceed it.
+  - Every extension is recorded (`extensions[]`: days, by, role, note, at) and
+    audit-logged (`EXTEND_SOCIETY_PASS`); admins see `extension_days`,
+    `extended_until` and the history on the residents and subscription views.
+  - During an extension the resident and the manager can book the remaining
+    washes; the daily wash checklist and the automatic schedule do **not** run.
+  - Renewing starts a fresh month and resets the extension (history is kept).
+- Monthly (non-society) passes follow the same period rule but have no extension.
+- **Car-bound passes** apply only to bookings for that exact car (never to a
+  type-only booking or another car of the same type).
+- **Switching a society off** (`is_active=false`) is admin-only and refused while
+  any resident holds a live plan; residents with live plans keep their hub.
+  Societies are not switched off as a product feature — single residents are
+  fine (the 3–5 cars per society target is a sales goal, not a rule).
+- **Residents KPI** counts only people holding a live plan.
+- **Rate-card changes** price new enrolments only; existing residents keep
+  renewing at their frozen car price (auto plans are versioned by price).

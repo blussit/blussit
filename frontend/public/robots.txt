@@ -4,13 +4,21 @@ Allow: /
 
 # Signed-in areas: nothing here is useful to a crawler and some of it is
 # per-customer. Kept out of the index (they're auth-gated regardless).
-Disallow: /app
+# "/app$" + "/app/" rather than a bare "/app" prefix, which would also
+# block /apple-touch-icon.png.
+Disallow: /app$
+Disallow: /app/
 Disallow: /captain
 Disallow: /manager
 Disallow: /admin
 Disallow: /thank-you
 Disallow: /login
-Disallow: /register
 Disallow: /forgot-password
+# Per-society signup links — private to each society.
+Disallow: /society/
+# Build files behind the clean URLs (/services is served from
+# /_pages/services.html) — only the clean URLs should be indexed.
+Disallow: /_pages/
+Disallow: /spa.html
 
 Sitemap: https://blussit.com/sitemap.xml

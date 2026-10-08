@@ -215,6 +215,13 @@ const LOCAL_IMAGES = {
 };
 
 /** Admin-uploaded image first; otherwise a bundled photo matched by service name. */
+/** srcset for our own 960 px service photos (480/720 px copies exist — see
+ *  scripts/optimize-images.py); undefined for anything else (admin uploads). */
+export function serviceImageSrcSet(src: string): string | undefined {
+  const m = src.match(/^(\/img\/svc-[a-z]+)-960\.webp$/);
+  return m ? `${m[1]}-480.webp 480w, ${m[1]}-720.webp 720w, ${src} 960w` : undefined;
+}
+
 export function serviceImage(s: { name: string; image?: string | null }, index: number): string {
   if (s.image) return s.image;
   const n = s.name.toLowerCase();

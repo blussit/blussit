@@ -1,97 +1,77 @@
-import { PublicNavbar } from "../../components/layout/PublicNavbar";
-import { PublicFooter } from "../../components/layout/PublicFooter";
-import { PageSeo } from "../../components/shared/PageSeo";
+import { BarChart3, Clock, Database, Settings2, Share2, Target } from "lucide-react";
+import { BUSINESS } from "../../seo/content";
+import { PolicyCard, PolicyPage, Points } from "./PolicyKit";
 
 /**
  * The published privacy policy — also a hard requirement for taking the
- * Meta WhatsApp app live. Plain, honest, matching what the product
- * actually collects and does.
+ * Meta WhatsApp app live. Plain and honest: it must match what the product
+ * actually collects and who it actually shares it with.
  */
-const SECTIONS: { title: string; body: string[] }[] = [
-  {
-    title: "What We Collect",
-    body: [
-      "Your name, phone number and email address.",
-      "Your vehicle details, such as type, brand, model and registration number.",
-      "The address where you want the service.",
-      "Booking history, payments recorded against bookings, subscriptions, reviews and support conversations.",
-      "WhatsApp messages you send to Blussit, plus message delivery status from WhatsApp.",
-      "Before and after photos of your vehicle for service proof.",
-      "For captains, we collect identity documents and job-time location only while a job is active.",
-    ],
-  },
-  {
-    title: "How We Use It",
-    body: [
-      "To create and manage your bookings.",
-      "To send captains to the right address.",
-      "To verify phone numbers with one-time passwords sent over WhatsApp (or SMS).",
-      "To send booking updates, payment links, reminders and support replies.",
-      "To improve service quality and resolve complaints.",
-      "We do not sell your personal data.",
-    ],
-  },
-  {
-    title: "WhatsApp And Service Providers",
-    body: [
-      "When you message us or receive WhatsApp updates, WhatsApp Business Platform / Meta processes your phone number, message content and message status.",
-      "Razorpay processes online payments. Blussit does not store your full card, UPI or bank details.",
-      "Google Maps may help us find service addresses and estimate travel.",
-      "Hosting and storage providers keep the app, database and uploaded photos working.",
-      "We share data with these providers only to run Blussit's service.",
-    ],
-  },
-  {
-    title: "Retention And Protection",
-    body: [
-      "We keep booking, payment and service records as long as needed for service, accounts, disputes and legal reasons.",
-      "We may keep support and WhatsApp history so our team can understand previous requests.",
-      "Captain job-time location is deleted after 30 days.",
-      "Access to customer, captain, manager and admin data is role-based.",
-    ],
-  },
-  {
-    title: "Your Choices",
-    body: [
-      "You can edit your vehicles, addresses and profile from your account at any time.",
-      "You can ask us to delete your account or personal data by emailing contact.blussit@gmail.com, messaging us on WhatsApp, or using the contact form.",
-      "You can ask us to stop WhatsApp service messages.",
-      "We may still keep completed booking, payment or dispute records if required for accounts, tax, fraud prevention or legal reasons.",
-    ],
-  },
-];
-
 export default function PrivacyPolicyPage() {
   return (
-    <div className="min-h-screen bg-white text-black">
-      <PageSeo path="/privacy-policy" />
-      <PublicNavbar />
-      <main className="container-page max-w-[820px] py-12 sm:py-16">
-        <p className="text-[11px] font-bold tracking-[0.18em] text-[#B08A00]">Policy</p>
-        <h1 className="mt-1 font-display text-3xl font-bold">Privacy Policy</h1>
-        <p className="mt-2 text-[15px] leading-relaxed text-neutral-600">
-          Blussit uses your data only to run bookings, send updates, take payments and support you. We do not sell your personal data.
+    <PolicyPage
+      path="/privacy-policy"
+      title="Privacy Policy"
+      intro="We use your details only to run your bookings, keep you updated and support you. We never sell your personal data."
+      updated="7 October 2026"
+    >
+      <PolicyCard icon={Database} title="What We Collect">
+        <Points
+          items={[
+            "Your name, phone number and email.",
+            "Your vehicles and service addresses.",
+            "Your bookings, payments, plans, reviews and support chats, including WhatsApp messages you send us.",
+            "Before and after photos of your vehicle.",
+            "For captains: ID documents, and location only while a job is active.",
+          ]}
+        />
+      </PolicyCard>
+
+      <PolicyCard icon={Target} title="Why We Use It">
+        <Points
+          items={[
+            "To book your wash and send the captain to the right place.",
+            "To send login codes (OTP), booking updates, reminders and payment links on WhatsApp or SMS.",
+            "To sort out complaints and improve our service.",
+          ]}
+        />
+      </PolicyCard>
+
+      <PolicyCard icon={Share2} title="Who We Share It With">
+        <p className="mb-2">Only the services we need to run Blussit:</p>
+        <Points
+          items={[
+            "WhatsApp (Meta) — to deliver our messages.",
+            "Razorpay — for online payments. We never see or store your full card, UPI or bank details.",
+            "Google — for maps and address lookup, and for sign-in if you choose Sign In With Google.",
+            "Our hosting and storage providers — to keep the app, data and photos running.",
+          ]}
+        />
+      </PolicyCard>
+
+      <PolicyCard icon={BarChart3} title="Website Analytics">
+        <p>
+          Our website uses Google Analytics and the Meta Pixel to count visits and see which ads bring customers. They use cookies; you can block or
+          clear them in your browser settings.
         </p>
-        <div className="mt-8 space-y-8">
-          {SECTIONS.map((s) => (
-            <section key={s.title}>
-              <h2 className="font-display text-xl font-bold">{s.title}</h2>
-              <ul className="mt-3 space-y-2">
-                {s.body.map((line) => (
-                  <li key={line} className="flex gap-2.5 text-[15px] leading-relaxed text-neutral-700">
-                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#E8A900]" />
-                    {line}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
-        </div>
-        <p className="mt-10 text-sm text-neutral-500">
-          Questions about your data? Email contact.blussit@gmail.com, message us on WhatsApp, or use the contact form — we answer.
+      </PolicyCard>
+
+      <PolicyCard icon={Clock} title="How Long We Keep It">
+        <p>
+          We keep booking and payment records as long as needed for service, accounts, tax and legal reasons. Captain job location is deleted after 30
+          days.
         </p>
-      </main>
-      <PublicFooter />
-    </div>
+      </PolicyCard>
+
+      <PolicyCard icon={Settings2} title="Your Choices">
+        <Points
+          items={[
+            "Edit your profile, vehicles and addresses in your account at any time.",
+            `To delete your account or data, or to stop WhatsApp messages, email ${BUSINESS.email} or message us on WhatsApp.`,
+            "Some completed booking and payment records may be kept where the law requires it.",
+          ]}
+        />
+      </PolicyCard>
+    </PolicyPage>
   );
 }

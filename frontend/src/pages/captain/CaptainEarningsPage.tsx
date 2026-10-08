@@ -14,7 +14,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { todayIST, formatDay } from "../../lib/date";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { carService, clock, istDay, rupees, statusWord, useCarTypes, weekStartIST } from "../../components/captain/jobState";
-import { Btn, Notice, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
+import { Btn, LoadError, Notice, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
 import type { Booking } from "../../types";
 
 const field =
@@ -23,14 +23,16 @@ const field =
 export default function CaptainEarningsPage() {
   const { t } = useCaptainTranslation();
   const queryClient = useQueryClient();
-  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
+  const policyQuery = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
+  const policy = policyQuery.data;
   const walletOn = !!policy?.wallet_gating_enabled;
   const recent = useQuery({
     queryKey: ["my-jobs", "history", "recent"],
     queryFn: () => bookingApi.myJobs({ scope: "history", status: "completed", page: 1, page_size: 100 }),
   });
-  const { data: wallet } = useQuery({ queryKey: ["my-wallet"], queryFn: walletApi.myWallet, enabled: walletOn });
-  const { data: withdrawals } = useQuery({
+  const walletQuery = useQuery({ queryKey: ["my-wallet"], queryFn: walletApi.myWallet, enabled: walletOn });
+  const wallet = walletQuery.data;
+  const withdrawalsQuery = useQuery({
     queryKey: ["my-withdrawals"],
     queryFn: () => walletApi.myWithdrawals({ page: 1, page_size: 5 }),
     enabled: walletOn,
@@ -63,6 +65,19 @@ export default function CaptainEarningsPage() {
     onError: (e) => setFormError(getErrorMessage(e)),
   });
 
+  const withdrawals = withdrawalsQuery.data;
+
+  // Failed reads are said plainly — never ₹0 tiles, "no finished jobs", or a
+  // wallet that silently isn't there.
+  const recentFailed = recent.isError && !recent.data;
+  // Without the policy we can't tell whether fees/the wallet apply, so the
+  // tiles would guess; retry it alongside the jobs.
+  const policyFailed = policyQuery.isError && !policy;
+  const walletFailed = walletOn && walletQuery.isError && !wallet;
+  const withdrawalsFailed = walletOn && withdrawalsQuery.isError && !withdrawals;
+  const retryLabel = t("captain.v2.tryAgain");
+  const retrySub = t("captain.v2.loadFailedSub");
+
   const jobs = (recent.data?.data ?? []).filter((j) => j.completed_at);
   const types = useCarTypes(jobs.slice(0, 10));
   const today = todayIST();
@@ -91,10 +106,27 @@ export default function CaptainEarningsPage() {
   return (
     <div className="space-y-4">
       <PageTitle>{t("captain.v2.tab.earnings")}</PageTitle>
-      <div className="grid grid-cols-2 gap-2">
-        {tile(t("captain.v2.today"), todayStats)}
-        {tile(t("captain.v2.thisWeek"), weekStats)}
-      </div>
+      {recentFailed || policyFailed ? (
+        <LoadError
+          title="Couldn't Load Your Earnings"
+          sub={retrySub}
+          retryLabel={retryLabel}
+          busy={recent.isFetching || policyQuery.isFetching}
+          onRetry={() => {
+            if (recentFailed) void recent.refetch();
+            if (policyFailed) void policyQuery.refetch();
+          }}
+        />
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {tile(t("captain.v2.today"), todayStats)}
+          {tile(t("captain.v2.thisWeek"), weekStats)}
+        </div>
+      )}
+
+      {walletFailed && (
+        <LoadError title="Couldn't Load Your Wallet" sub={retrySub} retryLabel={retryLabel} busy={walletQuery.isFetching} onRetry={() => void walletQuery.refetch()} />
+      )}
 
       {walletOn && wallet && (
         <Panel className="p-4">
@@ -131,6 +163,19 @@ export default function CaptainEarningsPage() {
               <Landmark className="h-5 w-5" /> {t("captain.earnings.bankDetails")}
             </Btn>
           </div>
+          {withdrawalsFailed && (
+            <p role="alert" className="mt-3 border-t border-[#E4E9F1] pt-3 text-sm text-[#5F6878]">
+              Couldn't load your withdrawals.{" "}
+              <button
+                type="button"
+                className="font-bold text-[#0A66F0] disabled:opacity-60"
+                disabled={withdrawalsQuery.isFetching}
+                onClick={() => void withdrawalsQuery.refetch()}
+              >
+                {retryLabel}
+              </button>
+            </p>
+          )}
           {!!withdrawals?.data.length && (
             <ul className="mt-3 divide-y divide-[#E4E9F1] border-t border-[#E4E9F1]">
               {withdrawals.data.map((w) => (
@@ -144,6 +189,7 @@ export default function CaptainEarningsPage() {
         </Panel>
       )}
 
+      {!recentFailed && (
       <div>
         <h2 className="mb-2 text-[15px] font-extrabold text-[#0E1A33]">{t("captain.v2.recentJobs")}</h2>
         {recent.isLoading ? (
@@ -172,6 +218,7 @@ export default function CaptainEarningsPage() {
           </Panel>
         )}
       </div>
+      )}
 
       <Sheet open={sheet === "withdraw"} onClose={close} title={t("captain.earnings.requestWithdrawal")}>
         <input

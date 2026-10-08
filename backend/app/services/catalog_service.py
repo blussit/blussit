@@ -1,6 +1,8 @@
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.exceptions import ConflictException, NotFoundException
+from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
+from app.models.enums import BookingStatus
 from app.repositories.catalog_repository import CategoryRepository, ComboOfferRepository, ServiceRepository
 from app.schemas.catalog_schema import (
     CategoryCreateRequest,
@@ -12,6 +14,60 @@ from app.schemas.catalog_schema import (
 )
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.text import slugify
+
+
+# Every booking state still owed work or money — reference data such a
+# booking points at must not disappear under it (ADM-06).
+LIVE_BOOKING_STATUSES = [s.value for s in BookingStatus if s not in (BookingStatus.COMPLETED, BookingStatus.CANCELLED)]
+# A scheduled pass (a custom-plan renewal waiting for its start) is live too.
+_LIVE_PASS_STATUSES = ["active", "paused", "scheduled"]
+
+
+def _names(rows: list[dict], key: str = "name", limit: int = 6) -> str:
+    shown = [str(r.get(key) or r["_id"]) for r in rows[:limit]]
+    more = len(rows) - limit
+    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+
+
+async def _live_bookings(db, match: dict) -> list[dict]:
+    return await db.bookings.find(
+        {**match, "status": {"$in": LIVE_BOOKING_STATUSES}, "is_deleted": {"$ne": True}}, {"booking_number": 1},
+    ).to_list(length=50)
+
+
+def in_use_refusal(what: str, uses: list[str]) -> BadRequestException:
+    return BadRequestException(
+        f"This {what} is still in use — {'; '.join(uses)}. Switch it off instead (untick Active): it leaves the "
+        "site and new bookings, and everything already booked or sold keeps working."
+    )
+
+
+async def service_uses(db, service_id: str) -> list[str]:
+    """What still points at this service: live bookings, plans that include
+    it (and passes sold on them), passes bought for it, combos, the
+    homepage hero. Deleting under any of these broke them (ADM-06)."""
+    uses: list[str] = []
+    live = await _live_bookings(db, {"service_ids": service_id})
+    if live:
+        uses.append(f"{len(live)} live booking(s) ({_names(live, 'booking_number')})")
+    plans = await db.subscription_plans.find(
+        {"included_service_ids": service_id, "is_deleted": {"$ne": True}}, {"name": 1},
+    ).to_list(length=50)
+    if plans:
+        uses.append(f"plan(s) {_names(plans)}")
+    passes = await db.user_subscriptions.count_documents({
+        "status": {"$in": _LIVE_PASS_STATUSES}, "is_deleted": {"$ne": True},
+        "$or": [{"service_id": service_id}, {"plan_id": {"$in": [str(p["_id"]) for p in plans]}}],
+    })
+    if passes:
+        uses.append(f"{passes} active pass(es)")
+    combos = await db.combo_offers.find({"service_ids": service_id, "is_deleted": {"$ne": True}}, {"name": 1}).to_list(length=50)
+    if combos:
+        uses.append(f"combo(s) {_names(combos)}")
+    home = await db.settings.find_one({"key": "homepage_config", "value.featured_service_id": service_id}, {"_id": 1})
+    if home:
+        uses.append("the homepage's featured service")
+    return uses
 
 
 class CategoryService:
@@ -42,6 +98,11 @@ class CategoryService:
         return serialize_doc(updated)
 
     async def delete(self, category_id: str) -> None:
+        if not await self.repo.find_by_id(category_id):
+            raise NotFoundException("Category not found")
+        services = await self.repo.db.services.find({"category_id": category_id, "is_deleted": {"$ne": True}}, {"name": 1}).to_list(length=50)
+        if services:
+            raise in_use_refusal("category", [f"service(s) {_names(services)} — move or delete them first"])
         deleted = await self.repo.soft_delete(category_id)
         if not deleted:
             raise NotFoundException("Category not found")
@@ -59,6 +120,15 @@ def serialize_service(doc: dict | None) -> dict | None:
     if doc is None:
         return None
     return serialize_doc({**_SERVICE_DEFAULTS, **doc})
+
+
+# What a captain is paid per job — internal pay, shown only to the
+# catalogue's editors (admin/manager), never on the public catalogue.
+_INTERNAL_SERVICE_FIELDS = ("captain_fee",)
+
+
+def public_service(service: dict) -> dict:
+    return {k: v for k, v in service.items() if k not in _INTERNAL_SERVICE_FIELDS}
 
 
 class ServiceCatalogService:
@@ -97,6 +167,11 @@ class ServiceCatalogService:
         return serialize_service(updated)
 
     async def delete(self, service_id: str) -> None:
+        if not ObjectId.is_valid(service_id) or not await self.repo.find_by_id(service_id):
+            raise NotFoundException("Service not found")
+        uses = await service_uses(self.repo.db, service_id)
+        if uses:
+            raise in_use_refusal("service", uses)
         deleted = await self.repo.soft_delete(service_id)
         if not deleted:
             raise NotFoundException("Service not found")

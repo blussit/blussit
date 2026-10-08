@@ -38,6 +38,8 @@ async def make_service_center(
     default_slot_capacity: int = 20,
     max_bookings_per_day: int | None = None,
     pincode: str = "452099",
+    latitude: float = 22.7,
+    longitude: float = 75.8,
 ) -> str:
     n = _n()
     doc = {
@@ -48,8 +50,8 @@ async def make_service_center(
             "city": "Indore",
             "state": "MP",
             "pincode": pincode,
-            "latitude": 22.7,
-            "longitude": 75.8,
+            "latitude": latitude,
+            "longitude": longitude,
             "service_pincodes": [pincode],
             "radius_km": 6.0,
         },
@@ -234,3 +236,27 @@ async def make_subscription_plan(
         "is_deleted": False,
     })
     return str(result.inserted_id)
+
+
+def own_upload_url(path: str) -> str:
+    """A URL shaped like the ones POST /uploads/* returns under the test
+    settings (local storage) — photo and KYC request schemas accept only
+    our own storage's URLs (app.core.storage.is_own_upload_url)."""
+    from app.core.config import settings
+    from app.core.storage import LOCAL_FALLBACK_BASE_URL
+
+    return f"{(settings.PUBLIC_BASE_URL or LOCAL_FALLBACK_BASE_URL).rstrip('/')}/uploads/{path}"
+
+
+async def make_recorded_photo_url(db, captain_id: str, name: str = "photo") -> str:
+    """A photo URL exactly as POST /uploads/photo hands it to a captain —
+    WITH its upload record (uploaded_photos). A before/after job step only
+    takes a photo its own captain uploaded, recently, and only once (audit
+    CAP-02), so every captain-flow test needs a fresh one per step."""
+    import uuid
+
+    from app.core.storage import record_photo_upload
+
+    url = own_upload_url(f"photos/{name}-{uuid.uuid4().hex}.jpg")
+    await record_photo_upload(db, url, captain_id, "captain")
+    return url

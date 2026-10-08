@@ -9,14 +9,22 @@ MSG91's answer to /api/v5/widget/verifyAccessToken for that token.
 
 Binding matters: a valid token proves *some* identifier completed OTP —
 not necessarily the phone the caller claims. After MSG91 confirms the
-token, we extract the verified identifier (from MSG91's response when
-present, else from the now-MSG91-validated JWT payload) and REQUIRE it
-to match the expected phone. No identifier → fail closed.
+token, we take the verified identifier from MSG91's OWN response and
+REQUIRE it to match the expected phone; when the response names an
+identifier that isn't that phone, the token is refused whatever the JWT
+says. Only a response that names no identifier at all falls back to the
+token's payload (unsigned as far as we can check — MSG91 vouched for the
+token, not necessarily for every claim inside it). No identifier anywhere
+→ fail closed.
+
+Single use is enforced by the caller (AuthService.verify_phone_proof),
+which owns the database.
 """
 import asyncio
 import base64
 import json
 import logging
+import re
 
 import httpx
 
@@ -44,12 +52,54 @@ class Msg91Unavailable(AppException):
         super().__init__(message, details)
 
 
-def _digits(value: str) -> str:
-    return "".join(ch for ch in str(value) if ch.isdigit())
+# A phone number and nothing else: ASCII digits, an optional leading "+",
+# and the separators people type. Anything more (letters, "@", other
+# symbols, non-ASCII digits) is not a phone, however many digits it has.
+_PHONE_SHAPED = re.compile(r"\+?[0-9\s\-()]+", re.ASCII)
+# What counts as MSG91 NAMING an identifier in its answer: something
+# phone-shaped with at least 10 digits, or an email. A status sentence
+# ("OTP verified successfully") names nobody.
+_EMAIL_SHAPED = re.compile(r"[^@\s]+@[^@\s]+")
 
 
-def _local_phone(identifier: str) -> str:
-    return validate_indian_mobile(str(identifier)) or _digits(identifier)
+def _bound_phone(identifier: object) -> str | None:
+    """The canonical 10-digit phone `identifier` IS, or None. Never digits
+    pulled out of a longer string: MSG91 also verifies emails, and an
+    attacker-owned "9876543210@mail.example" must not count as proof of
+    9876543210 (that would let anyone reset that number's password)."""
+    text = str(identifier).strip()
+    if not _PHONE_SHAPED.fullmatch(text):
+        return None
+    return validate_indian_mobile(text)
+
+
+def _names_an_identifier(value: object) -> bool:
+    """Does this value of MSG91's response name WHO was verified? Any
+    non-ASCII digit counts as naming someone (never trust it to be "just a
+    message") — it can then only fail the binding, never pass it."""
+    text = str(value).strip()
+    if not text:
+        return False
+    if _EMAIL_SHAPED.fullmatch(text):
+        return True
+    if any(ch.isdigit() and not ch.isascii() for ch in text):
+        return True
+    return bool(_PHONE_SHAPED.fullmatch(text)) and sum(ch.isdigit() for ch in text) >= 10
+
+
+def _response_identifiers(body: dict) -> list[str]:
+    """The identifiers MSG91's verify response itself names — in "message"
+    (a string, or a dict of fields) or a top-level identifier field."""
+    values: list = []
+    message = body.get("message")
+    if isinstance(message, dict):
+        values.extend(message.values())
+    elif message is not None:
+        values.append(message)
+    for key in ("identifier", "mobile", "phone", "email"):
+        if body.get(key) is not None:
+            values.append(body[key])
+    return [str(v) for v in values if not isinstance(v, (dict, list)) and _names_an_identifier(v)]
 
 
 def _jwt_payload(token: str) -> dict:
@@ -112,25 +162,24 @@ class Msg91WidgetService:
             logger.info("MSG91 token rejected (%s): %s", response.status_code, str(body)[:200])
             return False
 
-        # Identifier binding — MSG91 echoes it in some responses; the JWT
-        # payload (now known-genuine) carries it otherwise.
-        candidates = []
-        message = body.get("message")
-        if isinstance(message, dict):
-            candidates.extend(str(v) for v in message.values())
-        elif message:
-            candidates.append(str(message))
-        payload = _jwt_payload(access_token)
-        for key in ("identifier", "mobile", "phone", "identity", "sub"):
-            if payload.get(key):
-                candidates.append(str(payload[key]))
-
-        expected = _local_phone(expected_phone)
-        for candidate in candidates:
-            if _local_phone(candidate) == expected and expected:
-                return True
+        # Identifier binding. MSG91's answer is the authority: when it names
+        # who was verified, that is the only thing compared — a JWT payload
+        # claiming a different number must never outvote it (if MSG91 ever
+        # validated by session rather than the exact token, an edited
+        # payload would otherwise bind any phone). The payload is read only
+        # when the answer names nobody.
+        expected = validate_indian_mobile(expected_phone)
+        named = _response_identifiers(body)
+        payload: dict = {}
+        if named:
+            candidates = named
+        else:
+            payload = _jwt_payload(access_token)
+            candidates = [str(payload[k]) for k in ("identifier", "mobile", "phone", "identity", "sub") if payload.get(k)]
+        if expected and any(_bound_phone(candidate) == expected for candidate in candidates):
+            return True
         logger.warning(
-            "MSG91 token valid but identifier mismatch/absent (expected …%s; response=%s payload_keys=%s)",
-            expected[-4:], str(body)[:120], list(payload.keys()),
+            "MSG91 token valid but identifier mismatch/absent (expected …%s; from_response=%s; payload_keys=%s)",
+            (expected or "")[-4:], bool(named), list(payload.keys()),
         )
         return False

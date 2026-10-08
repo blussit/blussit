@@ -12,11 +12,11 @@ import type { Service } from "../../types";
 export function ServicePrepNotice({ services, className = "" }: { services: Service[]; className?: string }) {
   if (!services.some((s) => !s.is_addon)) return null;
   return (
-    <p className={`flex items-start gap-2 rounded-xl border border-[#F3E5B5] bg-white p-3 text-xs leading-relaxed text-gray-600 ${className}`}>
-      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-black" aria-hidden="true" />
+    <p className={`flex items-start gap-2 rounded-xl border border-[#E4E9F1] bg-white p-3 text-xs leading-relaxed text-[#5F6878] ${className}`}>
+      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0A66F0]" aria-hidden="true" />
       <span>
         Please keep water and a power point near the vehicle.{" "}
-        <a href="/service-policy" target="_blank" rel="noreferrer" className="font-semibold text-black underline underline-offset-2">
+        <a href="/service-policy" target="_blank" rel="noreferrer" className="font-semibold text-[#0E1A33] underline underline-offset-2">
           Read More
         </a>
       </span>

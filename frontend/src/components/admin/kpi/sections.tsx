@@ -7,7 +7,7 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil } from "lucide-react";
-import { Card, CardBody, CardHeader, Spinner, StatusBadge } from "../../ui";
+import { Card, CardBody, CardHeader, ErrorState, Spinner, StatusBadge } from "../../ui";
 import { kpiApi, adminUserApi, type KpiPeriodParams } from "../../../api/admin";
 import { bookingApi } from "../../../api/booking";
 import { complaintApi } from "../../../api/engagement";
@@ -36,6 +36,12 @@ function Loading() {
       <Spinner />
     </div>
   );
+}
+
+/** Still loading — or the read failed: say so with a retry instead of a
+ *  spinner that never ends. */
+function Pending({ failed, busy, retry }: { failed: boolean; busy: boolean; retry: () => void }) {
+  return failed ? <ErrorState className="my-6" message="Couldn't load this section." busy={busy} onRetry={retry} /> : <Loading />;
 }
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${v}%`);
@@ -157,12 +163,12 @@ type BusinessData = {
 };
 
 export function BusinessTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<BusinessData>("business", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<BusinessData>("business", params);
   // Hooks run on EVERY render, loading or not — the rules of hooks don't
   // allow calling these only once `data` exists.
   const bookingDrill = useBookingDrill(params);
   const briefDrill = useBriefDrill();
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   const t = data.totals;
   const q = data.revenue_quality;
   return (
@@ -271,10 +277,10 @@ type CustomersData = {
 };
 
 export function CustomersTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<CustomersData>("customers", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<CustomersData>("customers", params);
   const customerDrill = useCustomerDrill(params);
   const briefDrill = useBriefDrill();
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   const r = data.retention;
   return (
     <div className="space-y-6">
@@ -364,10 +370,10 @@ type CaptainsData = {
 };
 
 export function CaptainsTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<CaptainsData>("captains", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<CaptainsData>("captains", params);
   const [openId, setOpenId] = useState<string | null>(null);
   const briefDrill = useBriefDrill();
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -461,12 +467,12 @@ type FinancialData = {
 };
 
 export function FinancialTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<FinancialData>("financial", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<FinancialData>("financial", params);
   const [editOpen, setEditOpen] = useState(false);
   const qc = useQueryClient();
   const bookingDrill = useBookingDrill(params);
   const briefDrill = useBriefDrill();
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   const profitable = data.net_profit >= 0;
   return (
     <div className="space-y-6">
@@ -590,11 +596,11 @@ type MarketingData = {
 };
 
 export function MarketingTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<MarketingData>("marketing", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<MarketingData>("marketing", params);
   const [editOpen, setEditOpen] = useState(false);
   const qc = useQueryClient();
   const briefDrill = useBriefDrill();
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -707,12 +713,12 @@ type OperationsData = {
 };
 
 export function OperationsTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<OperationsData>("operations", params);
+  const { data, isLoading, isError, isFetching, refetch } = useSection<OperationsData>("operations", params);
   // Hooks run on EVERY render, loading or not — the rules of hooks don't
   // allow calling these only once `data` exists.
   const briefDrill = useBriefDrill();
   const complaintDrill = useComplaintDrill(params);
-  if (isLoading || !data) return <Loading />;
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   const cap = data.capacity;
   const ex = data.experience;
   return (
@@ -735,8 +741,8 @@ export function OperationsTab({ params }: { params: KpiPeriodParams }) {
                 label="Available" value={cap.available} tip="Open slots ÷ total slots in the period"
                 onClick={() => briefDrill.open({ title: "Available Slots", value: cap.available, tip: "Total slots minus booked slots for the period", breakdown: [{ label: "Total Slots", value: cap.total }, { label: "Booked", value: cap.booked }] })}
               />
-              <MiniStat label="Peak Slot" value={<span className="text-sm">{cap.peak_slot || "—"}</span>} />
-              <MiniStat label="Quietest Slot" value={<span className="text-sm">{cap.lowest_slot || "—"}</span>} />
+              <MiniStat label="Peak Slot" value={<span className="text-sm">{cap.peak_slot ? formatSlot(cap.peak_slot) : "—"}</span>} />
+              <MiniStat label="Quietest Slot" value={<span className="text-sm">{cap.lowest_slot ? formatSlot(cap.lowest_slot) : "—"}</span>} />
             </div>
           </CardBody>
         </Card>
@@ -830,8 +836,8 @@ function QualityRow({ ok, text }: { ok: boolean; text: string }) {
 type AreasData = { areas: { area: string; bookings: number; revenue: number; customers: number; repeat_rate: number | null }[] };
 
 export function AreasTab({ params }: { params: KpiPeriodParams }) {
-  const { data, isLoading } = useSection<AreasData>("areas", params);
-  if (isLoading || !data) return <Loading />;
+  const { data, isLoading, isError, isFetching, refetch } = useSection<AreasData>("areas", params);
+  if (isLoading || !data) return <Pending failed={isError} busy={isFetching} retry={() => void refetch()} />;
   return (
     <Card>
       <CardHeader>

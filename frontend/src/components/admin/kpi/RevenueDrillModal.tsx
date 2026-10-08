@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Modal, PageLoader, StatusBadge } from "../../ui";
+import { ErrorState, Modal, PageLoader, StatusBadge } from "../../ui";
 import { bookingApi } from "../../../api/booking";
 import { subscriptionApi } from "../../../api/engagement";
 import { BookingDetailDrawer } from "../../shared/BookingDetailDrawer";
@@ -85,7 +85,7 @@ export function RevenueDrillModal({
                 key={t.key}
                 type="button"
                 onClick={() => setTab(t.key)}
-                className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-black text-white" : "text-gray-600 hover:bg-[#FFF4CD]"}`}
+                className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[#E8F0FE] text-[#0A66F0]" : "text-gray-600 hover:bg-[#EEF3FA]"}`}
               >
                 {t.label}
               </button>
@@ -93,7 +93,9 @@ export function RevenueDrillModal({
           </div>
 
           {tab === "bookings" ? (
-            bookings.isLoading || !bookings.data ? (
+            bookings.isError && !bookings.data ? (
+              <ErrorState message="Couldn't load completed washes." onRetry={() => void bookings.refetch()} busy={bookings.isFetching} />
+            ) : bookings.isLoading || !bookings.data ? (
               <PageLoader />
             ) : !bookings.data.data.length ? (
               <p className="rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">No completed washes in this period.</p>
@@ -120,6 +122,8 @@ export function RevenueDrillModal({
                 <Pager page={bookingPage} totalPages={bookings.data.meta.total_pages} onPage={setBookingPage} busy={bookings.isFetching} />
               </div>
             )
+          ) : plans.isError && !plans.data ? (
+            <ErrorState message="Couldn't load plan purchases." onRetry={() => void plans.refetch()} busy={plans.isFetching} />
           ) : plans.isLoading || !plans.data ? (
             <PageLoader />
           ) : !plans.data.data.length ? (

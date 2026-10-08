@@ -292,19 +292,20 @@ def project(
         dates = chance_dates.get(sub_id) or []
         return len(dates) - bisect_right(dates, on)
 
-    # Enrollments with their own repeat wash (or any booking) on a date sit
+    # Residents with their own repeat wash (or any booking) on a date sit
     # that society day out — two bookings for one resident at once would
-    # clash in the booking flow.
+    # clash in the booking flow. Keyed by CUSTOMER, not enrollment: a car
+    # added mid-month is a second enrollment of the same resident.
     resident_dates: dict[str, set[date]] = {}
     for v in ordered:
         if v.kind == "resident" and v.status not in ("skipped", "cancelled"):
             for sid in v.sub_ids:
                 car = by_sub.get(sid)
                 if car:
-                    resident_dates.setdefault(car.enrollment_id, set()).add(v.date)
+                    resident_dates.setdefault(car.customer_id, set()).add(v.date)
     for c in cars:
         for d in c.washed:
-            resident_dates.setdefault(c.enrollment_id, set()).add(d)
+            resident_dates.setdefault(c.customer_id, set()).add(d)
 
     for v in ordered:
         result = {"placed": [], "overflow": [], "skipped": []}
@@ -324,14 +325,19 @@ def project(
             if not chosen:
                 continue
             slot = slots.get(v.slot_keys[0]) if v.slot_keys else None
+            if slot is None:
+                # The center no longer offers this slot (hours changed since
+                # the repeat wash was set) — nothing to book it into.
+                result["overflow"] = [{**_unit(chosen), "reason": "This slot isn't offered any more — pick another slot"}]
+                continue
             unit = _unit(chosen, pin=slot)
             lanes = [v.captain_ids[0] if v.captain_ids else None]
             placed, overflow = lay_out([unit], lanes, 99, [slot] if slot else [], list(slots.values()), buffer, day_busy)
             if overflow:
                 # The resident's own slot stands even when the captain is
                 # booked solid — the booking goes to the queue unassigned.
-                placed = [{**unit, "lane": 0, "captain_id": None, "start": slot.start if slot else None,
-                           "slot_key": slot.key if slot else None, "warning": "Captain is busy in this slot — assign one from the queue"}]
+                placed = [{**unit, "lane": 0, "captain_id": None, "start": slot.start,
+                           "slot_key": slot.key, "warning": "Captain is busy in this slot — assign one from the queue"}]
             for p in placed:
                 _spend(p, budget, washed, v.date, day_busy)
             result["placed"] = placed
@@ -343,7 +349,7 @@ def project(
             if car.sub_id in v.excluded:
                 result["skipped"].append({"sub_id": car.sub_id, "reason": "Taken off this day"})
                 continue
-            if v.date in resident_dates.get(car.enrollment_id, set()):
+            if v.date in resident_dates.get(car.customer_id, set()):
                 # Their own repeat wash, or another booking, that day.
                 result["skipped"].append({"sub_id": car.sub_id, "reason": "Has another wash booked that day"})
                 continue
@@ -357,9 +363,11 @@ def project(
                 result["skipped"].append({"sub_id": car.sub_id, "reason": f"Spaced out — last premium wash {last.isoformat()}"})
                 continue
             due.append(((-surplus, car.end, car.flat.lower(), car.plate), car))
+        # One unit per RESIDENT (all their enrollments here): their cars are
+        # one booking visit — two would trip the booking's own-clash guard.
         groups: dict[str, list[tuple[tuple, Car]]] = {}
         for key, car in due:
-            groups.setdefault(car.enrollment_id, []).append((key, car))
+            groups.setdefault(car.customer_id, []).append((key, car))
         units = []
         for members in groups.values():
             members.sort(key=lambda kc: kc[0])

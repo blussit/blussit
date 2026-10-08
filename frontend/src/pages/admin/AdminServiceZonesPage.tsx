@@ -12,7 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MapPinned, Pencil, Trash2 } from "lucide-react";
 import { adminServiceCenterApi } from "../../api/admin";
 import { zonesApi, type ServiceZone } from "../../api/admin";
-import { Badge, Button, Card, CardBody, Input, Select, Spinner } from "../../components/ui";
+import { Badge, Button, Card, CardBody, ErrorState, Input, Select, Spinner } from "../../components/ui";
 import { ensureGoogleMaps, getLib } from "../../lib/googleMaps";
 import { getErrorMessage } from "../../lib/api-client";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -35,9 +35,11 @@ export default function AdminServiceZonesPage() {
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
 
-  const { data: centersPage } = useQuery({ queryKey: ["centers-admin"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
-  const centers = centersPage?.data;
-  const { data: zones, isLoading } = useQuery({ queryKey: ["service-zones"], queryFn: zonesApi.list });
+  const centersQuery = useQuery({ queryKey: ["centers-admin"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  const centers = centersQuery.data?.data;
+  const zonesQuery = useQuery({ queryKey: ["service-zones"], queryFn: zonesApi.list });
+  const { data: zones, isLoading } = zonesQuery;
+  const zonesFailed = zonesQuery.isError && !zones;
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["service-zones"] });
   const createZone = useMutation({
@@ -173,9 +175,9 @@ export default function AdminServiceZonesPage() {
       // overlay would swallow the very map clicks that add corners.
       clickable: false,
       editable: false,
-      strokeColor: "#F0A500",
+      strokeColor: "#0A66F0",
       strokeWeight: 2,
-      fillColor: "#F0A500",
+      fillColor: "#0A66F0",
       fillOpacity: 0.18,
     });
     objects.current.draft = draft;
@@ -252,11 +254,14 @@ export default function AdminServiceZonesPage() {
                   </option>
                 ))}
               </Select>
+              {centersQuery.isError && !centers && (
+                <ErrorState message="Couldn't load service centers." onRetry={() => void centersQuery.refetch()} busy={centersQuery.isFetching} className="p-4" />
+              )}
               <Input label="Zone Name" placeholder="e.g. Vijay Nagar belt" value={name} onChange={(e) => setName(e.target.value)} />
               {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
               {drawing ? (
                 <div className="space-y-2">
-                  <div className="rounded-xl bg-[var(--color-secondary-light,#FDF3D7)] px-3 py-2.5 text-sm text-[var(--color-text-primary)]">
+                  <div className="rounded-xl bg-[#E8F0FE] px-3 py-2.5 text-sm text-[var(--color-text-primary)]">
                     <span className="font-semibold">{cornerCount === 0 ? "Now click the map" : `${cornerCount} corner${cornerCount === 1 ? "" : "s"} added`}</span>
                     <span className="block text-xs text-[var(--color-text-secondary)]">
                       Each click on the map adds a corner of your zone. Trace the area you serve (3+ corners), then press Finish.
@@ -281,7 +286,8 @@ export default function AdminServiceZonesPage() {
             <CardBody className="p-4">
               <p className="mb-2 text-sm font-semibold text-[var(--color-text-primary)]">Zones</p>
               {isLoading && <Spinner />}
-              {!isLoading && !(zones || []).length && <p className="text-sm text-[var(--color-text-secondary)]">Nothing drawn yet.</p>}
+              {zonesFailed && <ErrorState message="Couldn't load zones." onRetry={() => void zonesQuery.refetch()} busy={zonesQuery.isFetching} className="p-4" />}
+              {!isLoading && !zonesFailed && !(zones || []).length && <p className="text-sm text-[var(--color-text-secondary)]">Nothing drawn yet.</p>}
               <ul className="space-y-2">
                 {(zones || []).map((zone: ServiceZone) => (
                   <li

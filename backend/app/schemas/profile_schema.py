@@ -60,27 +60,29 @@ class VehicleUpdateRequest(BaseModel):
     acknowledge_shared_registration: bool = False
 
 
+# Same bounds as the booking flow's QuickAddress (VAL-1: these were
+# unbounded — a 1.5 MB line1 was stored and shown on every staff screen).
 class AddressCreateRequest(BaseModel):
-    label: str = "Home"
-    line1: str
-    line2: Optional[str] = None
-    landmark: Optional[str] = None
-    city: str
-    state: str
+    label: str = Field(default="Home", max_length=50)
+    line1: str = Field(min_length=1, max_length=300)
+    line2: Optional[str] = Field(default=None, max_length=300)
+    landmark: Optional[str] = Field(default=None, max_length=200)
+    city: str = Field(max_length=100)
+    state: str = Field(max_length=100)
     pincode: str = Field(min_length=4, max_length=10)
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     is_default: bool = False
 
 
 class AddressUpdateRequest(BaseModel):
-    label: Optional[str] = None
-    line1: Optional[str] = None
-    line2: Optional[str] = None
-    landmark: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    pincode: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    label: Optional[str] = Field(default=None, max_length=50)
+    line1: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    line2: Optional[str] = Field(default=None, max_length=300)
+    landmark: Optional[str] = Field(default=None, max_length=200)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    pincode: Optional[str] = Field(default=None, min_length=4, max_length=10)
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     is_default: Optional[bool] = None

@@ -3,13 +3,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { CalendarClock, ChevronLeft, Lock, Unlock, Wand2, X } from "lucide-react";
 import { adminCapacityPolicyApi, adminServiceCenterApi, adminSlotCapacityApi } from "../../api/admin";
-import { Badge, Button, Card, Input, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, ErrorState, Input, PageLoader } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { format, todayIST, formatTime12, formatSlot } from "../../lib/date";
 import { useConfirm } from "../../context/ConfirmContext";
 import { toTitle } from "../../lib/titleCase";
 
 type Section = "overview" | "policy";
+
+/** A real calendar date in YYYY-MM-DD — what a date input gives when it's
+ *  filled in properly ("" when cleared or half-typed). */
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
 
 /**
  * The single source of truth for a service center's capacity (BLUSSIT
@@ -68,10 +76,14 @@ function OverviewSection({ centerId }: { centerId: string }) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
-  const { data, isLoading } = useQuery({
+  // A cleared, half-typed or past date never reaches the server — it used
+  // to either error (and take the date picker down with it) or sit on a
+  // spinner forever with no picker left to fix it.
+  const dateOk = isIsoDate(date) && date >= todayIST();
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["admin-slot-capacity", centerId, date],
     queryFn: () => adminSlotCapacityApi.get(centerId, date),
-    enabled: !!centerId && !!date,
+    enabled: !!centerId && dateOk,
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin-slot-capacity", centerId, date] });
@@ -86,7 +98,34 @@ function OverviewSection({ centerId }: { centerId: string }) {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
-  if (isLoading || !data) return <PageLoader />;
+  // The date picker stays on screen whatever happens below it, so a bad
+  // date or a failed read can always be fixed by picking another day.
+  const datePicker = (
+    <Card className="p-4">
+      <Input label="Date" type="date" min={todayIST()} value={date} onChange={(e) => setDate(e.target.value)} className="max-w-xs" />
+    </Card>
+  );
+  if (!dateOk)
+    return (
+      <div className="space-y-6">
+        {datePicker}
+        <p className="text-sm text-[var(--color-text-secondary)]">Pick a date from today onwards to see its slots.</p>
+      </div>
+    );
+  if (isError && !data)
+    return (
+      <div className="space-y-6">
+        {datePicker}
+        <ErrorState message="Couldn't load this day's slots." busy={isFetching} onRetry={() => void refetch()} />
+      </div>
+    );
+  if (isLoading || !data)
+    return (
+      <div className="space-y-6">
+        {datePicker}
+        <PageLoader />
+      </div>
+    );
 
   const totals = data.slots.reduce(
     (acc, s) => ({ capacity: acc.capacity + s.capacity, booked: acc.booked + s.booked_count, remaining: acc.remaining + Math.max(s.capacity - s.booked_count, 0) }),
@@ -95,9 +134,7 @@ function OverviewSection({ centerId }: { centerId: string }) {
 
   return (
     <div className="space-y-6">
-      <Card className="p-4">
-        <Input label="Date" type="date" min={todayIST()} value={date} onChange={(e) => setDate(e.target.value)} className="max-w-xs" />
-      </Card>
+      {datePicker}
 
       <div className="grid grid-cols-3 gap-3">
         <Card className="p-4 text-center">
@@ -219,8 +256,15 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
   const [note, setNote] = useState("");
   const [editingChangeId, setEditingChangeId] = useState<string | null>(null);
 
-  const { data: overview, isLoading } = useQuery({ queryKey: ["capacity-policy-overview", centerId], queryFn: () => adminCapacityPolicyApi.overview(centerId), enabled: !!centerId });
-  const { data: history } = useQuery({ queryKey: ["capacity-policy-history", centerId], queryFn: () => adminCapacityPolicyApi.history(centerId), enabled: !!centerId });
+  const {
+    data: overview,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+  } = useQuery({ queryKey: ["capacity-policy-overview", centerId], queryFn: () => adminCapacityPolicyApi.overview(centerId), enabled: !!centerId });
+  const historyQuery = useQuery({ queryKey: ["capacity-policy-history", centerId], queryFn: () => adminCapacityPolicyApi.history(centerId), enabled: !!centerId });
+  const history = historyQuery.data;
 
   const slotKeys = overview?.slot_keys || [];
 
@@ -311,6 +355,7 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  if (isError && !overview) return <ErrorState message="Couldn't load the capacity settings." busy={isFetching} onRetry={() => void refetch()} />;
   if (isLoading || !overview) return <PageLoader />;
 
   return (
@@ -445,7 +490,14 @@ function PolicySection({ centerId, confirm }: { centerId: string; confirm: (opts
         <div className="border-b border-gray-100 px-5 py-3">
           <p className="text-sm font-semibold text-[var(--color-text-primary)]">Capacity History</p>
         </div>
-        {!history?.length ? (
+        {historyQuery.isError && !history ? (
+          <ErrorState
+            message="Couldn't load the capacity history."
+            onRetry={() => void historyQuery.refetch()}
+            busy={historyQuery.isFetching}
+            className="m-4"
+          />
+        ) : !history?.length ? (
           <p className="p-5 text-sm text-[var(--color-text-secondary)]">No capacity changes recorded yet.</p>
         ) : (
           <div className="overflow-x-auto">

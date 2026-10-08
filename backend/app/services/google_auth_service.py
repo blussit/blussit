@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.authz import account_switched_off
 from app.core.config import settings
 from app.core.exceptions import BadRequestException, UnauthorizedException
 from app.models.enums import UserRole, UserStatus
@@ -70,12 +71,26 @@ class GoogleAuthService:
         if not user and email:
             user = await self.db.users.find_one({"email": email, "is_deleted": {"$ne": True}})
             if user:
-                # First Google login on an existing email account — link it.
-                await self.db.users.update_one({"_id": user["_id"]}, {"$set": {"google_sub": sub}})
+                # Linking by email trusts that whoever set up the existing
+                # account owns the address — but nothing ever proved that
+                # for a password account (an attacker could register the
+                # victim's email first and keep that password). Those sign
+                # in the way they were made; Google may only join accounts
+                # with no password of their own.
+                if user.get("role") == UserRole.CUSTOMER.value and user.get("password_hash"):
+                    raise UnauthorizedException("An account with this email already exists — sign in with your mobile number instead.")
+                if user.get("role") == UserRole.CUSTOMER.value:
+                    await self.db.users.update_one({"_id": user["_id"]}, {"$set": {"google_sub": sub}})
 
         if user:
-            if user.get("status") == UserStatus.SUSPENDED.value:
-                raise UnauthorizedException("Your account has been suspended. Contact support.")
+            # Google sign-in is for customers. Staff accounts sign in with
+            # their password (lockout, forced change, business-number rules
+            # all live there) — a Google login must never mint staff tokens.
+            if user.get("role") != UserRole.CUSTOMER.value:
+                raise UnauthorizedException("Staff accounts sign in with email and password.")
+            standing = account_switched_off(user)
+            if standing:
+                raise UnauthorizedException(standing)
             await self.auth.users.update_by_id(str(user["_id"]), {"last_login_at": datetime.now(timezone.utc)})
             fresh = await self.auth.users.find_by_id(str(user["_id"]))
             return self.auth._issue_tokens(fresh)

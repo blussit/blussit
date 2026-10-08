@@ -28,10 +28,13 @@ import { SocietyIssueModal } from "../../components/society/SocietyIssueModal";
 import { ResidentScheduleCard } from "../../components/society/schedule/ResidentScheduleCard";
 import { serviceCenterApi } from "../../api/catalog";
 import { useAuth } from "../../context/AuthContext";
-import { tokenStorage, getErrorMessage } from "../../lib/api-client";
+import { useConfirm } from "../../context/ConfirmContext";
+import { tokenStorage, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { validateIndianMobile, validateIndianPlate } from "../../lib/validators";
 import { formatDay, formatShortDate, formatSlot } from "../../lib/date";
+import { lastBookingDayText } from "../../components/customer/passDates";
 import { payWithRazorpay, paymentErrorMessage } from "../../lib/razorpay";
+import { trackLead, trackPurchase } from "../../lib/metaPixel";
 import { SocietyOtpModal, type SocietyPhoneProof } from "../../components/society/SocietyOtpModal";
 import { Spinner } from "../../components/ui";
 import { titleCase } from "../../components/public/landing/shared";
@@ -69,8 +72,20 @@ export default function SocietyFormPage({ embedded = false }: { embedded?: boole
   const location = useLocation();
   const { user, isLoading: authLoading } = useAuth();
   const isCustomer = user?.role === "customer";
-  const form = useQuery({ queryKey: ["society-form", token, isCustomer ? user?.id : "anon"], queryFn: () => societyFormApi.get(token), retry: false });
-  const hub = useQuery({ queryKey: ["society-hub", token, user?.id], queryFn: () => societyFormApi.me(token), enabled: isCustomer, retry: false });
+  // A bad/rotated/switched-off link answers 4xx (final); a network blip or
+  // 5xx is retried, then shown as an error with "Try Again" — never as
+  // "this link isn't active" or as an empty hub.
+  const form = useQuery({
+    queryKey: ["society-form", token, isCustomer ? user?.id : "anon"],
+    queryFn: () => societyFormApi.get(token),
+    retry: retryUnlessClientError(2),
+  });
+  const hub = useQuery({
+    queryKey: ["society-hub", token, user?.id],
+    queryFn: () => societyFormApi.me(token),
+    enabled: isCustomer,
+    retry: retryUnlessClientError(2),
+  });
   const [adding, setAdding] = useState(false);
   // A banner carried over from the standalone page (e.g. "You're all set").
   const [flash, setFlash] = useState(() => (location.state as { flash?: string } | null)?.flash || "");
@@ -87,6 +102,36 @@ export default function SocietyFormPage({ embedded = false }: { embedded?: boole
       </Frame>
     );
   }
+  const isClientError = (err: unknown) => {
+    const status = getErrorStatus(err);
+    return status !== undefined && status >= 400 && status < 500;
+  };
+  const formUnreachable = form.isError && !form.data && !isClientError(form.error);
+  // The link itself is fine but the resident's own hub didn't load: an
+  // error with a retry — never the join form, as if they had no plan.
+  const hubUnreachable = isCustomer && !!form.data && hub.isError && !hub.data && !isClientError(hub.error);
+  if (formUnreachable || hubUnreachable) {
+    const retrying = form.isFetching || hub.isFetching;
+    return (
+      <Frame society={form.data?.society}>
+        <div className={`${card} mt-6 text-center`} role="alert">
+          <p className="text-lg font-bold text-[#0E1A33]">{formUnreachable ? "Couldn't Load This Page" : "Couldn't Load Your Plan"}</p>
+          <p className="mt-1 text-sm text-[#5F6878]">Check your connection and try again.</p>
+          <button
+            type="button"
+            className={`${ghostBtn} mx-auto mt-4`}
+            disabled={retrying}
+            onClick={() => {
+              if (form.isError) void form.refetch();
+              if (hub.isError) void hub.refetch();
+            }}
+          >
+            {retrying ? "Trying…" : "Try Again"}
+          </button>
+        </div>
+      </Frame>
+    );
+  }
   if (form.isError || !form.data) {
     return (
       <Frame>
@@ -98,13 +143,20 @@ export default function SocietyFormPage({ embedded = false }: { embedded?: boole
     );
   }
   const hasPlan = !!hub.data?.enrollments.length;
+  // Switched-off form: the hub (pay / renew / withdraw) stays, new sign-ups don't.
+  const formEnabled = form.data.form_enabled !== false;
   if (!embedded && isCustomer && hasPlan && !adding) {
     return <Navigate to={`/app/society/${token}`} replace state={flash ? { flash } : undefined} />;
   }
   return (
     <Frame society={form.data.society}>
-      {hasPlan && !adding ? (
-        <ResidentHub token={token} hub={hub.data!} flash={flash} onAdd={() => { setFlash(""); setAdding(true); }} />
+      {hasPlan && (!adding || !formEnabled) ? (
+        <ResidentHub token={token} hub={hub.data!} flash={flash} onAdd={formEnabled ? () => { setFlash(""); setAdding(true); } : undefined} />
+      ) : !formEnabled ? (
+        <div className={`${card} mt-6 text-center`}>
+          <p className="text-lg font-bold text-[#0E1A33]">New Sign-Ups Are Closed</p>
+          <p className="mt-1 text-sm text-[#5F6878]">Ask your society manager about joining.</p>
+        </div>
       ) : (
         <EnrollForm token={token} data={form.data} onCancel={hasPlan ? () => setAdding(false) : undefined} onDone={(message) => { setFlash(message); setAdding(false); }} />
       )}
@@ -175,6 +227,7 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
   const customising = planId === null;
   const [quote, setQuote] = useState<SocietyQuote | null>(null);
   const [quoteError, setQuoteError] = useState("");
+  const [quoting, setQuoting] = useState(false);
   const [error, setError] = useState("");
   const [otpOpen, setOtpOpen] = useState(false);
   const [otpError, setOtpError] = useState("");
@@ -190,14 +243,21 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
   useEffect(() => {
     if (!types.length || (!planId && !(data.customise.enabled && custom.premium_service_id))) {
       setQuote(null);
+      setQuoting(false);
       return;
     }
     let live = true;
+    // The old price must not stay on screen (or on the Pay button) while the
+    // new choice is being priced.
+    setQuote(null);
+    setQuoteError("");
+    setQuoting(true);
     const t = setTimeout(() => {
       societyFormApi
         .quote(token, { ...(planId ? { plan_id: planId } : { custom }), vehicle_types: types, coupon_code: coupon || undefined })
         .then((q) => live && (setQuote(q), setQuoteError("")))
-        .catch((err) => live && (setQuote(null), setQuoteError(getErrorMessage(err))));
+        .catch((err) => live && (setQuote(null), setQuoteError(getErrorMessage(err))))
+        .finally(() => live && setQuoting(false));
     }, 250);
     return () => {
       live = false;
@@ -244,8 +304,10 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
       });
       setOtpOpen(false);
       // Signed in as the resident now — unless a staff member is testing
-      // the link on their own browser (never replace their session).
-      if (result.auth && !isStaff) {
+      // the link on their own browser, or someone ELSE is signed in here
+      // (enrolling another number must never silently swap whose account
+      // this browser is in).
+      if (result.auth && !isStaff && (!user || user.phone === normalizedPhone)) {
         tokenStorage.set(result.auth.access_token, result.auth.refresh_token);
         await refreshUser();
       }
@@ -261,6 +323,11 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
         } catch (err) {
           note = `${paymentErrorMessage(err)} Your request is saved — you can pay from this page any time.`;
         }
+      }
+      // Staff testing the link on their own browser is never a sale.
+      if (!isStaff) {
+        if (paid) trackSocietyPurchase(result.enrollment);
+        else trackLead("Society plan request");
       }
       setDone({ enrollment: result.enrollment, paid, note });
       // A signed-in resident lands on their hub (the page swaps over as soon
@@ -493,7 +560,7 @@ function EnrollForm({ token, data, onCancel, onDone }: { token: string; data: So
             </div>
           </>
         ) : (
-          <p className="text-sm text-[#5F6878]">{quoteError || "Pick a plan to see your price."}</p>
+          <p className="text-sm text-[#5F6878]">{quoteError || (quoting ? "Working out your price…" : "Pick a plan to see your price.")}</p>
         )}
         <div className="mt-4">
           <label className={label} htmlFor="soc-coupon">Coupon Code <span className="font-normal text-[#5F6878]">(Optional)</span></label>
@@ -562,15 +629,24 @@ function Meter({ label, value, pct, hint }: { label: string; value: string; pct:
   );
 }
 
-/** "2 Nov" — when the plan's current month ends (first live car's pass). */
-const validTill = (e: SocietyEnrollment) => {
-  const end = e.cars.find((c) => c.subscription?.status === "active" && c.subscription.end_date)?.subscription?.end_date;
-  return end ? formatShortDate(end.slice(0, 10)) : "";
+/** "Last Booking Day: 6 Nov 2026" — the last day the plan's washes can be
+ *  booked (first live car's pass; the server's `last_booking_day_label`,
+ *  extension included — same words as the customer app, passDates.ts). */
+const lastDayText = (e: SocietyEnrollment) => {
+  const sub = e.cars.find((c) => c.subscription?.status === "active" && (c.subscription.last_booking_day_label || c.subscription.end_date))?.subscription;
+  return sub ? lastBookingDayText(sub) : "";
 };
 
-function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: SocietyHub; flash?: string; onAdd: () => void }) {
+/** A resident's first payment for a society plan — the Meta Purchase. */
+function trackSocietyPurchase(enrollment: { id: string; plan_name: string; total_amount: number }) {
+  if (!(enrollment.total_amount > 0)) return;
+  trackPurchase({ value: enrollment.total_amount, eventId: `society:${enrollment.id}`, contentType: "plan", contentName: enrollment.plan_name || "Society plan" });
+}
+
+function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: SocietyHub; flash?: string; onAdd?: () => void }) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const confirm = useConfirm();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const refresh = () => {
@@ -588,6 +664,9 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
         { name: user?.full_name, contact: user?.phone },
       ),
     onSuccess: (_r, v) => {
+      // A renewal is the same resident again, not a new sale for the ads.
+      const enrollment = hub.enrollments.find((e) => e.id === v.id);
+      if (!v.renewal && enrollment) trackSocietyPurchase(enrollment);
       setMessage(v.renewal ? "Payment received — your plan is renewed." : "Payment received — your plan is active.");
       setRenewFor(null);
       refresh();
@@ -617,7 +696,7 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
               <p className="text-[15px] font-bold leading-snug">{planWithServices(e)}</p>
               <p className="mt-0.5 text-[13px] text-[#5F6878]">
                 Flat {e.flat} · {rupees(e.total_amount)} / Month
-                {validTill(e) && <> · Valid Till {validTill(e)}</>}
+                {lastDayText(e) && <> · <span className="whitespace-nowrap">{lastDayText(e)}</span></>}
                 {e.status !== "active" && e.discount_amount > 0 && <span className="text-[#0A66F0]"> · coupon {e.coupon_code} −{rupees(e.discount_amount)}</span>}
               </p>
             </div>
@@ -652,6 +731,11 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
                       hint={c.subscription.remaining > 0 ? "Planned for you, or book one below" : `All used — more on ${c.subscription.end_date ? formatShortDate(c.subscription.end_date.slice(0, 10)) : "renewal"}`}
                     />
                   </div>
+                  {c.subscription.in_extension && c.subscription.last_bookable_day && c.subscription.remaining > 0 && (
+                    <p className="mt-3 rounded-[10px] bg-[#EEF4FF] px-3 py-2 text-[13px] font-semibold text-[#0A66F0]" data-testid="society-extension-note">
+                      Book Your Remaining Washes — {lastBookingDayText(c.subscription)}
+                    </p>
+                  )}
                 </li>
               ) : (
                 <li key={c.vehicle_id} className="flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-[#F7F9FC] px-3.5 py-3">
@@ -676,7 +760,16 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
               </button>
             )}
             {(e.status === "requested" || e.status === "awaiting_payment") && (
-              <button className={ghostBtn} disabled={withdraw.isPending} onClick={() => withdraw.mutate(e.id)}>Withdraw Request</button>
+              <button
+                className={ghostBtn}
+                disabled={withdraw.isPending}
+                onClick={async () => {
+                  if (await confirm({ title: "Withdraw This Request?", message: "Your society manager won't see it any more. You can sign up again later.", tone: "danger", confirmLabel: "Withdraw" }))
+                    withdraw.mutate(e.id);
+                }}
+              >
+                Withdraw Request
+              </button>
             )}
           </div>
           {e.status === "requested" && !hub.online_payment && <p className="mt-2 text-xs text-[#5F6878]">Your manager will confirm and collect payment.</p>}
@@ -716,7 +809,7 @@ function ResidentHub({ token, hub, flash, onAdd }: { token: string; hub: Society
         )}
       </section>
 
-      <button className={`${ghostBtn} w-full`} onClick={onAdd}><Plus className="h-4 w-4" /> Add Another Car</button>
+      {onAdd && <button className={`${ghostBtn} w-full`} onClick={onAdd}><Plus className="h-4 w-4" /> Add Another Car</button>}
 
       <SocietyIssueModal
         open={issueOpen}
@@ -846,6 +939,13 @@ function BookPremium({ token, hub, cars }: { token: string; hub: SocietyHub; car
       <p className="mb-1.5 text-xs font-semibold text-[#5F6878]">Time</p>
       {slots.isLoading ? (
         <Spinner />
+      ) : slots.isError && !slots.data ? (
+        <p role="alert" className="mb-3 text-sm text-[#5F6878]">
+          Couldn't load the times for that day.{" "}
+          <button type="button" disabled={slots.isFetching} onClick={() => void slots.refetch()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+            {slots.isFetching ? "Trying…" : "Try Again"}
+          </button>
+        </p>
       ) : (
         <div className="mb-3 grid grid-cols-2 gap-2">
           {(slots.data || []).map((s) => (

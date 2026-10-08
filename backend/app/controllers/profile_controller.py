@@ -1,5 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.authz import ensure_customer_in_scope
 from app.core.dependencies import CurrentUser
 from app.core.responses import success
 from app.schemas.profile_schema import (
@@ -53,13 +54,17 @@ class VehicleController:
 
 class AddressController:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.service = AddressService(db)
         self.audit = AuditService(db)
 
     async def list(self, current_user: CurrentUser):
         return success(await self.service.list_my_addresses(current_user.id))
 
-    async def list_for_customer(self, customer_id: str):
+    async def list_for_customer(self, current_user: CurrentUser, customer_id: str):
+        # AZ-01: saved addresses carry map pins — a manager reads them only
+        # for a customer known to their own center (404 otherwise).
+        await ensure_customer_in_scope(self.db, current_user.role, current_user.service_center_id, customer_id)
         return success(await self.service.list_for_customer(customer_id))
 
     async def create(self, current_user: CurrentUser, payload: AddressCreateRequest):

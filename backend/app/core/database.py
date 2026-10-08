@@ -77,13 +77,180 @@ def get_database() -> AsyncIOMotorDatabase:
     return mongodb.db
 
 
+class _IndexBuildCollection:
+    """One collection as create_indexes sees it: create_index is never
+    fatal (see _IndexBuildDb); everything else passes straight through."""
+
+    def __init__(self, collection):
+        self.raw = collection
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+    async def create_index(self, keys, **kwargs):
+        try:
+            return await self.raw.create_index(keys, **kwargs)
+        except Exception as exc:  # degrade, don't die — the next boot retries it
+            logger.warning("Index %s on %s skipped: %s", kwargs.get("name") or keys, self.raw.name, exc)
+            return None
+
+
+class _IndexBuildDb:
+    """create_indexes' view of the database. It builds ~100 indexes in one
+    sequence, and a single failure (legacy duplicates under a new unique
+    index, an equivalent index someone added by hand under another name)
+    used to abort the whole function — skipping every index after it. Each
+    build is now logged and skipped on its own instead."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getattr__(self, name):
+        return _IndexBuildCollection(getattr(self._db, name))
+
+    def __getitem__(self, name):
+        return _IndexBuildCollection(self._db[name])
+
+
+ACTIVE_SLOT_INDEX = "uniq_active_customer_slot_v3"
+VISIT_SEAT_INDEX = "uniq_visit_seat_v1"
+_ACTIVE_BOOKING_STATUSES = ("awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled")
+
+
+def mongodb_raw(db):
+    """The real database behind create_indexes' degrade-don't-die wrapper."""
+    return getattr(db, "_db", db)
+
+
+async def _ensure_replacing_index(collection, keys, *, name: str, replaces: tuple[str, ...], **options) -> bool:
+    """Build `name`, THEN drop the indexes it replaces — never the other way
+    round. If the build fails (legacy rows violate a unique index), the old
+    indexes stay so the collection keeps whatever guard it had, and the
+    failure is logged as an ERROR (missing_critical_indexes reports it to
+    the readiness probe). An older server that refuses two indexes on one
+    key pattern gets the old ones dropped first, but only after a dry run
+    shows the new unique index will build."""
+    from pymongo.errors import OperationFailure
+
+    try:
+        await collection.create_index(keys, name=name, **options)
+    except OperationFailure as exc:
+        if exc.code in (85, 86) and options.get("unique"):  # IndexOptionsConflict / IndexKeySpecsConflict
+            if await _would_violate(collection, keys, options.get("partialFilterExpression") or {}):
+                logger.error("Index %s on %s NOT built: existing rows violate it — old index kept (%s)", name, collection.name, exc)
+                return False
+            for stale in replaces:
+                try:
+                    await collection.drop_index(stale)
+                except Exception:  # noqa: BLE001 — absent already
+                    pass
+            try:
+                await collection.create_index(keys, name=name, **options)
+            except Exception as retry_exc:  # noqa: BLE001
+                logger.error("Index %s on %s NOT built: %s", name, collection.name, retry_exc)
+                return False
+        else:
+            logger.error("Index %s on %s NOT built — old index kept: %s", name, collection.name, exc)
+            return False
+    except Exception as exc:  # noqa: BLE001 — degrade, don't die
+        logger.error("Index %s on %s NOT built — old index kept: %s", name, collection.name, exc)
+        return False
+    for stale in replaces:
+        try:
+            await collection.drop_index(stale)
+        except Exception:  # noqa: BLE001 — absent already
+            pass
+    return True
+
+
+async def _would_violate(collection, keys, partial: dict) -> bool:
+    """Does any group of rows share a key the unique index would refuse?"""
+    group = {k: f"${k}" for k, _ in keys}
+    rows = await collection.aggregate([
+        {"$match": partial},
+        {"$group": {"_id": group, "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}},
+        {"$limit": 1},
+    ]).to_list(length=1)
+    return bool(rows)
+
+
+# The unique / safety indexes the business rules lean on — duplicate
+# bookings, double settlement of one Razorpay order/link/mandate, two
+# accounts on one phone/email, a re-delivered WhatsApp message processed
+# twice, two counters for one slot/day, two holds by one holder, a visit
+# holding a seat twice. Checked by key pattern + uniqueness (not by name:
+# an equivalent index built by hand still counts) — and, for the active-slot
+# guard, by its partial filter: a legacy v2 on the same keys guards less.
+_ACTIVE_SLOT_FILTER = {"status": {"$in": list(_ACTIVE_BOOKING_STATUSES)}, "is_deleted": False}
+_CRITICAL_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("bookings", ("customer_id", "visit_line_key", "scheduled_date", "scheduled_slot"), ACTIVE_SLOT_INDEX),
+    ("bookings", ("booking_number",), "booking_number unique"),
+    ("bookings", ("booking_group_id", "seat_key.date", "seat_key.slot_key"), VISIT_SEAT_INDEX),
+    ("payment_orders", ("razorpay_order_id",), "uniq_rzp_order"),
+    ("payment_orders", ("razorpay_link_id",), "uniq_rzp_link"),
+    ("payment_orders", ("razorpay_subscription_id",), "uniq_rzp_mandate"),
+    ("users", ("phone",), "users.phone unique"),
+    ("users", ("email",), "users.email unique"),
+    ("whatsapp_message_dedup", ("wamid",), "whatsapp_message_dedup.wamid unique"),
+    ("slot_capacity", ("service_center_id", "date", "slot_key"), "slot_capacity unique (center, date, slot)"),
+    ("daily_capacity", ("service_center_id", "date"), "daily_capacity unique (center, date)"),
+    ("slot_holds", ("service_center_id", "date", "slot_key", "holder_id"), "slot_holds unique (center, date, slot, holder)"),
+    ("capacity_policy_changes", ("service_center_id", "effective_date"), "capacity_policy_changes unique (center, date)"),
+    ("customer_charges", ("visit_key", "kind"), "uniq_charge_per_visit"),
+    # Customer wallet (MoneyService): one wallet per customer, one ledger
+    # row per idempotency key — a retried/raced post never moves money twice.
+    ("customer_wallets", ("customer_id",), "uniq_customer_wallet"),
+    ("customer_wallet_ledger", ("key",), "uniq_wallet_entry_key"),
+    # Manager paybacks (MONEY-2): one record per idempotency key — a
+    # double submit / retried request never pays back twice.
+    ("customer_paybacks", ("key",), "uniq_customer_payback_key"),
+)
+
+
+def _same_filter(actual, expected: dict) -> bool:
+    """Partial filters compared as plain data (the server hands back SON)."""
+    import json
+
+    def plain(value):
+        return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+    return actual is not None and plain(dict(actual)) == plain(expected)
+
+
+async def missing_critical_indexes(db: AsyncIOMotorDatabase | None = None) -> list[str]:
+    """The critical unique indexes that do NOT exist right now, as
+    "collection: label" strings — empty when all are in place. For the
+    readiness probe (audit DEP-08: index builds only log a warning on
+    failure, so a guard could be silently absent). `db` defaults to the
+    app's database. Never raises for a missing collection (no indexes ->
+    reported missing)."""
+    db = db if db is not None else get_database()
+    missing: list[str] = []
+    cache: dict[str, list[dict]] = {}
+    for collection, keys, label in _CRITICAL_INDEXES:
+        if collection not in cache:
+            try:
+                cache[collection] = await db[collection].list_indexes().to_list(length=None)
+            except Exception:  # noqa: BLE001 — collection not created yet
+                cache[collection] = []
+        found = any(
+            index.get("unique") and tuple(index.get("key", {}).keys()) == keys
+            and (label != ACTIVE_SLOT_INDEX or _same_filter(index.get("partialFilterExpression"), _ACTIVE_SLOT_FILTER))
+            for index in cache[collection]
+        )
+        if not found:
+            missing.append(f"{collection}: {label}")
+    return missing
+
+
 async def create_indexes() -> None:
     """
     Create all required indexes at startup. Idempotent — safe to run
     every boot. Keeping this centralized avoids missing indexes as the
     schema grows.
     """
-    db = mongodb.db
+    db = _IndexBuildDb(mongodb.db)
 
     await db.users.create_index("email", unique=True, sparse=True)
     await db.users.create_index("phone", unique=True, sparse=True)
@@ -131,23 +298,40 @@ async def create_indexes() -> None:
     # clean BadRequestException. Partial: only active-status bookings are
     # constrained, so a cancelled/completed one never blocks a fresh rebooking.
     # The partial filter GREW (awaiting_payment joined the active set) and
-    # Mongo won't re-spec a partialFilterExpression in place — drop the
-    # original auto-named index once, then build the named replacement.
-    for stale in ("customer_id_1_vehicle_id_1_scheduled_date_1_scheduled_slot_1", "uniq_active_customer_slot"):
-        try:
-            await db.bookings.drop_index(stale)
-        except Exception:
-            pass
+    # v3 stopped counting recycle-bin rows; Mongo won't re-spec a
+    # partialFilterExpression in place. v3 is built FIRST and the old
+    # indexes are dropped only once it exists (audit DEP-08: dropping first
+    # left the collection with NO duplicate-booking guard whenever legacy
+    # duplicates made the v3 build fail).
     # Keyed on visit_line_key (see BookingModel) rather than vehicle_id:
     # bookings no longer need a vehicle record, and two SUVs on one visit
     # must not collide with each other while a double-submitted single
     # booking still must.
-    await db.bookings.create_index(
+    await _ensure_replacing_index(
+        mongodb_raw(db).bookings,
         [("customer_id", 1), ("visit_line_key", 1), ("scheduled_date", 1), ("scheduled_slot", 1)],
+        name=ACTIVE_SLOT_INDEX,
         unique=True,
-        name="uniq_active_customer_slot_v2",
-        partialFilterExpression={"status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]}},
+        partialFilterExpression=_ACTIVE_SLOT_FILTER,
+        replaces=("customer_id_1_vehicle_id_1_scheduled_date_1_scheduled_slot_1", "uniq_active_customer_slot", "uniq_active_customer_slot_v2"),
     )
+    # Explicit seat ownership (BookingService._take_seat/_release_seat): the
+    # reconciliation recount and the daily-cap init count seats owned per
+    # (center, day, slot) — partial, only owners are indexed...
+    await db.bookings.create_index(
+        [("seat_key.service_center_id", 1), ("seat_key.date", 1), ("seat_key.slot_key", 1)],
+        name="seat_owners_v1", partialFilterExpression={"holds_seat": True},
+    )
+    # ...and the database itself refuses a visit holding the same seat twice.
+    await db.bookings.create_index(
+        [("booking_group_id", 1), ("seat_key.date", 1), ("seat_key.slot_key", 1)],
+        name=VISIT_SEAT_INDEX, unique=True,
+        partialFilterExpression={"holds_seat": True, "booking_group_id": {"$type": "string"}},
+    )
+    # BookingService._claim_booking_lock: short-lived insert-first claims
+    # (e.g. one manager "log a done job" per customer+minute). The claimant
+    # deletes its own; this only sweeps up after a crashed request.
+    await db.booking_locks.create_index("expires_at", expireAfterSeconds=0)
 
     # Custom-plan enquiries — one row per phone (upserted), newest first.
     await db.plan_enquiries.create_index("phone", unique=True)
@@ -263,6 +447,9 @@ async def create_indexes() -> None:
     # self-delete at their own expiry instant (TTL 0 on expires_at).
     await db.otp_requests.create_index("identifier")
     await db.otp_requests.create_index("expires_at", expireAfterSeconds=0)
+    # Single-use MSG91 widget tokens (AuthService; _id = the token's sha256)
+    # — remembered only until the token itself would have expired.
+    await db.used_widget_tokens.create_index("expires_at", expireAfterSeconds=0)
     # Road-distance cache for the customer distance charge (route_service).
     await db.road_distance_cache.create_index("expires_at", expireAfterSeconds=0)
 
@@ -288,14 +475,21 @@ async def create_indexes() -> None:
     # context and audit trails are business records.
     async def _ensure_ttl(collection, field: str, seconds: int) -> None:
         # A plain index on the same key may predate the TTL decision —
-        # Mongo refuses the option change, so drop-and-recreate once.
+        # Mongo refuses the option change, so drop-and-recreate once. (On
+        # the raw collection: this one needs to SEE the refusal.)
         from pymongo.errors import OperationFailure
 
+        collection = getattr(collection, "raw", collection)
         try:
             await collection.create_index(field, expireAfterSeconds=seconds)
         except OperationFailure:
-            await collection.drop_index(f"{field}_1")
-            await collection.create_index(field, expireAfterSeconds=seconds)
+            try:
+                await collection.drop_index(f"{field}_1")
+                await collection.create_index(field, expireAfterSeconds=seconds)
+            except Exception as exc:  # degrade, don't die
+                logger.warning("TTL index on %s.%s skipped: %s", collection.name, field, exc)
+        except Exception as exc:  # degrade, don't die
+            logger.warning("TTL index on %s.%s skipped: %s", collection.name, field, exc)
 
     await _ensure_ttl(db.notifications, "created_at", 90 * 24 * 3600)
     await _ensure_ttl(db.sms_outbox, "created_at", 365 * 24 * 3600)
@@ -340,6 +534,12 @@ async def create_indexes() -> None:
     # on purpose+status+created_at, which no other index above starts with —
     # without this every dashboard load was a full collection scan.
     await db.payment_orders.create_index([("purpose", 1), ("status", 1), ("created_at", -1)])
+    # PaymentService: one open checkout per customer + target (open_key),
+    # and the refund queue newest-refunded first.
+    await db.payment_orders.create_index([("open_key", 1), ("customer_id", 1), ("status", 1)])
+    await db.payment_orders.create_index(
+        [("refund_status", 1), ("refunded_at", -1)], partialFilterExpression={"refund_status": {"$exists": True}},
+    )
     # Recycle-bin delete/permanent-delete money-attached checks — an $or
     # across these two fields, each served by its own sparse index (only
     # group-payment orders carry booking_ids; only single-booking orders
@@ -360,6 +560,63 @@ async def create_indexes() -> None:
     )
     await db.withdrawal_requests.create_index("captain_id")
     await db.withdrawal_requests.create_index("status")
+    # One PENDING withdrawal per captain, enforced by Mongo: the service's
+    # count-then-insert let parallel requests each see zero and all insert.
+    try:
+        await db.withdrawal_requests.create_index(
+            "captain_id", unique=True, name="uniq_pending_withdrawal_per_captain",
+            partialFilterExpression={"status": "pending"},
+        )
+    except Exception as exc:  # duplicate legacy data — degrade, don't die
+        logger.warning("Unique index build skipped: %s", exc)
+    # Who uploaded which identity document (upload_routes authorizes
+    # downloads on it), and the per-account daily upload counter.
+    await db.uploaded_documents.create_index("key")
+    await db.uploaded_documents.create_index([("url", 1), ("owner_id", 1)])
+    await db.upload_counters.create_index("expires_at", expireAfterSeconds=0)
+    # Photo upload records (app.core.storage, audit CAP-02) — a captain's
+    # uploads newest first. No TTL: it is the audit trail of job photos.
+    await db.uploaded_photos.create_index([("uploader_id", 1), ("created_at", -1)])
+    # PERF-01: cross-instance websocket events live a few minutes only.
+    from app.core.ws_manager import WS_EVENT_TTL_SECONDS
+
+    await db.ws_events.create_index("at", expireAfterSeconds=WS_EVENT_TTL_SECONDS)
+
+    # Customer account charges (late cancellation — CustomerChargeService):
+    # "this customer's open charges" (quote + the next booking's claim),
+    # the center's / admin's charge list newest first, a carrying booking's
+    # charges (release on cancel/delete), and ONE charge per cancelled visit.
+    await db.customer_charges.create_index([("customer_id", 1), ("status", 1)])
+    await db.customer_charges.create_index([("service_center_id", 1), ("status", 1), ("created_at", -1)])
+    await db.customer_charges.create_index([("created_at", -1)])
+    await db.customer_charges.create_index("applied_to_booking_id", sparse=True)
+    await db.customer_charges.create_index([("visit_key", 1), ("kind", 1)], unique=True, name="uniq_charge_per_visit")
+
+    # Customer wallet (CustomerWalletService / MoneyService): one balance
+    # per customer; an immutable ledger, idempotent on `key`; a customer's
+    # ledger newest first; the admin payouts list; a booking's entries.
+    await db.customer_wallets.create_index("customer_id", unique=True, name="uniq_customer_wallet")
+    await db.customer_wallet_ledger.create_index("key", unique=True, name="uniq_wallet_entry_key")
+    await db.customer_wallet_ledger.create_index([("customer_id", 1), ("created_at", -1)])
+    await db.customer_wallet_ledger.create_index([("kind", 1), ("created_at", -1)])
+    await db.customer_wallet_ledger.create_index("booking_id", sparse=True)
+    # Manager paybacks (MONEY-2, CustomerWalletService.payback): unique
+    # idempotency key; the admin list (newest first, by center); a
+    # booking's / customer's paybacks; the collections line per center.
+    await db.customer_paybacks.create_index("key", unique=True, name="uniq_customer_payback_key")
+    await db.customer_paybacks.create_index([("created_at", -1)])
+    await db.customer_paybacks.create_index([("service_center_id", 1), ("created_at", -1)])
+    await db.customer_paybacks.create_index("booking_id")
+    await db.customer_paybacks.create_index([("customer_id", 1), ("created_at", -1)])
+    # NOTIFY: once-per-event notification claims expire after 60 days; the
+    # WhatsApp queue's delivery-failure view (failed rows, newest first).
+    await db.notification_claims.create_index("created_at", expireAfterSeconds=60 * 24 * 3600)
+    await db.whatsapp_queue.create_index([("failure", 1), ("updated_at", -1)])
+    # Captain-wallet delta postings carry a key (cw:{booking}:{rev}) — the
+    # same delta can never be posted twice.
+    await db.wallet_transactions.create_index(
+        "key", unique=True, name="uniq_wallet_txn_key", partialFilterExpression={"key": {"$type": "string"}},
+    )
 
     await db.service_centers.create_index([("location.latitude", 1), ("location.longitude", 1)])
     await db.addresses.create_index([("latitude", 1), ("longitude", 1)])
@@ -466,6 +723,23 @@ async def create_indexes() -> None:
         # captain_start_stage in late/severely_late), default newest-first —
         # otherwise it walked every booking the center ever had.
         (db.bookings, [("service_center_id", 1), ("captain_start_stage", 1), ("created_at", -1)], {}),
+        # Manager/admin queue pages (BookingRepository.list_queue): one per
+        # _QUEUE_SORTS spec, each ENDING in the same keys as the sort — the
+        # _id tiebreak included, or Mongo fetched and sorted the center's
+        # whole history in memory to return 20 rows. scheduled_desc walks
+        # the scheduled one backwards; the late-starts scope sorts
+        # scheduled_desc too.
+        (db.bookings, [("service_center_id", 1), ("created_at", -1), ("_id", -1)], {}),
+        (db.bookings, [("service_center_id", 1), ("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)], {}),
+        (db.bookings, [("service_center_id", 1), ("captain_start_stage", 1), ("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)], {}),
+        # A captain's live jobs: has_active_job (every 25 s location ping),
+        # find_active_for_captain (inside the assign transaction) and his
+        # job list (list_for_captain's scheduled sorts) — instead of his
+        # whole lifetime history.
+        (db.bookings, [("captain_id", 1), ("status", 1), ("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)], {}),
+        # The reminder-loop finders (BookingService._sweep_scan): status +
+        # a date window, streamed earliest slot first.
+        (db.bookings, [("status", 1), ("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)], {}),
         # Repeat-booking nudge (find_customers_due_repeat_reminder): lapsed
         # customers, longest-lapsed first — reads users, not every booking.
         (db.users, [("role", 1), ("last_completed_at", 1)], {}),
@@ -488,6 +762,15 @@ async def create_indexes() -> None:
             await collection.create_index(keys, **options)
         except Exception as exc:  # an equivalent index under another name — degrade, don't die
             logger.warning("Index %s on %s skipped: %s", keys, collection.name, exc)
+
+    # Durable WhatsApp send queue (NotificationService) — also created
+    # lazily by its worker; built here so the first sends never wait on it.
+    try:
+        from app.services.notification_service import ensure_queue_indexes
+
+        await ensure_queue_indexes(mongodb_raw(db))
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("WhatsApp queue indexes skipped: %s", exc)
 
     # Society plans (docs/SOCIETY_PLANS.md) keep their own index list.
     from app.repositories.society_repository import ensure_society_indexes

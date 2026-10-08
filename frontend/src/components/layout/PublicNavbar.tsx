@@ -41,7 +41,9 @@ function BlussitLogo({ onClick }: { onClick?: (e: React.MouseEvent) => void }) {
     >
       <img
         src="/img/blussit-logo-480.webp"
-        alt="BLUSSIT"
+        width={480}
+        height={63}
+        alt="Blussit"
         className="h-6 md:h-7 w-auto object-contain transition-transform duration-500 group-hover:-rotate-2 group-hover:scale-105"
       />
 
@@ -202,12 +204,12 @@ export function PublicNavbar() {
               className="
                 group inline-flex cursor-pointer items-center gap-2
                 rounded-[10px]
-                bg-[#FBBF24] text-[#071A3D]
+                bg-[#FFD21F]
                 px-6 py-2.5
-                text-sm font-bold text-[#071A3D]
+                text-sm font-bold text-[#0E1A33]
                 transition-all duration-200
                 hover:-translate-y-0.5
-                hover:bg-[#FBBF24]
+                hover:bg-[#F5C400]
                 
               "
             >
@@ -315,7 +317,7 @@ export function PublicNavbar() {
         </div>
 
         {/* Divider */}
-        <div className="my-2 h-px w-[90%] bg-[#E1D7C4]/70" />
+        <div className="my-2 h-px w-[90%] bg-[#E4E9F1]" />
 
         {/* Actions */}
         <div className="flex w-full flex-col items-center gap-3 px-1 pb-1 pt-2">
@@ -333,10 +335,9 @@ export function PublicNavbar() {
                 py-3
                 text-sm
                 font-bold
-                text-[#071A3D]
                 transition-all
                 duration-200
-                hover:bg-[#FFD21F]
+                hover:bg-[#F5C400]
                 
               "
             >
@@ -369,11 +370,10 @@ export function PublicNavbar() {
                   py-3
                   text-sm
                   font-bold
-                  text-[#071A3D]
                   transition-all
                   duration-200
                   hover:-translate-y-0.5
-                  hover:bg-[#FFD21F]
+                  hover:bg-[#F5C400]
                   
                 "
               >

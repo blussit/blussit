@@ -311,7 +311,38 @@ async def test_kpi_sections_match_legacy(db, dataset, section, period):
         legacy["captains"], new["captains"] = by("captain_id")(legacy["captains"]), by("captain_id")(new["captains"])
     if section == "business":
         assert_same(legacy.pop("service_mix"), new.pop("service_mix"), "$.service_mix", loose={".revenue": 0.3, ".aov": 0.3})
+    if section == "overview":
+        _without_society_line(new)
+    if section == "financial":
+        _without_discount_tip_lines(new)
     assert_same(legacy, new)
+
+
+def _without_society_line(out: dict) -> None:
+    """Society revenue became its own line (SOC-1, 2026-10-07) after the
+    legacy reference was frozen — and part of combined_revenue. Taken back
+    out here so the rest still compares number for number;
+    test_fix_plans_society.py pins the society figures themselves."""
+    for block in ("current", "previous"):
+        society = out[block].pop("society_revenue")
+        out[block]["combined_revenue"] = round(out[block]["combined_revenue"] - society, 2)
+        # Net plan revenue (PLANS-2, 2026-10-07): custom-plan refunds and the
+        # net shown beside the unchanged gross plan_revenue — additive lines,
+        # pinned by test_feat_small_plan_net.py.
+        out[block].pop("plan_refunds")
+        out[block].pop("plan_revenue_net")
+    _without_discount_tip_lines(out)
+
+
+def _without_discount_tip_lines(out: dict) -> None:
+    """Manager discounts and tips became visible lines (OPS, 2026-10-07,
+    founder decision) after the legacy reference was frozen. They are
+    already INSIDE revenue — pure additions, no total changes — so they're
+    dropped here; tests/test_fix_ops_misc.py pins the figures themselves."""
+    for block in (out.get("current"), out.get("previous"), out):
+        if isinstance(block, dict):
+            for key in ("manager_discounts", "tips", "tips_included"):
+                block.pop(key, None)
 
 
 @pytest.mark.asyncio
@@ -328,6 +359,7 @@ async def test_manager_overview_matches_legacy(db, dataset, period):
     for center in dataset["centers"]:
         legacy = await LegacyKpiService(db).manager_overview(center, s, e, ps, pe)
         new = await KpiService(db).manager_overview(center, s, e, ps, pe)
+        _without_society_line(new)
         assert_same(legacy, new)
 
 
@@ -422,6 +454,34 @@ async def _all_pages(fetch, page_size=7):
 # legacy row has no such key — and test_staff_car_type_service_names.py
 # pins their values.
 ADDED_DISPLAY_KEYS = ("vehicle_type", "vehicle_type_name", "service_id", "service_name")
+# Society pass extension (founder rule 2026-10-07): display-only columns on
+# the subscription rows only, pinned by test_fix_plans_extension.py.
+EXTENSION_DISPLAY_KEYS = ("extension_days", "extended_until", "extensions", "in_extension")
+# Generalised extension + custom multi-car plans (2026-10-07): further
+# additive, display-only columns derived from the same subscription / order
+# docs (the car a pass is bound to, its per-service quotas, the extend
+# button state; a custom cart's id and car count on a plan-purchase row).
+# Every legacy key keeps its exact value; these are pinned by
+# test_feat_plans_custom.py / test_feat_plans_extension.py.
+CUSTOM_PLAN_DISPLAY_KEYS = (
+    "extension_days_left", "can_extend", "vehicle_id", "registration_number", "plan_kind", "custom_plan_id",
+    "total_by_service", "remaining_by_service", "services", "car_count",
+    # follow-up: the same pass-view window fields the customer 360 shows
+    "usable_until", "last_bookable_day", "society_id",
+    # PLANS-2 net plan revenue (2026-10-07): a custom cart's refunded cars
+    # beside the gross `amount` (pinned by test_feat_small_plan_net.py).
+    "refunded_amount", "net_amount",
+)
+
+
+# Scheduled custom-plan renewals (PLANS-2, 2026-10-07) are their own KPI
+# group on both subscription overviews — additive; the legacy dataset has
+# none, so the count is pinned by test_feat_small_scheduled.py, not here.
+ADDED_KPI_KEYS = ("scheduled",)
+
+
+def _without_added_kpis(kpis: dict) -> dict:
+    return {k: v for k, v in kpis.items() if k not in ADDED_KPI_KEYS}
 
 
 def _legacy_shape(new_rows, legacy_rows):
@@ -429,7 +489,12 @@ def _legacy_shape(new_rows, legacy_rows):
     out = []
     for row in new_rows:
         assert all(k in row for k in ADDED_DISPLAY_KEYS), sorted(row)
-        out.append({k: v for k, v in row.items() if k in legacy_keys or k not in ADDED_DISPLAY_KEYS})
+        out.append({
+            k: v for k, v in row.items()
+            if (k in legacy_keys or k not in ADDED_DISPLAY_KEYS)
+            and k not in EXTENSION_DISPLAY_KEYS
+            and (k in legacy_keys or k not in CUSTOM_PLAN_DISPLAY_KEYS)
+        })
     return out
 
 
@@ -452,7 +517,7 @@ async def test_center_subscription_overview_matches_legacy(db, dataset, status):
     legacy = await LegacySubscriptions(db).center_overview(center, "admin", None)
     svc = UserSubscriptionService(db)
     out, rows = await _all_pages(lambda p, n: svc.center_overview(center, "admin", None, page=p, page_size=n, status=status))
-    assert_same(legacy["kpis"], out["kpis"])
+    assert_same(legacy["kpis"], _without_added_kpis(out["kpis"]))
     assert_same(_sorted_breakdown(legacy["plan_breakdown"], "active_count"), out["plan_breakdown"])
     keep = STATUS_PREDICATES.get(status) or (lambda r: r["status"] == "active" and r["days_left"] is not None and r["days_left"] <= 14)
     assert_same([r for r in legacy["rows"] if keep(r)], _legacy_shape(rows, legacy["rows"]))
@@ -464,7 +529,7 @@ async def test_admin_subscription_overview_matches_legacy(db, dataset, status):
     legacy = await LegacySubscriptions(db).admin_overview()
     svc = UserSubscriptionService(db)
     out, rows = await _all_pages(lambda p, n: svc.admin_overview(page=p, page_size=n, status=status))
-    assert_same(legacy["kpis"], out["kpis"])
+    assert_same(legacy["kpis"], _without_added_kpis(out["kpis"]))
     assert_same(_sorted_breakdown(legacy["plan_breakdown"], "count"), out["plan_breakdown"])
     assert_same([r for r in legacy["rows"] if STATUS_PREDICATES[status](r)], _legacy_shape(rows, legacy["rows"]))
 

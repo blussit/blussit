@@ -11,7 +11,7 @@ export default function AdminContactMessagesPage() {
   // A long message was clamped to two lines with no way to read the rest —
   // the row now opens the whole thing.
   const [open, setOpen] = useState<ContactMessage | null>(null);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-contact-messages", page],
     queryFn: () => adminContactMessageApi.list({ page, page_size: 20 }),
   });
@@ -26,6 +26,8 @@ export default function AdminContactMessagesPage() {
       <DataTable<ContactMessage>
         isLoading={isLoading}
         data={data?.data || []}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle="No Messages Yet"
         emptyDescription="Contact form submissions from the landing page will show up here."
         onRowClick={setOpen}

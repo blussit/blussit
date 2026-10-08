@@ -7,6 +7,7 @@ freezes every request and WebSocket on the instance while it hashes. The
 sync versions remain for seed data and scripts.
 """
 import asyncio
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -48,6 +49,24 @@ async def verify_password_async(plain_password: str, hashed_password: str | None
     if not hashed_password:
         return False
     return await asyncio.to_thread(verify_password, plain_password, hashed_password)
+
+
+_dummy_hash: str | None = None
+
+
+async def verify_password_or_dummy_async(plain_password: str, hashed_password: str | None) -> bool:
+    """verify_password_async that costs one bcrypt check EVEN WHEN there is
+    nothing to check against (no such account, or a password-less one) —
+    against a throwaway hash, always answering False. Login uses it so its
+    response time doesn't reveal which identifiers have accounts (ENUM-1:
+    an unknown one answered in ~18 ms, a real one in ~1 s)."""
+    global _dummy_hash
+    if hashed_password:
+        return await verify_password_async(plain_password, hashed_password)
+    if _dummy_hash is None:
+        _dummy_hash = await hash_password_async(secrets.token_urlsafe(24))
+    await asyncio.to_thread(verify_password, plain_password, _dummy_hash)
+    return False
 
 
 def create_token(subject: str, role: str, token_type: TokenType, extra_claims: dict[str, Any] | None = None) -> str:

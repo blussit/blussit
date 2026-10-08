@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Complaint, Coupon, Notification, Review, SubscriptionPlan, UserSubscription } from "../types";
+import type { Complaint, Coupon, Notification, PassExtension, Review, SubscriptionPlan, UserSubscription } from "../types";
 
 /** One subscription row on the manager's center overview. */
 export interface CenterSubscriptionRow {
@@ -27,6 +27,11 @@ export interface CenterSubscriptionRow {
   start_date?: string | null;
   end_date?: string | null;
   days_left?: number | null;
+  /** Society pass: days added after the plan month (max 10). */
+  extension_days?: number;
+  extended_until?: string | null;
+  extensions?: PassExtension[];
+  in_extension?: boolean;
 }
 
 /** Paging for the overview endpoints: KPIs/breakdowns cover everything,
@@ -74,6 +79,11 @@ export interface AdminSubscriptionRow {
   total_service_count?: number | null;
   start_date?: string | null;
   end_date?: string | null;
+  /** Society pass: days a manager/admin added after the plan month (max 10). */
+  extension_days?: number;
+  extended_until?: string | null;
+  extensions?: PassExtension[];
+  in_extension?: boolean;
 }
 
 export interface AdminSubscriptionOverview {

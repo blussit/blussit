@@ -24,8 +24,13 @@ class CaptainLocationRepository(BaseRepository):
             pass
 
     async def list_for_captain(self, captain_id: str, since: datetime | None = None, limit: int = 500) -> list[dict]:
+        """The captain's LATEST `limit` points since `since`, oldest first.
+        Taken newest-first and then reversed: oldest-first with a limit
+        kept only the morning once a day of 25 s pings passed the cap."""
         query: dict = {"captain_id": captain_id}
         if since is not None:
             query["at"] = {"$gte": since}
-        cursor = self.collection.find(query).sort("at", 1).limit(limit)
-        return await cursor.to_list(length=limit)
+        cursor = self.collection.find(query).sort("at", -1).limit(limit)
+        rows = await cursor.to_list(length=limit)
+        rows.reverse()
+        return rows

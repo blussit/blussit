@@ -3,12 +3,13 @@ import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-qu
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { CalendarPlus, Gift, Sparkles, Star } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { vehicleTypeApi } from "../../api/catalog";
+import { visitDue } from "../../components/customer/money";
+import { bookingPolicyApi, vehicleTypeApi } from "../../api/catalog";
 import { visitCarDetail, visitServiceTitle, visitTypeLabel } from "../../components/customer/cars";
 import { reviewApi } from "../../api/engagement";
 import { btn, card, PageHeader, Segmented, Skeleton, StatusChip } from "../../components/customer/ui";
 import { serviceImage } from "../../components/public/landing/shared";
-import { formatDay, formatShortDate, formatSlot } from "../../lib/date";
+import { formatDay, formatShortDate, formatSlot, minutesUntilSlotStart } from "../../lib/date";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import type { Booking } from "../../types";
 
@@ -87,11 +88,19 @@ export default function MyBookingsPage() {
     enabled: tab === "past" && completedIds.length > 0,
     placeholderData: keepPreviousData,
   });
+  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get, staleTime: 5 * 60 * 1000, enabled: tab === "upcoming" });
+  const editLockMinutes = (policy as { customer_edit_lock_minutes?: number } | undefined)?.customer_edit_lock_minutes ?? 60;
   const reviewByBookingId = new Map((myReviews || []).map((r) => [r.booking_id, r]));
 
   const upcomingCard = (slab: BookingSlab) => {
     const b = slab.primary;
     const unpaid = slab.status === "awaiting_payment";
+    // Same rule the detail page (and the server) uses: no car on its way,
+    // and more than customer_edit_lock_minutes before the slot.
+    const editable =
+      !unpaid &&
+      !slab.bookings.some((c) => ["captain_on_the_way", "service_started", "completed"].includes(c.status)) &&
+      minutesUntilSlotStart(b.scheduled_date, b.scheduled_slot) > editLockMinutes;
     const planCovered = !!b.subscription_id || b.payment_method === "subscription";
     // The service on its own line, then the car type (+ make/plate) — both stay readable at 390px.
     const detail = [visitTypeLabel(slab, vehicleTypes), visitCarDetail(slab, vehicleTypes)].filter(Boolean).join(" · ");
@@ -101,7 +110,7 @@ export default function MyBookingsPage() {
           <CalendarPlus className="h-5 w-5" />
         </span>
         <Link to={`/app/bookings/${b.id}`} className="min-w-0 flex-1">
-          <p className="truncate tabular-nums text-[15px] font-bold text-[#0E1A33]">{formatSlot(b.scheduled_slot)}</p>
+          <p className="tabular-nums text-[15px] font-bold leading-snug text-[#0E1A33]">{formatSlot(b.scheduled_slot)}</p>
           <p className="mt-0.5 truncate text-sm font-medium text-[#0E1A33]">{visitServiceTitle(slab)}</p>
           {(detail || planCovered) && (
             <p className="truncate text-[13px] text-[#5F6878]">
@@ -115,9 +124,16 @@ export default function MyBookingsPage() {
           )}
           <StatusChip status={slab.status} className="mt-2" />
         </Link>
-        <Link to={`/app/bookings/${b.id}`} className={btn(unpaid ? "primary" : "outline", "sm", "rounded-full")}>
-          {unpaid ? `Pay ₹${Math.round(slab.totalAmount)}` : "Details"}
-        </Link>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <Link to={`/app/bookings/${b.id}`} className={btn(unpaid ? "primary" : "outline", "sm", "rounded-full")}>
+            {unpaid ? `Pay ₹${Math.round(visitDue(slab.bookings))}` : "Details"}
+          </Link>
+          {editable && (
+            <Link to={`/app/bookings/${b.id}?edit=1`} className="inline-flex min-h-[36px] items-center px-2 text-[13px] font-semibold text-[#0A66F0] hover:underline" data-testid="row-edit-booking">
+              Edit
+            </Link>
+          )}
+        </div>
       </div>
     );
   };

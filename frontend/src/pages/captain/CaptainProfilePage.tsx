@@ -10,6 +10,7 @@ import { BadgeCheck, Building2, Camera, Check, ChevronDown, ChevronRight, Clock,
 import { authApi } from "../../api/auth";
 import { staffDirectoryApi } from "../../api/admin";
 import { uploadApi } from "../../api/upload";
+import { StaffPhoneVerify } from "../../components/shared/StaffPhoneVerify";
 import { kycApi, type CaptainKyc } from "../../api/staffOps";
 import { useAuth } from "../../context/AuthContext";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
@@ -17,6 +18,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { AttendanceCard } from "../../components/captain/Attendance";
 import { Btn, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
 import { Modal } from "../../components/ui";
+import { PrivateDocumentView } from "../../components/shared/PrivateDocument";
 
 const field =
   "w-full rounded-2xl border border-[#E4E9F1] px-4 text-[15px] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE] disabled:bg-[#EEF3FA] disabled:text-[#5F6878]";
@@ -50,7 +52,7 @@ function DocUpload({ label, url, disabled, missing, onUploaded }: { label: strin
       </div>
       {url && (
         <Modal open={viewing} onClose={() => setViewing(false)} title={label} maxWidth="max-w-sm">
-          <img src={url} alt={label} className="max-h-[60vh] w-full rounded-xl bg-[#F6F8FC] object-contain" />
+          {viewing && <PrivateDocumentView url={url} label={label} />}
           <Btn variant="outline" className="mt-4 w-full" onClick={() => setViewing(false)}>
             {t("captain.common.close")}
           </Btn>
@@ -235,6 +237,8 @@ export default function CaptainProfilePage() {
           )}
         </div>
       </Panel>
+
+      <StaffPhoneVerify />
 
       <div>
         <h2 className="mb-2 text-[15px] font-extrabold text-[#0E1A33]">{t("captain.v2.attendance")}</h2>

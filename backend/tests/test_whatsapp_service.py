@@ -52,7 +52,9 @@ async def test_whatsapp_service_send_otp_message_shape(db, cleanup_outbox):
     ok = await service.send_otp("9876543211", "123456", purpose="verification")
     assert ok is True
     doc = await db.whatsapp_outbox.find_one({"phone": "9876543211"})
-    assert "123456" in doc["message"]
+    # Recorded (kind otp), but the code itself never sits in the outbox.
+    assert doc["kind"] == "otp" and "OTP sent" in doc["message"]
+    assert "123456" not in doc["message"]
 
 
 @pytest.mark.asyncio
@@ -61,7 +63,8 @@ async def test_whatsapp_service_send_temp_password_never_logs_it_elsewhere(db, c
     ok = await service.send_temp_password("9876543212", "Sw9kLp2Qrt")
     assert ok is True
     doc = await db.whatsapp_outbox.find_one({"phone": "9876543212"})
-    assert "Sw9kLp2Qrt" in doc["message"]
+    assert doc["kind"] == "temp_password"
+    assert "Sw9kLp2Qrt" not in doc["message"]
 
 
 @pytest.mark.asyncio
@@ -86,7 +89,7 @@ async def test_send_otp_uses_template_when_configured(db, cleanup_outbox, monkey
     assert ok is True
     doc = await db.whatsapp_outbox.find_one({"phone": "9876543214"})
     assert doc["template_name"] == "otp_verification"
-    assert "775533" in doc["message"]
+    assert "775533" not in doc["message"]
 
 
 @pytest.mark.asyncio
@@ -97,7 +100,7 @@ async def test_send_otp_falls_back_to_plain_text_when_no_template_configured(db,
     assert ok is True
     doc = await db.whatsapp_outbox.find_one({"phone": "9876543215"})
     assert "template_name" not in doc
-    assert "112233" in doc["message"]
+    assert "112233" not in doc["message"]
 
 
 @pytest.mark.asyncio
@@ -123,7 +126,7 @@ async def test_send_temp_password_uses_template_when_configured(db, cleanup_outb
     assert ok is True
     doc = await db.whatsapp_outbox.find_one({"phone": "9876543217"})
     assert doc["template_name"] == "cleanride_temp_password"
-    assert "Xk29pQr7Lm" in doc["message"]
+    assert "Xk29pQr7Lm" not in doc["message"]
 
 
 @pytest.mark.asyncio

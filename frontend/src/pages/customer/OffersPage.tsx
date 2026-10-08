@@ -4,6 +4,9 @@
  * plus the monthly plans.
  */
 import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { catalogApi } from "../../api/catalog";
+import { ErrorState } from "../../components/ui";
 import { ArrowRight, Gift, Tag } from "lucide-react";
 import { useActiveOffers } from "../../components/public/LaunchOfferPopup";
 import { serviceImage, titleCase } from "../../components/public/landing/shared";
@@ -11,12 +14,17 @@ import { btn, card, PageHeader } from "../../components/customer/ui";
 
 export default function OffersPage() {
   const offers = useActiveOffers();
+  // Same cached catalogue the offers come from — a failed read is said, not
+  // shown as "No offers right now".
+  const services = useQuery({ queryKey: ["public-services"], queryFn: () => catalogApi.services({ page_size: 100 }) });
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
       <PageHeader back="/app/profile" title="Offers" />
 
-      {offers.length ? (
+      {!offers.length && services.isError && !services.data ? (
+        <ErrorState message="Couldn't load the offers." busy={services.isFetching} onRetry={() => void services.refetch()} />
+      ) : offers.length ? (
         <div className="grid gap-4 sm:grid-cols-2">
           {offers.map((o, i) => (
             <div key={o.service.id} className={`${card} overflow-hidden`}>

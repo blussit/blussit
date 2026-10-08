@@ -29,16 +29,19 @@ import {
   MessageCircle,
   Navigation,
   Phone,
+  PlusCircle,
   Sparkles,
   TriangleAlert,
   Undo2,
 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorCode, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { translateCaptainError } from "../../lib/captainErrorTranslations";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useActiveJobs } from "../../components/captain/CaptainShell";
 import { CollectPayment } from "../../components/captain/CollectPayment";
+import { AddServicesSheet } from "../../components/captain/AddServicesSheet";
+import { CustomerEditedNote, JobMoney } from "../../components/captain/JobMoney";
 import { PhotoTile, usePhotoShot } from "../../components/captain/PhotoShot";
 import { getPosition } from "../../components/captain/photo";
 import {
@@ -66,11 +69,11 @@ import {
   waUrl,
   whenLabel,
 } from "../../components/captain/jobState";
-import { BottomBar, Btn, InfoRow, Notice, Panel, Sheet, TopBar } from "../../components/captain/ui";
+import { BottomBar, Btn, InfoRow, LoadError, Notice, Panel, Sheet, TopBar } from "../../components/captain/ui";
 import { cn } from "../../lib/cn";
 import type { Booking } from "../../types";
 
-type SheetKind = null | "arrive" | "more" | "late" | "release";
+type SheetKind = null | "arrive" | "more" | "late" | "release" | "add";
 
 export default function CaptainJobPage() {
   const { id = "" } = useParams();
@@ -94,7 +97,9 @@ function JobScreen({ id }: { id: string }) {
       const mine = all.filter((c) => c.captain_id === booking.captain_id && c.status !== "cancelled");
       return mine.length ? mine : [booking];
     },
-    retry: false,
+    // A reassigned/removed job answers 4xx — that's final ("job gone"); a
+    // dropped connection gets two more tries, then an error with a retry.
+    retry: retryUnlessClientError(2),
   });
 
   const [pickedId, setPickedId] = useState<string | null>(null);
@@ -104,6 +109,8 @@ function JobScreen({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [code, setCode] = useState("");
   const [note, setNote] = useState("");
+  // "Added — collect ₹X at the end." after an on-site add.
+  const [addedMsg, setAddedMsg] = useState("");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
@@ -134,11 +141,29 @@ function JobScreen({ id }: { id: string }) {
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ["my-jobs"] }),
       queryClient.invalidateQueries({ queryKey: ["captain-visit", id] }),
+      // A finished/collected job moves his earnings.
+      queryClient.invalidateQueries({ queryKey: ["my-wallet"] }),
     ]);
+  // A photo step that failed because storage is down keeps the photo and
+  // offers the same step again.
+  const [retryStep, setRetryStep] = useState<"before" | "after" | null>(null);
   const fail = (e: unknown) =>
     setError(
       axios.isAxiosError(e) ? translateCaptainError(getErrorMessage(e), language) : e instanceof Error && e.message ? e.message : getErrorMessage(e),
     );
+  /** Photo steps: storage down → keep the photo, offer a retry; the server
+   *  refusing THIS photo (not uploaded from the app, already used, too old,
+   *  not a new photo) → its own words, and the photo is cleared to retake. */
+  const failPhoto = (e: unknown, shot: typeof beforeShot, which: "before" | "after") => {
+    if (getErrorCode(e) === "STORAGE_UNAVAILABLE") {
+      setRetryStep(which);
+      setError(t("captain.v2.storageDown"));
+      return;
+    }
+    fail(e);
+    const message = axios.isAxiosError(e) ? getErrorMessage(e) : "";
+    if (getErrorStatus(e) === 400 && /photo/i.test(message) && /(take|again|new photo|fresh photo|already used|too old)/i.test(message)) shot.input.reset();
+  };
 
   const heading = useMutation({
     mutationFn: async () => {
@@ -151,9 +176,12 @@ function JobScreen({ id }: { id: string }) {
   });
   const byCode = car ? (car.requires_service_code ?? !!car.service_code) : true;
   const verify = useMutation({
-    mutationFn: async () => {
+    // The value is passed in when the 4th digit auto-submits (state hasn't
+    // caught up yet); the button sends what's in the field.
+    mutationFn: async (typed?: string) => {
+      const value = typed ?? code;
       const at = await getPosition(geoFail);
-      return bookingApi.verifyVehicle(car!.id, byCode ? { service_code: code } : { registration_number: code.trim() }, at);
+      return bookingApi.verifyVehicle(car!.id, byCode ? { service_code: value } : { registration_number: value.trim() }, at);
     },
     onMutate: () => setError(""),
     onSuccess: async () => {
@@ -167,22 +195,24 @@ function JobScreen({ id }: { id: string }) {
     mutationFn: async () => bookingApi.captureBeforePhoto(car!.id, await beforeShot.submit()),
     onMutate: () => {
       setError("");
+      setRetryStep(null);
       setPickedId(car!.id);
     },
     onSuccess: refresh,
-    onError: fail,
+    onError: (e) => failPhoto(e, beforeShot, "before"),
   });
   const after = useMutation({
     mutationFn: async () => bookingApi.captureAfterPhoto(car!.id, await afterShot.submit()),
     onMutate: () => {
       setError("");
+      setRetryStep(null);
       setPickedId(car!.id);
     },
     onSuccess: async () => {
       await refresh();
       setAfterMode(false);
     },
-    onError: fail,
+    onError: (e) => failPhoto(e, afterShot, "after"),
   });
   const risk = useMutation({
     mutationFn: () => bookingApi.reportRisk(car!.id, note.trim() || undefined),
@@ -217,6 +247,21 @@ function JobScreen({ id }: { id: string }) {
       </>
     );
   }
+  const status = visit.isError ? getErrorStatus(visit.error) : undefined;
+  if (!car && visit.isError && !(status !== undefined && status >= 400 && status < 500)) {
+    return (
+      <>
+        <TopBar title={t("captain.v2.title.details")} back={goBack} />
+        <LoadError
+          title={t("captain.v2.jobLoadFailed")}
+          sub={t("captain.v2.loadFailedSub")}
+          retryLabel={t("captain.v2.tryAgain")}
+          busy={visit.isFetching}
+          onRetry={() => void visit.refetch()}
+        />
+      </>
+    );
+  }
   if (!car) {
     return (
       <>
@@ -232,6 +277,8 @@ function JobScreen({ id }: { id: string }) {
   const step = stepOf(car);
   const isVisit = cars.length > 1;
   const pay = paymentOf(cars);
+  // A previous late-cancellation charge riding on this visit (in the total to collect).
+  const carriedCharge = cars.filter((c) => c.status !== "cancelled").reduce((sum, c) => sum + (Number(c.cancellation_charge) || 0), 0);
   const stuck = needsManager(car);
   const flagged = blockedByFlag(car);
   const reached = cars.some((c) => c.vehicle_verified || c.service_started_at || c.status === "completed");
@@ -245,6 +292,30 @@ function JobScreen({ id }: { id: string }) {
   const lastOpen = openCars.length === 1 && openCars[0].id === car.id;
   const words = { today: t("captain.v2.today"), tomorrow: t("captain.v2.tomorrow") };
   const showDetails = summary || step === "start" || step === "arrive" || step === "closed";
+  // On-site add-ons (spec 1.4): after arrival is verified, during the wash,
+  // and after completion while the visit still owes money.
+  const canAdd =
+    !stuck &&
+    ((car.status === "captain_on_the_way" && !!car.vehicle_verified) || car.status === "service_started" || (car.status === "completed" && pay.due > 0.004));
+  const addButton = canAdd ? (
+    <Btn
+      variant="outline"
+      className="w-full"
+      onClick={() => {
+        setError("");
+        setAddedMsg("");
+        setSheet("add");
+      }}
+      data-testid="captain-add-service"
+    >
+      <PlusCircle className="h-5 w-5 text-[#0A66F0]" /> {t("captain.onsite.addService")}
+    </Btn>
+  ) : null;
+  const addedNotice = addedMsg ? (
+    <Notice tone="green" icon={<Check className="h-4 w-4" />}>
+      {addedMsg}
+    </Notice>
+  ) : null;
 
   const title = summary
     ? t("captain.v2.title.details")
@@ -268,11 +339,13 @@ function JobScreen({ id }: { id: string }) {
       ? cars.some((c) => c.payment_method === "cash")
         ? t("captain.v2.pay.paidCash")
         : t("captain.v2.pay.paidShort")
-      : pay.prepaid
-        ? t("captain.v2.pay.prepaidShort")
-        : pay.cash
-          ? t("captain.v2.pay.cashShort").replace("{amount}", rupees(pay.cashTotal))
-          : t("captain.v2.pay.onlineShort");
+      : pay.paidAmount > 0 || pay.wallet > 0
+        ? t("captain.v2.pay.partShort").replace("{amount}", rupees(pay.due))
+        : pay.prepaid
+          ? t("captain.v2.pay.prepaidShort")
+          : pay.cash
+            ? t("captain.v2.pay.cashShort").replace("{amount}", rupees(pay.due))
+            : t("captain.v2.pay.onlineShort");
 
   // Car type first, then the service — "Sedan · Star Wash" — with the
   // make/plate under it when the booking has them.
@@ -342,6 +415,12 @@ function JobScreen({ id }: { id: string }) {
         </div>
       )}
 
+      {!summary && step !== "closed" && (
+        <div className="mb-3">
+          <CustomerEditedNote cars={cars} />
+        </div>
+      )}
+
       {showDetails && (
         <div className="space-y-3">
           {isVisit ? strip(visitCarService(cars, types)) : contextStrip}
@@ -383,7 +462,14 @@ function JobScreen({ id }: { id: string }) {
             >
               {isVisit ? [...new Set(cars.map(serviceName))].join(" + ") : serviceName(car)}
             </InfoRow>
-            <InfoRow icon={<IndianRupee className="h-5 w-5" />} label={t("captain.v2.payment")}>{payText}</InfoRow>
+            <InfoRow icon={<IndianRupee className="h-5 w-5" />} label={t("captain.v2.payment")}>
+              {payText}
+              {carriedCharge > 0 && (
+                <span className="block text-sm font-medium text-[#5F6878]" data-testid="captain-carried-charge">
+                  {t("captain.v2.pay.includesCharge").replace("{amount}", rupees(carriedCharge))}
+                </span>
+              )}
+            </InfoRow>
             <InfoRow icon={<MapPin className="h-5 w-5" />} label={t("captain.job.location")}>
               {addressLine(car) || t("captain.job.addressUnavailable")}
               <span className="block text-sm font-medium text-[#5F6878]">
@@ -405,6 +491,8 @@ function JobScreen({ id }: { id: string }) {
               </InfoRow>
             )}
           </Panel>
+
+          {step !== "closed" && <JobMoney cars={cars} types={types} />}
 
           {summary && (car.before_photo || car.after_photo) && (
             <div className="grid grid-cols-2 gap-2">
@@ -450,6 +538,9 @@ function JobScreen({ id }: { id: string }) {
             gpsText={t("captain.v2.gpsTagged")}
           />
           {flagged && <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.v2.flagged")}</Notice>}
+          {addedNotice}
+          <JobMoney cars={cars} types={types} />
+          {addButton}
         </div>
       )}
 
@@ -459,6 +550,9 @@ function JobScreen({ id }: { id: string }) {
           <Panel className="p-4">
             <WashStepper car={car} now={now} />
           </Panel>
+          <JobMoney cars={cars} types={types} />
+          {addedNotice}
+          {addButton}
         </div>
       )}
 
@@ -474,12 +568,12 @@ function JobScreen({ id }: { id: string }) {
             retakeText={t("captain.v2.retake")}
             gpsText={t("captain.v2.gpsTagged")}
           />
-          {lastOpen && car.payment_status !== "paid" && !pay.plan && (
+          {lastOpen && pay.due > 0.004 && (
             pay.prepaid ? (
               <Notice tone="amber" icon={<IndianRupee className="h-4 w-4" />}>{t("captain.v2.pay.prepaidNoCash")}</Notice>
-            ) : car.payment_method === "cash" ? (
-              <Notice tone="blue" icon={<IndianRupee className="h-4 w-4" />}>{t("captain.v2.pay.cashBefore").replace("{amount}", rupees(pay.cashTotal))}</Notice>
-            ) : null
+            ) : (
+              <Notice tone="blue" icon={<IndianRupee className="h-4 w-4" />}>{t("captain.v2.pay.cashBefore").replace("{amount}", rupees(pay.due))}</Notice>
+            )
           )}
           {flagged && <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.v2.flagged")}</Notice>}
         </div>
@@ -500,18 +594,37 @@ function JobScreen({ id }: { id: string }) {
             <p className="mt-1 tabular-nums text-[34px] font-extrabold text-[#0E1A33]">{rupees(isVisit && allDone ? pay.total : car.total_amount)}</p>
             {car.completed_at && <p className="text-sm font-medium text-[#5F6878]">{t("captain.v2.completedAt").replace("{time}", clock(car.completed_at))}</p>}
           </div>
+          <JobMoney cars={cars} types={types} />
+          {addedNotice}
           {isVisit && !allDone ? (
             <Notice tone="blue">{t("captain.v2.moreCars").replace("{n}", String(openCars.length))}</Notice>
           ) : (
             <CollectPayment cars={cars} anchor={car} />
           )}
+          {addButton}
+          {/* The done bar holds two buttons — keep the last card clear of it. */}
+          <div className="h-12" aria-hidden />
         </div>
       )}
 
       {/* ------------------------------------------------------------ actions */}
       {!summary && (
         <BottomBar>
-          {error && <p className="mb-2 text-sm font-medium text-[#B91C1C]" role="alert">{error}</p>}
+          {error && (
+            <p className="mb-2 text-sm font-medium text-[#B91C1C]" role="alert">
+              {error}
+              {retryStep && (
+                <button
+                  type="button"
+                  className="ml-2 font-bold text-[#0A66F0] underline-offset-2 hover:underline disabled:opacity-60"
+                  disabled={before.isPending || after.isPending}
+                  onClick={() => (retryStep === "before" ? before.mutate() : after.mutate())}
+                >
+                  {t("captain.v2.tryAgain")}
+                </button>
+              )}
+            </p>
+          )}
           {(step === "start" || step === "arrive") && !stuck && (
             <div className="grid grid-cols-2 gap-2">
               {canNavigate && url ? (
@@ -560,7 +673,10 @@ function JobScreen({ id }: { id: string }) {
               {isVisit && !allDone ? (
                 <Btn onClick={() => setPickedId(openCars[0].id)}>{t("captain.v2.act.nextCar")}</Btn>
               ) : (
-                <Btn onClick={goNext}>{t("captain.v2.act.nextBooking")}</Btn>
+                // Money still to collect: that panel is the main action, not "next".
+                <Btn variant={allDone && pay.due > 0.004 ? "outline" : "primary"} onClick={goNext}>
+                  {t("captain.v2.act.nextBooking")}
+                </Btn>
               )}
               <Btn variant="outline" onClick={() => setSummary(true)}>
                 {t("captain.actions.viewDetails")}
@@ -586,7 +702,13 @@ function JobScreen({ id }: { id: string }) {
             autoFocus
             maxLength={4}
             value={code}
-            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            onChange={(e) => {
+              const next = e.target.value.replace(/\D/g, "").slice(0, 4);
+              setCode(next);
+              // The 4th digit submits by itself — on a phone the keyboard
+              // otherwise covers the button.
+              if (next.length === 4 && next !== code && !verify.isPending) verify.mutate(next);
+            }}
             placeholder="••••"
             className="mt-4 h-16 w-full rounded-2xl border border-[#E4E9F1] text-center tabular-nums text-[32px] font-extrabold tracking-[0.5em] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE]"
           />
@@ -605,12 +727,28 @@ function JobScreen({ id }: { id: string }) {
           className="mt-4 w-full"
           disabled={byCode ? code.length !== 4 : code.trim().length < 3}
           loading={verify.isPending}
-          onClick={() => verify.mutate()}
+          onClick={() => verify.mutate(undefined)}
         >
           {verify.isPending ? t("captain.v2.locating") : t("captain.v2.verifyCta")}
         </Btn>
         <p className="mt-2 text-center text-xs font-medium text-[#5F6878]">{t("captain.v2.locNote")}</p>
       </Sheet>
+
+      {canAdd && (
+        <AddServicesSheet
+          key={car.id}
+          open={sheet === "add"}
+          onClose={() => setSheet(null)}
+          car={car}
+          cars={cars}
+          types={types}
+          onAdded={async (res) => {
+            setSheet(null);
+            setAddedMsg(t("captain.onsite.addedDone").replace("{amount}", rupees(res.visit_amount_due)));
+            await Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: ["collect-status"] })]);
+          }}
+        />
+      )}
 
       <Sheet open={sheet === "more"} onClose={() => setSheet(null)} title={t("captain.v2.more")}>
         <div className="space-y-2">

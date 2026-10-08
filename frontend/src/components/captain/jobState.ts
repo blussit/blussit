@@ -220,18 +220,50 @@ export function pickNext(jobs: Booking[], excludeKey?: string | null): BookingSl
 
 export const slabKeyOf = (b: Booking) => b.booking_group_id || b.id;
 
+/* ------------------------------------------------ booking money (1.5) */
+
+type Money = { wallet_applied?: number | null; amount_paid?: number | null; amount_due?: number | null };
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** One car's money — the server's fields when present, else derived the
+ * way the backend does for an older row (a stored "paid" = fully paid). */
+export function moneyOf(b: Booking) {
+  const m = b as Booking & Money;
+  const total = Number(b.total_amount) || 0;
+  const wallet = Number(m.wallet_applied) || 0;
+  const settled = b.payment_status === "paid";
+  const paid = m.amount_paid != null ? Number(m.amount_paid) || 0 : settled ? Math.max(0, total - wallet) : 0;
+  const due =
+    b.status === "cancelled" || b.payment_status === "refund_due" || b.payment_status === "refunded"
+      ? 0
+      : m.amount_due != null
+        ? Math.max(0, Number(m.amount_due) || 0)
+        : settled
+          ? 0
+          : Math.max(0, r2(total - wallet - paid));
+  return { total, wallet, paid, due };
+}
+
+/** The visit's money: Total, Paid, Wallet Credit Used, Due (every live car). */
+export function visitMoney(cars: Booking[]) {
+  const live = cars.filter((c) => c.status !== "cancelled");
+  const sum = (k: "total" | "wallet" | "paid" | "due") => r2(live.reduce((s, c) => s + moneyOf(c)[k], 0));
+  return { total: sum("total"), wallet: sum("wallet"), paid: sum("paid"), due: sum("due") };
+}
+
 /** Money still owed on a visit, and how it may be taken. */
 export function paymentOf(cars: Booking[]) {
   const live = cars.filter((c) => c.status !== "cancelled");
-  const unpaid = live.filter((c) => c.payment_status !== "paid" && (c.total_amount ?? 0) > 0);
-  const due = unpaid.reduce((s, c) => s + (c.total_amount ?? 0), 0);
-  const total = live.reduce((s, c) => s + (c.total_amount ?? 0), 0);
-  const prepaid = live.some((c) => c.prepaid_only);
-  const plan = live.every((c) => c.payment_method === "subscription" || (c.total_amount ?? 0) === 0);
+  const money = visitMoney(live);
+  const unpaid = live.filter((c) => moneyOf(c).due > 0.004);
+  const due = money.due;
+  const total = money.total;
+  // No cash on a prepaid booking that has had nothing paid towards it
+  // (the backend refuses it too); once part-paid, the rest may be cash.
+  const prepaid = unpaid.some((c) => c.prepaid_only && moneyOf(c).paid + moneyOf(c).wallet <= 0);
+  const plan = live.every((c) => c.payment_method === "subscription" || (c.total_amount ?? 0) === 0) && due <= 0.004;
   const cash = live.some((c) => c.payment_method === "cash");
-  // What he physically takes in cash for the visit: every cash car — a
-  // car finished earlier on the visit already counts as paid (completion
-  // settles it), but the customer hands over the money once, at the end.
-  const cashTotal = live.filter((c) => c.payment_method === "cash").reduce((s, c) => s + (c.total_amount ?? 0), 0);
-  return { due, total, prepaid, plan, cash, cashTotal, paid: unpaid.length === 0 };
+  // Kept for older screens: what is still to take for the visit.
+  const cashTotal = due;
+  return { due, total, paidAmount: money.paid, wallet: money.wallet, prepaid, plan, cash, cashTotal, paid: unpaid.length === 0 };
 }

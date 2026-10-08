@@ -64,3 +64,8 @@ async def ensure_society_indexes(db) -> None:
     # same phone + society dedupe).
     await db.society_leads.create_index([("service_center_id", 1), ("status", 1), ("created_at", -1)])
     await db.society_leads.create_index([("phone", 1), ("name_key", 1), ("created_at", -1)])
+    # Custom multi-car plans: same enroll/activate pattern, their own cart
+    # collection (custom_plan_service.ensure_custom_plan_indexes).
+    from app.services.custom_plan_service import ensure_custom_plan_indexes
+
+    await ensure_custom_plan_indexes(db)

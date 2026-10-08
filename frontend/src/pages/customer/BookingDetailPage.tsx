@@ -2,8 +2,9 @@
  * One booking (or a multi-car visit), as the customer sees it: a status
  * headline, the captain's card with Call / WhatsApp, the 4-digit service
  * code, a Booked → Captain assigned → On the way → Started → Completed
- * timeline (12-hour IST times), and every action that still applies — pay,
- * reschedule, cancel within policy, book again, rate, get help.
+ * timeline (12-hour IST times), and every action that still applies — pay
+ * what's due, edit (until 1 hour before), cancel (until the captain heads
+ * out, with the wallet effect shown first), book again, rate, get help.
  *
  * Founder rule: NO live location or map for the customer. The page follows
  * the booking's STATUS only — a "changed" ping on the booking:{id} socket
@@ -15,16 +16,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { BadgeCheck, Ban, CalendarClock, CarFront, CalendarX2, Check, CheckCircle2, CreditCard, LifeBuoy, MapPin, Navigation2, Pencil, Phone, RotateCcw, Sparkles, Star, UserCheck, type LucideIcon } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { vehicleTypeApi } from "../../api/catalog";
+import { bookingPolicyApi, vehicleTypeApi } from "../../api/catalog";
+import type { BookingEditResult, CancelOutcome, CancelPreview } from "../../api/bookingEdit";
+import { EditBookingSheet, EditResultSheet } from "../../components/customer/EditBookingSheet";
+import { openBlussitWhatsApp } from "../../components/public/WhatsAppFloatingButton";
 import { visitCarDetail, visitTypeServiceLabel } from "../../components/customer/cars";
+import { addedByLine, paymentStatusLabel, visitDue, visitMoney, type BookingMoney } from "../../components/customer/money";
+import { toTitle } from "../../lib/titleCase";
 import { paymentApi } from "../../api/payment";
 import { complaintApi, reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { Input, Modal, PageLoader } from "../../components/ui";
 import { btn, card, PageHeader, StatusChip, WhatsAppGlyph, whatsAppLink } from "../../components/customer/ui";
-import { SlotPicker } from "../../components/shared/SlotPicker";
 import { useLiveChannel } from "../../lib/socket";
+import { bookingEventId, trackPurchase } from "../../lib/metaPixel";
 import { formatDay, formatShortDate, formatSlot, todayIST } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
 import { combinedStatus } from "../../lib/bookingGroups";
@@ -135,9 +141,12 @@ export default function BookingDetailPage() {
   const isCustomer = user?.role === "customer";
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
-  const [rescheduleOpen, setRescheduleOpen] = useState(false);
-  const [newDate, setNewDate] = useState("");
-  const [newSlot, setNewSlot] = useState("");
+  // Edit Booking (date, time, address, services, notes) — opened here or
+  // by ?edit=1 from My Bookings — and what the save changed.
+  const [editOpen, setEditOpen] = useState(false);
+  const [editResult, setEditResult] = useState<BookingEditResult | null>(null);
+  // What a cancel just did to the wallet / plan wash.
+  const [cancelOutcome, setCancelOutcome] = useState<CancelOutcome | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [captainRating, setCaptainRating] = useState(5);
   const [captainComment, setCaptainComment] = useState("");
@@ -153,9 +162,13 @@ export default function BookingDetailPage() {
   const [supportSent, setSupportSent] = useState(false);
   // What the last pay attempt on THIS screen came to.
   const [payNote, setPayNote] = useState<{ tone: "info" | "error"; text: string } | null>(null);
+  // When a payment on this screen went through or is still being confirmed:
+  // pay actions stay hidden until the server has answered SINCE then (a
+  // second payment used to be accepted and parked for a refund).
+  const [paymentPendingAt, setPaymentPendingAt] = useState(0);
 
   const bookingQueryKey = ["booking", id];
-  const { data: booking, isLoading, isError, refetch } = useQuery({
+  const { data: booking, isLoading, isError, refetch, dataUpdatedAt: bookingUpdatedAt } = useQuery({
     queryKey: bookingQueryKey,
     queryFn: () => bookingApi.get(id as string),
     enabled: !!id,
@@ -173,30 +186,67 @@ export default function BookingDetailPage() {
     refetchInterval: (query) => (query.state.data?.every(isFinished) ? false : 45000),
   });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
+  // The edit lock (customer_edit_lock_minutes) comes from the live policy.
+  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get, staleTime: 5 * 60 * 1000 });
   const visit = groupId && visitBookings?.length ? visitBookings : null;
   const live = !!booking && !(visit ? visit.every(isFinished) : isFinished(booking));
-  /** The whole visit's amount — what the customer actually owes. */
-  const visitTotal = (visit || (booking ? [booking] : [])).reduce((sum, b) => sum + (b.total_amount || 0), 0);
   const trailCars = visit || (booking ? [booking] : []);
   const multiCar = trailCars.length > 1;
+  // A car cancelled off the visit no longer counts toward its price (a
+  // wholly cancelled visit still shows what it came to).
+  const liveCars = trailCars.filter((b) => b.status !== "cancelled");
+  const pricedCars = liveCars.length ? liveCars : trailCars;
+  /** The visit's price — every car still on it. */
+  const visitTotal = pricedCars.reduce((sum, b) => sum + (b.total_amount || 0), 0);
+  /** What a payment now actually charges — the server's own rule: the
+   *  not-cancelled cars' amount_due (total − wallet credit used − paid);
+   *  older responses: every unpaid car's total. */
+  const dueAmount = visitDue(trailCars);
+  const dueCars = liveCars.filter((b) => visitDue([b]) > 0).length;
+  // Wallet credit used on this visit, money already received, a previous
+  // wallet balance carried in, and services added on site (spec 2026-10-07).
+  const money = visitMoney(pricedCars);
   // Charged once per visit (on its first car) and already inside total_amount.
-  const travelCharge = trailCars.reduce((sum, b) => sum + (b.travel_charge || 0), 0);
+  const travelCharge = pricedCars.reduce((sum, b) => sum + (b.travel_charge || 0), 0);
   const travelKm = trailCars.find((b) => (b.travel_charge || 0) > 0)?.travel_charge_km;
   const prepaidOnly = trailCars.some((b) => b.prepaid_only);
+  // A previous late-cancellation charge carried by this visit (in the total).
+  const carriedCharge = pricedCars.reduce((sum, b) => sum + (Number(b.cancellation_charge) || 0), 0);
+  // Paid online, then cancelled: the money goes back.
+  const refundCars = trailCars.filter((b) => b.payment_status === "refund_due" || b.payment_status === "refunded");
+  const refundTotal = refundCars.reduce((sum, b) => sum + (Number(b.refunded_amount) || b.total_amount || 0), 0);
+  const refundDone = refundCars.length > 0 && refundCars.every((b) => b.payment_status === "refunded");
   // Founder rule: a prepaid service can never fall back to cash.
   const cashAllowed = !prepaidOnly && booking?.status === "awaiting_payment";
 
   useLiveChannel(id && live ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+    if (groupId) queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
   });
 
   // A failed attempt (retryable) or money received that couldn't be applied.
   const paymentStateKey = ["booking-payment-state", id];
-  const { data: paymentState } = useQuery({
+  const { data: paymentState, dataUpdatedAt: paymentStateUpdatedAt } = useQuery({
     queryKey: paymentStateKey,
     queryFn: () => paymentApi.bookingState(id as string),
     enabled: !!id && isCustomer,
-    refetchInterval: live ? 45000 : false,
+    // Faster while a payment is being confirmed, so the page settles by itself.
+    refetchInterval: (query) =>
+      query.state.data?.confirming || (paymentPendingAt > 0 && query.state.dataUpdatedAt < paymentPendingAt) ? 5000 : live ? 45000 : false,
+  });
+  /** A payment is in flight or under review — never offer another one. */
+  const paymentHeld =
+    !!paymentState?.confirming ||
+    !!paymentState?.attention ||
+    (paymentPendingAt > 0 && (paymentStateUpdatedAt < paymentPendingAt || bookingUpdatedAt < paymentPendingAt));
+
+  // What cancelling now costs (late-cancellation charge, added to the next
+  // booking) — read fresh each time the cancel dialog opens.
+  const cancelPreview = useQuery({
+    queryKey: ["cancellation-charge-preview", id, !!groupId],
+    queryFn: (): Promise<CancelPreview> => bookingApi.cancellationChargePreview(id as string, !!groupId),
+    enabled: !!id && cancelOpen && isCustomer,
+    staleTime: 0,
   });
 
   const { data: myReviews } = useQuery({ queryKey: ["my-reviews", "for", id], queryFn: () => reviewApi.mine(id ? [id] : undefined), enabled: isCustomer && !!id });
@@ -219,6 +269,14 @@ export default function BookingDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booking?.status, myReviews, searchParams]);
 
+  // "Edit" from My Bookings lands here with ?edit=1 — open the editor once.
+  const editLinkDone = useRef(false);
+  useEffect(() => {
+    if (editLinkDone.current || searchParams.get("edit") !== "1" || !booking || !isCustomer) return;
+    editLinkDone.current = true;
+    setEditOpen(true);
+  }, [booking, isCustomer, searchParams]);
+
   const openReview = () => {
     setError("");
     if (myReview) {
@@ -236,28 +294,20 @@ export default function BookingDetailPage() {
   };
 
   const cancelMutation = useMutation({
-    mutationFn: async (): Promise<void> => {
-      if (groupId) await bookingApi.cancelGroup(groupId, cancelReason);
-      else await bookingApi.cancel(id as string, cancelReason);
+    mutationFn: async (): Promise<CancelOutcome> => {
+      if (groupId) return (await bookingApi.cancelGroup(groupId, cancelReason)) as CancelOutcome;
+      return (await bookingApi.cancel(id as string, cancelReason)) as CancelOutcome;
     },
-    onSuccess: () => {
+    onSuccess: (outcome) => {
+      setCancelOutcome(outcome || {});
+      queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
       queryClient.invalidateQueries({ queryKey: ["booking", id] });
       queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      // A plan wash used on this visit goes back on the pass.
+      queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
       setCancelOpen(false);
       setCancelReason("");
-    },
-    onError: (err) => setError(getErrorMessage(err)),
-  });
-
-  const rescheduleMutation = useMutation({
-    mutationFn: () => bookingApi.reschedule(id as string, newDate, newSlot),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["booking", id] });
-      queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-      setRescheduleOpen(false);
-      setNewDate("");
-      setNewSlot("");
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
@@ -278,26 +328,55 @@ export default function BookingDetailPage() {
     onError: (err) => setError(getErrorMessage(err)),
   });
 
+  // Paying (or switching to cash) only CONFIRMS a booking that was waiting
+  // on payment — that's the Meta Purchase. Paying a confirmed cash booking
+  // online later isn't a new sale. Read when the action starts, before a
+  // live update can change the status under it.
+  const confirmsBooking = useRef(false);
+  // The amount the action settles, read when it starts (the due amount then).
+  const confirmedAmount = useRef(0);
+  const trackConfirmed = () => {
+    const value = confirmedAmount.current;
+    if (!confirmsBooking.current || !booking || !(value > 0)) return;
+    trackPurchase({
+      value,
+      eventId: bookingEventId(groupId, booking.id),
+      contentType: "booking",
+      numItems: trailCars.length,
+    });
+  };
+
   const payMutation = useMutation({
     mutationFn: () => {
       setPayNote(null);
       setError("");
+      confirmsBooking.current = booking?.status === "awaiting_payment";
+      confirmedAmount.current = dueAmount;
       return payWithRazorpay(
         // A visit is paid for once — every car on it, one order.
         groupId ? { purpose: "booking_group", booking_group_id: groupId } : { purpose: "booking", booking_id: id as string },
         { name: user?.full_name, email: user?.email, contact: user?.phone },
         undefined,
         {
-          onConfirming: () => setPayNote({ tone: "info", text: "Payment done — confirming it with the bank…" }),
+          onConfirming: () => {
+            setPaymentPendingAt(Date.now());
+            setPayNote({ tone: "info", text: "Payment done — confirming it with the bank…" });
+          },
           onFailed: (reason) => setPayNote({ tone: "error", text: `Payment failed — ${reason}` }),
         }
       );
     },
-    onSuccess: () => setPayNote(null),
+    onSuccess: () => {
+      // Paid: hold the pay buttons until the booking reloads as paid.
+      setPaymentPendingAt(Date.now());
+      setPayNote(null);
+      trackConfirmed();
+    },
     onError: (err) => {
       if (err instanceof PaymentFailed) {
         setPayNote({ tone: "error", text: `Payment failed — ${err.reason} Try again${cashAllowed ? ", or pay cash instead" : ""}.` });
       } else if (err instanceof PaymentPendingConfirmation || err instanceof PaymentNeedsAttention) {
+        setPaymentPendingAt(Date.now());
         setPayNote({ tone: "info", text: err.message });
       } else if (err instanceof PaymentCancelled) {
         setPayNote(null); // closed the modal without paying — nothing to report
@@ -316,10 +395,13 @@ export default function BookingDetailPage() {
   const switchToCashMutation = useMutation({
     // One decision for the whole visit.
     mutationFn: async (): Promise<void> => {
+      confirmsBooking.current = booking?.status === "awaiting_payment";
+      confirmedAmount.current = dueAmount;
       if (groupId) await bookingApi.switchGroupToCash(groupId);
       else await bookingApi.switchToCash(id as string);
     },
     onSuccess: () => {
+      trackConfirmed();
       queryClient.invalidateQueries({ queryKey: bookingQueryKey });
       queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
@@ -336,6 +418,13 @@ export default function BookingDetailPage() {
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
+
+  // Each dialog starts clean — an error from another action (a failed
+  // review, a refused reschedule) must not show up inside it.
+  const openCancel = () => {
+    setError("");
+    setCancelOpen(true);
+  };
 
   const supportSubjectValid = supportSubject.trim().length >= 3;
   const supportDescriptionValid = supportDescription.trim().length >= 5;
@@ -367,30 +456,41 @@ export default function BookingDetailPage() {
   }
   if (isLoading || !booking) return <PageLoader />;
 
-  // Cancellation policy (mirrors the backend): self-cancel only while still
-  // unassigned AND more than 4 hours before the slot.
   const slotStartMs = (() => {
     const start = (booking.scheduled_slot || "00:00").split("-")[0].trim();
     const t = new Date(`${booking.scheduled_date.slice(0, 10)}T${start.length === 5 ? start : "00:00"}:00+05:30`).getTime();
     return Number.isNaN(t) ? Date.now() : t;
   })();
-  const insideCancelLock = Date.now() > slotStartMs - 4 * 60 * 60 * 1000;
-  const unassigned = ["pending", "rescheduled"].includes(booking.status);
-  // Not a real booking yet (online payment not finished): nothing was
-  // dispatched, so the 4-hour lock doesn't apply.
+  // Spec 2026-10-07: the customer cancels until the captain heads out, and
+  // edits until customer_edit_lock_minutes (60) before the slot — the
+  // server enforces both; these only decide which buttons show.
+  const editLockMinutes = (policy as { customer_edit_lock_minutes?: number } | undefined)?.customer_edit_lock_minutes ?? 60;
+  const insideEditLock = Date.now() > slotStartMs - editLockMinutes * 60 * 1000;
+  // Not a real booking yet (online payment not finished): nothing to edit — pay or cancel.
   const awaitingPayment = booking.status === "awaiting_payment";
   const failedReason = !payNote && !payMutation.isPending ? paymentState?.last_failure?.reason : undefined;
   const lastFailure = failedReason ? sentence(failedReason) : undefined;
-  const canCancel = isCustomer && (awaitingPayment || (unassigned && !insideCancelLock));
+  const captainHeaded = trailCars.some((b) => ["captain_on_the_way", "service_started", "completed"].includes(b.status));
+  const bookingOpen = !["completed", "cancelled"].includes(booking.status);
+  const canCancel = isCustomer && bookingOpen && (awaitingPayment || !captainHeaded);
+  const canEdit = isCustomer && bookingOpen && !awaitingPayment && !captainHeaded && !insideEditLock;
   const cancelLockHint =
-    isCustomer && !["completed", "cancelled"].includes(booking.status) && !canCancel
-      ? !unassigned
-        ? "A captain is assigned, so it can't be cancelled online."
-        : "Cancellations close 4 hours before your slot. Message us on WhatsApp for help."
-      : null;
-  // Mirrors the backend's reschedule guard.
-  const canReschedule = isCustomer && !["completed", "cancelled", "captain_on_the_way", "service_started", "awaiting_payment"].includes(booking.status);
-  const canPayOnline = isCustomer && booking.payment_status === "pending" && booking.status !== "cancelled" && !awaitingPayment && booking.total_amount > 0;
+    isCustomer && bookingOpen && !canCancel
+      ? "Your captain is on the way, so this booking can't be cancelled or changed here. Message us on WhatsApp for help."
+      : canCancel && !canEdit && !awaitingPayment
+        ? `Changes close ${editLockMinutes >= 60 && editLockMinutes % 60 === 0 ? `${editLockMinutes / 60} hour${editLockMinutes === 60 ? "" : "s"}` : `${editLockMinutes} minutes`} before your slot.`
+        : null;
+  // Anything still due can be paid online — a cash booking, a part-paid one
+  // (an edit or an on-site add-on raised it), even after the wash.
+  const canPayOnline =
+    isCustomer &&
+    booking.status !== "cancelled" &&
+    !awaitingPayment &&
+    !["refund_due", "refunded"].includes(booking.payment_status) &&
+    dueAmount > 0 &&
+    !paymentHeld;
+  // One payment action at a time: while the checkout is open, nothing else on the visit moves.
+  const payBusy = payMutation.isPending || switchToCashMutation.isPending;
   const cancelReasonValid = cancelReason.trim().length >= 3;
   // "Sedan · Star Wash" — the car type and the service, then the make/plate when the booking has them.
   const title = visitTypeServiceLabel({ bookings: trailCars }, vehicleTypes);
@@ -512,28 +612,28 @@ export default function BookingDetailPage() {
       {awaitingPayment ? (
         // Not booked until paid: finish paying, or (unless prepaid only) have the captain collect cash.
         <div>
-          <p className="font-semibold text-[#0E1A33]">{paymentState?.confirming ? "Confirming Your Payment…" : lastFailure ? "Payment Failed" : "Payment Pending"}</p>
+          <p className="font-semibold text-[#0E1A33]">{paymentHeld && !paymentState?.attention ? "Confirming Your Payment…" : paymentState?.attention ? "Payment Under Review" : lastFailure ? "Payment Failed" : "Payment Pending"}</p>
           <p className="mt-1 text-sm text-[#5F6878]">
-            {lastFailure
-              ? `${lastFailure} Try again${cashAllowed ? ", or pay cash instead" : ""} — unpaid slots are released shortly.`
-              : `Pay to confirm your slot${visit ? ` — one payment covers all ${visit.length} vehicles` : ""}. Unpaid slots are released shortly.`}
+            {paymentHeld
+              ? "No need to pay again — this page updates by itself once it's confirmed."
+              : lastFailure
+                ? `${lastFailure} Try again${cashAllowed ? ", or pay cash instead" : ""} — unpaid slots are released shortly.`
+                : `Pay to confirm your slot${dueCars > 1 ? ` — one payment covers ${dueCars === trailCars.length ? `all ${dueCars}` : dueCars} vehicles` : ""}. Unpaid slots are released shortly.`}
           </p>
           {payNote && <p className={`mt-2 text-sm ${payNote.tone === "error" ? "text-[#C62828]" : "text-[#0E1A33]"}`}>{payNote.text}</p>}
           <div className="mt-4 grid gap-2">
-            <button type="button" className={btn("primary", "md", "w-full")} disabled={payMutation.isPending} onClick={() => payMutation.mutate()}>
-              {payMutation.isPending ? "Opening Payment…" : lastFailure ? `Try Again — ₹${Math.round(visitTotal)}` : `Pay ₹${Math.round(visitTotal)} Now`}
-            </button>
-            {!prepaidOnly && (
-              <button type="button" className={btn("outline", "md", "w-full")} disabled={switchToCashMutation.isPending} onClick={() => switchToCashMutation.mutate()}>
-                Pay Cash Instead
+            {!paymentHeld && (
+              <button type="button" className={btn("primary", "md", "w-full")} disabled={payBusy} onClick={() => payMutation.mutate()}>
+                {payMutation.isPending ? "Opening Payment…" : lastFailure ? `Try Again — ₹${Math.round(dueAmount)}` : `Pay ₹${Math.round(dueAmount)} Now`}
               </button>
             )}
-            {/* Nothing is booked yet, so the booking reopens with every choice filled in. */}
-            <Link to={`/app/book?edit=${booking.id}`} className={btn("ghost", "md", "w-full")}>
-              <Pencil className="h-4 w-4" /> Edit Booking
-            </Link>
+            {!prepaidOnly && !paymentHeld && (
+              <button type="button" className={btn("outline", "md", "w-full")} disabled={payBusy} onClick={() => switchToCashMutation.mutate()}>
+                {switchToCashMutation.isPending ? "Switching To Cash…" : "Pay Cash Instead"}
+              </button>
+            )}
             {canCancel && (
-              <button type="button" className={btn("danger", "md", "w-full")} onClick={() => setCancelOpen(true)}>
+              <button type="button" className={btn("danger", "md", "w-full")} disabled={payBusy || paymentHeld} onClick={openCancel}>
                 <CalendarX2 className="h-4 w-4" /> Cancel Booking
               </button>
             )}
@@ -544,8 +644,11 @@ export default function BookingDetailPage() {
           {/* Founder rule: any unpaid booking can be paid online at any time, even one booked as cash. */}
           {canPayOnline && (
             <button type="button" className={btn("primary", "md", "w-full")} disabled={payMutation.isPending} onClick={() => payMutation.mutate()}>
-              {payMutation.isPending ? "Opening Payment…" : `Pay ₹${Math.round(visitTotal)} Online`}
+              {payMutation.isPending ? "Opening Payment…" : `Pay ₹${Math.round(dueAmount)} Now`}
             </button>
+          )}
+          {isCustomer && paymentHeld && !payNote && booking.payment_status !== "paid" && !paymentState?.attention && (
+            <p className="text-sm text-[#0E1A33]">Confirming your payment — no need to pay again.</p>
           )}
           {payNote && <p className={`text-sm ${payNote.tone === "error" ? "text-[#C62828]" : "text-[#0E1A33]"}`}>{payNote.text}</p>}
           {isCustomer && ["completed", "cancelled"].includes(booking.status) && (
@@ -558,13 +661,21 @@ export default function BookingDetailPage() {
               <Star className="h-4 w-4" /> Rate This Wash
             </button>
           )}
-          {canReschedule && (
-            <button type="button" className={btn("outline", "md", "w-full")} onClick={() => setRescheduleOpen(true)}>
-              <CalendarClock className="h-4 w-4" /> Reschedule
+          {canEdit && (
+            <button
+              type="button"
+              className={btn("outline", "md", "w-full")}
+              data-testid="edit-booking"
+              onClick={() => {
+                setError("");
+                setEditOpen(true);
+              }}
+            >
+              <Pencil className="h-4 w-4" /> Edit Booking
             </button>
           )}
           {canCancel && (
-            <button type="button" className={btn("danger", "md", "w-full")} onClick={() => setCancelOpen(true)}>
+            <button type="button" className={btn("danger", "md", "w-full")} disabled={payBusy} onClick={openCancel}>
               <CalendarX2 className="h-4 w-4" /> Cancel Booking
             </button>
           )}
@@ -638,15 +749,26 @@ export default function BookingDetailPage() {
       <h2 className="mb-3 font-display text-[16px] font-bold text-[#0E1A33]">Price Details</h2>
       <div className="space-y-2.5 text-sm">
         {visit ? (
-          visit.map((car) => (
-            <div key={car.id} className="flex justify-between gap-3">
-              <span className="min-w-0 text-[#5F6878]">
-                <span className="block font-medium text-[#0E1A33]">{visitTypeServiceLabel({ bookings: [car] }, vehicleTypes)}</span>
-                {visitCarDetail({ bookings: [car] }, vehicleTypes)}
-              </span>
-              <span className="tabular-nums text-[#0E1A33]">₹{Math.round((car.total_amount || 0) - (car.travel_charge || 0))}</span>
-            </div>
-          ))
+          visit.map((car) => {
+            // A car cancelled off a still-live visit isn't charged: shown struck, out of the total.
+            const dropped = car.status === "cancelled" && liveCars.length > 0;
+            return (
+              <div key={car.id} className="flex justify-between gap-3">
+                <span className="min-w-0 text-[#5F6878]">
+                  <span className="block font-medium text-[#0E1A33]">{visitTypeServiceLabel({ bookings: [car] }, vehicleTypes)}</span>
+                  {[visitCarDetail({ bookings: [car] }, vehicleTypes), dropped ? "Cancelled" : ""].filter(Boolean).join(" · ")}
+                  {((car as BookingMoney).added_services || []).map((a, i) => (
+                    <span key={i} className="block text-xs">
+                      Incl. {toTitle(a.name) || "Extra Service"} ₹{Math.round(a.amount || 0)} — {addedByLine(a)}
+                    </span>
+                  ))}
+                </span>
+                <span className={cn("tabular-nums", dropped ? "text-[#8A94A6] line-through" : "text-[#0E1A33]")}>
+                  ₹{Math.round((car.total_amount || 0) - (dropped ? 0 : (car.travel_charge || 0) + (Number(car.cancellation_charge) || 0) + (Number((car as BookingMoney).wallet_due_carried) || 0)))}
+                </span>
+              </div>
+            );
+          })
         ) : (
           <>
             <div className="flex justify-between">
@@ -667,17 +789,82 @@ export default function BookingDetailPage() {
             <span className="tabular-nums text-[#0E1A33]">₹{Math.round(travelCharge)}</span>
           </div>
         )}
+        {!visit && money.addedServices > 0 && (
+          <div className="space-y-1.5" data-testid="booking-added-services">
+            {((booking as BookingMoney).added_services || []).length ? (
+              ((booking as BookingMoney).added_services || []).map((a, i) => (
+                <div key={i} className="flex justify-between gap-3">
+                  <span className="min-w-0 text-[#5F6878]">
+                    {toTitle(a.name) || "Extra Service"}
+                    {(a.qty || 1) > 1 ? ` ×${a.qty}` : ""} <span className="text-xs">— {addedByLine(a)}</span>
+                  </span>
+                  <span className="tabular-nums text-[#0E1A33]">₹{Math.round(a.amount || 0)}</span>
+                </div>
+              ))
+            ) : (
+              <div className="flex justify-between gap-3">
+                <span className="text-[#5F6878]">Added On Site</span>
+                <span className="tabular-nums text-[#0E1A33]">₹{Math.round(money.addedServices)}</span>
+              </div>
+            )}
+          </div>
+        )}
+        {money.walletCarried > 0 && (
+          <div className="flex justify-between gap-3" data-testid="booking-previous-balance">
+            <span className="text-[#5F6878]">Previous Balance Due</span>
+            <span className="tabular-nums text-[#0E1A33]">₹{Math.round(money.walletCarried)}</span>
+          </div>
+        )}
+        {carriedCharge > 0 && (
+          <div className="flex justify-between gap-3" data-testid="booking-carried-charge">
+            <span className="text-[#5F6878]">Previous Cancellation Charge</span>
+            <span className="tabular-nums text-[#0E1A33]">₹{Math.round(carriedCharge)}</span>
+          </div>
+        )}
         <div className="flex justify-between border-t border-[#EEF2F7] pt-3 text-base font-bold text-[#0E1A33]">
           <span>Total</span>
           <span className="tabular-nums">₹{Math.round(visitTotal)}</span>
         </div>
+        {money.walletApplied > 0 && (
+          <div className="flex justify-between gap-3 text-[#1E7B3C]" data-testid="booking-wallet-applied">
+            <span>Wallet Credit</span>
+            <span className="tabular-nums">−₹{Math.round(money.walletApplied)}</span>
+          </div>
+        )}
+        {money.amountPaid > 0 && (
+          <div className="flex justify-between gap-3" data-testid="booking-amount-paid">
+            <span className="text-[#5F6878]">Paid</span>
+            <span className="tabular-nums text-[#0E1A33]">₹{Math.round(money.amountPaid)}</span>
+          </div>
+        )}
+        {dueAmount > 0 && (Math.round(dueAmount) !== Math.round(visitTotal) || money.walletApplied > 0 || money.amountPaid > 0) && (
+          <div className="flex justify-between rounded-xl bg-[#FFF8EE] px-3 py-2 text-sm font-bold text-[#0E1A33]" data-testid="booking-amount-due">
+            <span>Amount Due</span>
+            <span className="tabular-nums">₹{Math.round(dueAmount)}</span>
+          </div>
+        )}
         <div className="flex justify-between text-xs text-[#5F6878]">
           <span>Payment</span>
           <span>
             {PAYMENT_METHOD_LABELS[booking.payment_method] || (booking.payment_method || "—").replace(/_/g, " ")}
-            {booking.payment_status === "paid" ? " · Paid" : ""}
+            {["paid", "partially_paid"].includes(booking.payment_status) ? ` · ${paymentStatusLabel(booking.payment_status)}` : ""}
           </span>
         </div>
+        {(refundCars.length > 0 || paymentState?.refund) && (
+          <div className="flex justify-between gap-3 rounded-xl bg-[#F4F8FF] px-3 py-2 text-sm font-semibold text-[#0E1A33]" data-testid="booking-refund">
+            {(paymentState?.refund?.status ?? (refundDone ? "refunded" : "due")) === "refunded" ? (
+              <>
+                <span>Refunded</span>
+                <span className="tabular-nums">₹{Math.round(paymentState?.refund?.amount ?? refundTotal)}</span>
+              </>
+            ) : (
+              <>
+                <span>Refund In Process</span>
+                <span className="tabular-nums">₹{Math.round(paymentState?.refund?.amount ?? refundTotal)}</span>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -783,6 +970,45 @@ export default function BookingDetailPage() {
 
       <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="Cancel Booking">
         <div className="space-y-4">
+          <div className="space-y-1.5 rounded-xl bg-[#F4F8FF] px-3.5 py-3 text-sm text-[#0E1A33]" data-testid="customer-cancel-preview">
+            {cancelPreview.isLoading ? (
+              <span className="text-[#5F6878]">Checking what cancelling costs…</span>
+            ) : cancelPreview.data ? (
+              cancelPreview.data.can_cancel === false ? (
+                <span>{cancelPreview.data.refusal || "This booking can't be cancelled now."}</span>
+              ) : (
+                <>
+                  {cancelPreview.data.amount > 0 ? <p className="font-semibold">Charge ₹{Math.round(cancelPreview.data.amount)}</p> : null}
+                  {(cancelPreview.data.net ?? 0) > 0 && <p className="font-semibold text-[#1E7B3C]">₹{Math.round(cancelPreview.data.net ?? 0)} Back To Your Wallet</p>}
+                  {(cancelPreview.data.net ?? 0) < 0 && <p className="font-semibold">₹{Math.round(-(cancelPreview.data.net ?? 0))} Added To Your Next Booking</p>}
+                  {(cancelPreview.data.plan_wash_forfeited_count ?? 0) > 0 ? (
+                    <p className="font-semibold text-[#B25E00]">This Plan Wash Will Be Used Up</p>
+                  ) : cancelPreview.data.plan_wash_returned ? (
+                    <p className="font-semibold">Your Plan Wash Will Be Returned</p>
+                  ) : null}
+                  {!(cancelPreview.data.amount > 0) && !(cancelPreview.data.net ?? 0) && !(cancelPreview.data.plan_wash_forfeited_count ?? 0) && !cancelPreview.data.plan_wash_returned && (
+                    <p className="font-semibold">Cancelling now is free.</p>
+                  )}
+                </>
+              )
+            ) : (
+              <span className="text-[#5F6878]">Free up to 4 hours before your slot.</span>
+            )}
+            <Link to="/cancellation-policy" className="block text-xs font-semibold text-[#0A66F0] underline-offset-2 hover:underline">
+              Cancellation Policy
+            </Link>
+          </div>
+          {cancelPreview.data?.can_cancel === false ? (
+            <div className="grid gap-2">
+              <button type="button" className={btn("outline", "md", "w-full")} onClick={() => openBlussitWhatsApp(`Hi Blussit, I need help with booking ${booking.booking_number}.`)}>
+                <WhatsAppGlyph className="h-[18px] w-[18px]" /> Message Us On WhatsApp
+              </button>
+              <a href="tel:8962288774" className={btn("ghost", "md", "w-full")}>
+                <Phone className="h-4 w-4" /> Call Us
+              </a>
+            </div>
+          ) : (
+            <>
           <Input
             label="Reason For Cancellation"
             value={cancelReason}
@@ -793,19 +1019,58 @@ export default function BookingDetailPage() {
           <button type="button" className={btn("primary", "md", "w-full bg-[#C62828] hover:bg-[#B71C1C]")} disabled={!cancelReasonValid || cancelMutation.isPending} onClick={() => cancelMutation.mutate()}>
             {cancelMutation.isPending ? "Cancelling…" : "Confirm Cancellation"}
           </button>
+            </>
+          )}
         </div>
       </Modal>
 
-      <Modal open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} title="Reschedule">
-        <div className="space-y-4">
-          <p className="text-sm text-[#5F6878]">Your captain may change for the new time.</p>
-          <SlotPicker serviceCenterId={booking.service_center_id} date={newDate} onDateChange={setNewDate} value={newSlot} onChange={setNewSlot} />
-          {error && <p className="text-sm text-[#C62828]">{error}</p>}
-          <button type="button" className={btn("primary", "md", "w-full")} disabled={!newDate || !newSlot || rescheduleMutation.isPending} onClick={() => rescheduleMutation.mutate()}>
-            {rescheduleMutation.isPending ? "Saving…" : "Confirm Reschedule"}
-          </button>
+      <Modal open={!!cancelOutcome} onClose={() => setCancelOutcome(null)} title="Booking Cancelled">
+        <div className="space-y-3 text-sm text-[#0E1A33]" data-testid="cancel-outcome">
+          {cancelOutcome?.wallet?.wallet_line ? <p>{cancelOutcome.wallet.wallet_line}</p> : <p>Your booking is cancelled.</p>}
+          {!!cancelOutcome?.plan_wash_forfeited && <p className="font-semibold text-[#B25E00]">The plan wash on this booking is used up.</p>}
+          <div className="grid gap-2 pt-1">
+            {cancelOutcome?.wallet && (cancelOutcome.wallet.net ?? 0) !== 0 && (
+              <Link to="/app/wallet" className={btn("outline", "md", "w-full")}>
+                View My Wallet
+              </Link>
+            )}
+            <button type="button" className={btn("primary", "md", "w-full")} onClick={() => setCancelOutcome(null)}>
+              Done
+            </button>
+          </div>
         </div>
       </Modal>
+
+      <EditBookingSheet
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        cars={liveCars.length ? liveCars : trailCars}
+        groupId={groupId}
+        vehicleTypes={vehicleTypes}
+        onSaved={(result) => {
+          setEditOpen(false);
+          setEditResult(result);
+          queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+          queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
+          queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+          queryClient.invalidateQueries({ queryKey: ["available-slots"] });
+          queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
+          queryClient.invalidateQueries({ queryKey: paymentStateKey });
+        }}
+      />
+      <EditResultSheet
+        result={editResult}
+        onClose={() => setEditResult(null)}
+        onPay={
+          isCustomer && !paymentHeld
+            ? () => {
+                setEditResult(null);
+                payMutation.mutate();
+              }
+            : undefined
+        }
+      />
+
 
       <Modal open={reviewOpen} onClose={() => setReviewOpen(false)} title={myReview ? "Edit Your Review" : "Rate Your Wash"}>
         <div className="space-y-4">

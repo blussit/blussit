@@ -1,11 +1,54 @@
-from datetime import datetime
-from typing import Optional
+import re
+from datetime import date, datetime
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.storage import MAX_STORED_URL_LENGTH, is_own_upload_url
 from app.models.enums import BookingPriority, PaymentMethod
 from app.schemas.profile_schema import AddressCreateRequest, VehicleCreateRequest
 from app.utils.phone import validate_indian_mobile
+from app.utils.timezone import IST
+
+_PLAIN_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def ist_calendar_day(value) -> datetime:
+    """THE one form a booking's scheduled_date takes: the IST business
+    calendar day it names, as naive midnight (the form every query and the
+    seat counters key on). "2026-10-10", "2026-10-10T00:00:00+05:30" and
+    "2026-10-09T18:30:00Z" are all 10 Oct. An aware value was stored as a
+    UTC instant before — the previous day at 18:30 — so its booking showed,
+    and released its seat, on the wrong day (audit BOOK-01). A naive value
+    is IST wall-clock already; only its date counts."""
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            if _PLAIN_DAY.match(text):
+                day = date.fromisoformat(text)
+                return datetime(day.year, day.month, day.day)
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
+        except ValueError:
+            raise ValueError("Pick a valid date (YYYY-MM-DD).")
+    else:
+        raise ValueError("Pick a valid date (YYYY-MM-DD).")
+    day = moment.astimezone(IST).date() if moment.tzinfo else moment.date()
+    return datetime(day.year, day.month, day.day)
+
+
+def _ist_day_string(value) -> str:
+    return ist_calendar_day(value).strftime("%Y-%m-%d")
+
+
+def _unique_ids(ids: list[str]) -> list[str]:
+    """Each service once, in the order picked. ["star", "star", "star"] used
+    to price three washes while a pass waived them all and spent one
+    (audit PRICE-02); repeats are what service_quantities is for."""
+    return list(dict.fromkeys(ids or []))
 
 
 def _validate_alt_contact_phone(v: Optional[str]) -> Optional[str]:
@@ -44,13 +87,22 @@ class BookingCreateRequest(BaseModel):
     # Slot-hold ticket (AUDIT.md M1): the anonymous/session key the client
     # used when acquiring a hold, so create_booking can convert it.
     hold_key: Optional[str] = Field(default=None, max_length=80)
+    # The total the customer was shown (from POST /bookings/quote). When
+    # sent, a booking the server would now charge MORE for is refused with
+    # 409 PRICE_CHANGED instead of being created at the new price.
+    expected_total: Optional[float] = Field(default=None, ge=0)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+    _day = field_validator("scheduled_date", mode="before")(ist_calendar_day)
+    _services = field_validator("service_ids")(_unique_ids)
 
     @model_validator(mode="after")
     def _vehicle_or_type(self) -> "BookingCreateRequest":
-        if bool(self.vehicle_id) == bool(self.vehicle_type):
-            raise ValueError("Provide exactly one of vehicle_id or vehicle_type")
+        # A saved car (vehicle_id) may also name its type — a car-bound
+        # pass booking sends both; the car's own type must match it
+        # (checked by create_booking).
+        if not (self.vehicle_id or self.vehicle_type):
+            raise ValueError("Provide vehicle_id or vehicle_type")
         return self
 
 
@@ -95,6 +147,20 @@ class QuickBookingLine(BaseModel):
     # customer's plan?") — e.g. the customer wants to save the wash and pay
     # cash this once. See BookingService._cars_for_lines.
     use_subscription: bool = True
+    # An explicit car-bound pass (a custom multi-car plan or a society pass
+    # names ONE car): the customer's saved car and the pass to use for it.
+    # Such a pass is never applied automatically and never to another car
+    # (BookingService._cars_for_lines); quantity must be 1.
+    vehicle_id: Optional[str] = Field(default=None, pattern=r"^[0-9a-fA-F]{24}$")
+    subscription_id: Optional[str] = Field(default=None, pattern=r"^[0-9a-fA-F]{24}$")
+
+    _services = field_validator("service_ids")(_unique_ids)
+
+    @model_validator(mode="after")
+    def _one_named_car(self) -> "QuickBookingLine":
+        if (self.vehicle_id or self.subscription_id) and self.quantity != 1:
+            raise ValueError("A line for a specific car (or its pass) books exactly one car")
+        return self
 
 
 class QuickBookingRequest(BaseModel):
@@ -124,6 +190,8 @@ class QuickBookingRequest(BaseModel):
     # website bookings only; signed-in customers and managers send neither.
     phone_otp: Optional[str] = Field(default=None, max_length=8)
     phone_access_token: Optional[str] = Field(default=None, max_length=4000)
+    # The visit total the customer was shown — see BookingCreateRequest.
+    expected_total: Optional[float] = Field(default=None, ge=0)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
 
@@ -238,6 +306,9 @@ class ManagerLogBookingRequest(BaseModel):
     # Tip the customer gave for this visit (optional). Added to the visit's
     # total and revenue (founder) — see BookingService._record_tip.
     tip_amount: float = Field(default=0, ge=0, le=100000)
+    # How the tip was handed over — its own method, independent of
+    # payment_method (MONEY-2). Default cash.
+    tip_method: Literal["cash", "online"] = "cash"
     # True = the customer gets ONE WhatsApp: "service is done". Nothing else.
     send_whatsapp: bool = True
 
@@ -288,8 +359,11 @@ class ManagerMarkDoneRequest(BaseModel):
 class BookingTipRequest(BaseModel):
     """Manager/admin recording (or correcting) the tip on a job the manager
     did. 0 clears it. One tip per visit, part of its total — see
-    BookingService.set_tip."""
+    BookingService.set_tip. `tip_method` (MONEY-2): how the tip itself was
+    handed over — cash (default) or online — independent of how the job
+    was paid; it decides which money bucket the tip is counted in."""
     tip_amount: float = Field(ge=0, le=100000)
+    tip_method: Literal["cash", "online"] = "cash"
 
     _tip = field_validator("tip_amount")(_whole_rupee_tip)
 
@@ -319,6 +393,8 @@ class ManagerBookingCreateRequest(BaseModel):
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+    _day = field_validator("scheduled_date", mode="before")(ist_calendar_day)
+    _services = field_validator("service_ids")(_unique_ids)
 
     @model_validator(mode="after")
     def _exactly_one_vehicle_and_address(self) -> "ManagerBookingCreateRequest":
@@ -351,7 +427,9 @@ class ReportRiskRequest(BaseModel):
 
 class BookingRescheduleRequest(BaseModel):
     scheduled_date: datetime
-    scheduled_slot: str
+    scheduled_slot: str = Field(max_length=20)
+
+    _day = field_validator("scheduled_date", mode="before")(ist_calendar_day)
 
 
 class GroupVehicleRequest(BaseModel):
@@ -371,10 +449,14 @@ class GroupVehicleRequest(BaseModel):
     # customer with two passes gets two cars covered and pays for the rest.
     subscription_id: Optional[str] = None
 
+    _services = field_validator("service_ids")(_unique_ids)
+
     @model_validator(mode="after")
     def _vehicle_or_type(self) -> "GroupVehicleRequest":
-        if bool(self.vehicle_id) == bool(self.vehicle_type):
-            raise ValueError("Provide exactly one of vehicle_id or vehicle_type")
+        # Both may be sent for a saved car (its type must match — see
+        # BookingCreateRequest); at least one is required.
+        if not (self.vehicle_id or self.vehicle_type):
+            raise ValueError("Provide vehicle_id or vehicle_type")
         if self.vehicle_id and self.quantity != 1:
             raise ValueError("quantity applies to vehicle_type lines only")
         return self
@@ -387,6 +469,7 @@ class BookingGroupCreateRequest(BaseModel):
 
     vehicles: list[GroupVehicleRequest] = Field(min_length=1)
     address_id: str
+    # Always the plain IST day ("YYYY-MM-DD") once validated — see ist_calendar_day.
     scheduled_date: str
     scheduled_slot: str
     hold_key: Optional[str] = None
@@ -395,12 +478,34 @@ class BookingGroupCreateRequest(BaseModel):
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = None
     alternate_contact_phone: Optional[str] = None
+    # The visit total the customer was shown — see BookingCreateRequest.
+    expected_total: Optional[float] = Field(default=None, ge=0)
 
     _validate_alt_phone = field_validator("alternate_contact_phone")(_validate_alt_contact_phone)
+    _day = field_validator("scheduled_date", mode="before")(_ist_day_string)
 
 
 class BookingCancelRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=300)
+    # Staff only (a customer's own cancel is always "at their request"):
+    # the customer asked for this cancellation, so the late-cancellation
+    # charge applies (GET /bookings/{id}/cancellation-charge-preview).
+    # Without it a staff cancel is a business cancel and never charges.
+    at_customer_request: bool = False
+    # Staff may lower the charge: 0..the policy amount (default the policy
+    # amount when at_customer_request). Whole rupees.
+    charge_amount: Optional[float] = Field(default=None, ge=0, le=2000)
+    # Staff only: hand a plan-covered wash back to the pass even though the
+    # customer cancelled inside its last hour (it is used up by default —
+    # spec 1.2). Ignored for the customer's own cancel.
+    return_plan_wash: Optional[bool] = None
+
+    @field_validator("charge_amount")
+    @classmethod
+    def _rupees(cls, v: Optional[float]) -> Optional[float]:
+        from app.utils.money import round_rupees
+
+        return None if v is None else float(round_rupees(v))
 
 
 class BookingAssignCaptainRequest(BaseModel):
@@ -414,33 +519,53 @@ class BookingAssignCaptainRequest(BaseModel):
 
 
 class EquipmentUsedInput(BaseModel):
-    inventory_item_id: str
-    item_name: str
-    quantity: float
+    # Checked against the booking's center inventory before the job moves
+    # (audit VAL-3: a bad id was a 500 after the status had changed).
+    inventory_item_id: str = Field(pattern=r"^[0-9a-fA-F]{24}$")
+    item_name: str = Field(max_length=120)
+    # Taken FROM the store — never zero or negative (a negative quantity
+    # topped the stock up).
+    quantity: float = Field(gt=0, le=1000)
+
+
+# A real position on Earth (audit CAP-04: any float was stored as the
+# captain's location and fed the geofence/breadcrumb maths).
+Latitude = Annotated[float, Field(ge=-90, le=90)]
+Longitude = Annotated[float, Field(ge=-180, le=180)]
 
 
 class HeadingRequest(BaseModel):
     """Captain taps 'Heading to customer' — captures departure time + their
     current GPS location, and the equipment they're carrying from the store."""
-    latitude: float
-    longitude: float
+    latitude: Latitude
+    longitude: Longitude
     equipment_used: list[EquipmentUsedInput] = []
 
 
 class CaptainLocationPingRequest(BaseModel):
     """Periodic location update while a captain has an active job — see
     BookingService.update_captain_location / has_active_job."""
-    latitude: float
-    longitude: float
+    latitude: Latitude
+    longitude: Longitude
 
 
 class PhotoCaptureRequest(BaseModel):
     """Used for both the before-service and after-service photo steps. The
     image must come from a live camera capture on the frontend (never a
     file picker) and always carries the device's GPS coordinates."""
-    image_url: str
-    latitude: float
-    longitude: float
+    image_url: str = Field(max_length=MAX_STORED_URL_LENGTH)
+    latitude: Latitude
+    longitude: Longitude
+
+    @field_validator("image_url")
+    @classmethod
+    def _uploaded_by_us(cls, v: str) -> str:
+        # The proof photo is whatever POST /uploads/photo returned — any
+        # other URL would put an arbitrary (or someone else's) image on the
+        # job card the customer and manager trust.
+        if not is_own_upload_url(v):
+            raise ValueError("Please take the photo again — it didn't upload to our storage.")
+        return v
 
 
 class CaptainCancelRequest(BaseModel):
@@ -463,9 +588,9 @@ class VerifyVehicleRequest(BaseModel):
     # under the older saved-vehicle flow.
     service_code: Optional[str] = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$")
     registration_number: Optional[str] = Field(default=None, min_length=3, max_length=20)
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    accuracy_m: Optional[float] = None
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    accuracy_m: Optional[float] = Field(default=None, ge=0, le=100000)
 
     @model_validator(mode="after")
     def _code_or_plate(self) -> "VerifyVehicleRequest":
@@ -482,3 +607,100 @@ class ResolveIssueRequest(BaseModel):
 
 class PriorityUpdateRequest(BaseModel):
     priority: BookingPriority
+
+
+_OBJECT_ID = r"^[0-9a-fA-F]{24}$"
+
+
+class BookingCarEdit(BaseModel):
+    """One car's changes in a customer edit (spec 1.3). Only the fields
+    sent change. `booking_id` names the car (required on
+    PATCH /bookings/group/{id}; on PATCH /bookings/{id} it defaults to that
+    booking). A plan-covered car can't change its service or car."""
+    booking_id: Optional[str] = Field(default=None, pattern=_OBJECT_ID)
+    vehicle_type: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    vehicle_id: Optional[str] = Field(default=None, pattern=_OBJECT_ID)
+    service_ids: Optional[list[str]] = Field(default=None, min_length=1, max_length=20)
+    service_quantities: Optional[dict[str, int]] = None
+
+    _services = field_validator("service_ids")(lambda v: _unique_ids(v) if v is not None else v)
+
+    def changes_car(self) -> bool:
+        return any(v is not None for v in (self.vehicle_type, self.vehicle_id, self.service_ids, self.service_quantities))
+
+
+class BookingEditRequest(BaseModel):
+    """PATCH /bookings/{id} and PATCH /bookings/group/{id} — the customer
+    changes their booking (spec 1.3) until 1 hour before the slot.
+    Visit-wide: scheduled_date + scheduled_slot (together), the address
+    (a saved address_id or a new pinned `address`; it must be served by the
+    SAME center) and notes. Per car: `cars` (or, on the single-booking
+    endpoint, the top-level vehicle_type / vehicle_id / service_ids /
+    service_quantities). `expected_total`: the visit total the customer was
+    shown — a higher new total is refused with 409 PRICE_CHANGED."""
+    scheduled_date: Optional[datetime] = None
+    scheduled_slot: Optional[str] = Field(default=None, max_length=20)
+    address_id: Optional[str] = Field(default=None, pattern=_OBJECT_ID)
+    address: Optional[QuickAddress] = None
+    customer_notes: Optional[str] = Field(default=None, max_length=500)
+    vehicle_type: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    vehicle_id: Optional[str] = Field(default=None, pattern=_OBJECT_ID)
+    service_ids: Optional[list[str]] = Field(default=None, min_length=1, max_length=20)
+    service_quantities: Optional[dict[str, int]] = None
+    cars: Optional[list[BookingCarEdit]] = Field(default=None, max_length=10)
+    expected_total: Optional[float] = Field(default=None, ge=0)
+    # Preview only: the same validation, locks and pricing as the real save,
+    # but nothing is written (no seat move, no money, no messages, no
+    # history) — the UI shows the exact new price before the customer saves.
+    dry_run: bool = False
+
+    _services = field_validator("service_ids")(lambda v: _unique_ids(v) if v is not None else v)
+
+    @field_validator("scheduled_date", mode="before")
+    @classmethod
+    def _day(cls, v):
+        return None if v is None else ist_calendar_day(v)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "BookingEditRequest":
+        if (self.scheduled_date is None) != (self.scheduled_slot is None):
+            raise ValueError("Send the new date and slot together")
+        if self.address_id and self.address:
+            raise ValueError("Provide address_id or address, not both")
+        top_car = any(v is not None for v in (self.vehicle_type, self.vehicle_id, self.service_ids, self.service_quantities))
+        if top_car and self.cars:
+            raise ValueError("Send car changes either at the top level or in cars, not both")
+        if not (
+            self.scheduled_date or self.address_id or self.address or self.customer_notes is not None or top_car
+            or any(c.changes_car() for c in (self.cars or []))
+        ):
+            raise ValueError("Nothing to change")
+        return self
+
+    def car_edits(self, default_booking_id: str | None) -> list[BookingCarEdit]:
+        """Every car edit as BookingCarEdit (the top-level fields become one
+        for `default_booking_id`)."""
+        if any(v is not None for v in (self.vehicle_type, self.vehicle_id, self.service_ids, self.service_quantities)):
+            return [BookingCarEdit(
+                booking_id=default_booking_id, vehicle_type=self.vehicle_type, vehicle_id=self.vehicle_id,
+                service_ids=self.service_ids, service_quantities=self.service_quantities,
+            )]
+        return [c if c.booking_id else c.model_copy(update={"booking_id": default_booking_id}) for c in (self.cars or []) if c.changes_car()]
+
+
+class AddServicesRequest(BaseModel):
+    """POST /bookings/{id}/add-services — services/add-ons added on site by
+    the assigned captain (after arrival) or by the center's manager/admin
+    (spec 1.4). quantities: {service_id: n} for per-unit add-ons."""
+    service_ids: list[str] = Field(min_length=1, max_length=10)
+    quantities: dict[str, int] = Field(default_factory=dict)
+    note: Optional[str] = Field(default=None, max_length=300)
+
+    _services = field_validator("service_ids")(_unique_ids)
+
+    @field_validator("service_ids")
+    @classmethod
+    def _ids(cls, v: list[str]) -> list[str]:
+        if any(not re.match(_OBJECT_ID, i or "") for i in v):
+            raise ValueError("Pick valid services")
+        return v

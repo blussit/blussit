@@ -60,6 +60,11 @@ export const contentApi = {
 // ---- Slot holds (theater-seat model) --------------------------------------
 /** Stable per-browser holder key; the backend converts the hold into the
  * booking when the same key is sent as hold_key at create time. */
+// Storage blocked (private mode, strict settings): one key for this page's
+// lifetime instead of a new one per call — a hold taken with one key and
+// renewed/booked with another blocked the customer's own seat.
+let memoryHolderKey: string | null = null;
+
 export function getSlotHolderKey(): string {
   const KEY = "dvc_slot_holder";
   try {
@@ -70,7 +75,8 @@ export function getSlotHolderKey(): string {
     }
     return k;
   } catch {
-    return "anon-" + Math.random().toString(36).slice(2, 14);
+    if (!memoryHolderKey) memoryHolderKey = "anon-" + Math.random().toString(36).slice(2, 14) + Math.random().toString(36).slice(2, 8);
+    return memoryHolderKey;
   }
 }
 

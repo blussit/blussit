@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2, CheckCircle2, MapPin } from "lucide-react";
 import { bucketUsage, captainSocietyApi, clockIST, premiumUsage, type CaptainSocietyCard } from "../../../api/society";
 import { getErrorMessage } from "../../../lib/api-client";
+import { LoadError } from "../ui";
 import { titleCase } from "../../public/landing/shared";
 
 type Lang = "en" | "hi";
@@ -17,12 +18,14 @@ const T = {
     far: "Far from the society pin — your manager will see this.", noLoc: "Saved without location.", cars: "Cars Washed Today", save: "Save",
     saved: "Saved", left: "Left", allDone: "All Done", sub: "Covering Today",
     bucketHint: "Daily washes done / allowed this cycle", premiumHint: "Premium washes left / this cycle",
+    loadError: "Couldn't Load Today's Societies", loadErrorSub: "Check your internet and try again.", tryAgain: "Try Again",
   },
   hi: {
     title: "आज की सोसाइटी", none: "आज कोई सोसाइटी नहीं।", arrive: "मैं पहुँच गया", arrived: "पहुँचे", locating: "लोकेशन ले रहे हैं…",
     far: "सोसाइटी से दूर — मैनेजर को दिखेगा।", noLoc: "बिना लोकेशन सेव हुआ।", cars: "आज धुली गाड़ियाँ", save: "सेव करें",
     saved: "सेव हो गया", left: "बाकी", allDone: "पूरा", sub: "आज के लिए",
     bucketHint: "इस साइकिल में हुई / कुल डेली वॉश", premiumHint: "बाकी / कुल प्रीमियम वॉश",
+    loadError: "आज की सोसाइटी लोड नहीं हो सकीं", loadErrorSub: "इंटरनेट जाँचें और फिर से कोशिश करें।", tryAgain: "फिर से कोशिश करें",
   },
 };
 
@@ -42,11 +45,14 @@ export function CaptainSocietiesToday({ language = "en", hideWhenEmpty = false }
   const q = useQuery({ queryKey: ["captain-societies-today"], queryFn: captainSocietyApi.today, refetchInterval: 120_000 });
   if (q.isLoading) return null;
   const list = q.data?.societies || [];
-  if (!list.length && hideWhenEmpty) return null;
+  // A failed read is not "no society today" — show it even when the empty
+  // case would be hidden, so a captain with a society doesn't miss it.
+  const failed = q.isError && !q.data;
+  if (!list.length && hideWhenEmpty && !failed) return null;
   return (
     <section className="space-y-3" data-testid="captain-societies">
       <h2 className="flex items-center gap-2 text-base font-bold text-[#0E1A33]"><Building2 className="h-5 w-5" /> {t.title}</h2>
-      {q.isError && <p className="text-sm text-red-600">{getErrorMessage(q.error)}</p>}
+      {failed && <LoadError title={t.loadError} sub={t.loadErrorSub} retryLabel={t.tryAgain} onRetry={() => void q.refetch()} busy={q.isFetching} />}
       {!list.length && !q.isError && <p className="rounded-2xl border border-[#E4E9F1] bg-white p-4 text-sm text-[#5F6878]">{t.none}</p>}
       {list.map((s) => <SocietyCard key={s.id} society={s} lang={language} />)}
     </section>

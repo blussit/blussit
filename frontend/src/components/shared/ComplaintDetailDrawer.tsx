@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageSquare } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { complaintApi } from "../../api/engagement";
-import { Badge, Button, Modal, Select, StatusBadge } from "../../components/ui";
+import { Badge, Button, ErrorState, Modal, Select, StatusBadge } from "../../components/ui";
 import { BookingDetailDrawer } from "./BookingDetailDrawer";
 import { CustomerDetailDrawer } from "./CustomerDetailDrawer";
 import { getErrorMessage } from "../../lib/api-client";
@@ -64,14 +64,18 @@ export function ComplaintDetailDrawer({
     setCustomerOpen(false);
   }, [id]);
 
-  const { data: fresh } = useQuery({
+  const freshQuery = useQuery({
     queryKey: ["complaint", id],
     queryFn: () => complaintApi.get(id!),
     enabled: !!id,
     // Customer replies land while the drawer is open.
     refetchInterval: 20000,
   });
+  const fresh = freshQuery.data;
   const ticket: Complaint | null = fresh && fresh.id === id ? fresh : complaint;
+  // The list row may not carry the thread — if the full ticket didn't load,
+  // "No updates yet" would be a guess, so say the read failed instead.
+  const threadFailed = freshQuery.isError && !fresh;
 
   const refreshLists = () => {
     queryClient.invalidateQueries({ queryKey: ["center-complaints-page"] });
@@ -89,11 +93,12 @@ export function ComplaintDetailDrawer({
     refreshLists();
   };
 
-  const { data: booking } = useQuery({
+  const bookingQuery = useQuery({
     queryKey: ["complaint-booking", ticket?.booking_id],
     queryFn: () => bookingApi.get(ticket!.booking_id!),
     enabled: !!ticket?.booking_id && bookingOpen,
   });
+  const booking = bookingQuery.data;
 
   const replyMutation = useMutation({
     // Everything the post needs travels as variables — nothing is read
@@ -199,13 +204,28 @@ export function ComplaintDetailDrawer({
           ) : (
             <p className="text-xs text-[var(--color-text-secondary)]">This complaint predates booking-linking and isn't tied to a specific booking.</p>
           )}
+          {bookingOpen && bookingQuery.isError && !booking && (
+            <p role="alert" className="text-xs text-[var(--color-text-secondary)]">
+              Couldn't load this booking.{" "}
+              <button
+                type="button"
+                className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+                disabled={bookingQuery.isFetching}
+                onClick={() => void bookingQuery.refetch()}
+              >
+                Try Again
+              </button>
+            </p>
+          )}
 
           <div>
             <p className="mb-2 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
               <MessageSquare className="h-3.5 w-3.5" /> Updates &amp; replies
               {!!ticket.replies?.length && <span className="font-mono-num">({ticket.replies.length})</span>}
             </p>
-            {!ticket.replies?.length ? (
+            {threadFailed && !ticket.replies?.length ? (
+              <ErrorState message="Couldn't load the replies." onRetry={() => void freshQuery.refetch()} busy={freshQuery.isFetching} className="p-4" />
+            ) : !ticket.replies?.length ? (
               <p className="rounded-xl bg-[var(--ui-icon-bg,#f9fafb)] p-3 text-sm text-[var(--color-text-secondary)]">No updates yet.</p>
             ) : (
               <div className="space-y-2.5">
@@ -291,7 +311,7 @@ export function ComplaintDetailDrawer({
         </div>
       </Modal>
 
-      {bookingOpen && booking && <BookingDetailDrawer booking={booking} onClose={() => setBookingOpen(false)} />}
+      {bookingOpen && booking && <BookingDetailDrawer booking={booking} hasComplaint onClose={() => setBookingOpen(false)} />}
       <CustomerDetailDrawer customerId={customerOpen ? ticket.customer_id : null} onClose={() => setCustomerOpen(false)} />
     </>
   );

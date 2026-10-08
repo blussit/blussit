@@ -3,16 +3,17 @@
  * who may open it): the shareable form link, the daily captain, residents
  * with their plans and usage, the attendance calendar and payments.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, CalendarCheck2, ChevronLeft, ChevronRight, Copy, MapPin, MessageCircle, Pencil, RefreshCw, UserPlus } from "lucide-react";
-import { Badge, Button, Input, Panel, Select, Spinner, StatCard, StatusBadge } from "../ui";
+import { AlertTriangle, ArrowLeft, CalendarCheck2, CalendarPlus, ChevronLeft, ChevronRight, Copy, MapPin, MessageCircle, Pencil, RefreshCw, UserPlus } from "lucide-react";
+import { Badge, Button, ErrorState, Input, Modal, Panel, Select, Spinner, StatCard, StatusBadge } from "../ui";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorMessage, getErrorStatus } from "../../lib/api-client";
 import { format, formatShortDate, todayIST } from "../../lib/date";
 import { titleCase } from "../public/landing/shared";
+import { lastBookingDay, lastBookingDayText } from "../customer/passDates";
 import {
   bucketUsage,
   carLabel,
@@ -31,6 +32,8 @@ import {
 import { ComplaintDetailDrawer } from "../shared/ComplaintDetailDrawer";
 import type { Complaint } from "../../types";
 import { SocietyFormModal } from "./SocietyFormModal";
+import { ExtendPassDialog, ExtensionHistory, type ExtendTarget } from "./PassExtension";
+import type { PassExtension } from "../../types";
 import { AddResidentModal, CollectCashModal, StaffBookPremiumModal } from "./SocietyResidentModals";
 // Premium-wash schedule (docs/SOCIETY_PLANS.md §9) — self-contained tab + resident-row button.
 import { ResidentScheduleButton, SocietyScheduleTab } from "./schedule/SocietyScheduleTab";
@@ -53,6 +56,8 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
   const [editOpen, setEditOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [bookFor, setBookFor] = useState<SocietyEnrollment | null>(null);
+  const [extendFor, setExtendFor] = useState<ExtendTarget | null>(null);
+  const [historyFor, setHistoryFor] = useState<PassExtension[] | null>(null);
   const society = useQuery({ queryKey: ["society", societyId], queryFn: () => societyApi.get(societyId) });
   const enrollments = useQuery({ queryKey: ["society-enrollments", societyId, filter], queryFn: () => societyApi.enrollments(societyId, filter || undefined) });
   const captains = useQuery({
@@ -102,7 +107,21 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
   });
 
   if (society.isLoading) return <div className="flex justify-center py-16"><Spinner /></div>;
-  if (!society.data) return <p className="py-10 text-center text-sm text-gray-500">{getErrorMessage(society.error) || "Society not found."}</p>;
+  if (!society.data) {
+    // A 404 is an answer ("not found"); anything else is a failed read
+    // worth retrying.
+    const notFound = getErrorStatus(society.error) === 404;
+    return (
+      <div className="space-y-4">
+        <Link to={backTo} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-black"><ArrowLeft className="h-4 w-4" /> Societies</Link>
+        <ErrorState
+          message={notFound ? "Society not found." : "Couldn't load this society."}
+          onRetry={notFound ? undefined : () => void society.refetch()}
+          busy={society.isFetching}
+        />
+      </div>
+    );
+  }
   const s = society.data;
   const url = societyFormUrl(s.form_path);
   const share = `Hi! Blussit now washes cars daily at ${s.name}. Pick your plan here: ${url}`;
@@ -153,7 +172,8 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
             <Button variant="ghost" size="sm" onClick={() => linkAct.mutate("toggle")}>{s.form_enabled ? "Switch Off" : "Switch On"}</Button>
           </div>
         </Panel>
-        <CaptainPanel society={s} captains={captains.data || []} saving={captainAct.isPending} onSave={(p) => captainAct.mutate(p)} />
+        <CaptainPanel society={s} captains={captains.data || []} saving={captainAct.isPending} onSave={(p) => captainAct.mutate(p)}
+          loadError={captains.isError && !captains.data ? <ErrorState message="Couldn't load captains." onRetry={() => void captains.refetch()} busy={captains.isFetching} className="mb-3 p-4" /> : null} />
       </div>
 
       <div className="flex max-w-full gap-1 overflow-x-auto rounded-full bg-gray-100 p-1 text-sm font-semibold sm:w-fit">
@@ -173,7 +193,9 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
             <option value="cancelled">Cancelled</option>
           </Select>
         }>
-          {enrollments.isLoading ? <Spinner /> : !enrollments.data?.length ? (
+          {enrollments.isLoading ? <Spinner /> : enrollments.isError && !enrollments.data ? (
+            <ErrorState message="Couldn't load residents." onRetry={() => void enrollments.refetch()} busy={enrollments.isFetching} className="p-4" />
+          ) : !enrollments.data?.length ? (
             <p className="py-6 text-center text-sm text-gray-500"><b className="block text-black">No Residents Yet</b>Share the link or add one.</p>
           ) : (
             <ul className="divide-y divide-[#F3E5B5]">
@@ -192,7 +214,8 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
                   </div>
                   <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
                     {e.cars.map((c) => (
-                      <div key={c.vehicle_id} className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs">
+                      <div key={c.vehicle_id} className="rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="min-w-0">
                           <span className="block font-mono font-semibold">{c.registration_number}</span>
                           {c.vehicle_type_name ? <span className="block text-gray-500">{titleCase(c.vehicle_type_name)}</span> : null}
@@ -203,10 +226,50 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
                                 <span title="Premium washes left / this cycle">{premiumUsage(e.premium_service_name, c.subscription.remaining, c.subscription.total)}</span>
                                 {" · "}
                                 <span title="Daily washes done / allowed this cycle">{bucketUsage(e.bucket_short_label, c.bucket_used ?? 0, c.bucket_allowance)}</span>
-                                {c.subscription.end_date ? ` · Till ${formatShortDate(c.subscription.end_date.slice(0, 10))}` : ""}
+                                {lastBookingDay(c.subscription) ? ` · ${lastBookingDayText(c.subscription)}` : ""}
                               </>
                             : titleCase(c.status)}
                         </span>
+                      </div>
+                      {c.subscription && ((c.subscription.extension_days ?? 0) > 0 || c.subscription.can_extend) && (
+                        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-gray-200 pt-1.5" data-testid="pass-extension-row">
+                          <span className="min-w-0 text-gray-600">
+                            {(c.subscription.extension_days ?? 0) > 0 ? (
+                              <>
+                                <span className="font-semibold text-[#0E1A33]">Extended {c.subscription.extension_days} Day{c.subscription.extension_days === 1 ? "" : "s"}</span>
+                                {lastBookingDay(c.subscription) ? ` · ${lastBookingDayText(c.subscription)}` : ""}
+                                {c.subscription.extensions?.length ? (
+                                  <button type="button" className="ml-1.5 font-semibold text-[#0A66F0] hover:underline" onClick={() => setHistoryFor(c.subscription!.extensions || [])}>
+                                    History
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : (
+                              <>{c.subscription.remaining} premium left{lastBookingDay(c.subscription) ? ` · ${lastBookingDayText(c.subscription)}` : ""}</>
+                            )}
+                          </span>
+                          {c.subscription.can_extend && (c.subscription.extension_days_left ?? 0) > 0 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                setExtendFor({
+                                  societyId,
+                                  subscriptionId: c.subscription!.id,
+                                  plate: c.registration_number,
+                                  remaining: c.subscription!.remaining,
+                                  endDate: c.subscription!.end_date,
+                                  daysUsed: c.subscription!.extension_days ?? 0,
+                                  daysLeft: c.subscription!.extension_days_left ?? 0,
+                                  extensions: c.subscription!.extensions,
+                                })
+                              }
+                            >
+                              <CalendarPlus className="h-3.5 w-3.5" /> Extend
+                            </Button>
+                          )}
+                        </div>
+                      )}
                       </div>
                     ))}
                   </div>
@@ -292,6 +355,10 @@ export function SocietyDetailView({ societyId, backTo, isAdmin = false }: { soci
         onDone={(msg) => { setCollect(null); ok(msg); refresh(); }} />
       <StaffBookPremiumModal open={!!bookFor} onClose={() => setBookFor(null)} societyId={societyId} centerId={s.service_center_id} enrollment={bookFor}
         onBooked={(msg) => { setBookFor(null); ok(msg); refresh(); }} />
+      <ExtendPassDialog target={extendFor} onClose={() => setExtendFor(null)} />
+      <Modal open={!!historyFor} onClose={() => setHistoryFor(null)} title="Extension History" maxWidth="max-w-sm">
+        <ExtensionHistory extensions={historyFor} />
+      </Modal>
     </div>
   );
 }
@@ -311,7 +378,9 @@ function IssuesPanel({ societyId }: { societyId: string }) {
         <option value="">All</option>
       </Select>
     }>
-      {q.isLoading ? <Spinner /> : !q.data?.length ? (
+      {q.isLoading ? <Spinner /> : q.isError && !q.data ? (
+        <ErrorState message="Couldn't load resident issues." onRetry={() => void q.refetch()} busy={q.isFetching} className="p-4" />
+      ) : !q.data?.length ? (
         <p className="py-6 text-center text-sm font-semibold text-black">{status === "open" ? "No Open Issues" : "Nothing Here"}</p>
       ) : (
         <ul className="divide-y divide-[#E4E9F1]" data-testid="society-issues">
@@ -334,14 +403,18 @@ function IssuesPanel({ societyId }: { societyId: string }) {
   );
 }
 
-function CaptainPanel({ society, captains, saving, onSave }: {
+function CaptainPanel({ society, captains, saving, onSave, loadError }: {
   society: SocietyDetail; captains: { id: string; name?: string | null }[]; saving: boolean;
   onSave: (p: { captain_id: string | null; date?: string }) => void;
+  /** The captains read failed: the picker would show "Not Assigned" even
+   *  when one is — say so instead. */
+  loadError?: ReactNode;
 }) {
   const [subDate, setSubDate] = useState(todayIST());
   const [subCaptain, setSubCaptain] = useState("");
   return (
     <Panel title="Daily Captain" description="Marks arrival every day and ticks the cars washed.">
+      {loadError}
       <Select aria-label="Daily captain" value={society.daily_captain?.id || ""} onChange={(e) => onSave({ captain_id: e.target.value || null })} disabled={saving}>
         <option value="">Not Assigned</option>
         {captains.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -382,7 +455,13 @@ export function AttendancePanel({ societyId }: { societyId: string }) {
         <button type="button" aria-label="Next month" className="rounded-full p-1.5 hover:bg-gray-100" onClick={() => setMonth((m) => shiftMonth(m, 1))}><ChevronRight className="h-4 w-4" /></button>
       </div>
     }>
-      {q.isLoading || !q.data ? <Spinner /> : <AttendanceCalendar data={q.data} />}
+      {q.isError && !q.data ? (
+        <ErrorState message="Couldn't load attendance." busy={q.isFetching} onRetry={() => void q.refetch()} />
+      ) : q.isLoading || !q.data ? (
+        <Spinner />
+      ) : (
+        <AttendanceCalendar data={q.data} />
+      )}
     </Panel>
   );
 }

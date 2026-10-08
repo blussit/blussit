@@ -174,15 +174,20 @@ def _expected_link_signature(link_id: str, reference_id: str, payment_id: str) -
 
 
 async def test_preview_prices_a_plan_before_any_customer_or_money_exists(rig):
+    started = ObjectId()  # every row inserted after this sorts above it
     svc = PaymentService(rig["db"])
     result = await svc.manager_subscription_preview(
         ManagerSubscriptionPreviewRequest(plan_id=rig["plan_id"], vehicle_type=rig["hatchback"], service_id=rig["star"])
     )
     assert result["base_price"] == rig["base_price"] == result["final_price"]
     assert result["customer_exists"] is False and result["already_has_pass"] is False
-    # Nothing was created by merely previewing.
-    assert await rig["db"].payment_orders.count_documents({}) == 0
-    assert await rig["db"].user_subscriptions.count_documents({}) == 0
+    # Nothing was created by merely previewing. Scoped to this test's own
+    # (freshly made) plan — other suites' leftover rows are not this test's
+    # business — and to anything created since the preview began.
+    assert await rig["db"].payment_orders.count_documents({"plan_id": rig["plan_id"]}) == 0
+    assert await rig["db"].user_subscriptions.count_documents({"plan_id": rig["plan_id"]}) == 0
+    assert await rig["db"].payment_orders.count_documents({"_id": {"$gt": started}}) == 0
+    assert await rig["db"].user_subscriptions.count_documents({"_id": {"$gt": started}}) == 0
 
 
 async def test_preview_applies_a_discount_or_a_coupon_never_both_at_once(rig):
@@ -367,7 +372,12 @@ async def test_discount_bringing_the_price_below_the_online_minimum_is_refused_n
     # capped at 50% — see test_manager_discount_is_capped_at_half_the_price).
     with pytest.raises(BadRequestException, match="minimum"):
         await svc.manager_subscription_offer(rig["manager_id"], _offer(rig, phone, discount_amount=rig["base_price"]), actor_role="admin")
-    assert await rig["db"].payment_orders.count_documents({"customer_id": {"$exists": True}}) == 0
+    # No order at all for this test's own plan, nor for the customer behind
+    # this phone (if the refused offer got as far as creating them).
+    assert await rig["db"].payment_orders.count_documents({"plan_id": rig["plan_id"]}) == 0
+    customer = await rig["db"].users.find_one({"phone": phone})
+    if customer is not None:
+        assert await rig["db"].payment_orders.count_documents({"customer_id": str(customer["_id"])}) == 0
 
 
 async def test_manager_discount_is_capped_at_half_the_price(rig, cleanup):
@@ -1213,7 +1223,8 @@ async def test_a_manager_sold_plan_is_correctly_spent_by_a_new_booking_then_a_lo
     logged = await bs.create_manager_logged_visit(
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
-            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            # A logged job spends the plan only when the manager says so (MGR-01).
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=True)],
             scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time=await _earlier_today(rig),
             address_line="1 Manager Booking Lane, Indore", send_whatsapp=False,
         ),
@@ -1443,7 +1454,8 @@ async def test_a_pass_cannot_cover_a_logged_job_from_before_it_was_granted(rig, 
     logged = await bs.create_manager_logged_visit(
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
-            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            # Asked for (MGR-01) — and still refused: the pass didn't exist yet.
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=True)],
             scheduled_date=yesterday, service_time="10:00",
             address_line="4 Backdated Lane, Indore", send_whatsapp=False,
         ),
@@ -1461,7 +1473,7 @@ async def test_a_pass_cannot_cover_a_logged_job_from_before_it_was_granted(rig, 
     today_logged = await bs.create_manager_logged_visit(
         ManagerLogBookingRequest(
             customer_name="Plan Customer", customer_phone=phone,
-            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]])],
+            lines=[QuickBookingLine(vehicle_type=rig["hatchback"], quantity=1, service_ids=[rig["star"]], use_subscription=True)],
             scheduled_date=now_ist().strftime("%Y-%m-%d"), service_time=await _earlier_today(rig),
             address_line="4 Backdated Lane, Indore", send_whatsapp=False,
         ),

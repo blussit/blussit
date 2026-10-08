@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "sitemap": "node scripts/generate-sitemap.mjs",
-    "build": "npm run sitemap && tsc -b && vite build",
+    "build": "npm run sitemap && tsc -b && vite build && npm run prerender",
+    "prerender": "vite build --ssr src/prerender/entry.tsx --outDir node_modules/.prerender --emptyOutDir && node scripts/prerender.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },

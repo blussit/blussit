@@ -38,8 +38,12 @@ class CreateOrderRequest(BaseModel):
 
 
 class CollectPaymentRequest(BaseModel):
-    """Captain doorstep settlement — names the booking being settled."""
+    """Captain doorstep settlement — names the booking being settled.
+    `expected_amount` (cash): the amount due the captain's screen showed —
+    refused with 409 AMOUNT_DUE_CHANGED when that is no longer what is due
+    (never trusted as the amount itself: the server collects amount_due)."""
     booking_id: str = Field(min_length=1, max_length=50)
+    expected_amount: Optional[float] = Field(default=None, ge=0, le=1_000_000)
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -87,6 +91,11 @@ class PaymentFailureReport(BaseModel):
 
 
 class ResolveAttentionRequest(BaseModel):
-    """What the admin did about a parked payment (refunded, activated…)."""
+    """What the admin did about a parked payment (refunded, activated…).
+    `outcome="refunded"` records the refund itself: the payment row and the
+    booking(s) it paid for then read "refunded" and reports stop counting
+    the money — `refund_amount` (rupees) for a partial refund, else all of it."""
 
     note: str = Field(min_length=3, max_length=300)
+    outcome: Optional[Literal["refunded", "activated", "other"]] = None
+    refund_amount: Optional[float] = Field(default=None, gt=0, le=1_000_000)

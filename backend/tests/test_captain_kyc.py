@@ -10,7 +10,7 @@ from app.core.exceptions import BadRequestException, ForbiddenException
 from app.schemas.staff_kyc_schema import KycReviewRequest, KycSubmitRequest
 from app.services.staff_kyc_service import StaffKycService, masked_kyc
 
-from tests.factories import make_captain, make_manager, make_service_center
+from tests.factories import make_captain, make_manager, make_service_center, own_upload_url
 
 
 @pytest.fixture
@@ -24,13 +24,20 @@ async def rig(db, cleanup):
     cleanup.append(("users", {"_id": ObjectId(manager_id)}))
     cleanup.append(("notifications", {}))
     cleanup.append(("audit_logs", {}))
+    # The captain's own uploads, as POST /uploads/document records them —
+    # a packet may only name documents its captain uploaded.
+    await db.uploaded_documents.insert_many([
+        {"url": PACKET.aadhaar_doc_url, "key": "documents/aadhaar.jpg", "owner_id": captain_id},
+        {"url": PACKET.pan_doc_url, "key": "documents/pan.jpg", "owner_id": captain_id},
+    ])
+    cleanup.append(("uploaded_documents", {"owner_id": captain_id}))
     return {"db": db, "center_id": center_id, "captain_id": captain_id, "manager_id": manager_id}
 
 
 PACKET = KycSubmitRequest(
-    photo_url="https://example.com/me.jpg",
-    aadhaar_doc_url="https://example.com/aadhaar.jpg",
-    pan_doc_url="https://example.com/pan.jpg",
+    photo_url=own_upload_url("photos/me.jpg"),
+    aadhaar_doc_url=own_upload_url("documents/aadhaar.jpg"),
+    pan_doc_url=own_upload_url("documents/pan.jpg"),
     aadhaar_number="123412341234",
     pan_number="ABCDE1234F",
     local_address="12 Local Lane, Indore",

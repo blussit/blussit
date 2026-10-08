@@ -4,7 +4,7 @@ import { Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { subscriptionApi } from "../../api/engagement";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { adminSubscriptionPlanApi } from "../../api/admin";
-import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
+import { Badge, Button, DataTable, ErrorState, Input, Modal, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
@@ -64,10 +64,13 @@ export default function AdminSubscriptionPlansPage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
-  const { data, isLoading } = useQuery({ queryKey: ["admin-plans"], queryFn: () => subscriptionApi.plans(false) });
-  const { data: categories } = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
-  const { data: servicesData } = useQuery({ queryKey: ["admin-services-for-plans"], queryFn: () => catalogApi.services({ page_size: 100 }) });
+  const { data, isLoading, error: plansError, refetch: refetchPlans } = useQuery({ queryKey: ["admin-plans"], queryFn: () => subscriptionApi.plans(false) });
+  const categoriesQuery = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
+  const categories = categoriesQuery.data;
+  const vehicleTypesQuery = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
+  const vehicleTypes = vehicleTypesQuery.data;
+  const servicesQuery = useQuery({ queryKey: ["admin-services-for-plans"], queryFn: () => catalogApi.services({ page_size: 100 }) });
+  const servicesData = servicesQuery.data;
   const services = servicesData?.data || [];
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<SubscriptionPlan | null>(null);
@@ -208,6 +211,8 @@ export default function AdminSubscriptionPlansPage() {
       <DataTable<SubscriptionPlan>
         isLoading={isLoading}
         data={data || []}
+        error={plansError}
+        onRetry={() => void refetchPlans()}
         emptyTitle="No Subscription Plans Yet"
         columns={[
           { header: "Name", accessor: (p) => toTitle(p.name) },
@@ -299,6 +304,9 @@ export default function AdminSubscriptionPlansPage() {
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
               The buyer picks ONE of these at purchase, and that is the only wash the pass ever covers.
             </p>
+            {servicesQuery.isError && !servicesData && (
+              <ErrorState message="Couldn't load services." onRetry={() => void servicesQuery.refetch()} busy={servicesQuery.isFetching} className="mb-2 p-4" />
+            )}
             <div className="flex flex-wrap gap-2">
               {services.map((s) => (
                 <button
@@ -385,6 +393,9 @@ export default function AdminSubscriptionPlansPage() {
               For a plan that mixes categories (e.g. 4 Normal Clean + 1 Deep Clean) rather than one fixed service — set counts
               here and they override "Total Visits Included" above. Leave every category at 0 to use the simple total instead.
             </p>
+            {categoriesQuery.isError && !categories && (
+              <ErrorState message="Couldn't load categories." onRetry={() => void categoriesQuery.refetch()} busy={categoriesQuery.isFetching} className="mb-2 p-4" />
+            )}
             <div className="space-y-2">
               {(categories || []).map((c) => (
                 <div key={c.id} className="grid grid-cols-[1fr_100px] items-center gap-3">
@@ -404,6 +415,9 @@ export default function AdminSubscriptionPlansPage() {
 
           <div>
             <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Eligible Vehicle Types</p>
+            {vehicleTypesQuery.isError && !vehicleTypes && (
+              <ErrorState message="Couldn't load vehicle types." onRetry={() => void vehicleTypesQuery.refetch()} busy={vehicleTypesQuery.isFetching} className="mb-2 p-4" />
+            )}
             <div className="flex flex-wrap gap-2">
               {(vehicleTypes || []).map((t) => (
                 <button

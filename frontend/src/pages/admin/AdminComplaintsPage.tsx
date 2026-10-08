@@ -29,7 +29,7 @@ export default function AdminComplaintsPage() {
   const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-for-complaints"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["admin-complaints", status, centerFilter, category, debouncedSearch, page],
     queryFn: () =>
       complaintApi.all({
@@ -119,6 +119,8 @@ export default function AdminComplaintsPage() {
       <DataTable<Complaint>
         isLoading={isLoading}
         data={data?.data || []}
+        error={error}
+        onRetry={() => void refetch()}
         emptyTitle={debouncedSearch || status || centerFilter ? "No Complaints Match" : "No Complaints"}
         onRowClick={(c) => setSelected(c)}
         columns={[

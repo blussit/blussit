@@ -9,12 +9,43 @@
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" href="/blussit-mark.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <!-- maximum-scale=1 keeps the zoom level fixed — without it, mobile
-         Safari/Chrome auto-zoom the whole page in whenever a form field is
-         focused (below their ~16px auto-zoom threshold) or the layout
-         reflows, which felt like the page "jumping" during booking. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-    <meta name="theme-color" content="#0A0A0A" />
+    <!-- No maximum-scale for everyone: pinch-zoom is an accessibility
+         feature (low vision) and Android Chrome honours maximum-scale=1 by
+         blocking it. iOS Safari ignores it for pinch-zoom but uses it to
+         stop the page auto-zooming into every focused form field under
+         16px (the "page jumps" during booking) — so the script below adds
+         it on iOS only, where it can't block zooming.
+         interactive-widget=resizes-content: the on-screen keyboard shrinks
+         the layout (and dvh) instead of covering bottom sheets and their
+         submit buttons. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
+    <script>
+      (function () {
+        try {
+          var ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+          var meta = document.querySelector('meta[name="viewport"]');
+          if (ios && meta) meta.setAttribute("content", meta.getAttribute("content") + ", maximum-scale=1");
+        } catch (e) {}
+      })();
+    </script>
+    <meta name="theme-color" content="#FFFFFF" />
+    <!-- The /thank-you ticket must never reach analytics: an old-style
+         ?token= link is moved into this tab's storage and out of the
+         address bar BEFORE Google Analytics or the Meta Pixel read the URL
+         (they record page URLs). The page reads it back (src/lib/thankYou.ts). -->
+    <script>
+      (function () {
+        try {
+          if (location.pathname === "/thank-you" && /[?&]token=/.test(location.search)) {
+            var params = new URLSearchParams(location.search);
+            sessionStorage.setItem("blussit:thank-you", params.get("token") || "");
+            params.delete("token");
+            var rest = params.toString();
+            history.replaceState(history.state, "", "/thank-you" + (rest ? "?" + rest : "") + location.hash);
+          }
+        } catch (e) {}
+      })();
+    </script>
 
     <!-- A bare pre-hydration fallback so the tab doesn't sit blank for the
          instant before React mounts — harmless to duplicate, since browsers
@@ -43,8 +74,8 @@
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://blussit.com/" />
     <meta property="og:image" content="https://blussit.com/banner.webp" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
+    <meta property="og:image:width" content="1567" />
+    <meta property="og:image:height" content="1004" />
     <meta property="og:image:alt" content="Blussit — premium car wash at your doorstep" />
     <meta property="og:locale" content="en_IN" />
 
@@ -53,21 +84,6 @@
     <meta name="twitter:description" content="Book a premium car or bike wash at your doorstep in Indore." />
     <meta name="twitter:image" content="https://blussit.com/banner.webp" />
 
-    <!-- Landing page only: start fetching the first hero picture right now,
-         in parallel with the JS bundle, instead of after React has mounted
-         and discovered it (that wait was most of the "slow home page"). -->
-    <script>
-      (function () {
-        if (location.pathname !== "/") return;
-        var hero = document.createElement("link");
-        hero.rel = "preload";
-        hero.as = "image";
-        hero.type = "image/webp";
-        hero.setAttribute("fetchpriority", "high");
-        hero.href = matchMedia("(max-width: 639px)").matches ? "/hero/home-m.webp" : "/hero/home-1600.webp";
-        document.head.appendChild(hero);
-      })();
-    </script>
 
     <!-- Fonts load WITHOUT blocking the first paint: the page shows at once in
          the fallback font and swaps when they arrive (display=swap). A plain
@@ -87,13 +103,15 @@
     </noscript>
 
     <!-- Structured data. Deliberately factual only: no ratings, awards or
-         certifications we can't substantiate here (the AggregateRating on
-         real customer reviews is emitted separately, from live data, on
-         the homepage's Reviews section — see ReviewsShowcase.tsx). Address/
-         phone/hours match the live service center record; update both
-         together if that ever changes. "AutoWash" is schema.org's specific
-         type for car-wash businesses and is what makes this eligible for
-         local/"near me" results, on top of plain Organization/WebSite. -->
+         certifications we can't substantiate (and no review/rating markup —
+         curated testimonials on our own business would be self-serving).
+         The address is the office (same as the footer and BUSINESS in
+         src/seo/content.ts — keep all three identical to the Google Business
+         Profile); hours 07:00-19:00. No "geo": we'd rather Google place the
+         pin from the address than from coordinates nobody verified. "AutoWash"
+         is schema.org's specific type for car-wash businesses and is what
+         makes this eligible for local/"near me" results, on top of plain
+         Organization/WebSite. -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -102,26 +120,23 @@
             "@type": ["Organization", "LocalBusiness", "AutoWash"],
             "@id": "https://blussit.com/#organization",
             "name": "Blussit",
-            "alternateName": ["Blushit", "Blasit", "Blusit", "Blashit"],
+            "alternateName": ["Blussit Car Wash", "Blushit", "Blusit", "Bluss It", "Blush It", "Blasit", "Blashit"],
             "url": "https://blussit.com/",
             "logo": "https://blussit.com/blussit-logo.png",
             "image": "https://blussit.com/banner.webp",
             "telephone": "+91-8962288774",
             "email": "contact.blussit@gmail.com",
+            "sameAs": ["https://www.instagram.com/blussitwash/", "https://www.facebook.com/people/Blussit/61593594339671/"],
             "priceRange": "₹₹",
             "address": {
               "@type": "PostalAddress",
-              "streetAddress": "AB Road",
+              "streetAddress": "88 Shivampuri Colony, Bhawarkuwa",
               "addressLocality": "Indore",
               "addressRegion": "Madhya Pradesh",
               "postalCode": "452001",
               "addressCountry": "IN"
             },
-            "geo": {
-              "@type": "GeoCoordinates",
-              "latitude": 22.68205299918325,
-              "longitude": 75.86653931944844
-            },
+            "hasMap": "https://www.google.com/maps/search/?api=1&query=88+Shivampuri+Colony%2C+Bhawarkuwa%2C+Indore+452001",
             "areaServed": { "@type": "City", "name": "Indore" },
             "openingHoursSpecification": {
               "@type": "OpeningHoursSpecification",
@@ -167,8 +182,34 @@
         }, 2500);
       });
     </script>
+
+    <!-- Meta Pixel — Meta's standard snippet, except fbevents.js is fetched
+         once the page has loaded (like GA4 above) so it never delays the hero
+         or the booking code. The fbq stub queues the PageView until then.
+         Route changes in the SPA are tracked by the pixel itself (it listens
+         to history pushState), so no per-route PageView call is needed.
+         Live site only: test bookings on localhost / Vercel previews would
+         otherwise reach Meta as real Purchases (src/lib/metaPixel.ts). -->
+    <script>
+      if (/(^|\.)blussit\.com$/.test(location.hostname))
+      !function(f,b,e,v,n,t,s)
+      {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+      n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+      if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+      n.queue=[];f.addEventListener('load',function(){t=b.createElement(e);t.async=!0;
+      t.src=v;s=b.getElementsByTagName(e)[0];
+      s.parentNode.insertBefore(t,s)})}(window, document,'script',
+      'https://connect.facebook.net/en_US/fbevents.js');
+      if (window.fbq) {
+        fbq('init', '1153209444066340');
+        fbq('track', 'PageView');
+      }
+    </script>
   </head>
   <body>
+    <noscript><img height="1" width="1" style="display:none" alt=""
+      src="https://www.facebook.com/tr?id=1153209444066340&ev=PageView&noscript=1"
+    /></noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

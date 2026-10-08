@@ -133,6 +133,14 @@ class SocietyQuoteRequest(PlanChoice):
     _c = field_validator("coupon_code")(_coupon)
 
 
+class StaffQuoteRequest(SocietyQuoteRequest):
+    """Staff 'add resident' price check — with the resident's phone, their
+    personal plan for this society (if admin made one) prices too. A
+    half-typed phone just prices without it (never a 422 mid-typing)."""
+
+    phone: Optional[str] = Field(default=None, max_length=20)
+
+
 class SocietyEnrollRequest(PlanChoice):
     resident_name: str = Field(min_length=2, max_length=100)
     phone: str = Field(min_length=10, max_length=20)
@@ -197,6 +205,17 @@ class CouponPreviewRequest(BaseModel):
     renewal: bool = False
 
     _c = field_validator("coupon_code")(_coupon)
+
+
+class PassExtendRequest(BaseModel):
+    """Manager/admin: give a society pass that has ended (or is ending) a few
+    more days so its remaining premium washes can be booked. At most 10 days
+    in total per plan month (checked against what was already granted)."""
+
+    days: int = Field(ge=1, le=10)
+    note: Optional[str] = Field(default=None, max_length=300)
+
+    _n = field_validator("note")(_clean)
 
 
 class CancelEnrollmentRequest(BaseModel):

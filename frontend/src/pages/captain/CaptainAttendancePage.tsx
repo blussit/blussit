@@ -12,7 +12,7 @@ import { formatShortDate, todayIST } from "../../lib/date";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { AttendanceCard, useTodayAttendance } from "../../components/captain/Attendance";
 import { clock, statusWord } from "../../components/captain/jobState";
-import { Btn, Panel, Pill, Sheet, TopBar } from "../../components/captain/ui";
+import { Btn, LoadError, Panel, Pill, Sheet, TopBar } from "../../components/captain/ui";
 
 const field =
   "h-12 w-full rounded-2xl border border-[#E4E9F1] px-4 text-[15px] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE]";
@@ -22,8 +22,10 @@ const tone = (s: string) => (s === "approved" || s === "present" ? "green" : s =
 export default function CaptainAttendancePage() {
   const { t, language } = useCaptainTranslation();
   const queryClient = useQueryClient();
-  const { data: attendance } = useTodayAttendance();
-  const { data: leaves } = useQuery({ queryKey: ["leaves"], queryFn: () => leaveApi.mine({ page: 1, page_size: 10 }) });
+  const attendanceQuery = useTodayAttendance();
+  const attendance = attendanceQuery.data;
+  const leavesQuery = useQuery({ queryKey: ["leaves"], queryFn: () => leaveApi.mine({ page: 1, page_size: 10 }) });
+  const leaves = leavesQuery.data;
   const [open, setOpen] = useState(false);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -48,7 +50,15 @@ export default function CaptainAttendancePage() {
 
       <div>
         <h2 className="mb-2 text-[15px] font-extrabold text-[#0E1A33]">{t("captain.attendance.history")}</h2>
-        {!attendance?.data.length ? (
+        {attendanceQuery.isError && !attendance ? (
+          <LoadError
+            title="Couldn't Load Your Attendance History"
+            sub={t("captain.v2.loadFailedSub")}
+            retryLabel={t("captain.v2.tryAgain")}
+            busy={attendanceQuery.isFetching}
+            onRetry={() => void attendanceQuery.refetch()}
+          />
+        ) : !attendance?.data.length ? (
           <Panel className="px-4 py-6 text-center text-sm font-semibold text-[#5F6878]">{t("captain.attendance.no_history")}</Panel>
         ) : (
           <Panel className="divide-y divide-[#E4E9F1]">
@@ -75,7 +85,15 @@ export default function CaptainAttendancePage() {
             <Plus className="h-4 w-4" /> {t("captain.attendance.req_leave")}
           </button>
         </div>
-        {!leaves?.data.length ? (
+        {leavesQuery.isError && !leaves ? (
+          <LoadError
+            title="Couldn't Load Your Leave Requests"
+            sub={t("captain.v2.loadFailedSub")}
+            retryLabel={t("captain.v2.tryAgain")}
+            busy={leavesQuery.isFetching}
+            onRetry={() => void leavesQuery.refetch()}
+          />
+        ) : !leaves?.data.length ? (
           <Panel className="px-4 py-6 text-center text-sm font-semibold text-[#5F6878]">{t("captain.attendance.no_leaves")}</Panel>
         ) : (
           <Panel className="divide-y divide-[#E4E9F1]">

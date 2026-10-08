@@ -30,7 +30,7 @@ import {
   whenLabel,
   type Step,
 } from "../../components/captain/jobState";
-import { Btn, Notice, Panel, StatTile } from "../../components/captain/ui";
+import { Btn, LoadError, Notice, Panel, StatTile } from "../../components/captain/ui";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 
 function countdown(ms: number, t: ReturnType<typeof useCaptainTranslation>["t"]): string {
@@ -137,7 +137,13 @@ export default function CaptainTodayPage() {
     queryFn: () => bookingApi.myJobs({ scope: "history", status: "completed", page: 1, page_size: 100 }),
   });
   const { data: kyc } = useQuery({ queryKey: ["my-kyc"], queryFn: kycApi.my });
-  const { today: attendance, isLoading: attLoading } = useTodayAttendance();
+  const attendanceQuery = useTodayAttendance();
+  const { today: attendance, isLoading: attLoading } = attendanceQuery;
+  // A failed read must not read as "not clocked in" (and invite a punch),
+  // nor as zero jobs in the tiles.
+  const attFailed = attendanceQuery.isError && !attendanceQuery.data;
+  const activeFailed = active.isError && !active.data;
+  const recentFailed = recent.isError && !recent.data;
   const { clockIn, error: clockError } = useClock();
   const { data: notifs } = useUnreadNotifications();
 
@@ -169,7 +175,19 @@ export default function CaptainTodayPage() {
         </Link>
       </div>
 
-      {!attLoading && !attendance && (
+      {attFailed ? (
+        <Panel className="flex items-center gap-3 p-3 pl-4">
+          <p role="alert" className="min-w-0 flex-1 text-sm font-semibold text-[#0E1A33]">Couldn't load your attendance.</p>
+          <Btn
+            variant="secondary"
+            className="!min-h-[44px] shrink-0 px-4 text-sm"
+            loading={attendanceQuery.isFetching}
+            onClick={() => void attendanceQuery.refetch()}
+          >
+            {t("captain.v2.tryAgain")}
+          </Btn>
+        </Panel>
+      ) : !attLoading && !attendance && (
         <Panel className="flex items-center gap-3 p-3 pl-4">
           <p className="min-w-0 flex-1 text-sm font-semibold text-[#0E1A33]">{t("captain.v2.att.notIn")}</p>
           <Btn className="!min-h-[44px] shrink-0 px-4 text-sm" loading={clockIn.isPending} onClick={() => clockIn.mutate()}>
@@ -188,15 +206,38 @@ export default function CaptainTodayPage() {
       )}
 
       <div className="grid grid-cols-3 gap-2">
-        <StatTile label={t("captain.v2.stat.total")} value={remaining + completed} />
-        <StatTile label={t("captain.v2.stat.completed")} value={completed} tone="green" />
-        <StatTile label={t("captain.v2.stat.remaining")} value={remaining} tone="blue" />
+        <StatTile label={t("captain.v2.stat.total")} value={activeFailed || recentFailed ? "—" : remaining + completed} />
+        <StatTile label={t("captain.v2.stat.completed")} value={recentFailed ? "—" : completed} tone="green" />
+        <StatTile label={t("captain.v2.stat.remaining")} value={activeFailed ? "—" : remaining} tone="blue" />
       </div>
+      {recentFailed && (
+        <p role="alert" className="text-sm text-[#5F6878]">
+          Couldn't load today's finished jobs.{" "}
+          <button type="button" className="font-bold text-[#0A66F0] disabled:opacity-60" disabled={recent.isFetching} onClick={() => void recent.refetch()}>
+            {t("captain.v2.tryAgain")}
+          </button>
+        </p>
+      )}
 
       {active.isLoading ? (
         <Panel className="h-56 animate-pulse bg-[#EEF3FA]" ><span /></Panel>
+      ) : activeFailed ? (
+        <LoadError
+          title={t("captain.v2.loadFailed")}
+          sub={t("captain.v2.loadFailedSub")}
+          retryLabel={t("captain.v2.tryAgain")}
+          busy={active.isFetching}
+          onRetry={() => void active.refetch()}
+        />
       ) : next ? (
         <NextBookingCard slab={next} />
+      ) : stuck > 0 ? (
+        // Every job left is waiting on the manager (e.g. its window was
+        // missed) — "No jobs" beside "N remaining" would contradict itself.
+        <Panel className="px-4 py-8 text-center">
+          <p className="text-[15px] font-bold text-[#0E1A33]">{t("captain.v2.allWaiting")}</p>
+          <p className="mt-1 text-sm text-[#5F6878]">{t("captain.v2.allWaitingSub")}</p>
+        </Panel>
       ) : (
         <Panel className="px-4 py-8 text-center">
           <p className="text-[15px] font-bold text-[#0E1A33]">{t("captain.v2.noJobs")}</p>

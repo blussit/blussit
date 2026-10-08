@@ -33,8 +33,9 @@ async def submit_my_kyc(payload: KycSubmitRequest, current_user: CurrentUser = D
 
 @router.get("/captains/{captain_id}/kyc", dependencies=[Depends(require_manager_or_admin)])
 async def captain_kyc(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """The manager's review view — the one list surface where full (unmasked)
-    numbers are legitimate, since the manager is the verifier."""
+    """The review view. Aadhaar/PAN numbers are masked to the last 4 for a
+    manager (DATA-1) — the uploaded card images, which the manager checks,
+    stay viewable; an admin sees the full numbers."""
     return success(await StaffKycService(db).get_for_review(captain_id, current_user.role, current_user.service_center_id))
 
 
@@ -183,8 +184,13 @@ async def set_captain_status(
     """Suspend / reactivate one of the manager's OWN captains. The captain
     page's buttons used to call the admin-only /users endpoints, so a
     manager always got 403. Suspending ends every session (token_version
-    bump) — the captain must log in again once reactivated."""
-    from app.services.audit_service import AuditService
+    bump) — the captain must log in again once reactivated. Refused while
+    the captain holds live jobs — assigned, on the way or started — or a
+    society's captain slot (CAP-05: "assigned" used to slip through and
+    leave the job on a captain who could no longer sign in); the shared
+    UserService guard names them so the manager reassigns first."""
+    from app.services.audit_service import AuditService, field_changes
+    from app.services.user_service import UserService
 
     def _public(doc: dict) -> dict:
         return {
@@ -202,22 +208,12 @@ async def set_captain_status(
     if payload.status == "active" and current_user.role != "admin" and captain.get("suspended_by_role") == "admin":
         # An admin's suspension (fraud, moonlighting…) is the admin's to lift.
         raise ForbiddenException("An admin suspended this captain — only an admin can reactivate them.")
-    if payload.status == "suspended":
-        busy = await db.bookings.count_documents({
-            "captain_id": captain_id, "is_deleted": {"$ne": True},
-            "status": {"$in": ["captain_on_the_way", "service_started"]},
-        })
-        if busy:
-            raise BadRequestException("This captain is on a job right now — suspend them after it's finished.")
-    updated = await users.update_by_id(captain_id, {"status": payload.status})
-    if payload.status == "suspended":
-        await db.users.update_one(
-            {"_id": updated["_id"]}, {"$inc": {"token_version": 1}, "$set": {"suspended_by_role": current_user.role}},
-        )
-    else:
-        await db.users.update_one({"_id": updated["_id"]}, {"$unset": {"suspended_by_role": ""}})
+    updated = await UserService(db).set_captain_status(captain, payload.status, current_user.role)
+    if not updated:
+        raise NotFoundException("Captain not found")
     await AuditService(db).log_action(
-        current_user.id, current_user.role, "SET_CAPTAIN_STATUS", "users", captain_id, {"status": payload.status}
+        current_user.id, current_user.role, "SET_CAPTAIN_STATUS", "users", captain_id,
+        {"status": payload.status, "changes": field_changes(captain, updated, ["status"])},
     )
     message = "Captain suspended" if payload.status == "suspended" else "Captain reactivated"
     return success(_public(updated), message)

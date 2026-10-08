@@ -8,9 +8,11 @@ from app.controllers.subscription_controller import SubscriptionPlanController, 
 from app.core.dependencies import (
     CurrentUser,
     PaginationParams,
+    get_catalogue_viewer,
     get_current_user,
     get_db,
     get_optional_user,
+    is_catalogue_editor,
     require_admin,
     require_customer,
     require_manager_or_admin,
@@ -25,6 +27,7 @@ from app.schemas.subscription_schema import (
     PlanEnquiryRequest,
     SubscribeRequest,
     SubscriptionPlanCreateRequest,
+    SubscriptionExtendRequest,
     SubscriptionPlanUpdateRequest,
     UpgradeSubscriptionRequest,
 )
@@ -34,8 +37,12 @@ subscription_router = APIRouter(prefix="/subscriptions", tags=["User Subscriptio
 
 
 @plan_router.get("")
-async def list_plans(active_only: bool = True, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await SubscriptionPlanController(db).list(active_only)
+async def list_plans(
+    active_only: bool = True, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    # Discontinued plans are for admin/manager screens only — the public
+    # list never shows them, whatever the query string asks for.
+    return await SubscriptionPlanController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
 @plan_router.get("/{plan_id}")
@@ -112,7 +119,7 @@ async def list_customer_subscriptions(
 @subscription_router.get("/center/{service_center_id}/overview", dependencies=[Depends(require_manager_or_admin)])
 async def center_subscription_overview(
     service_center_id: str,
-    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled | scheduled"),
     plan_id: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     current_user: CurrentUser = Depends(get_current_user),
@@ -191,6 +198,19 @@ async def manager_offer_void(order_id: str, current_user: CurrentUser = Depends(
     return await PaymentController(db).manager_offer_void(current_user, order_id)
 
 
+@subscription_router.post("/{subscription_id}/extend", dependencies=[Depends(require_manager_or_admin)])
+async def extend_subscription(
+    subscription_id: str, payload: SubscriptionExtendRequest, current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """A few more days on any pass (monthly, custom or society) that has
+    ended or is in its last 3 days, so its remaining washes can still be
+    booked — at most 10 days per 30-day period. Manager: passes of their own
+    center only (a society pass: their society's center); admin: any.
+    Customers never extend (403). Audited as EXTEND_PASS."""
+    return await UserSubscriptionController(db).extend(current_user, subscription_id, payload)
+
+
 @subscription_router.post("/{subscription_id}/cancel", dependencies=[Depends(require_customer)])
 async def cancel_subscription(subscription_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await UserSubscriptionController(db).cancel(current_user, subscription_id)
@@ -218,7 +238,7 @@ async def list_all_subscriptions(pagination: PaginationParams = Depends(), db: A
 
 @subscription_router.get("/admin/overview", dependencies=[Depends(require_admin)])
 async def subscriptions_admin_overview(
-    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled | scheduled"),
     plan_id: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
@@ -276,3 +296,10 @@ async def center_plan_purchases(
     ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
     s, e, _ps, _pe = resolve_period(period, start, end)
     return await UserSubscriptionController(db).plan_purchases(s, e, pagination, service_center_id)
+
+
+# Custom multi-car plans (manager cart) live under /subscriptions/custom-plans
+# — mounted here so main.py needs no extra registration.
+from app.routes.v1.custom_plan_routes import router as _custom_plan_router  # noqa: E402
+
+subscription_router.include_router(_custom_plan_router)

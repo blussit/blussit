@@ -20,9 +20,12 @@ from app.core.dependencies import (
     require_customer,
     require_manager,
     require_manager_or_admin,
+    require_staff,
 )
 from app.services.auth_service import AuthService
 from app.schemas.booking_schema import (
+    AddServicesRequest,
+    BookingEditRequest,
     BookingGroupCreateRequest,
     BookingAssignCaptainRequest,
     BookingCancelRequest,
@@ -47,6 +50,10 @@ from app.schemas.booking_schema import (
 )
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
+
+# The customer-charges API (/charges) lives in its own module; main.py
+# registers it from here, next to the bookings router.
+from app.routes.v1.charge_routes import router as charge_router  # noqa: E402,F401
 
 
 def _apply_period_filters(filters: dict, period: Optional[str], start: Optional[str], end: Optional[str], date_field: str) -> None:
@@ -243,6 +250,17 @@ async def list_all(
     return await BookingController(db).list_all(filters, pagination)
 
 
+@router.post("/admin/reconcile-slot-counters", dependencies=[Depends(require_admin)])
+async def reconcile_slot_counters(
+    repair: bool = False, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    """Admin: recount seat ownership against every slot/day counter for
+    today and later (BookingService.reconcile_slot_counters). Reports drift
+    only, unless `repair=true` is sent explicitly — then each drifted
+    counter is rewritten from a transactional recount, logged and audited."""
+    return await BookingController(db).reconcile_slot_counters(current_user, repair)
+
+
 @router.get("/recycle-bin", dependencies=[Depends(require_admin)])
 async def list_recycle_bin(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Soft-deleted bookings, most-recently-deleted first, each with
@@ -277,6 +295,31 @@ async def permanently_delete_booking(
 @router.get("/{booking_id}")
 async def get_booking(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).get(current_user, booking_id)
+
+
+@router.get("/{booking_id}/cancellation-charge-preview")
+async def cancellation_charge_preview(
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    whole_visit: bool = False,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """What cancelling this booking now would add to the customer's next
+    booking (the late-cancellation charge). `whole_visit=true` previews the
+    visit cancel (POST /bookings/group/{id}/cancel). The customer sees
+    their own booking; a manager their center's; an admin any."""
+    return await BookingController(db).cancellation_charge_preview(current_user, booking_id, whole_visit)
+
+
+@router.post("/{booking_id}/unlock-arrival-code", dependencies=[Depends(require_manager_or_admin)])
+async def unlock_arrival_code(
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Too many wrong arrival codes locked this visit's check — the manager
+    (own center) or admin resets it."""
+    return await BookingController(db).unlock_arrival_code(current_user, booking_id)
 
 
 @router.post("/{booking_id}/assign-captain", dependencies=[Depends(require_manager_or_admin)])
@@ -419,12 +462,57 @@ async def reschedule_booking(booking_id: str, payload: BookingRescheduleRequest,
     return await BookingController(db).reschedule(current_user, booking_id, payload)
 
 
+@router.patch("/group/{booking_group_id}", dependencies=[Depends(require_customer)])
+async def edit_booking_group(
+    payload: BookingEditRequest,
+    booking_group_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The customer changes their visit (spec 1.3): date/slot, address
+    (same service center only), notes, and per car (`cars`: booking_id +
+    services / quantities / vehicle_type / vehicle_id). Refused within 1
+    hour of the slot or once the captain is on the way. Re-priced; a paid
+    visit priced down is credited to the wallet, priced up becomes due.
+    `expected_total` → 409 PRICE_CHANGED when the new total is higher."""
+    return await BookingController(db).edit(current_user, None, payload, group_id=booking_group_id)
+
+
+@router.patch("/{booking_id}", dependencies=[Depends(require_customer)])
+async def edit_booking(
+    payload: BookingEditRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The customer changes one booking (spec 1.3) — same rules as the
+    visit edit; date/slot/address/notes move the whole visit when the
+    booking is a car of one, the car fields (top level) change this car."""
+    return await BookingController(db).edit(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/add-services", dependencies=[Depends(require_staff)])
+async def add_services_on_site(
+    payload: AddServicesRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """On-site add-ons (spec 1.4): the assigned captain after verifying his
+    arrival (until the visit is fully paid), or the center's manager / an
+    admin while the booking isn't cancelled. The added amount becomes due;
+    the captain's earning is unchanged."""
+    return await BookingController(db).add_services(current_user, booking_id, payload)
+
+
 @router.patch("/{booking_id}/tip", dependencies=[Depends(require_manager_or_admin)])
 async def set_booking_tip(
     booking_id: str, payload: BookingTipRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    """Add or correct the tip on a finished job (0 clears it). Recorded
-    only — never part of the bill or revenue."""
+    """Add or correct the tip on a job the manager did (0 clears it).
+    Founder: no cap, it counts in the job's total and the platform's
+    revenue (never a captain's pay); who set it and when is on the booking
+    (tip_updated_by / tip_updated_at) and in the audit log, before/after."""
     return await BookingController(db).set_tip(current_user, booking_id, payload)
 
 
@@ -452,11 +540,14 @@ class SlotHoldRequest(BaseModel):
 
 @router.post("/hold")
 async def hold_slot(payload: SlotHoldRequest, request: Request, db=Depends(get_db)):
-    from app.core.rate_limit import _client_ip
+    # The per-client hold cap keys on the SAME client key as the rate
+    # limiter — an IPv6 client is its /64 (audit SLOT-02: one device could
+    # pick a fresh address per hold and empty a slot).
+    from app.core.rate_limit import _client_key
     from app.services.booking_service import BookingService
 
     return success(await BookingService(db).hold_slot(
-        payload.holder_key, payload.service_center_id, payload.date, payload.slot_key, client_ip=_client_ip(request),
+        payload.holder_key, payload.service_center_id, payload.date, payload.slot_key, client_ip=_client_key(request),
     ))
 
 

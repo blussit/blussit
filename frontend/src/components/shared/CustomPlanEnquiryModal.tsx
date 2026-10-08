@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Button, Input, Modal } from "../ui";
 import { subscriptionApi, type PlanEnquiryPayload } from "../../api/engagement";
 import { getErrorMessage } from "../../lib/api-client";
+import { trackLead } from "../../lib/metaPixel";
 
 /** "None of these fit us" — captured as a lead the team calls back. */
 export function CustomPlanEnquiryModal({
@@ -42,6 +43,7 @@ export function CustomPlanEnquiryModal({
         washes_per_month: form.washes_per_month || undefined,
       }),
     onSuccess: () => {
+      trackLead("Custom plan enquiry");
       setSent(true);
       setError("");
     },

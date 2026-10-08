@@ -42,9 +42,16 @@ class BookingPriority(str, Enum):
 
 
 class PaymentStatus(str, Enum):
+    # Nothing paid yet, something due (see app/services/booking_money.py).
     PENDING = "pending"
+    # Something paid (online / QR / cash), something still due — after an
+    # edit, an on-site add-on, or a partial payment.
+    PARTIALLY_PAID = "partially_paid"
     PAID = "paid"
     FAILED = "failed"
+    # Paid online, then cancelled/deleted: the money is owed back and the
+    # booking sits on the admin refund queue (PaymentService.flag_refund_due).
+    REFUND_DUE = "refund_due"
     REFUNDED = "refunded"
 
 
@@ -60,11 +67,68 @@ class PaymentMethod(str, Enum):
     SUBSCRIPTION = "subscription"
 
 
+class CustomerChargeStatus(str, Enum):
+    # On the customer's account, waiting for their next booking.
+    OPEN = "open"
+    # Added to a booking's total (applied_to_booking_id). Goes back to OPEN
+    # if that booking is cancelled or deleted before it is paid.
+    APPLIED = "applied"
+    # A manager/admin removed it (reduced to ₹0).
+    WAIVED = "waived"
+    # Charged to the customer's wallet (the wallet model, founder
+    # 2026-10-07): a debit row on customer_wallet_ledger settled it. A
+    # reduction is credited back to the wallet.
+    SETTLED = "settled"
+
+
+class CustomerWalletEntryKind(str, Enum):
+    """Why a customer-wallet ledger row exists (customer_wallet_ledger.kind).
+    The sign of the row's amount says credit (+) or debit (−)."""
+    # A cancelled booking: what was paid back, net of the cancellation charge
+    # (negative when the charge was bigger than what was paid).
+    CANCELLATION = "cancellation"
+    # An unpaid booking cancelled late: the charge.
+    CANCELLATION_CHARGE = "cancellation_charge"
+    # Open late-cancellation charges moved onto the wallet (migration).
+    CHARGE_MIGRATED = "charge_migrated"
+    # A manager/admin reduced or waived a charge already on the wallet.
+    CHARGE_REDUCED = "charge_reduced"
+    # A paid booking edited to a lower price.
+    PRICE_REDUCED = "price_reduced"
+    # Paid more than was due (online and cash for the same thing, a link for
+    # an old amount, a payment after a cancel).
+    OVERPAYMENT = "overpayment"
+    # Wallet credit spent on a booking at creation / returned when that
+    # booking is cancelled.
+    BOOKING_PAYMENT = "booking_payment"
+    # A negative balance carried into a booking was paid with it.
+    PREVIOUS_BALANCE_PAID = "previous_balance_paid"
+    # The manager transferred money back to the customer outside the app.
+    PAYOUT = "payout"
+    ADJUSTMENT = "adjustment"
+    # One car of a paid custom plan refunded to the wallet (PLANS-2,
+    # CustomPlanService.refund_car; meta.custom_plan_id names the cart).
+    REFUND = "refund"
+
+
+class CancellationChargeTier(str, Enum):
+    """The late-cancellation policy table (founder, 2026-10-07). More than
+    the lock window (CUSTOMER_CANCEL_LOCK_HOURS) before the slot is free."""
+    FREE = "free"
+    ONE_TO_FOUR_HOURS = "1_to_4h"
+    UNDER_ONE_HOUR = "under_1h"
+    AFTER_CAPTAIN_LEFT = "after_captain_left"
+
+
 class SubscriptionStatus(str, Enum):
     ACTIVE = "active"
     EXPIRED = "expired"
     CANCELLED = "cancelled"
     PAUSED = "paused"
+    # A custom-plan renewal paid while the car's old pass is still live:
+    # it starts the day after the old pass's Last Booking Day and is
+    # promoted to ACTIVE at its start (subscription_service.PASS_SCHEDULED).
+    SCHEDULED = "scheduled"
 
 
 class BillingCycle(str, Enum):

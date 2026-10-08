@@ -47,8 +47,18 @@ export function PassPurchaseSheet({
   error?: string;
   prefill?: PassPrefill | null;
 }) {
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
-  const { data: servicesData } = useQuery({
+  const {
+    data: vehicleTypes,
+    isError: typesFailed,
+    isFetching: typesFetching,
+    refetch: refetchTypes,
+  } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
+  const {
+    data: servicesData,
+    isError: servicesFailed,
+    isFetching: servicesFetching,
+    refetch: refetchServices,
+  } = useQuery({
     queryKey: ["services-for-passes"],
     queryFn: () => catalogApi.services({ page_size: 100 }),
     enabled: open,
@@ -104,7 +114,7 @@ export function PassPurchaseSheet({
 
   // The live price — re-quoted from the server whenever the type or the
   // service changes, never computed here.
-  const { data: quote, isFetching: quoting, error: quoteError } = useQuery({
+  const { data: quote, isFetching: quoting, error: quoteError, refetch: refetchQuote } = useQuery({
     queryKey: ["pass-quote", plan?.id, vehicleType, serviceId],
     queryFn: () => subscriptionApi.quotePass({ plan_id: plan!.id, vehicle_type: vehicleType!, service_id: serviceId! }),
     enabled: !!plan && !!vehicleType && !!serviceId,
@@ -138,7 +148,19 @@ export function PassPurchaseSheet({
                 {vehicleType === t.id && <Check className="h-4 w-4 text-[#0E1A33]" />}
               </button>
             ))}
-            {!types.length && <p className="text-xs text-gray-500">Loading vehicle types…</p>}
+            {!types.length &&
+              (typesFailed && !vehicleTypes ? (
+                <p role="alert" className="text-xs text-gray-500">
+                  Couldn't load vehicle types.{" "}
+                  <button type="button" disabled={typesFetching} onClick={() => void refetchTypes()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                    {typesFetching ? "Trying…" : "Try Again"}
+                  </button>
+                </p>
+              ) : vehicleTypes ? (
+                <p className="text-xs text-gray-500">This pass isn't sold for any vehicle type right now.</p>
+              ) : (
+                <p className="text-xs text-gray-500">Loading vehicle types…</p>
+              ))}
           </div>
         </div>
 
@@ -160,11 +182,21 @@ export function PassPurchaseSheet({
                 {titleCase(s.name)}
               </button>
             ))}
-            {!menu.length && (
-              <p className="text-xs text-gray-500">
-                {chosenType ? `No service on this pass is offered for a ${chosenType.name}. Try another type, or request a custom plan.` : "Pick a vehicle type first."}
-              </p>
-            )}
+            {!menu.length &&
+              (servicesFailed && !servicesData ? (
+                <p role="alert" className="text-xs text-gray-500">
+                  Couldn't load the services.{" "}
+                  <button type="button" disabled={servicesFetching} onClick={() => void refetchServices()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                    {servicesFetching ? "Trying…" : "Try Again"}
+                  </button>
+                </p>
+              ) : chosenType && !servicesData ? (
+                <p className="text-xs text-gray-500">Loading services…</p>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  {chosenType ? `No service on this pass is offered for a ${chosenType.name}. Try another type, or request a custom plan.` : "Pick a vehicle type first."}
+                </p>
+              ))}
           </div>
         </div>
 
@@ -177,7 +209,12 @@ export function PassPurchaseSheet({
               <Spinner className="h-4 w-4" /> Working out your price…
             </p>
           ) : quoteError ? (
-            <p className="text-sm text-[var(--color-error)]">{getErrorMessage(quoteError)}</p>
+            <p className="text-sm text-[var(--color-error)]">
+              {getErrorMessage(quoteError)}{" "}
+              <button type="button" onClick={() => void refetchQuote()} className="font-semibold text-[#0A66F0] hover:underline">
+                Try Again
+              </button>
+            </p>
           ) : quote ? (
             <>
               <div className="flex items-baseline justify-between gap-3">

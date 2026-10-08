@@ -20,7 +20,7 @@ export const FAQS: Faq[] = [
     id: "areas",
     question: "Which Areas Do You Serve?",
     answer:
-      "We serve Indore. Enter your address or drop a pin while booking and we'll tell you right away if we can reach you. If a distance charge applies to your address, you see it before you confirm.",
+      "Every colony in Indore. Drop a pin while booking and a captain comes to that spot. If a distance charge applies to your address, you see it before you confirm.",
   },
   {
     id: "keep-ready",
@@ -38,7 +38,7 @@ export const FAQS: Faq[] = [
     id: "cancel",
     question: "Can I Cancel Or Change My Booking?",
     answer:
-      "Yes. You can change the date or time from your account until the captain is on the way. You can cancel for free from your account up to 4 hours before your time slot. Closer than that, call or WhatsApp us and we'll help.",
+      "Yes. You can change the date or time from your account until the captain is on the way. Cancelling is free up to 4 hours before your slot. After that, a small amount is deducted (₹50 to ₹100) — see our Cancellation Policy.",
   },
   {
     id: "monthly-pass",

@@ -8,6 +8,7 @@ import { catalogApi, vehicleTypeApi } from "../../../api/catalog";
 import { useAuth } from "../../../context/AuthContext";
 import { CustomPlanEnquiryModal } from "../../shared/CustomPlanEnquiryModal";
 import { bikeTypeIds } from "../../../lib/serviceMix";
+import { cheapestMonthlyPassPrice } from "../../../lib/passPricing";
 import { titleCase } from "./shared";
 import { SocietyRequestCard } from "./SocietyRequestCard";
 import type { Service } from "../../../types";
@@ -52,7 +53,11 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
         .map((s) => s.name)
     )
   );
-  const maxWashesAMonth = Math.max(0, ...active.map((p) => p.total_service_count || 0));
+  // Per MONTH: a quarterly/yearly plan's count (12, 48) isn't a monthly figure.
+  const maxWashesAMonth = Math.max(0, ...active.filter((p) => (p.billing_cycle || "monthly") === "monthly").map((p) => p.total_service_count || 0));
+  // The real, buyable minimum from the live plans (pre-rendered into the
+  // HTML at build time) — never a typed-in figure. No plan on sale: no price.
+  const fromPrice = cheapestMonthlyPassPrice(active, services, vehicleTypes, bikeIds);
   const washesLine = maxWashesAMonth > 0 ? `Up to ${maxWashesAMonth} washes a month` : "Washes every month";
 
   return (
@@ -71,7 +76,7 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
             <span className="relative inline-block text-[#1677FF]">
               Every Month.
               <svg viewBox="0 0 200 12" preserveAspectRatio="none" className="absolute -bottom-1.5 left-2 h-[8px] w-[75%]" aria-hidden="true">
-                <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FACC15" strokeWidth="3" strokeLinecap="round" />
+                <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FFD21F" strokeWidth="3" strokeLinecap="round" />
               </svg>
             </span>
           </h2>
@@ -91,12 +96,13 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
                 <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[26px]">Monthly Pass</h3>
                 <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
 
-                <div className="mt-1.5 flex items-baseline gap-1.5">
-                  <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">
-                    ₹999
-                  </span>
-                  <span className="text-[13px] text-[#64748B]">/ Month</span>
-                </div>
+                {fromPrice != null && (
+                  <div className="mt-1.5 flex items-baseline gap-1.5">
+                    <span className="text-[13px] text-[#64748B]">From</span>
+                    <span className="font-display text-[36px] font-extrabold leading-none text-[#1677FF] sm:text-[40px]">₹{fromPrice}</span>
+                    <span className="text-[13px] text-[#64748B]">/ Month</span>
+                  </div>
+                )}
 
                 <ul className="my-3 space-y-1.5">
                   <PlanLine
@@ -121,9 +127,15 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
               <div
                 className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
               >
-                <div
-                  className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
-                  style={{ backgroundImage: `url(${MONTHLY_IMG})` }}
+                {/* An <img>, not a CSS background: it's below the fold, and a
+                    background downloads at once — stealing bandwidth from the
+                    hero photo on a phone. Lazy, it waits until scrolled near. */}
+                <img
+                  src={MONTHLY_IMG}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  className="absolute inset-0 h-full w-full object-cover object-center transition-transform duration-700 group-hover:scale-105"
                 />
               </div>
             </div>
@@ -132,7 +144,7 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
           <SocietyRequestCard />
 
           {/* Custom plan */}
-          <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:h-full lg:flex-col">
+          <div id="custom-plan" className="group relative flex scroll-mt-24 flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:h-full lg:flex-col">
             <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
               <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[24px]">Custom Plan</h3>
               <p className="mt-1 text-[13px] leading-snug text-[#64748B]">
@@ -158,9 +170,15 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
             <div
                 className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
               >
-                <div
-                  className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
-                  style={{ backgroundImage: `url(${CUSTOM_IMG})` }}
+                {/* An <img>, not a CSS background: it's below the fold, and a
+                    background downloads at once — stealing bandwidth from the
+                    hero photo on a phone. Lazy, it waits until scrolled near. */}
+                <img
+                  src={CUSTOM_IMG}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  className="absolute inset-0 h-full w-full object-cover object-center transition-transform duration-700 group-hover:scale-105"
                 />
               </div>
           </div>

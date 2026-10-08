@@ -134,7 +134,7 @@ export function HowItWorksStrip({ id = "how-it-works" }: { id?: string }) {
               <span className="relative inline-block" style={{ color: BLUE }}>
                 Made Simple.
                 <svg viewBox="0 0 200 12" preserveAspectRatio="none" className="absolute -bottom-1.5 left-2 h-[8px] w-[75%]" aria-hidden="true">
-                  <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FACC15" strokeWidth="3" strokeLinecap="round" />
+                  <path d="M2,8 C50,2 120,2 198,7" fill="none" stroke="#FFD21F" strokeWidth="3" strokeLinecap="round" />
                 </svg>
               </span>
             </h2>

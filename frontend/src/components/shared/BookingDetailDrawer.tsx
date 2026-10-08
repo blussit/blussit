@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Calendar, Car, Clock, CreditCard, Flag, MapPin, Navigation, Pencil, Star, Trash2, User as UserIcon, Wrench } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, Ban, Calendar, Car, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, Navigation, Pencil, Plus, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
+import { getErrorMessage } from "../../lib/api-client";
+import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
 import { TipModal } from "./TipModal";
-import { Badge, Button, Modal, StatusBadge } from "../ui";
+import { AddedOnSiteLines, AddServiceDialog, CustomerEditedChip, HistoryChanges, PAYMENT_STATUS_LABELS, paymentTone } from "./BookingStaffExtras";
+import { moneyOf, staffBookingApi, TIP_METHOD_LABELS, type ManagerPayback, type StaffBooking, type TipMethod } from "../../api/staffBookings";
+import { PAYBACK_REASON_LABELS, PAYOUT_METHOD_LABELS, type PaybackReason, type PayoutMethod } from "../../api/customerWallet";
+import { PaybackDialog, paybackOption } from "./PaybackDialog";
+import { Badge, Button, ErrorState, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
-import { formatDateTime, formatSlot } from "../../lib/date";
-import { ISSUE_LABELS, vehicleLabel } from "../../lib/constants";
+import { asUtcInstant, formatDateTime, formatSlot } from "../../lib/date";
+import { isArrivalLocked, issueLabel, vehicleLabel } from "../../lib/constants";
 import { bookingServiceLabel, combinedStatus } from "../../lib/bookingGroups";
 import { toTitle } from "../../lib/titleCase";
 import type { Booking } from "../../types";
@@ -43,6 +49,8 @@ export function BookingDetailDrawer({
   centerName,
   onEdit,
   onDelete,
+  onCancel,
+  hasComplaint = false,
 }: {
   booking: Booking | null;
   onClose: () => void;
@@ -55,15 +63,33 @@ export function BookingDetailDrawer({
    *  the whole visit server-side). */
   onEdit?: (booking: Booking) => void;
   onDelete?: (booking: Booking) => void;
+  /** Staff cancel (opens the caller's StaffCancelDialog) — gets a car on
+   *  the visit that is still open; the whole visit is cancelled. */
+  onCancel?: (booking: Booking) => void;
+  /** Opened from a complaint: a payback for it is allowed (the server checks). */
+  hasComplaint?: boolean;
 }) {
   // The rest of the visit, when the row opened is one car of several.
   const groupId = booking?.booking_group_id || null;
-  const { data: visitBookings } = useQuery({
+  const visitQuery = useQuery({
     queryKey: ["booking-group", groupId],
     queryFn: () => bookingApi.getGroup(groupId as string),
     enabled: !!groupId,
   });
-  const cars: Booking[] = groupId && visitBookings?.length ? visitBookings : booking ? [booking] : [];
+  const visitBookings = visitQuery.data;
+  // Without the group read a multi-car visit would show as one car.
+  const visitFailed = !!groupId && visitQuery.isError && !visitBookings;
+  // A single booking's list row has no status_history (and may be stale on
+  // money): staff re-read it. A visit's group read already carries both.
+  const { user: me } = useAuth();
+  const staffViewer = me?.role === "manager" || me?.role === "admin";
+  const freshQuery = useQuery({
+    queryKey: ["staff-booking", booking?.id],
+    queryFn: () => staffBookingApi.get(booking!.id),
+    enabled: !!booking && !groupId && staffViewer,
+  });
+  const single: Booking | null = booking ? ({ ...booking, ...(freshQuery.data && freshQuery.data.id === booking.id ? freshQuery.data : {}) } as Booking) : null;
+  const cars: StaffBooking[] = groupId && visitBookings?.length ? visitBookings : single ? [single] : [];
   const isVisit = cars.length > 1;
   const visitTotal = cars.reduce((sum, c) => sum + (c.total_amount || 0), 0);
 
@@ -71,7 +97,22 @@ export function BookingDetailDrawer({
   // clicked, and resets whenever a different booking opens the drawer.
   const [carId, setCarId] = useState<string | null>(null);
   useEffect(() => setCarId(booking?.id || null), [booking?.id]);
-  const car = cars.find((c) => c.id === carId) || booking;
+  const car: StaffBooking | null = cars.find((c) => c.id === carId) || single;
+  const [addFor, setAddFor] = useState<StaffBooking | null>(null);
+  // Money of the visit: wallet used, previous balance carried, paid, due.
+  const money = cars.reduce(
+    (acc, c) => {
+      const m = moneyOf(c);
+      return { wallet: acc.wallet + m.wallet, paid: acc.paid + m.paid, due: acc.due + m.due, carried: acc.carried + m.carried };
+    },
+    { wallet: 0, paid: 0, due: 0, carried: 0 },
+  );
+  const visitPayStatus = cars.every((c) => c.payment_status === "paid")
+    ? "paid"
+    : cars.some((c) => c.payment_status === "partially_paid") || (money.paid > 0 && money.due > 0)
+      ? "partially_paid"
+      : "pending";
+  const editedCars = cars.filter((c) => c.customer_edited_at);
   const flagged = cars.filter((c) => c.issue_flag && !c.issue_resolved);
   const paymentPending = cars.some((c) => c.payment_status !== "paid");
   const editableCar = cars.find((c) => !["completed", "cancelled"].includes(c.status)) || null;
@@ -84,9 +125,9 @@ export function BookingDetailDrawer({
   // shows a fresh save straight away.
   const { user } = useAuth();
   const [tipOpen, setTipOpen] = useState(false);
-  const [tipSaved, setTipSaved] = useState<number | null>(null);
+  const [tipSaved, setTipSaved] = useState<{ tip: number; method: TipMethod } | null>(null);
   useEffect(() => setTipSaved(null), [booking?.id]);
-  const visitTip = tipSaved ?? cars.reduce((sum, c) => sum + (Number(c.tip_amount) || 0), 0);
+  const visitTip = tipSaved?.tip ?? cars.reduce((sum, c) => sum + (Number(c.tip_amount) || 0), 0);
   const doneCar = cars.find((c) => c.status === "completed" && c.completed_by_role === "manager") || null;
   const canEditTip = !!doneCar && (user?.role === "manager" || user?.role === "admin");
   const showTip = canEditTip || (visitTip > 0 && (user?.role === "manager" || user?.role === "admin"));
@@ -102,10 +143,51 @@ export function BookingDetailDrawer({
     refetchInterval: travelActive ? 45000 : false,
   });
 
-  const { data: review } = useQuery({
+  const reviewQuery = useQuery({
     queryKey: ["booking-review", car?.id],
     queryFn: () => reviewApi.forBooking(car!.id),
     enabled: !!car,
+  });
+  const review = reviewQuery.data;
+
+  // Money staff see the same way everywhere: a previous late-cancellation
+  // charge, the manager's discount and the tip (with who and when), and a
+  // refund on a paid-then-cancelled booking.
+  const isStaff = user?.role === "manager" || user?.role === "admin";
+  const cancellationCharge = cars.reduce((sum, c) => sum + (Number(c.cancellation_charge) || 0), 0);
+  const discountCar = cars.find((c) => (Number(c.manager_discount) || 0) > 0) || null;
+  const managerDiscount = cars.reduce((sum, c) => sum + (Number(c.manager_discount) || 0), 0);
+  const tipCar = cars.find((c) => (Number(c.tip_amount) || 0) > 0) || null;
+  // A tip carries its own method (MONEY-2); one saved before that is cash.
+  const tipMethod: TipMethod = tipSaved?.method ?? (tipCar?.tip_method === "online" ? "online" : "cash");
+  // Money a manager paid back for this visit (MONEY-2), newest last.
+  const paybacks: (ManagerPayback & { carNumber?: string })[] = cars.flatMap((c) =>
+    (c.manager_paybacks || []).map((p) => ({ ...p, carNumber: isVisit ? c.booking_number : undefined })),
+  );
+  const paidBackTotal = cars.reduce((sum, c) => sum + (Number(c.paid_back_total) || 0), 0);
+  // Pay Back To Customer: only a cancelled / delayed / flagged / complained
+  // booking (the server decides; this just hides it where it can't apply).
+  const paybackChoices = cars.map((c) => paybackOption(c, hasComplaint)).filter((o) => o.signals.length > 0);
+  const [paybackOpen, setPaybackOpen] = useState(false);
+  const refundCars = cars.filter((c) => c.payment_status === "refund_due" || c.payment_status === "refunded");
+  const refundAmount = refundCars.reduce((sum, c) => sum + (Number(c.refunded_amount) || c.total_amount || 0), 0);
+  const refundDone = refundCars.length > 0 && refundCars.every((c) => c.payment_status === "refunded");
+  const refundedAt = refundCars.map((c) => c.refunded_at).filter(Boolean).sort().pop() || null;
+  const lockedCar = cars.find(isArrivalLocked) || null;
+  const noGps = cars.some((c) => c.arrival_no_gps);
+
+  const queryClient = useQueryClient();
+  const { push: pushToast } = useToast();
+  const unlock = useMutation({
+    mutationFn: (id: string) => bookingApi.unlockArrivalCode(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|admin-center-bookings|admin-bookings|booking|manager-dashboard)/.test(q.queryKey[0]),
+      });
+      pushToast({ tone: "success", title: "Arrival Check Unlocked", message: "The captain can enter the code again." });
+      onClose();
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Unlock", message: getErrorMessage(err) }),
   });
 
   return (
@@ -117,8 +199,28 @@ export function BookingDetailDrawer({
     >
       {booking && car && (
         <div className="space-y-5">
-          {(onEdit || onDelete) && (
+          {(onEdit || onDelete || (onCancel && editableCar) || (isStaff && lockedCar) || (isStaff && car.status !== "cancelled") || (isStaff && paybackChoices.length > 0)) && (
             <div className="flex flex-wrap justify-end gap-2 border-b border-gray-100 pb-3">
+              {isStaff && paybackChoices.length > 0 && booking.customer_id && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setPaybackOpen(true)} data-testid="drawer-payback">
+                  <HandCoins className="h-3.5 w-3.5" /> Pay Back To Customer
+                </Button>
+              )}
+              {isStaff && car.status !== "cancelled" && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setAddFor(car)}>
+                  <Plus className="h-3.5 w-3.5" /> Add Service{isVisit ? ` · Car ${cars.indexOf(car) + 1}` : ""}
+                </Button>
+              )}
+              {isStaff && lockedCar && (
+                <Button size="sm" isLoading={unlock.isPending} onClick={() => unlock.mutate(lockedCar.id)}>
+                  <LockOpen className="h-3.5 w-3.5" /> Unlock Arrival Check
+                </Button>
+              )}
+              {onCancel && editableCar && (
+                <Button size="sm" variant="outline" onClick={() => onCancel(editableCar)}>
+                  <Ban className="h-3.5 w-3.5 text-[var(--color-error)]" /> {isVisit ? "Cancel Visit" : "Cancel Booking"}
+                </Button>
+              )}
               {onEdit && (
                 <Button
                   size="sm"
@@ -136,6 +238,19 @@ export function BookingDetailDrawer({
                 </Button>
               )}
             </div>
+          )}
+          {visitFailed && (
+            <p role="alert" className="text-xs text-[var(--color-text-secondary)]">
+              Couldn't load the other cars on this visit.{" "}
+              <button
+                type="button"
+                className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+                disabled={visitQuery.isFetching}
+                onClick={() => void visitQuery.refetch()}
+              >
+                Try Again
+              </button>
+            </p>
           )}
           <div className="flex flex-wrap items-center gap-2">
             {/* The VISIT's status: least-advanced car wins, because the
@@ -155,9 +270,15 @@ export function BookingDetailDrawer({
             {booking.source === "whatsapp" && <Badge tone="success">Booked Via WhatsApp</Badge>}
             {booking.source === "staff" && <Badge tone="neutral">Booked By Staff</Badge>}
             {car.completed_by_role === "manager" && <Badge tone="success">Done By Manager</Badge>}
+            {isStaff && editedCars.map((c) => <CustomerEditedChip key={c.id} booking={c} withTime />)}
+            {noGps && (
+              <Badge tone="warning">
+                <WifiOff className="h-3 w-3" /> Reached Without GPS
+              </Badge>
+            )}
             {flagged.map((f) => (
               <Badge key={f.id} tone="error">
-                <AlertTriangle className="h-3 w-3" /> {ISSUE_LABELS[f.issue_flag!] || f.issue_flag}
+                <AlertTriangle className="h-3 w-3" /> {issueLabel(f.issue_flag)}
                 {isVisit ? ` · ${f.booking_number}` : ""}
               </Badge>
             ))}
@@ -299,25 +420,114 @@ export function BookingDetailDrawer({
               label={isVisit ? `Total · ${cars.length} Vehicles` : "Amount"}
               value={<span className="font-mono-num">₹{visitTotal}</span>}
             />
+            {cancellationCharge > 0 && (
+              <Row
+                label="Previous Cancellation Charge"
+                value={
+                  <span className="font-mono-num">
+                    ₹{cancellationCharge}
+                    <span className="ml-1 text-xs font-normal text-[var(--color-text-secondary)]">· in the total</span>
+                  </span>
+                }
+              />
+            )}
+            {isStaff && managerDiscount > 0 && (
+              <Row
+                label="Manager Discount"
+                value={
+                  <span className="font-mono-num">
+                    −₹{managerDiscount}
+                    {(discountCar?.manager_discount_by_name || discountCar?.manager_discount_at) && (
+                      <span className="block text-xs font-normal text-[var(--color-text-secondary)]">
+                        {[discountCar?.manager_discount_by_name ? `By ${discountCar.manager_discount_by_name}` : "", discountCar?.manager_discount_at ? formatDateTime(asUtcInstant(discountCar.manager_discount_at)) : ""]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    )}
+                  </span>
+                }
+              />
+            )}
+            {money.carried > 0 && (
+              <Row
+                label="Previous Balance Due"
+                value={
+                  <span className="font-mono-num">
+                    ₹{Math.round(money.carried)}
+                    <span className="ml-1 text-xs font-normal text-[var(--color-text-secondary)]">· in the total</span>
+                  </span>
+                }
+              />
+            )}
+            {money.wallet > 0 && <Row label="Paid From Wallet" value={<span className="font-mono-num">−₹{Math.round(money.wallet)}</span>} />}
             <Row label="Method" value={toTitle(booking.payment_method)} />
+            {isStaff && !refundCars.length && (money.paid > 0 || money.due > 0) && (
+              <>
+                <Row label="Paid" value={<span className="font-mono-num text-[var(--color-success)]">₹{Math.round(money.paid)}</span>} />
+                <Row
+                  label="Due"
+                  value={<span className={`font-mono-num ${money.due > 0 ? "font-bold text-amber-700" : ""}`}>₹{Math.round(money.due)}</span>}
+                />
+              </>
+            )}
             <Row
               label="Status"
-              value={<Badge tone={paymentPending ? "neutral" : "success"}>{paymentPending ? "Pending" : "Paid"}</Badge>}
+              value={
+                refundCars.length ? (
+                  <Badge tone={refundDone ? "neutral" : "warning"}>{refundDone ? `Refunded ₹${Math.round(refundAmount)}` : `Refund Due ₹${Math.round(refundAmount)}`}</Badge>
+                ) : (
+                  <Badge tone={paymentPending ? paymentTone(visitPayStatus) : "success"}>{paymentPending ? PAYMENT_STATUS_LABELS[visitPayStatus] : "Paid"}</Badge>
+                )
+              }
             />
+            {isStaff && <AddedOnSiteLines cars={cars} showCar={isVisit} />}
+            {refundDone && refundedAt && <Row label="Refunded On" value={<span className="font-mono-num text-xs">{formatDateTime(asUtcInstant(refundedAt))}</span>} />}
             {showTip && (
               <Row
                 label="Tip (Included In Amount)"
                 value={
                   <span className="flex items-center gap-2">
-                    <span className="font-mono-num">{visitTip > 0 ? `₹${visitTip}` : "—"}</span>
+                    <span className="font-mono-num">
+                      <span className="whitespace-nowrap">{visitTip > 0 ? `₹${visitTip} (${TIP_METHOD_LABELS[tipMethod]})` : "—"}</span>
+                      {visitTip > 0 && tipSaved == null && (tipCar?.tip_updated_by_name || tipCar?.tip_updated_at) && (
+                        <span className="block text-xs font-normal text-[var(--color-text-secondary)]">
+                          {[tipCar?.tip_updated_by_name ? `By ${tipCar.tip_updated_by_name}` : "", tipCar?.tip_updated_at ? formatDateTime(asUtcInstant(tipCar.tip_updated_at)) : ""].filter(Boolean).join(" · ")}
+                        </span>
+                      )}
+                    </span>
                     {canEditTip && (
-                      <button type="button" onClick={() => setTipOpen(true)} className="text-xs font-semibold text-[#0A66F0] hover:underline">
+                      <button type="button" onClick={() => setTipOpen(true)} className="text-xs font-semibold text-[var(--color-primary)] hover:underline">
                         {visitTip > 0 ? "Edit" : "Add Tip"}
                       </button>
                     )}
                   </span>
                 }
               />
+            )}
+            {isStaff && paybacks.length > 0 && (
+              <div className="mt-1 space-y-1 border-t border-gray-100 pt-2" data-testid="drawer-paybacks">
+                {paybacks.map((p, i) => (
+                  <p key={p.id || i} className="text-sm text-[var(--color-text-primary)]">
+                    <span className="font-semibold">
+                      Paid Back <span className="font-mono-num">₹{Math.round(p.amount)}</span>
+                      {p.by_name ? ` By ${p.by_name}` : ""}
+                    </span>
+                    <span className="text-[var(--color-text-secondary)]">
+                      {[
+                        p.reason_label || (p.reason ? PAYBACK_REASON_LABELS[p.reason as PaybackReason] || toTitle(p.reason) : ""),
+                        p.method ? PAYOUT_METHOD_LABELS[p.method as PayoutMethod] || toTitle(p.method) : "",
+                        p.reference ? `Ref ${p.reference}` : "",
+                        p.carNumber || "",
+                      ]
+                        .filter(Boolean)
+                        .map((x) => ` · ${x}`)
+                        .join("")}
+                    </span>
+                    {p.at && <span className="block text-xs text-[var(--color-text-secondary)]">{formatDateTime(asUtcInstant(p.at))}</span>}
+                  </p>
+                ))}
+                {paidBackTotal > 0 && <Row label="Paid Back Total" value={<span className="font-mono-num">₹{Math.round(paidBackTotal)}</span>} />}
+              </div>
             )}
           </Section>
 
@@ -336,9 +546,9 @@ export function BookingDetailDrawer({
                     key={c.id}
                     type="button"
                     onClick={() => setCarId(c.id)}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    className={`min-h-11 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors sm:min-h-0 ${
                       c.id === car.id
-                        ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] text-[var(--color-text-primary)]"
+                        ? "border-black bg-[var(--color-primary-light)] text-[var(--color-text-primary)]"
                         : "border-gray-200 text-[var(--color-text-secondary)] hover:border-gray-300"
                     }`}
                   >
@@ -364,6 +574,7 @@ export function BookingDetailDrawer({
                 <AlertTriangle className="h-3.5 w-3.5" /> {car.delay_minutes} min over expected duration
               </p>
             )}
+            {isStaff && <HistoryChanges rows={car.status_history} />}
           </Section>
 
           {/* Every workflow tap's captured GPS, each one openable in
@@ -418,7 +629,9 @@ export function BookingDetailDrawer({
           )}
 
           <Section title={isVisit ? `Review · ${carTag(car)}` : "Review"} icon={Star}>
-            {review ? (
+            {reviewQuery.isError && review === undefined ? (
+              <ErrorState message="Couldn't load the review." onRetry={() => void reviewQuery.refetch()} busy={reviewQuery.isFetching} className="p-4" />
+            ) : review ? (
               <div className="space-y-2">
                 {(review.captain_rating != null || review.rating != null) && <StarRow label="Captain" rating={review.captain_rating ?? review.rating ?? 0} />}
                 <StarRow label="Service" rating={review.service_rating ?? review.rating ?? 0} />
@@ -432,7 +645,24 @@ export function BookingDetailDrawer({
           </Section>
         </div>
       )}
-      <TipModal booking={tipOpen ? doneCar : null} currentTip={visitTip} onClose={() => setTipOpen(false)} onSaved={setTipSaved} />
+      <AddServiceDialog booking={addFor} onClose={() => setAddFor(null)} onAdded={() => void (groupId ? visitQuery.refetch() : freshQuery.refetch())} />
+      <TipModal
+        booking={tipOpen ? doneCar : null}
+        currentTip={visitTip}
+        currentMethod={tipMethod}
+        onClose={() => setTipOpen(false)}
+        onSaved={(tip, method) => setTipSaved({ tip, method })}
+      />
+      {isStaff && booking?.customer_id && (
+        <PaybackDialog
+          open={paybackOpen}
+          onClose={() => setPaybackOpen(false)}
+          customerId={booking.customer_id}
+          customerName={booking.customer_name}
+          bookings={paybackChoices}
+          defaultBookingId={paybackChoices.some((o) => o.id === car?.id) ? car?.id : paybackChoices[0]?.id}
+        />
+      )}
     </Modal>
   );
 }
@@ -489,7 +719,7 @@ function LocationCheckRow({
         rel="noreferrer"
         className="flex shrink-0 items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-xs font-semibold text-[var(--color-text-primary)] hover:border-black"
       >
-        <MapPin className="h-3 w-3" /> Open in Maps
+        <MapPin className="h-3 w-3" /> Open In Maps
       </a>
     </div>
   );

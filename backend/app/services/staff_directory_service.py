@@ -12,6 +12,7 @@ from app.services.booking_service import BookingService, _resolve_estimated_star
 from app.utils.geo import haversine_km
 from app.utils.timezone import from_stored
 
+_PERFORMANCE_MAX_JOBS = 5000
 _PERFORMANCE_FIELDS = {
     field: 1
     for field in (
@@ -109,7 +110,12 @@ class StaffDirectoryService:
 
         # Only the fields read below — a captain's full booking docs (photos,
         # history, snapshots) over a year would otherwise sit in memory per call.
-        bookings = await self.booking_repo.collection.find(match, _PERFORMANCE_FIELDS).to_list(length=None)
+        # Bounded (PERF-03): without a date filter this was the captain's
+        # whole history in memory — the newest _PERFORMANCE_MAX_JOBS (years of
+        # work) is the summary; status counts above still cover everything.
+        bookings = await self.booking_repo.collection.find(match, _PERFORMANCE_FIELDS).sort("scheduled_date", -1).limit(
+            _PERFORMANCE_MAX_JOBS
+        ).to_list(length=_PERFORMANCE_MAX_JOBS)
         completed = [b for b in bookings if b.get("status") == "completed"]
         total_jobs = len(completed)
         # The CAPTAIN's earnings, not the customer-paid gross — summing
@@ -245,7 +251,9 @@ class StaffDirectoryService:
             raise NotFoundException("Booking not found")
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
 
-        address = await booking_service.address_repo.find_by_id(booking["address_id"])
+        # The booking's own snapshot (spec 1.3) — editing the saved address
+        # later must not move where the captains are measured from.
+        address = await booking_service._address_of(booking)
         policy = await booking_service.policy_service.get_policy()
         # Only active captains are ever worth showing here — an
         # inactive/suspended one would just be a dead-end pick that fails

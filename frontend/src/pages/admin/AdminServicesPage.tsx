@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Power, Star, Trash2 } from "lucide-react";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { adminCatalogApi, analyticsApi } from "../../api/admin";
-import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
+import { Badge, Button, DataTable, ErrorState, Input, Modal, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { toTitle } from "../../lib/titleCase";
 import { useConfirm } from "../../context/ConfirmContext";
@@ -56,17 +56,20 @@ export default function AdminServicesPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
   const { push: pushToast } = useToast();
-  const { data: categories } = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
+  const categoriesQuery = useQuery({ queryKey: ["admin-categories"], queryFn: () => catalogApi.categories(false) });
+  const categories = categoriesQuery.data;
   // active_only=false: a service switched OFF must stay on this page (with
   // its Inactive badge) so it can be switched back on or edited.
-  const { data: services, isLoading } = useQuery({
+  const { data: services, isLoading, error: servicesError, refetch: refetchServices } = useQuery({
     queryKey: ["admin-services"],
     queryFn: () => catalogApi.services({ page_size: 100, active_only: false }),
   });
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
+  const vehicleTypesQuery = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
+  const vehicleTypes = vehicleTypesQuery.data;
   const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
 
-  const { data: breakdown } = useQuery({ queryKey: ["service-breakdown"], queryFn: () => analyticsApi.serviceBreakdown() });
+  const breakdownQuery = useQuery({ queryKey: ["service-breakdown"], queryFn: () => analyticsApi.serviceBreakdown() });
+  const breakdown = breakdownQuery.data;
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
@@ -230,6 +233,8 @@ export default function AdminServicesPage() {
       <DataTable<Service>
         isLoading={isLoading}
         data={services?.data || []}
+        error={servicesError}
+        onRetry={() => void refetchServices()}
         emptyTitle="No Services Yet"
         onRowClick={(s) => setStatsFor(s)}
         columns={[
@@ -290,6 +295,15 @@ export default function AdminServicesPage() {
 
       <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${toTitle(statsFor.name)} — Bookings` : ""}>
         {statsFor && (() => {
+          if (breakdownQuery.isError && !breakdown)
+            return (
+              <ErrorState
+                message="Couldn't load this service's booking stats."
+                onRetry={() => void breakdownQuery.refetch()}
+                busy={breakdownQuery.isFetching}
+                className="p-4"
+              />
+            );
           const s = breakdown?.find((b) => b.service_id === statsFor.id);
           if (!s) return <p className="text-sm text-[var(--color-text-secondary)]">No bookings have included this service yet.</p>;
           return (
@@ -371,6 +385,9 @@ export default function AdminServicesPage() {
               </option>
             ))}
           </Select>
+          {categoriesQuery.isError && !categories && (
+            <ErrorState message="Couldn't load categories." onRetry={() => void categoriesQuery.refetch()} busy={categoriesQuery.isFetching} className="p-4" />
+          )}
           <Input label="Service Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
           <div className="w-full">
             <label htmlFor="service-description" className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
@@ -514,6 +531,14 @@ export default function AdminServicesPage() {
           </div>
           <div>
             <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Applicable Vehicle Types</p>
+            {vehicleTypesQuery.isError && !vehicleTypes && (
+              <ErrorState
+                message="Couldn't load vehicle types."
+                onRetry={() => void vehicleTypesQuery.refetch()}
+                busy={vehicleTypesQuery.isFetching}
+                className="mb-2 p-4"
+              />
+            )}
             <div className="flex flex-wrap gap-2">
               {(vehicleTypes || []).map((t) => (
                 <button

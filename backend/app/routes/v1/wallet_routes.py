@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -54,8 +56,15 @@ async def my_withdrawals(pagination: PaginationParams = Depends(), current_user:
 
 
 @router.get("/withdrawals/pending", dependencies=[Depends(require_admin)])
-async def pending_withdrawals(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await WalletController(db).pending_withdrawals(pagination)
+async def pending_withdrawals(
+    status: Literal["pending", "approved"] = "pending",
+    pagination: PaginationParams = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The admin's withdrawal queues: `pending` (default — approve or
+    reject) and `approved` (already debited, awaiting the bank transfer —
+    mark paid, or reject to return the amount to the wallet)."""
+    return await WalletController(db).pending_withdrawals(pagination, status)
 
 
 @router.put("/withdrawals/{withdrawal_id}/review", dependencies=[Depends(require_admin)])

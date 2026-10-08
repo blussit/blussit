@@ -26,6 +26,7 @@ washes a captain does that day:
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import date, datetime, time, timedelta
 
 from bson import ObjectId
@@ -53,7 +54,7 @@ from app.services.society_schedule_engine import (
 )
 from app.services.society_service import LIVE_BOOKING_STATUSES, SocietyService, today_ist
 from app.utils.quiet_alerts import muted_manager_new_booking_alerts
-from app.utils.slots import format_slot_12h, format_time_12h, generate_slots
+from app.utils.slots import format_slot_12h, format_time_12h
 from app.utils.timezone import IST, from_stored, now_ist, to_ist
 
 logger = logging.getLogger(__name__)
@@ -137,12 +138,15 @@ class SocietyScheduleService:
         return center
 
     async def _slots(self, center: dict) -> dict[str, Slot]:
+        """The center's slots — the booking engine's own list
+        (booking_service.center_slots: the center's hours, else the
+        platform's 7:00 AM – 7:00 PM, and its slot length), never a
+        hard-coded 08:00–20:00 that offers slots the engine refuses."""
         from app.services.booking_policy_service import BookingPolicyService
+        from app.services.booking_service import center_slots
 
         policy = await BookingPolicyService(self.db).get_policy()
-        duration = center.get("slot_duration_minutes") or policy["slot_duration_minutes"]
-        raw = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
-        return {s["key"]: slot_from_key(s["key"]) for s in raw}
+        return {s["key"]: slot_from_key(s["key"]) for s in center_slots(center, policy)}
 
     async def _policy(self) -> dict:
         from app.services.booking_policy_service import BookingPolicyService
@@ -160,7 +164,7 @@ class SocietyScheduleService:
         oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
         count = await self.db.users.count_documents({
             "_id": {"$in": oids}, "role": "captain", "service_center_id": center_id,
-            "is_deleted": {"$ne": True}, "status": {"$ne": "suspended"},
+            "is_deleted": {"$ne": True}, "status": {"$nin": ["suspended", "inactive"]},
         }) if len(oids) == len(ids) else -1
         if count != len(set(ids)):
             raise BadRequestException("Pick captains from this society's service center.")
@@ -807,27 +811,31 @@ class SocietyScheduleService:
         return out
 
     async def _slot_room(self, center_id: str, dates: list[str]) -> dict[tuple[str, str], int]:
-        """Read-only: bookings each (date, slot) can still take."""
-        from app.services.capacity_policy_service import CapacityPolicyService
+        """Read-only: bookings each (date, slot) can still take. A slot not
+        touched yet starts at the engine's own default
+        (BookingService._slot_capacity_defaults); one whose capacity was
+        never configured takes NO bookings, so it has 0 room (fail closed —
+        it used to count as 999 free seats)."""
+        from app.services.booking_policy_service import BookingPolicyService
+        from app.services.booking_service import BookingService
 
         center = await self._center(center_id)
+        policy = await BookingPolicyService(self.db).get_policy()
         slots = await self._slots(center)
         docs = await self.db.slot_capacity.find({"service_center_id": center_id, "date": {"$in": dates}}).to_list(length=500)
         by = {(d["date"], d["slot_key"]): d for d in docs}
         out = {}
-        policy_service = CapacityPolicyService(self.db)
+        engine = BookingService(self.db)
         for day in dates:
-            day_policy = None
+            untouched = [key for key in slots if (day, key) not in by]
+            defaults = await engine._slot_capacity_defaults(center, day, untouched, policy) if untouched else {}
             for key in slots:
                 doc = by.get((day, key))
                 if doc:
                     cap = 0 if doc.get("is_closed") else int(doc.get("capacity") or 0)
                     out[(day, key)] = max(0, cap - int(doc.get("booked_count") or 0) - int(doc.get("held_count") or 0))
                 else:
-                    if day_policy is None:
-                        day_policy = await policy_service.get_effective_policy(center_id, day)
-                    dist = day_policy.get("slot_distribution") or {}
-                    out[(day, key)] = int(dist[key]) if key in dist else int(center.get("default_slot_capacity") or 999)
+                    out[(day, key)] = int(defaults.get(key) or 0)
         return out
 
     # ------------------------------------------------------------------
@@ -1089,15 +1097,47 @@ class SocietyScheduleService:
         )
         if not claimed:
             return None
+        # Two visit days of one society on one date (a rule day + an added
+        # day, or a moved one) must not project the same cars at once —
+        # each would book them. One generator per (society, date): the
+        # other hands its visit back and the next pass sees these bookings.
+        lock = await self._lock_day(claimed["society_id"], claimed["date"])
+        if not lock:
+            await self.db.society_visits.update_one(
+                {"_id": claimed["_id"], "status": "generating"}, {"$set": {"status": claimed.get("status") or "planned"}},
+            )
+            return None
         try:
             return await self._generate_claimed(claimed, actor_id)
         except Exception as exc:
             logger.exception("Society visit %s could not be booked", visit_id)
+            # A day that blew up is parked as failed (shown with its error and
+            # "Book now" to retry) — handing it back as planned made the
+            # sweep pick the same broken days first on every pass, forever,
+            # and no later day ever got booked.
             await self.db.society_visits.update_one(
                 {"_id": claimed["_id"], "status": "generating"},
-                {"$set": {"status": claimed.get("status") or "planned", "generation_error": str(exc)[:300]}},
+                {"$set": {"status": claimed.get("status") if claimed.get("status") in GENERATED else "failed",
+                          "generation_error": str(exc)[:300] or "Couldn't book this day — try again."}},
             )
             raise
+        finally:
+            await self.db.society_generation_locks.delete_one({"_id": f"{claimed['society_id']}:{claimed['date']}", "token": lock})
+
+    async def _lock_day(self, society_id: str, day: str) -> str | None:
+        """Claims (society, date) for one generator; a holder that died
+        is taken over after STALE_CLAIM. Returns the claim token or None."""
+        key = f"{society_id}:{day}"
+        token = secrets.token_hex(8)
+        now = now_ist()
+        try:
+            await self.db.society_generation_locks.insert_one({"_id": key, "token": token, "locked_at": now})
+            return token
+        except DuplicateKeyError:
+            taken = await self.db.society_generation_locks.find_one_and_update(
+                {"_id": key, "locked_at": {"$lt": now - STALE_CLAIM}}, {"$set": {"token": token, "locked_at": now}},
+            )
+            return token if taken else None
 
     async def _generate_claimed(self, visit: dict, actor_id: str) -> dict:
         vid = str(visit["_id"])
@@ -1185,10 +1225,15 @@ class SocietyScheduleService:
                             notes=f"Scheduled society premium wash — {society.get('name')}, {unit.get('flat') or 'flat'}",
                         ),
                         actor_id=actor_id, actor_role="admin", actor_center_id=None, society_id=visit["society_id"],
+                        # The schedule never runs into a granted extension —
+                        # that time is for booking remaining washes by hand.
+                        allow_extension=False,
                     )
                 ids += [b["id"] for b in result["bookings"]]
-            except AppException as exc:
-                alloc.update(status="failed", error=exc.message)
+            except Exception as exc:  # noqa: BLE001 — one resident's failure never sinks the whole day
+                if not isinstance(exc, AppException):
+                    logger.exception("Society visit %s: booking %s failed", vid, alloc["sub_ids"])
+                alloc.update(status="failed", error=exc.message if isinstance(exc, AppException) else "Couldn't book this wash — try again.")
                 if ids:
                     alloc["booking_ids"] = ids
                 return alloc
@@ -1304,8 +1349,13 @@ class SocietyScheduleService:
     async def captain_visits(self, captain_id: str, days: int = 7) -> dict:
         today = today_ist()
         end = today + timedelta(days=days - 1)
+        center_id = await self.society.captain_center(captain_id)
+        if not center_id:
+            return {"date": today.isoformat(), "visits": []}
         rows = await self.db.society_visits.find({
             "$or": [{"captain_ids": captain_id}, {"allocations.captain_id": captain_id}],
+            # A captain moved to another center stops seeing the old one's days.
+            "service_center_id": center_id,
             "date": {"$gte": today.isoformat(), "$lte": end.isoformat()},
             "status": {"$in": list(OPEN)}, "is_deleted": {"$ne": True},
         }).sort("date", 1).to_list(length=50)
@@ -1316,6 +1366,9 @@ class SocietyScheduleService:
         if not visit or not (
             captain_id in (visit.get("captain_ids") or []) or any(a.get("captain_id") == captain_id for a in visit.get("allocations") or [])
         ):
+            raise NotFoundException("Visit not found")
+        center_id = await self.society.captain_center(captain_id)
+        if not center_id or visit.get("service_center_id") != center_id:
             raise NotFoundException("Visit not found")
         return await self._captain_card(visit, captain_id)
 
@@ -1542,13 +1595,9 @@ class SocietyScheduleService:
         if not visit or _d(visit["date"]) <= today_ist():
             raise BadRequestException("That wash is today or past now — decline it and call the resident.")
         sub_ids = list(req.get("subscription_ids") or [])
-        if visit.get("kind") == "resident" and visit.get("customer_id") == req["customer_id"] and set(visit.get("subscription_ids") or []) <= set(sub_ids):
-            await self.skip_visit(visit, user, "Resident asked to change this premium wash")
-        else:
-            await self.exclude(visit, sub_ids, True, user)
-        message = f"Your premium wash on {date_label(visit['date'])} is skipped."
-        new_visit = None
         if req.get("kind") == "move":
+            # Validated BEFORE the old day is touched: a bad date / slot /
+            # captain must leave the visit and the request exactly as they were.
             day = self._check_date(payload.date or req["preferred_date"])
             slot = payload.slot_key or req.get("preferred_slot") or req.get("slot_key") or (visit.get("slot_keys") or [None])[0]
             center = await self._center(visit.get("service_center_id"))
@@ -1556,30 +1605,49 @@ class SocietyScheduleService:
             captain = payload.captain_id or (visit.get("captain_ids") or [None])[0]
             if captain:
                 await self._check_captains(visit["service_center_id"], [captain])
-            now = now_ist()
-            new_visit = await self.visits.create({
-                "society_id": visit["society_id"], "service_center_id": visit.get("service_center_id"), "kind": "resident",
-                "rule_id": None, "rule_date": None, "date": day.isoformat(), "slot_keys": [slot],
-                "captain_ids": [captain] if captain else [], "washes_per_captain": 99,
-                "enrollment_id": req.get("enrollment_id"), "customer_id": req["customer_id"], "subscription_ids": sub_ids,
-                "excluded_subscription_ids": [], "status": "planned", "allocations": [], "overflow": [],
-                "changes": [{"at": now, "by": user.id, "what": f"moved from {visit['date']} (resident's request)"}],
-                "moved_from": visit["date"], "request_id": str(req["_id"]), "notes": req.get("note"), "created_by": user.id,
-            })
-            message = f"Your premium wash moved to {date_label(day)}, {format_slot_12h(slot)}."
-        await self.requests.update_by_id(str(req["_id"]), {
-            "status": "approved", "resolution_note": payload.note, "resolved_by": user.id, "resolved_at": now_ist(),
-            "new_visit_id": str(new_visit["_id"]) if new_visit else None,
-        })
+        # Answered exactly once: claimed pending -> approved atomically, so a
+        # double tap / two staff (or an approve racing a decline) can't skip
+        # the day twice or create two moved visits. Put back if it fails.
+        await self._answer_once(req, {"status": "approved", "resolution_note": payload.note, "resolved_by": user.id, "resolved_at": now_ist()})
+        try:
+            if visit.get("kind") == "resident" and visit.get("customer_id") == req["customer_id"] and set(visit.get("subscription_ids") or []) <= set(sub_ids):
+                await self.skip_visit(visit, user, "Resident asked to change this premium wash")
+            else:
+                await self.exclude(visit, sub_ids, True, user)
+            message = f"Your premium wash on {date_label(visit['date'])} is skipped."
+            new_visit = None
+            if req.get("kind") == "move":
+                now = now_ist()
+                new_visit = await self.visits.create({
+                    "society_id": visit["society_id"], "service_center_id": visit.get("service_center_id"), "kind": "resident",
+                    "rule_id": None, "rule_date": None, "date": day.isoformat(), "slot_keys": [slot],
+                    "captain_ids": [captain] if captain else [], "washes_per_captain": 99,
+                    "enrollment_id": req.get("enrollment_id"), "customer_id": req["customer_id"], "subscription_ids": sub_ids,
+                    "excluded_subscription_ids": [], "status": "planned", "allocations": [], "overflow": [],
+                    "changes": [{"at": now, "by": user.id, "what": f"moved from {visit['date']} (resident's request)"}],
+                    "moved_from": visit["date"], "request_id": str(req["_id"]), "notes": req.get("note"), "created_by": user.id,
+                })
+                message = f"Your premium wash moved to {date_label(day)}, {format_slot_12h(slot)}."
+        except BaseException:
+            await self.requests.collection.update_one(
+                {"_id": req["_id"], "status": "approved"}, {"$set": {"status": "pending", "resolved_by": None, "resolved_at": None}},
+            )
+            raise
+        await self.requests.update_by_id(str(req["_id"]), {"new_visit_id": str(new_visit["_id"]) if new_visit else None})
         await self.society._tell_resident(req["customer_id"], "Premium wash updated", message + (f" {payload.note}" if payload.note else ""))
         return (await self.request_views([await self.requests.find_by_id(str(req["_id"]))]))[0]
+
+    async def _answer_once(self, req: dict, fields: dict) -> None:
+        claimed = await self.requests.collection.find_one_and_update(
+            {"_id": req["_id"], "status": "pending", "is_deleted": {"$ne": True}}, {"$set": {**fields, "updated_at": now_ist()}},
+        )
+        if not claimed:
+            raise BadRequestException("This request was already answered.")
 
     async def decline_request(self, req: dict, payload, user) -> dict:
         if req.get("status") != "pending":
             raise BadRequestException("This request was already answered.")
-        await self.requests.update_by_id(str(req["_id"]), {
-            "status": "declined", "resolution_note": payload.note, "resolved_by": user.id, "resolved_at": now_ist(),
-        })
+        await self._answer_once(req, {"status": "declined", "resolution_note": payload.note, "resolved_by": user.id, "resolved_at": now_ist()})
         when = date_label(req["visit_date"]) if req.get("visit_date") else "your scheduled day"
         await self.society._tell_resident(
             req["customer_id"], "Premium wash unchanged",

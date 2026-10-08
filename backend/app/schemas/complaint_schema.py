@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import ComplaintPriority, ComplaintStatus
 
@@ -13,7 +13,19 @@ class ComplaintCreateRequest(BaseModel):
     subject: str = Field(min_length=3, max_length=150)
     description: str = Field(min_length=5, max_length=2000)
     priority: ComplaintPriority = ComplaintPriority.MEDIUM
-    attachments: list[str] = []
+    # VAL-4: only links to our own uploads — never javascript:/data: or
+    # arbitrary sites rendered as links on staff screens.
+    attachments: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("attachments")
+    @classmethod
+    def _own_uploads_only(cls, urls: list[str]) -> list[str]:
+        from app.core.storage import is_own_upload_url
+
+        for url in urls:
+            if not isinstance(url, str) or len(url) > 500 or not is_own_upload_url(url):
+                raise ValueError("Attachments must be photos uploaded through the app")
+        return urls
 
 
 class ComplaintUpdateRequest(BaseModel):

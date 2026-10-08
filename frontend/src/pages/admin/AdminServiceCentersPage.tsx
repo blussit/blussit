@@ -7,6 +7,7 @@ import { Badge, Button, DataTable, Input, Modal, Select } from "../../components
 import { MapPicker } from "../../components/shared/MapPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
+import { useConfirm } from "../../context/ConfirmContext";
 import { toTitle } from "../../lib/titleCase";
 import type { ServiceCenter } from "../../types";
 
@@ -32,7 +33,8 @@ export default function AdminServiceCentersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
-  const { data, isLoading } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
+  const confirm = useConfirm();
+  const { data, isLoading, error: centersError, refetch: refetchCenters } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
   const { data: managers } = useQuery({ queryKey: ["admin-managers"], queryFn: () => adminUserApi.list({ role: "manager", page: 1, page_size: 100 }) });
 
   const [open, setOpen] = useState(false);
@@ -151,6 +153,8 @@ export default function AdminServiceCentersPage() {
 
       <DataTable<ServiceCenter>
         isLoading={isLoading}
+        error={centersError}
+        onRetry={() => void refetchCenters()}
         data={data?.data || []}
         emptyTitle="No Service Centers Yet"
         columns={[
@@ -182,8 +186,25 @@ export default function AdminServiceCentersPage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  isLoading={toggleActiveMutation.isPending}
-                  onClick={() => toggleActiveMutation.mutate(c)}
+                  aria-label={c.is_active ? `Deactivate ${c.name}` : `Activate ${c.name}`}
+                  title={c.is_active ? "Deactivate" : "Activate"}
+                  isLoading={toggleActiveMutation.isPending && toggleActiveMutation.variables?.id === c.id}
+                  disabled={toggleActiveMutation.isPending}
+                  onClick={async () => {
+                    // One tap used to switch a live center off — new bookings,
+                    // coverage and slots for its area stop at once.
+                    const ok = await confirm(
+                      c.is_active
+                        ? {
+                            title: `Deactivate ${toTitle(c.name)}?`,
+                            message: "Customers in its area can't book until it's switched back on. Bookings already made are not cancelled.",
+                            confirmLabel: "Deactivate",
+                            tone: "danger",
+                          }
+                        : { title: `Activate ${toTitle(c.name)}?`, message: "It starts taking bookings for its area right away.", confirmLabel: "Activate" }
+                    );
+                    if (ok) toggleActiveMutation.mutate(c);
+                  }}
                 >
                   <Power className="h-3.5 w-3.5" />
                 </Button>

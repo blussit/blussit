@@ -43,7 +43,7 @@ export function StatCard({
   className?: string;
 }) {
   const valueTone = {
-    default: "text-[var(--ui-ink,#000)]",
+    default: "text-[var(--ui-ink,#0E1A33)]",
     success: "text-[var(--color-success)]",
     warning: "text-amber-600",
     error: "text-[var(--color-error)]",
@@ -55,24 +55,24 @@ export function StatCard({
     <div
       className={cn(
         "group relative flex h-full flex-col rounded-2xl border border-[var(--color-card-border)] bg-white p-5 transition-colors",
-        clickable && "hover:border-[var(--ui-hover-line,#000)]",
+        clickable && "hover:border-[var(--ui-hover-line,#0A66F0)]",
         className
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--ui-muted,#6b7280)]">
+        <span className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--ui-muted,#5F6878)]">
           {Icon && <Icon className="h-3.5 w-3.5 shrink-0" />}
           {label}
           {labelAfter}
         </span>
         {clickable && (
-          <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-[var(--ui-hover-line,#000)] opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100">
+          <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-[var(--ui-hover-line,#0A66F0)] opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100">
             {linkLabel} <ArrowRight className="h-3 w-3" />
           </span>
         )}
       </div>
       <p className={cn("font-mono-num mt-3 text-[28px] font-bold leading-none", valueTone)}>{value}</p>
-      {hint && <p className="mt-1.5 text-xs text-[var(--ui-muted,#9ca3af)]">{hint}</p>}
+      {hint && <p className="mt-1.5 text-xs text-[var(--ui-muted,#5F6878)]">{hint}</p>}
     </div>
   );
 
@@ -116,8 +116,8 @@ export function Panel({
       {(title || actions) && (
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-card-border)] px-5 py-4">
           <div className="min-w-0">
-            {title && <h2 className="font-semibold text-[var(--ui-ink,#000)]">{title}</h2>}
-            {description && <p className="mt-0.5 text-xs text-[var(--ui-muted,#9ca3af)]">{description}</p>}
+            {title && <h2 className="font-semibold text-[var(--ui-ink,#0E1A33)]">{title}</h2>}
+            {description && <p className="mt-0.5 text-xs text-[var(--ui-muted,#5F6878)]">{description}</p>}
           </div>
           {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
         </header>

@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2, Phone } from "lucide-react";
-import { Badge, Button, Panel, Select, Spinner } from "../ui";
+import { Badge, Button, ErrorState, Panel, Select, Spinner } from "../ui";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
@@ -72,7 +72,9 @@ export function SocietyRequestsPanel({ isAdmin = false, onRegister }: { isAdmin?
         </div>
       }
     >
-      {q.isLoading ? <Spinner /> : !q.data?.rows.length ? (
+      {q.isLoading ? <Spinner /> : q.isError && !q.data ? (
+        <ErrorState message="Couldn't load society requests." onRetry={() => void q.refetch()} busy={q.isFetching} className="p-4" />
+      ) : !q.data?.rows.length ? (
         <p className="py-6 text-center text-sm font-semibold text-black">{status === "open" ? "No Open Requests" : "Nothing Here"}</p>
       ) : (
         <ul className="divide-y divide-[#E4E9F1]" data-testid="society-requests">

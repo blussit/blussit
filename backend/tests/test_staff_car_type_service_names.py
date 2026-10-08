@@ -44,6 +44,12 @@ async def rig(db, cleanup):
     star = await get_star_wash_service_id(db)
     plan_id = await get_any_active_plan(db)
     now = now_ist()
+    # Clock-safe (FINAL-POLISH 2026-10-08): the orders are stamped a few
+    # minutes back but never before 00:00 IST today, so a run between 00:00
+    # and 00:10 IST still finds both inside "today" (the cash one newest).
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cash_at = max(now - timedelta(minutes=5), start_of_day + timedelta(minutes=2))
+    link_at = max(now - timedelta(minutes=10), start_of_day + timedelta(minutes=1))
     sub_with = {
         "customer_id": customer, "plan_id": plan_id, "service_center_id": center, "vehicle_type": hatch, "service_id": star,
         "status": "active", "start_date": now, "end_date": now + timedelta(days=30), "amount_paid": 1396.0,
@@ -55,11 +61,11 @@ async def rig(db, cleanup):
     orders = (await db.payment_orders.insert_many([
         # Stamped on the order itself (every current checkout path).
         {"purpose": "subscription", "status": "paid", "kind": "manager_cash", "service_center_id": center, "customer_id": customer,
-         "plan_id": plan_id, "vehicle_type": hatch, "service_id": star, "amount_paise": 139600, "created_at": now - timedelta(minutes=5),
+         "plan_id": plan_id, "vehicle_type": hatch, "service_id": star, "amount_paise": 139600, "created_at": cash_at,
          "subscription_id": str(sub_ids[0])},
         # An older row without them — resolved through its subscription.
         {"purpose": "subscription", "status": "paid", "kind": "link", "service_center_id": center, "customer_id": customer,
-         "plan_id": plan_id, "amount_paise": 99900, "created_at": now - timedelta(minutes=10), "subscription_id": str(sub_ids[0])},
+         "plan_id": plan_id, "amount_paise": 99900, "created_at": link_at, "subscription_id": str(sub_ids[0])},
     ])).inserted_ids
     cleanup.append(("payment_orders", {"_id": {"$in": orders}}))
     cleanup.append(("user_subscriptions", {"_id": {"$in": sub_ids}}))
@@ -71,12 +77,14 @@ async def rig(db, cleanup):
     return {
         "center": center, "customer": customer, "hatch": hatch, "suv": suv, "star": star, "plan_id": plan_id,
         "hatch_name": hatch_name, "suv_name": suv_name, "star_name": star_name, "sub_ids": [str(i) for i in sub_ids],
+        "day": start_of_day.date().isoformat(),
     }
 
 
 @pytest.mark.asyncio
 async def test_plan_purchase_rows_name_the_car_and_the_wash(db, rig):
-    s, e, _, _ = resolve_period("today", None, None)
+    # The day the rig stamped (not "today" again — midnight may have passed).
+    s, e, _, _ = resolve_period(None, rig["day"], rig["day"])
     svc = UserSubscriptionService(db)
     for center in (None, rig["center"]):  # admin (platform) and manager (center) drill-downs
         rows, total = await svc.plan_purchases(s, e, 1, 50, service_center_id=center, extra={"customer_id": rig["customer"]})

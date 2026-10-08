@@ -72,12 +72,24 @@ class BookingRepository(BaseRepository):
         "created_desc": [("created_at", -1), ("_id", -1)],
     }
 
+    # The queue's "total" is a pager hint, not a report: counting a center's
+    # whole history on every page load was O(N). Past this many rows the
+    # total reads as exactly QUEUE_COUNT_CAP (see is_capped_total).
+    QUEUE_COUNT_CAP = 5000
+
+    @classmethod
+    def is_capped_total(cls, total: int) -> bool:
+        return total >= cls.QUEUE_COUNT_CAP
+
     async def list_queue(self, filters: dict, page: int, page_size: int, sort: str | None = None) -> tuple[list[dict], int]:
+        # Each sort is served by an index ending in the same keys (see the
+        # booking queue indexes in core/database.py's scale pack) — the _id
+        # tiebreak included, or Mongo sorts the whole match in memory.
         spec = self._QUEUE_SORTS.get(sort or "created_desc")
         if spec is None:
             raise ValueError("Unknown sort")
         query = {**filters, "is_deleted": {"$ne": True}}
-        total = await self.collection.count_documents(query)
+        total = await self.collection.count_documents(query, limit=self.QUEUE_COUNT_CAP)
         skip = max(page - 1, 0) * page_size
         items = await self.collection.find(query).sort(spec).skip(skip).limit(page_size).to_list(length=page_size)
         return items, total
@@ -110,17 +122,20 @@ class BookingRepository(BaseRepository):
             docs = [d for d in docs if str(d["_id"]) != exclude_booking_id]
         return docs
 
-    async def find_active_for_customer(self, customer_id: str, exclude_booking_id: str | None = None) -> list[dict]:
+    async def find_active_for_customer(
+        self, customer_id: str, exclude_booking_id: str | None = None, session: Optional[AsyncIOMotorClientSession] = None
+    ) -> list[dict]:
         """Same idea as find_active_for_captain, but for the customer's own
         schedule — nothing previously stopped a customer from booking (or
-        rescheduling into) two overlapping slots for themselves."""
+        rescheduling into) two overlapping slots for themselves. Pass
+        `session` to read inside the create/reschedule transaction."""
         filters: dict = {
             "customer_id": customer_id,
             # awaiting_payment counts: the slot is genuinely reserved while
             # the customer finishes paying, so it can't also be double-booked.
             "status": {"$in": ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]},
         }
-        docs = await self.find_all_no_paginate(filters)
+        docs = await self.find_all_no_paginate(filters, session=session)
         if exclude_booking_id:
             docs = [d for d in docs if str(d["_id"]) != exclude_booking_id]
         return docs
@@ -227,6 +242,17 @@ class BookingRepository(BaseRepository):
             sort_order=-1,
         )
 
+    NUMBER_PREFIX = "BK"
+    NUMBER_WIDTH = 4
+
+    @classmethod
+    def number_candidates(cls, digits: str) -> list[str]:
+        """Every stored booking number typed digits can mean: "12" is BK12,
+        BK012 or BK0012 — the generator below zero-pads to NUMBER_WIDTH, so
+        that is every form that can exist. Exact strings, so a search by
+        number is an index point lookup, not a scan of every BK... value."""
+        return [f"{cls.NUMBER_PREFIX}{'0' * pad}{digits}" for pad in range(max(0, cls.NUMBER_WIDTH - len(digits)) + 1)]
+
     async def generate_unique_booking_number(self) -> str:
         # Sequential, human-friendly ids: BK0001, BK0002, ... (grows to
         # BK10000+ naturally). The atomic $inc on the counters doc makes
@@ -240,7 +266,7 @@ class BookingRepository(BaseRepository):
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
-        return f"BK{doc['seq']:04d}"
+        return f"{self.NUMBER_PREFIX}{doc['seq']:0{self.NUMBER_WIDTH}d}"
 
 
 class BookingStatusHistoryRepository(BaseRepository):

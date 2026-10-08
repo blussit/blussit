@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -5,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.controllers.payment_controller import PaymentController
 from typing import Optional
 
+from app.core.config import settings
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin, require_captain, require_customer, require_manager_or_admin
 from app.core.exceptions import AppException
 from app.schemas.payment_schema import (
@@ -20,7 +23,7 @@ router = APIRouter(prefix="/payments", tags=["Payments"])
 
 _RESULT_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Blussit — Payment</title></head>
+<title>Blussit — Payment</title>{pixel}</head>
 <body style="margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#fff;font-family:system-ui,sans-serif">
 <div style="text-align:center;padding:32px;max-width:360px">
 <div style="font-size:44px">{icon}</div>
@@ -28,6 +31,35 @@ _RESULT_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <p style="margin:0;color:#666;font-size:14px">{detail}</p>
 <p style="margin-top:18px;color:#999;font-size:12px">You can close this tab and return to WhatsApp.</p>
 </div></body></html>"""
+
+# Meta's standard pixel snippet + the Purchase, for a website booking whose
+# payment link just confirmed it (PaymentService.link_purchase_event).
+_PIXEL = """<script>
+!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
+document,'script','https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', %(pixel_id)s);
+fbq('track', 'PageView');
+fbq('track', 'Purchase', {value: %(value)s, currency: 'INR', content_category: 'booking'}, {eventID: %(event_id)s});
+</script>"""
+
+
+async def _purchase_pixel(db: AsyncIOMotorDatabase, link_id: str | None) -> str:
+    if not settings.META_PIXEL_ID or not link_id:
+        return ""
+    try:
+        event = await PaymentService(db).link_purchase_event(link_id)
+    except Exception:  # noqa: BLE001 — tracking must never cost the customer their receipt page
+        return ""
+    if not event:
+        return ""
+    return _PIXEL % {
+        "pixel_id": json.dumps(settings.META_PIXEL_ID),
+        "value": json.dumps(event["value"]),
+        "event_id": json.dumps(event["event_id"]),
+    }
 
 
 @router.post("/create-order", dependencies=[Depends(require_customer)])
@@ -95,16 +127,17 @@ async def payment_link_callback(request: Request, db: AsyncIOMotorDatabase = Dep
         result = await PaymentService(db).verify_link_callback(dict(request.query_params))
         if result.get("status") == "needs_attention":
             return HTMLResponse(_RESULT_PAGE.format(
-                icon="🕒", title="Payment received — under review",
+                pixel="", icon="🕒", title="Payment received — under review",
                 detail="We got your payment but couldn't apply it automatically. Our team will fix or refund it — no need to pay again.",
             ))
         return HTMLResponse(_RESULT_PAGE.format(
+            pixel=await _purchase_pixel(db, request.query_params.get("razorpay_payment_link_id")),
             icon="✅", title="Payment received!",
             detail=f"Booking {result.get('booking_number') or ''} is paid. We've noted it — see you at your doorstep!",
         ))
     except AppException as exc:
         return HTMLResponse(_RESULT_PAGE.format(
-            icon="⚠️", title="Payment not confirmed",
+            pixel="", icon="⚠️", title="Payment not confirmed",
             detail=exc.message + " If money left your account, it will reflect shortly or auto-refund.",
         ), status_code=400)
 

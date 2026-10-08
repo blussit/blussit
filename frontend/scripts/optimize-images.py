@@ -66,3 +66,14 @@ logo = Image.open(PUBLIC / "blussit-logo.png").convert("RGBA")
 logo = logo.resize((480, round(logo.height * 480 / logo.width)), Image.LANCZOS)
 logo.save(PUBLIC / "img" / "blussit-logo-480.webp", "WEBP", quality=90, method=6)
 print(f"img/blussit-logo-480.webp                {logo.width}x{logo.height}  {(PUBLIC / 'img' / 'blussit-logo-480.webp').stat().st_size // 1024} KB")
+
+# The society plan card photo (landing + /plans): a 1.5 MB PNG shown at most
+# ~600 px wide -> an 800 px WebP.
+save(PUBLIC / "plans-card3.png", PUBLIC / "img" / "plans-card3-800.webp", 800, 76)
+
+# Service photos are shown far smaller than 960 px (cards ~260-360 px wide):
+# 480/720 px copies for srcset, made from the 960 px masters.
+for name in ("svc-jet", "svc-star", "svc-waterless", "svc-deep", "svc-bike"):
+    for width in (480, 720):
+        save(PUBLIC / "img" / f"{name}-960.webp", PUBLIC / "img" / f"{name}-{width}.webp", width, 76)
+

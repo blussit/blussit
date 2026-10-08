@@ -90,3 +90,73 @@ export function addonKit(services: Service[], typeId: string, bikeIds: Set<strin
   const simple = carAddons.filter((s) => s !== addBike);
   return { simple, addBike, bikePolish };
 }
+
+/**
+ * The add-ons a line of this vehicle type is OFFERED — the booking page's
+ * own chips (`kit.simple`, plus bike polish on a bike). The one filter every
+ * add-on picker uses: booking page, Book A Plan Wash, Edit Booking, the
+ * captain's and the manager's Add Service (QA 2026-10-07 — they offered
+ * Extra Bike Wash on cars). The add-a-bike line is never a chip: on a bike
+ * booking it is the bike counter. The server refuses the same on edits and
+ * on-site adds (BookingService._ensure_offered_for_type).
+ */
+export function offeredAddons(services: Service[], typeId: string, bikeIds: Set<string> = new Set()): Service[] {
+  const kit = addonKit(services, typeId, bikeIds);
+  return bikeIds.has(typeId) && kit.bikePolish ? [...kit.simple, kit.bikePolish] : kit.simple;
+}
+
+/**
+ * A bike line as the booking page builds it (QuickBookFlow `lineFor`): the
+ * bike COUNT picks the group's exact variant ("Bike Wash (2 bikes)"), else
+ * its smallest variant plus the add-a-bike line × the rest; bike polish is
+ * per bike (× count); every other add-on is one per vehicle.
+ *
+ * `fixedBase` keeps the base as given (a plan wash: the pass's own
+ * service) — any extra bikes then ride as the add-a-bike line.
+ * Used by the customer's Edit Booking and Book A Plan Wash sheets; the
+ * booking page keeps its own copy of the same rule.
+ */
+export function composeBikeLine({
+  variants,
+  count,
+  kit,
+  addonIds,
+  fixedBase,
+}: {
+  /** The base's variant group, smallest first (or just the base). */
+  variants: Service[];
+  count: number;
+  kit: AddonKit;
+  /** Picked add-ons (the add-a-bike line is ignored here — it's the count). */
+  addonIds: string[];
+  fixedBase?: Service | null;
+}): { base: Service | null; extraBikes: number; serviceIds: string[]; quantities: Record<string, number> } {
+  const sorted = [...variants].sort((a, b) => variantCount(a) - variantCount(b));
+  const exact = fixedBase ? null : sorted.find((v) => variantCount(v) === count);
+  const base = fixedBase || exact || sorted[0] || null;
+  if (!base) return { base: null, extraBikes: 0, serviceIds: [], quantities: {} };
+  const extraBikes = !exact && kit.addBike ? Math.max(0, count - variantCount(base)) : 0;
+  const serviceIds = [base.id];
+  const quantities: Record<string, number> = {};
+  if (extraBikes > 0 && kit.addBike) {
+    serviceIds.push(kit.addBike.id);
+    quantities[kit.addBike.id] = extraBikes;
+  }
+  const bikes = variantCount(base) + extraBikes;
+  for (const id of addonIds) {
+    if (id === base.id || id === kit.addBike?.id || serviceIds.includes(id)) continue;
+    serviceIds.push(id);
+    if (kit.bikePolish && id === kit.bikePolish.id && bikes > 1) quantities[id] = bikes;
+  }
+  return { base, extraBikes, serviceIds, quantities };
+}
+
+/** The −/+ range of a bike line's counter: from the smallest variant (or
+ *  the fixed base) up to 10 when the add-a-bike line exists, else up to
+ *  the largest variant. min === max means no counter to show. */
+export function bikeCountRange(variants: Service[], kit: AddonKit, fixedBase?: Service | null): { min: number; max: number } {
+  const counts = (fixedBase ? [fixedBase] : variants).map(variantCount);
+  const min = counts.length ? Math.min(...counts) : 1;
+  const max = kit.addBike ? 10 : counts.length ? Math.max(...counts) : 1;
+  return { min, max: Math.max(min, max) };
+}

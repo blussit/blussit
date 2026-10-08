@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarDays, CalendarPlus, Repeat, UserRound } from "lucide-react";
-import { Spinner } from "../../ui";
+import { ErrorState, Spinner } from "../../ui";
 import { useToast } from "../../../context/ToastContext";
 import { useConfirm } from "../../../context/ConfirmContext";
 import { getErrorMessage } from "../../../lib/api-client";
@@ -37,7 +37,7 @@ export function SocietyScheduleTab({ societyId, plannerPath }: { societyId: stri
   const ok = (title: string) => { toast.push({ tone: "success", title }); refresh(); };
 
   if (q.isLoading) return <div className="flex justify-center py-10"><Spinner /></div>;
-  if (!q.data) return <Banner tone="error">{getErrorMessage(q.error) || "Couldn't load the schedule."}</Banner>;
+  if (!q.data) return <ErrorState message="Couldn't load the schedule." onRetry={() => void q.refetch()} busy={q.isFetching} />;
   const s = q.data;
   const upcoming = s.visits.filter((v) => v.date >= s.today && v.status !== "cancelled");
   const residentsWithout = s.residents.filter((r) => !s.resident_rules.some((rr) => rr.enrollment_id === r.enrollment_id && rr.is_active));
@@ -194,6 +194,14 @@ export function ResidentScheduleButton({ societyId, enrollmentId }: { societyId:
         <Repeat className="h-4 w-4" /> Repeat Wash
       </button>
       {open && q.isLoading && <span className="text-xs text-[#5F6878]">Loading…</span>}
+      {open && q.isError && !q.data && (
+        <span role="alert" className="text-xs text-[#5F6878]">
+          Couldn't load the schedule.{" "}
+          <button type="button" className="font-semibold text-[#0A66F0] disabled:opacity-60" disabled={q.isFetching} onClick={() => void q.refetch()}>
+            Try Again
+          </button>
+        </span>
+      )}
       {open && q.data && !resident && <span className="text-xs text-[#5F6878]">No Live Car On A Plan</span>}
       {q.data && (
         <ResidentRuleModal open={open && !!resident} onClose={() => setOpen(false)} societyId={societyId} resident={resident} rule={rule}

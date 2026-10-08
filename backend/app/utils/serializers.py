@@ -33,7 +33,7 @@ COMPUTED_INSTANT_KEYS = frozenset({
     "created_at", "updated_at", "deleted_at",
     "heading_at", "issue_flagged_at", "vehicle_verified_at",
     "service_started_at", "completed_at", "captured_at",
-    "start_date", "end_date",
+    "start_date", "end_date", "extended_until",
     "valid_from", "valid_until",
     "last_login_at",
     "awaiting_assignment_since", "unassigned_reminder_sent_at", "late_start_reminder_sent_at",
@@ -61,6 +61,14 @@ COMPUTED_INSTANT_KEYS = frozenset({
     "last_used_at", "wash_reminder_sent_at", "used_up_notice_sent_at", "last_renewed_at",
     # Society plans (society_service.py) — now_ist() at write time.
     "cycle_start", "prev_cycle_start", "arrived_at", "activated_at", "cancelled_at", "washed_updated_at",
+    # Booking money/edit bookkeeping (feature build 2026-10-07) — every one
+    # is now_ist() / datetime.now(utc) at write time: a manager's discount
+    # and tip on a done job, when a logged job was entered, a refund, cash
+    # handed over, a customer's own edit, the pre-slot reminder, and the
+    # `at` of history rows (customer_charges.history, added_services,
+    # booking edit history) — "at" is only ever a computed instant here.
+    "manager_discount_at", "tip_updated_at", "logged_at", "refunded_at", "cash_collected_at",
+    "customer_edited_at", "customer_reminder_sent_at", "consumption_forfeited_at", "at",
 })
 
 

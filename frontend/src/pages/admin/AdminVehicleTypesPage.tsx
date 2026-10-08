@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Power, Star, Trash2 } from "lucide-react";
 import { vehicleTypeApi } from "../../api/catalog";
 import { adminVehicleTypeApi, analyticsApi } from "../../api/admin";
-import { Badge, Button, DataTable, Input, Modal } from "../../components/ui";
+import { Badge, Button, DataTable, ErrorState, Input, Modal } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -28,8 +28,9 @@ export default function AdminVehicleTypesPage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
-  const { data, isLoading } = useQuery({ queryKey: ["admin-vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
-  const { data: breakdown } = useQuery({ queryKey: ["vehicle-type-breakdown"], queryFn: () => analyticsApi.vehicleTypeBreakdown() });
+  const { data, isLoading, error: typesError, refetch: refetchTypes } = useQuery({ queryKey: ["admin-vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
+  const breakdownQuery = useQuery({ queryKey: ["vehicle-type-breakdown"], queryFn: () => analyticsApi.vehicleTypeBreakdown() });
+  const breakdown = breakdownQuery.data;
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<VehicleTypeOption | null>(null);
   const [form, setForm] = useState(emptyForm);
@@ -102,6 +103,8 @@ export default function AdminVehicleTypesPage() {
       <DataTable<VehicleTypeOption>
         isLoading={isLoading}
         data={data || []}
+        error={typesError}
+        onRetry={() => void refetchTypes()}
         emptyTitle="No Vehicle Types Yet"
         onRowClick={(t) => setStatsFor(t)}
         columns={[
@@ -136,6 +139,15 @@ export default function AdminVehicleTypesPage() {
 
       <Modal open={!!statsFor} onClose={() => setStatsFor(null)} title={statsFor ? `${toTitle(statsFor.name)} — Bookings` : ""}>
         {statsFor && (() => {
+          if (breakdownQuery.isError && !breakdown)
+            return (
+              <ErrorState
+                message="Couldn't load this vehicle type's booking stats."
+                onRetry={() => void breakdownQuery.refetch()}
+                busy={breakdownQuery.isFetching}
+                className="p-4"
+              />
+            );
           const s = breakdown?.find((b) => b.vehicle_type_id === statsFor.id);
           if (!s) return <p className="text-sm text-[var(--color-text-secondary)]">No bookings for this vehicle type yet.</p>;
           return (

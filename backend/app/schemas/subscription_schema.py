@@ -229,3 +229,19 @@ class ManagerSubscriptionPreviewRequest(BaseModel):
     def _coupon(cls, v: Optional[str]) -> Optional[str]:
         v = (v or "").strip().upper()
         return v or None
+
+
+class SubscriptionExtendRequest(BaseModel):
+    """Manager (the pass's own center) / admin: a few more days on a pass
+    that has ended or is ending (its last 3 days), so its remaining washes
+    can still be booked. At most 10 days in total per 30-day period —
+    checked server-side against what was already granted."""
+
+    days: int = Field(ge=1, le=10)
+    note: Optional[str] = Field(default=None, max_length=300)
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip()
+        return v or None

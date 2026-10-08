@@ -146,7 +146,7 @@ export default function GaragePage() {
       {listError && <p className="text-sm text-[#C62828]">{listError}</p>}
 
       {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Skeleton className="h-[188px]" />
           <Skeleton className="h-[188px]" />
         </div>
@@ -168,7 +168,7 @@ export default function GaragePage() {
               <p className="mt-1 text-sm text-[#5F6878]">Every car you get washed shows up here. Add one now to book it in one tap.</p>
             </div>
           )}
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {list.map((c) => {
               const title = garageTitle(c);
               const typeLine = garageTypeLine(c);
@@ -176,7 +176,7 @@ export default function GaragePage() {
               const washLines = garageWashLines(c, carServices);
               const Icon = isBikeType(c.vehicle_type_name) ? Bike : CarFront;
               return (
-                <div key={c.id} className={`${card} flex flex-col p-4`}>
+                <div key={c.id} className={`${card} flex min-w-0 flex-col p-4`}>
                   <div className="flex items-start gap-4">
                     <span className="flex h-[72px] w-[84px] shrink-0 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#EEF3FA,#E8F0FE)] text-[#0E1A33] sm:w-[92px]">
                       <Icon className="h-10 w-10" strokeWidth={1.6} />

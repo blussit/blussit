@@ -6,7 +6,8 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Bell, CalendarDays, CarFront, Check, Gift, LifeBuoy, LogOut, Pencil, Settings, Tag } from "lucide-react";
+import { Bell, CalendarDays, CarFront, Check, Gift, LifeBuoy, LogOut, Pencil, Settings, Tag, Wallet } from "lucide-react";
+import { customerWalletMeApi, MY_WALLET_QUERY_KEY } from "../../api/customerWalletMe";
 import { notificationApi, subscriptionApi } from "../../api/engagement";
 import { vehicleApi } from "../../api/profile";
 import { card, MenuRow, PageHeader } from "../../components/customer/ui";
@@ -26,6 +27,15 @@ export default function CustomerProfilePage() {
   const confirm = useConfirm();
   const { data: subs } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
   const { data: vehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, staleTime: 60_000 });
+  const { data: wallet } = useQuery({ queryKey: [...MY_WALLET_QUERY_KEY, "summary"], queryFn: () => customerWalletMeApi.me({ page: 1, page_size: 1 }), staleTime: 60_000 });
+  const walletBalance = Math.round(wallet?.balance ?? 0);
+  const walletMeta = !wallet ? undefined : walletBalance > 0 ? (
+    <span className="font-semibold text-[#1E7B3C]">₹{walletBalance} Credit</span>
+  ) : walletBalance < 0 ? (
+    <span className="font-semibold text-[#C62828]">You Owe ₹{-walletBalance}</span>
+  ) : (
+    "₹0"
+  );
   // Same cache entry the shell polls — no extra request.
   const { data: notifications } = useQuery({ queryKey: ["notifications", "unread"], queryFn: () => notificationApi.list({ page: 1, page_size: 20 }) });
 
@@ -65,6 +75,7 @@ export default function CustomerProfilePage() {
         <MenuRow icon={CarFront} label="My Garage" meta={vehicles?.length ? `${vehicles.length} Saved` : undefined} to="/app/garage" />
         <MenuRow icon={CalendarDays} label="My Bookings" to="/app/bookings" />
         <MenuRow icon={Gift} label="My Plans" meta={subs ? plansMeta : undefined} to="/app/subscriptions" />
+        <MenuRow icon={Wallet} label="My Wallet" meta={walletMeta} to="/app/wallet" />
         <MenuRow icon={Tag} label="Offers" to="/app/offers" />
         <MenuRow icon={Bell} label="Notifications" badge={notifications?.unread_count || 0} to="/app/notifications" />
         <MenuRow icon={LifeBuoy} label="Help & Support" to="/app/support" />

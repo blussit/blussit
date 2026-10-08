@@ -5,7 +5,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Input, Modal, Select } from "../../ui";
+import { Button, ErrorState, Input, Modal, Select } from "../../ui";
 import { whatsappCrmApi, type WaTemplate } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
 import { toTitle } from "../../../lib/titleCase";
@@ -25,8 +25,8 @@ export function TemplatePreview({ body, params }: { body: string; params: string
 function useApprovedTemplates() {
   // Server-filtered: approved, enabled, and sendable by an agent (no
   // URL-button parameter, not an OTP template — Meta rejects those here).
-  const { data } = useQuery({ queryKey: ["wa-templates", "sendable"], queryFn: () => whatsappCrmApi.templates({ sendable: true }) });
-  return data || [];
+  const q = useQuery({ queryKey: ["wa-templates", "sendable"], queryFn: () => whatsappCrmApi.templates({ sendable: true }) });
+  return { templates: q.data || [], failed: q.isError && !q.data, retry: () => void q.refetch(), retrying: q.isFetching };
 }
 
 export function TemplateForm({
@@ -40,13 +40,14 @@ export function TemplateForm({
   error: string;
   sendLabel?: string;
 }) {
-  const templates = useApprovedTemplates();
+  const { templates, failed, retry, retrying } = useApprovedTemplates();
   const [name, setName] = useState("");
   const [params, setParams] = useState<string[]>([]);
   const selected = useMemo(() => templates.find((t) => t.name === name), [templates, name]);
 
   return (
     <div className="space-y-3">
+      {failed && <ErrorState message="Couldn't load approved templates." onRetry={retry} busy={retrying} className="p-4" />}
       <Select label="Approved Template" value={name} onChange={(e) => { setName(e.target.value); setParams([]); }}>
         <option value="">Select…</option>
         {templates.map((t) => (
@@ -78,7 +79,7 @@ export function TemplateForm({
       >
         {sendLabel}
       </Button>
-      {templates.length === 0 && (
+      {templates.length === 0 && !failed && (
         <p className="text-xs text-[var(--color-text-secondary)]">No approved templates yet — check the Templates tab and sync approval status.</p>
       )}
     </div>

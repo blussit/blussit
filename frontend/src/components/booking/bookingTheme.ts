@@ -18,7 +18,7 @@ export const CARD = "rounded-[18px] border border-[#E4E9F1] bg-white shadow-[0_6
 
 /** The yellow call to action (navy text), full width. */
 export const CTA =
-  "flex h-[52px] w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] px-5 font-display text-[16px] font-bold text-[#0E1A33] shadow-[0_8px_20px_-10px_rgba(232,169,0,0.7)] transition hover:bg-[#FFC800] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60";
+  "flex h-[52px] w-full items-center justify-center gap-2 rounded-[14px] bg-[#FFD21F] px-5 font-display text-[16px] font-bold text-[#0E1A33] shadow-[0_8px_20px_-10px_rgba(232,169,0,0.7)] transition hover:bg-[#F5C400] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60";
 
 /** Text inputs on the confirm step. */
 export const FIELD =

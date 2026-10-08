@@ -3,10 +3,10 @@
  * society, plans for one society, personal plans for one customer — none
  * of them ever on the website — plus the rate card that prices "Customise".
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus } from "lucide-react";
-import { Badge, Button, DataTable, Input, Modal, Panel, Select, Switch } from "../../components/ui";
+import { Badge, Button, DataTable, ErrorState, Input, Modal, Panel, Select, Switch } from "../../components/ui";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { planCovers, rupees, societyApi, societyPlanApi, type RateCard, type SocietyPlanAdmin, type SocietyPlanInput } from "../../api/society";
@@ -36,6 +36,8 @@ export default function AdminSocietyPlansPage() {
       <DataTable<SocietyPlanAdmin>
         data={rows}
         isLoading={plans.isLoading}
+        error={plans.error}
+        onRetry={() => void plans.refetch()}
         emptyTitle="No Society Plans Yet"
         emptyDescription="Create the first template, e.g. Daily wash + 2 Star Wash at ₹1649 (MRP ₹2000)."
         onRowClick={(p) => setEditing(p)}
@@ -56,15 +58,18 @@ export default function AdminSocietyPlansPage() {
         <input type="checkbox" checked={showAuto} onChange={(e) => setShowAuto(e.target.checked)} /> Show Combinations Residents Customised
       </label>
 
+      {card.isError && !card.data && <ErrorState message="Couldn't load the rate card." onRetry={() => void card.refetch()} busy={card.isFetching} />}
       {card.data && <RateCardPanel card={card.data} onSaved={() => queryClient.invalidateQueries({ queryKey: ["society-rate-card"] })} />}
 
-      <PlanModal open={creating || !!editing} plan={editing} card={card.data} onClose={() => { setCreating(false); setEditing(null); }}
+      <PlanModal open={creating || !!editing} plan={editing} card={card.data}
+        cardError={card.isError && !card.data ? <ErrorState message="Couldn't load premium washes and car types." onRetry={() => void card.refetch()} busy={card.isFetching} className="p-4" /> : null}
+        onClose={() => { setCreating(false); setEditing(null); }}
         onSaved={() => { setCreating(false); setEditing(null); queryClient.invalidateQueries({ queryKey: ["society-plans"] }); }} />
     </div>
   );
 }
 
-function PlanModal({ open, plan, card, onClose, onSaved }: { open: boolean; plan: SocietyPlanAdmin | null; card?: RateCard; onClose: () => void; onSaved: () => void }) {
+function PlanModal({ open, plan, card, cardError, onClose, onSaved }: { open: boolean; plan: SocietyPlanAdmin | null; card?: RateCard; cardError?: ReactNode; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
   const societies = useQuery({ queryKey: ["societies", "", ""], queryFn: () => societyApi.list(), enabled: open });
   const [form, setForm] = useState<SocietyPlanInput>(empty(card));
@@ -108,6 +113,7 @@ function PlanModal({ open, plan, card, onClose, onSaved }: { open: boolean; plan
   return (
     <Modal open={open} onClose={onClose} title={plan ? "Edit Society Plan" : "New Society Plan"} maxWidth="max-w-2xl">
       <div className="space-y-3">
+        {cardError}
         <Input label="Name" value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="Daily wash + 2 Star Wash" />
         <div className="grid gap-3 sm:grid-cols-3">
           <Select label="Bucket Wash Days" value={String(form.bucket_days)} disabled={locked} onChange={(e) => set({ bucket_days: Number(e.target.value) })}>
@@ -148,6 +154,9 @@ function PlanModal({ open, plan, card, onClose, onSaved }: { open: boolean; plan
             <option value="">{form.scope === "customer" ? "Any Society" : "Pick A Society"}</option>
             {(societies.data?.rows || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
+        )}
+        {form.scope !== "template" && societies.isError && !societies.data && (
+          <ErrorState message="Couldn't load societies." onRetry={() => void societies.refetch()} busy={societies.isFetching} className="p-4" />
         )}
         {form.scope === "customer" && (
           <Input label="Customer Mobile" value={form.customer_phone || ""} disabled={locked} onChange={(e) => set({ customer_phone: e.target.value })} inputMode="tel" />

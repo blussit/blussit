@@ -27,14 +27,14 @@ export function Switch({
       onClick={() => onChange(!checked)}
       className={cn(
         "flex w-full items-center justify-between gap-4 rounded-xl border-2 p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-        checked ? "border-[var(--ui-hover-line,#000)] bg-[var(--ui-tint,#FFF4CD)]" : "border-gray-200 bg-white hover:border-gray-400"
+        checked ? "border-[var(--ui-hover-line,#0A66F0)] bg-[var(--ui-tint,#E8F0FE)]" : "border-gray-200 bg-white hover:border-gray-400"
       )}
     >
       <span className="min-w-0">
-        <span className="block text-sm font-semibold text-[var(--ui-ink,#000)]">{label}</span>
+        <span className="block text-sm font-semibold text-[var(--ui-ink,#0E1A33)]">{label}</span>
         {description && <span className="block text-xs text-gray-500">{description}</span>}
       </span>
-      <span aria-hidden className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", checked ? "bg-[var(--ui-accent,#E8A900)]" : "bg-gray-300")}>
+      <span aria-hidden className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", checked ? "bg-[var(--ui-accent,#0A66F0)]" : "bg-gray-300")}>
         <span className={cn("absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform", checked ? "translate-x-[22px]" : "translate-x-0.5")} />
       </span>
     </button>

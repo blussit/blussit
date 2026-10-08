@@ -28,6 +28,7 @@ from app.schemas.society_schema import (
     CancelEnrollmentRequest,
     CouponPreviewRequest,
     ManagerEnrollRequest,
+    PassExtendRequest,
     PremiumBookingRequest,
     RateCardRequest,
     SocietyCaptainRequest,
@@ -38,6 +39,7 @@ from app.schemas.society_schema import (
     SocietyPlanUpdateRequest,
     SocietyQuoteRequest,
     SocietyUpdateRequest,
+    StaffQuoteRequest,
     WashedRequest,
 )
 from app.services.audit_service import AuditService
@@ -68,7 +70,9 @@ async def society_form(token: str, current_user: CurrentUser | None = Depends(ge
     """The form's static data: society name, the plans offered here (plus a
     signed-in resident's personal plan), customise options, car types."""
     service = SocietyService(db)
-    society = await service.society_by_token(token)
+    # A switched-off form still opens for a signed-in resident of the
+    # society (their hub page loads this first).
+    society = await service.society_by_token(token, resident_id=_customer_id(current_user))
     return success(await service.public_form(society, _customer_id(current_user)))
 
 
@@ -98,8 +102,12 @@ async def society_form_enroll(
     society = await service.society_by_token(token)
     auth = AuthService(db)
     tokens = None
-    if current_user is not None and current_user.role == "customer" and current_user.phone == payload.phone:
-        customer = await auth.users.find_by_id(current_user.id)
+    signed_in = await auth.users.find_by_id(current_user.id) if current_user is not None and current_user.role == "customer" else None
+    # Skipping the code is only safe when this account has itself proven the
+    # number recently — a phone typed into a password registration proves
+    # nothing (that was the squatter path into a real resident's account).
+    if signed_in and signed_in.get("phone") == payload.phone and AuthService.phone_verification_fresh(signed_in):
+        customer = signed_in
     else:
         # Refuse what we can before spending the one-time code.
         quoted = await service.quote(society, payload, [c.vehicle_type for c in payload.cars], None if not payload.plan_id else _customer_id(current_user))
@@ -107,10 +115,7 @@ async def society_form_enroll(
             raise BadRequestException(quoted["coupon"]["error"] or "That coupon can't be used.")
         await auth.require_phone_proof(payload.phone, payload.phone_otp, payload.phone_access_token)
         customer = await auth.ensure_customer_by_phone(payload.phone, payload.resident_name)
-        await auth.users.update_by_id(
-            str(customer["_id"]), {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc), "last_login_at": datetime.now(timezone.utc)}
-        )
-        customer = await auth.users.find_by_id(str(customer["_id"]))
+        customer = await auth.mark_phone_proven(customer, last_login_at=datetime.now(timezone.utc))
         tokens = auth._issue_tokens(customer)
     if not customer:
         raise BadRequestException("Sign in again to continue.")
@@ -120,9 +125,10 @@ async def society_form_enroll(
 
 @form_router.get("/{token}/me", dependencies=[Depends(require_customer)])
 async def society_form_me(token: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """The signed-in resident's own plan in this society — nobody else's."""
+    """The signed-in resident's own plan in this society — nobody else's.
+    Works with the form switched off (it only stops new sign-ups)."""
     service = SocietyService(db)
-    society = await service.society_by_token(token)
+    society = await service.society_by_token(token, resident_id=current_user.id)
     return success(await service.my_hub(society, current_user.id))
 
 
@@ -131,7 +137,7 @@ async def society_form_withdraw(token: str, enrollment_id: str, current_user: Cu
     from app.core.exceptions import NotFoundException
 
     service = SocietyService(db)
-    society = await service.society_by_token(token)
+    society = await service.society_by_token(token, resident_id=current_user.id)
     enrollment = await service.get_enrollment(enrollment_id)
     if enrollment.get("customer_id") != current_user.id or enrollment.get("society_id") != str(society["_id"]):
         raise NotFoundException("Enrollment not found")
@@ -152,7 +158,7 @@ async def society_form_coupon_preview(
     from app.core.exceptions import NotFoundException
 
     service = SocietyService(db)
-    society = await service.society_by_token(token)
+    society = await service.society_by_token(token, resident_id=current_user.id)
     enrollment = await service.get_enrollment(enrollment_id)
     if enrollment.get("customer_id") != current_user.id or enrollment.get("society_id") != str(society["_id"]):
         raise NotFoundException("Enrollment not found")
@@ -240,7 +246,7 @@ async def get_society(society_id: str, current_user: CurrentUser = Depends(get_c
 async def update_society(society_id: str, payload: SocietyUpdateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     service = SocietyService(db)
     society = await service.society_for_actor(society_id, current_user.role, current_user.service_center_id)
-    result = await service.update_society(society, payload)
+    result = await service.update_society(society, payload, actor_role=current_user.role)
     await _audit(db, current_user, "UPDATE_SOCIETY", "societies", society_id, payload.model_dump(exclude_unset=True))
     return success(result, "Saved")
 
@@ -294,24 +300,30 @@ async def society_plans_offered(
     current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """What the manager's 'add resident' form offers — the society's plans,
-    plus a personal plan for the typed phone if admin made one."""
-    from app.utils.phone import validate_indian_mobile
-
+    plus a personal plan for the typed phone if admin made one FOR THIS
+    society (a phone lookup never reveals plans made for elsewhere)."""
     service = SocietyService(db)
     society = await service.society_for_actor(society_id, current_user.role, current_user.service_center_id)
-    customer_id = None
+    return success(await service.public_form(society, await _customer_by_phone(db, phone), staff=True))
+
+
+async def _customer_by_phone(db, phone: Optional[str]) -> Optional[str]:
+    from app.utils.phone import validate_indian_mobile
+
     normalized = validate_indian_mobile(phone or "")
-    if normalized:
-        user = await db.users.find_one({"phone": normalized, "role": "customer", "is_deleted": {"$ne": True}}, {"_id": 1})
-        customer_id = str(user["_id"]) if user else None
-    return success(await service.public_form(society, customer_id))
+    if not normalized:
+        return None
+    user = await db.users.find_one({"phone": normalized, "role": "customer", "is_deleted": {"$ne": True}}, {"_id": 1})
+    return str(user["_id"]) if user else None
 
 
 @society_router.post("/{society_id}/quote", dependencies=[Depends(require_manager_or_admin)])
-async def society_staff_quote(society_id: str, payload: SocietyQuoteRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def society_staff_quote(society_id: str, payload: StaffQuoteRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Staff price check; with the resident's `phone`, their personal plan
+    for this society prices too (as 'add resident' offers it)."""
     service = SocietyService(db)
     society = await service.society_for_actor(society_id, current_user.role, current_user.service_center_id)
-    return success(await service.quote(society, payload, payload.vehicle_types, None))
+    return success(await service.quote(society, payload, payload.vehicle_types, await _customer_by_phone(db, payload.phone), staff=True))
 
 
 @society_router.post("/{society_id}/enrollments", dependencies=[Depends(require_manager_or_admin)])
@@ -352,6 +364,27 @@ async def staff_premium_booking(society_id: str, payload: PremiumBookingRequest,
     for b in result["bookings"]:
         await _audit(db, current_user, "SOCIETY_PREMIUM_BOOKING", "bookings", b["id"], {"society_id": society_id})
     return success(result, "Premium wash booked")
+
+
+@society_router.post("/{society_id}/passes/{subscription_id}/extend", dependencies=[Depends(require_manager_or_admin)])
+async def extend_society_pass(
+    society_id: str, subscription_id: str, payload: PassExtendRequest,
+    current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """A few more days on a society pass that has ended (or is ending) so
+    its remaining premium washes can still be booked — at most 10 days per
+    plan month in total. Manager: own center's societies only."""
+    result = await SocietyService(db).extend_pass(
+        society_id, subscription_id, payload.days, note=payload.note,
+        actor_id=current_user.id, actor_role=current_user.role, actor_center_id=current_user.service_center_id,
+    )
+    await _audit(db, current_user, "EXTEND_SOCIETY_PASS", "user_subscriptions", subscription_id, {
+        "society_id": society_id, "days": payload.days, "note": payload.note,
+        "extension_days": result["extension_days"], "extended_until": result["extended_until"],
+    })
+    from app.services.subscription_service import extension_message
+
+    return success(result, extension_message(payload.days, result))
 
 
 # ---------------------------------------------------------------------------

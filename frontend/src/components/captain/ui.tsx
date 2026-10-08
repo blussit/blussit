@@ -100,7 +100,7 @@ export function Sheet({ open, onClose, title, children }: { open: boolean; onClo
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 40, opacity: 0 }}
             transition={{ duration: 0.18 }}
-            className="absolute inset-x-0 bottom-0 mx-auto max-h-[88vh] w-full max-w-[480px] overflow-y-auto rounded-t-[22px] bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3"
+            className="absolute inset-x-0 bottom-0 mx-auto max-h-[88dvh] w-full max-w-[480px] overflow-y-auto rounded-t-[22px] bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3"
           >
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-[#E4E9F1]" />
             <div className="mb-3 flex items-center justify-between gap-3">
@@ -154,6 +154,22 @@ export function StatTile({ label, value, tone = "navy" }: { label: string; value
   );
 }
 
+/** A read that failed: say so (never an empty "no jobs" that reads as a
+ *  fact) and offer a retry. Copy comes from the caller (captain i18n). */
+export function LoadError({ title, sub, retryLabel, onRetry, busy }: { title: string; sub?: string; retryLabel: string; onRetry: () => void; busy?: boolean }) {
+  return (
+    <Panel className="px-4 py-7 text-center">
+      <p role="alert" className="text-[15px] font-bold text-[#0E1A33]">
+        {title}
+      </p>
+      {sub && <p className="mt-1 text-sm text-[#5F6878]">{sub}</p>}
+      <Btn variant="secondary" className="mt-4 !min-h-[44px] px-5 text-sm" loading={busy} onClick={onRetry}>
+        {retryLabel}
+      </Btn>
+    </Panel>
+  );
+}
+
 /** One labelled line on a details card: icon tile, label, value. */
 export function InfoRow({ icon, label, children, right }: { icon: ReactNode; label: string; children: ReactNode; right?: ReactNode }) {
   return (
@@ -161,7 +177,7 @@ export function InfoRow({ icon, label, children, right }: { icon: ReactNode; lab
       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EEF3FA] text-[#0A66F0]">{icon}</span>
       <div className="min-w-0 flex-1">
         <p className="text-xs font-semibold text-[#5F6878]">{label}</p>
-        <div className="mt-0.5 text-[15px] font-semibold text-[#0E1A33]">{children}</div>
+        <div className="mt-0.5 break-words text-[15px] font-semibold text-[#0E1A33] [overflow-wrap:anywhere]">{children}</div>
       </div>
       {right && <div className="shrink-0 self-center">{right}</div>}
     </div>

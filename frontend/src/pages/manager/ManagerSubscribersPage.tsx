@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { AlarmClock, BadgeCheck, CircleOff, CreditCard, Gauge, Gift, Phone, Search } from "lucide-react";
-import { subscriptionApi, type CenterSubscriptionRow } from "../../api/engagement";
+import { AlarmClock, BadgeCheck, CalendarPlus, CircleOff, CreditCard, Gauge, Gift, Phone, Search } from "lucide-react";
+import { subscriptionApi, type CenterSubscriptionRow as BaseRow } from "../../api/engagement";
+import type { StaffPassExtras } from "../../api/customPlans";
+import { ExtendPassDialog, extensionLine, type ExtendTarget } from "../../components/society/PassExtension";
 import { useAuth } from "../../context/AuthContext";
-import { Badge, Button, Card, EmptyState, Input, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, PageLoader } from "../../components/ui";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { normalisePhoneSearch, Pager, useDebouncedValue } from "../../components/shared/ListControls";
 import { PlanUsageModal } from "../../components/shared/PlanUsageModal";
@@ -12,6 +14,7 @@ import { format } from "../../lib/date";
 import { carAndService, toTitle } from "../../lib/titleCase";
 
 type Filter = "all" | "active" | "expiring" | "expired";
+type CenterSubscriptionRow = BaseRow & StaffPassExtras;
 const PAGE_SIZE = 24;
 
 const FILTER_EMPTY: Record<Filter, string> = {
@@ -45,12 +48,13 @@ export default function ManagerSubscribersPage() {
   const [search, setSearch] = useState("");
   const [usageSubscriptionId, setUsageSubscriptionId] = useState<string | null>(null);
   const [customerId, setCustomerId] = useState<string | null>(null);
+  const [extendFor, setExtendFor] = useState<ExtendTarget | null>(null);
   const [page, setPage] = useState(1);
   const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
   // KPI tiles and the plan breakdown cover every plan; the list below is
   // one server-filtered page.
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ["center-subscription-overview", centerId, filter, planFilter, debouncedSearch, page],
     queryFn: () =>
       subscriptionApi.centerOverview(centerId, {
@@ -64,7 +68,7 @@ export default function ManagerSubscribersPage() {
     placeholderData: keepPreviousData,
   });
 
-  const rows: CenterSubscriptionRow[] = data?.rows || [];
+  const rows = (data?.rows || []) as CenterSubscriptionRow[];
   const planIdByName = useMemo(() => new Map((data?.plans || []).map((p) => [p.plan_name, p.plan_id])), [data]);
 
   if (!centerId) {
@@ -159,6 +163,8 @@ export default function ManagerSubscribersPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load subscriptions." onRetry={() => void refetch()} busy={isFetching} />
       ) : !rows.length ? (
         <EmptyState icon={Gift} title="Nothing Here" description={FILTER_EMPTY[filter]} />
       ) : (
@@ -213,6 +219,36 @@ export default function ManagerSubscribersPage() {
                   </div>
                 </div>
 
+                {r.registration_number && <p className="mt-1 font-mono-num text-xs text-[var(--color-text-secondary)]">{r.registration_number}</p>}
+                {(r.extension_days ?? 0) > 0 && (
+                  <p className="mt-2 text-xs text-[#0E1A33]" data-testid="pass-extension-line">
+                    <span className="font-semibold">{extensionLine(r.extension_days, r.extended_until)}</span>
+                    {r.extensions?.length ? ` · last by ${r.extensions[r.extensions.length - 1].by_name || "staff"}` : ""}
+                  </p>
+                )}
+                {r.can_extend && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2 min-h-11 sm:min-h-0"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setExtendFor({
+                        societyId: r.society_id,
+                        subscriptionId: r.subscription_id,
+                        plate: r.registration_number || carAndService(r.vehicle_type_name, r.service_name) || "This pass",
+                        planName: toTitle(r.plan_name),
+                        remaining: r.remaining_service_count ?? 0,
+                        endDate: r.end_date,
+                        daysUsed: r.extension_days ?? 0,
+                        daysLeft: r.extension_days_left ?? 10 - (r.extension_days ?? 0),
+                        extensions: r.extensions,
+                      });
+                    }}
+                  >
+                    <CalendarPlus className="h-3.5 w-3.5" /> Extend Pass
+                  </Button>
+                )}
                 {pct != null && (
                   <div className="mt-3">
                     <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)]">
@@ -248,6 +284,7 @@ export default function ManagerSubscribersPage() {
 
       <PlanUsageModal subscriptionId={usageSubscriptionId} onClose={() => setUsageSubscriptionId(null)} />
       <CustomerDetailDrawer customerId={customerId} onClose={() => setCustomerId(null)} />
+      <ExtendPassDialog target={extendFor} onClose={() => setExtendFor(null)} />
     </div>
   );
 }

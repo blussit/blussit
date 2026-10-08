@@ -3,6 +3,8 @@ Society fixes (2026-10-03): staff/resident premium bookings (the multi-car
 500), JSON 500s that keep their CORS headers, the premium wash named for
 what it is, and coupons on society enrollment / activation / renewal.
 """
+from types import SimpleNamespace
+from unittest.mock import ANY
 import itertools
 from datetime import datetime, timedelta, timezone
 
@@ -328,6 +330,9 @@ async def test_online_payment_charges_the_discounted_total(db, cleanup, rig, mon
 
     class _Client:
         order = _Orders()
+        # verify asks Razorpay what the signed payment is (PAY-09): captured,
+        # for the order and amount being verified (mock.ANY).
+        payment = SimpleNamespace(fetch=lambda pid: {"id": pid, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"})
 
     monkeypatch.setattr(payment_service.settings, "RAZORPAY_KEY_ID", "rzp_test_stub")
     monkeypatch.setattr(payment_service.settings, "RAZORPAY_KEY_SECRET", "stub_secret_key")

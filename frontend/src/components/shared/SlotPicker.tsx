@@ -178,7 +178,7 @@ export function SlotPicker({
                       }
                       onChange(s.key);
                     }}
-                    className={`flex flex-col items-center justify-center rounded-[12px] border py-2.5 px-1 sm:px-4 text-center transition-all ${
+                    className={`flex min-w-0 flex-col items-center justify-center rounded-[12px] border py-2.5 px-1 sm:px-4 text-center transition-all ${
                       disabled
                         ? "border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed"
                         : selected
@@ -186,7 +186,8 @@ export function SlotPicker({
                           : "border-gray-200 bg-white text-[#0B1B3A] hover:border-gray-300 hover:bg-gray-50"
                     }`}
                   >
-                    <span className="text-[13px] font-semibold whitespace-nowrap">
+                    {/* Wraps on a 320 px phone (two chips a row in a dialog) instead of spilling out of the chip. */}
+                    <span className="text-[13px] font-semibold leading-tight sm:whitespace-nowrap">
                       {formatTime12(s.start)} – {formatTime12(s.end)}
                     </span>
                     {disabled && <span className="text-[11px] font-medium text-red-400 mt-0.5">Full</span>}

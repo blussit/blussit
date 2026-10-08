@@ -13,7 +13,22 @@ Takes primitive args (not the CurrentUser class) so the service layer
 doesn't need to import from app.core.dependencies (the HTTP/auth layer) —
 keeps the dependency direction one-way.
 """
-from app.core.exceptions import BadRequestException, ForbiddenException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+
+# Account standing. "inactive" and "suspended" switch an account off: refused
+# at login, on every access-token use and on refresh (CAP-06 — "inactive"
+# used to block nothing). "pending" is NOT one of them — it is an onboarding
+# state (a new captain must still sign in to finish KYC); "active" and a
+# missing status (legacy rows default to active) are normal.
+_SWITCHED_OFF = {
+    "inactive": "Your account is inactive. Contact support.",
+    "suspended": "Your account has been suspended. Contact support.",
+}
+
+
+def account_switched_off(user: dict | None) -> str | None:
+    """The refusal message when this account may not be used, else None."""
+    return _SWITCHED_OFF.get((user or {}).get("status") or "")
 
 
 def ensure_own_center(actor_role: str, actor_center_id: str | None, service_center_id: str | None) -> None:
@@ -66,3 +81,40 @@ def resolve_grant_center_id(actor_role: str, actor_center_id: str | None, payloa
     if payload_center_id:
         return payload_center_id
     raise BadRequestException("Pick a service center for this plan.")
+
+
+async def customers_known_to_center(db, customer_ids: list[str], center_id: str) -> set[str]:
+    """Which of these customers a center has dealt with: a booking there, a
+    plan its manager granted/sold, or a society enrolment in one of its
+    societies. THE "customer known to my center" rule — the 360 view, the
+    typeahead, the customer password reset and every other staff read of a
+    customer's data by id use this one function."""
+    known: set[str] = set(
+        await db.bookings.distinct("customer_id", {"customer_id": {"$in": customer_ids}, "service_center_id": center_id})
+    )
+    rest = [c for c in customer_ids if c not in known]
+    if rest:
+        known.update(await db.user_subscriptions.distinct(
+            "customer_id", {"customer_id": {"$in": rest}, "service_center_id": center_id},
+        ))
+    rest = [c for c in customer_ids if c not in known]
+    if rest:
+        society_ids = [str(s["_id"]) for s in await db.societies.find({"service_center_id": center_id}, {"_id": 1}).to_list(length=500)]
+        if society_ids:
+            known.update(await db.society_enrollments.distinct(
+                "customer_id", {"customer_id": {"$in": rest}, "society_id": {"$in": society_ids}},
+            ))
+    return known
+
+
+async def ensure_customer_in_scope(db, actor_role: str, actor_center_id: str | None, customer_id: str) -> None:
+    """Gate for a staff endpoint that reads one customer's data by id
+    (addresses, plans, 360 view, password reset): an admin passes; a
+    manager only for a customer known to THEIR center (AZ-01 / MGR-04 —
+    any manager could read any customer's saved addresses and plans by
+    id). Anyone else, an unlinked manager, or an unknown id: 404, never
+    403 — an id outside the center must not confirm it exists."""
+    if actor_role == "admin":
+        return
+    if actor_role != "manager" or not actor_center_id or customer_id not in await customers_known_to_center(db, [customer_id], actor_center_id):
+        raise NotFoundException("Customer not found")

@@ -117,7 +117,7 @@ export function PickerField({
                   transition={{ type: "tween", duration: 0.22, ease: "easeOut" }}
                   role="listbox"
                   aria-label={sheetTitle || label}
-                  className="relative z-10 max-h-[82vh] w-full overflow-y-auto rounded-t-[22px] bg-white px-3 pb-[max(16px,env(safe-area-inset-bottom))] pt-2"
+                  className="relative z-10 max-h-[82dvh] w-full overflow-y-auto rounded-t-[22px] bg-white px-3 pb-[max(16px,env(safe-area-inset-bottom))] pt-2"
                 >
                   <div className="sticky top-0 z-10 -mx-3 bg-white px-4 pb-2 pt-1">
                     <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-[#D5DBE5]" />

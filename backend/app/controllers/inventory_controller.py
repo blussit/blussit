@@ -3,7 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
 from app.schemas.inventory_schema import InventoryAdjustRequest, InventoryCreateRequest, InventoryUpdateRequest
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, field_changes
 from app.services.inventory_service import InventoryService
 
 
@@ -20,11 +20,20 @@ class InventoryController:
 
     async def create(self, current_user: CurrentUser, payload: InventoryCreateRequest):
         result = await self.service.create(payload, current_user.role, current_user.service_center_id)
-        await self.audit.log_action(current_user.id, current_user.role, "CREATE_INVENTORY_ITEM", "inventory", result["id"])
+        await self.audit.log_action(
+            current_user.id, current_user.role, "CREATE_INVENTORY_ITEM", "inventory", result["id"],
+            {"item_name": payload.item_name, "quantity_available": payload.quantity_available, "service_center_id": payload.service_center_id},
+        )
         return success(result, "Inventory item added successfully")
 
     async def update(self, current_user: CurrentUser, item_id: str, payload: InventoryUpdateRequest):
+        before = await self.service.repo.find_by_id(item_id)
         result = await self.service.update(item_id, payload, current_user.role, current_user.service_center_id)
+        # Before/after (ADM-12) — a quantity overwrite is a stock movement too.
+        await self.audit.log_action(
+            current_user.id, current_user.role, "UPDATE_INVENTORY_ITEM", "inventory", item_id,
+            {"changes": field_changes(before, result, payload.model_dump(exclude_unset=True)), "service_center_id": result.get("service_center_id")},
+        )
         return success(result, "Inventory item updated successfully")
 
     async def adjust(self, current_user: CurrentUser, item_id: str, payload: InventoryAdjustRequest):
@@ -33,5 +42,10 @@ class InventoryController:
         return success(result, "Inventory adjusted successfully")
 
     async def delete(self, current_user: CurrentUser, item_id: str):
+        before = await self.service.repo.find_by_id(item_id)
         await self.service.delete(item_id, current_user.role, current_user.service_center_id)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "DELETE_INVENTORY_ITEM", "inventory", item_id,
+            {k: (before or {}).get(k) for k in ("item_name", "quantity_available", "unit", "service_center_id")},
+        )
         return success(None, "Inventory item removed successfully")

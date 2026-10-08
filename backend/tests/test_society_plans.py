@@ -3,6 +3,8 @@ Society plans (docs/SOCIETY_PLANS.md) — pricing, enrollment, activation,
 quotas, renewal, online payment and the "hidden from the website" rule.
 Service-level; the Razorpay client is stubbed (no external call is made).
 """
+from types import SimpleNamespace
+from unittest.mock import ANY
 import itertools
 from datetime import datetime, timedelta, timezone
 
@@ -42,6 +44,9 @@ class _StubOrders:
 
 class _StubClient:
     order = _StubOrders()
+    # verify asks Razorpay what the signed payment is (PAY-09): captured,
+    # for the order and amount being verified (mock.ANY).
+    payment = SimpleNamespace(fetch=lambda pid: {"id": pid, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"})
 
 
 @pytest.fixture
@@ -550,10 +555,16 @@ async def test_plan_list_links_a_society_pass_to_its_page_only_while_the_link_wo
     await activate_cash(db, view["id"])
     mine = [s for s in await UserSubscriptionService(db).list_my_subscriptions(str(resident["_id"])) if s.get("society_id")]
     assert mine and mine[0]["society_form_path"] == f"/society/{rig['society']['form_token']}"
-    # Form switched off: no dead link (the app books through /app/book).
+    # Form switched off: the link still opens THIS resident's hub (only new
+    # sign-ups stop — SocietyService.society_by_token), so it stays (SOC-8,
+    # remediation 2026-10-07; this used to assert the link was hidden).
     await db.societies.update_one({"_id": ObjectId(rig["society"]["id"])}, {"$set": {"form_enabled": False}})
     mine = [s for s in await UserSubscriptionService(db).list_my_subscriptions(str(resident["_id"])) if s.get("society_id")]
-    assert mine[0]["society_form_path"] is None and mine[0]["society_name"] == rig["society"]["name"]
+    assert mine[0]["society_form_path"] == f"/society/{rig['society']['form_token']}" and mine[0]["society_name"] == rig["society"]["name"]
+    # A cancelled plan has no hub to open: no dead link.
+    await db.user_subscriptions.update_one({"_id": ObjectId(mine[0]["id"])}, {"$set": {"status": "cancelled"}})
+    mine = [s for s in await UserSubscriptionService(db).list_my_subscriptions(str(resident["_id"])) if s.get("society_id")]
+    assert mine[0]["society_form_path"] is None
 
 
 async def test_mark_paid_activates_only_the_version_the_manager_reviewed(db, cleanup, rig):

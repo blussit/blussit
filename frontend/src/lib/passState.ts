@@ -36,6 +36,11 @@ export const isLivePass = (sub: UserSubscription) => {
  *  no cancel / upgrade / auto-pay / buy again here. */
 export const isSocietyPass = (sub: Pick<UserSubscription, "society_id">): boolean => !!sub.society_id;
 
+/** A car's pass from a manager-built custom plan (per-service washes). */
+export const isCustomPlanPass = (sub: UserSubscription): boolean => {
+  return sub.plan_kind === "custom" || !!sub.custom_plan_id;
+};
+
 /** Where a society pass is booked and renewed — the society hub inside the
  *  customer dashboard, built only from a same-site /society/<token> path
  *  (never an arbitrary URL from the response). */
@@ -58,8 +63,9 @@ export function buyAgainCandidates(subs: UserSubscription[]): UserSubscription[]
   const live = subs.filter(isLivePass);
   const seen = new Set<string>();
   return subs
-    // A society pass is renewed on its society page, never re-bought here.
-    .filter((s) => passState(s) === "ended" && !isSocietyPass(s))
+    // A society pass is renewed on its society page, and a custom plan is
+    // built by the manager — neither is re-bought here.
+    .filter((s) => passState(s) === "ended" && !isSocietyPass(s) && !isCustomPlanPass(s))
     .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())
     .filter((s) => {
       const key = `${s.plan_id}|${s.vehicle_type || ""}|${s.service_id || ""}`;

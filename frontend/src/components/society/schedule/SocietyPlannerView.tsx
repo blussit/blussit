@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, CalendarPlus, ChevronLeft, ChevronRight, Shuffle } from "lucide-react";
-import { Modal, Spinner } from "../../ui";
+import { ErrorState, Modal, Spinner } from "../../ui";
 import { adminServiceCenterApi } from "../../../api/admin";
 import { useToast } from "../../../context/ToastContext";
 import { getErrorMessage } from "../../../lib/api-client";
@@ -86,17 +86,21 @@ export function SocietyPlannerView({ isAdmin = false, societyBasePath }: { isAdm
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button type="button" aria-label="Previous weeks" className="rounded-full p-2 hover:bg-[#EEF3FA]" onClick={() => setStart((s) => addDays(s, -14))}><ChevronLeft className="h-4 w-4" /></button>
-        <span className="min-w-[180px] text-center text-sm font-semibold text-[#0E1A33]">
+        <span className="min-w-0 flex-1 text-center text-sm font-semibold text-[#0E1A33] sm:min-w-[180px] sm:flex-none">
           {new Date(`${start}T12:00:00+05:30`).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} – {new Date(`${end}T12:00:00+05:30`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
         </span>
         <button type="button" aria-label="Next weeks" className="rounded-full p-2 hover:bg-[#EEF3FA]" onClick={() => setStart((s) => addDays(s, 14))}><ChevronRight className="h-4 w-4" /></button>
         <Btn kind="ghost" onClick={() => setStart(mondayOf(todayIST()))}>This Week</Btn>
       </div>
 
-      {q.isLoading || (isAdmin && centers.isLoading) ? <div className="flex justify-center py-16"><Spinner /></div> : !p ? (
-        <Banner tone="error">{getErrorMessage(q.error) || "Pick A Service Center"}</Banner>
+      {q.isLoading || (isAdmin && centers.isLoading) ? <div className="flex justify-center py-16"><Spinner /></div> : isAdmin && centers.isError && !centers.data ? (
+        <ErrorState message="Couldn't load service centers." onRetry={() => void centers.refetch()} busy={centers.isFetching} />
+      ) : q.isError && !p ? (
+        <ErrorState message="Couldn't load the planner." onRetry={() => void q.refetch()} busy={q.isFetching} />
+      ) : !p ? (
+        <Banner tone="error">Pick A Service Center</Banner>
       ) : (
         <>
           {p.warnings.length > 0 && <div className="space-y-1.5">{p.warnings.slice(0, 6).map((w, i) => <Banner key={i} tone="warn">{w.message}</Banner>)}</div>}

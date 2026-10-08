@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Minus, Plus } from "lucide-react";
-import { Button, Input, Modal, Select, Switch } from "../ui";
+import { Button, ErrorState, Input, Modal, Select, Switch } from "../ui";
 import { serviceCenterApi } from "../../api/catalog";
 import {
   planServices,
@@ -65,12 +65,18 @@ export function AddResidentModal({ open, onClose, societyId, onSaved }: { open: 
   }, [data]);
 
   const types = cars.map((c) => c.vehicle_type).filter(Boolean);
-  const key = JSON.stringify({ planId, custom, types, appliedCoupon });
+  // The resident's number is part of the price: a customer's personal plan is priced for them.
+  const key = JSON.stringify({ planId, custom, types, appliedCoupon, validPhone });
   useEffect(() => {
     if (!open || !types.length || (!planId && !custom)) return setQuote(null);
     let live = true;
     societyApi
-      .quote(societyId, { ...(planId ? { plan_id: planId } : { custom: custom! }), vehicle_types: types, coupon_code: appliedCoupon || undefined })
+      .quote(societyId, {
+        ...(planId ? { plan_id: planId } : { custom: custom! }),
+        vehicle_types: types,
+        coupon_code: appliedCoupon || undefined,
+        phone: validPhone || undefined,
+      })
       .then((q) => live && setQuote(q))
       .catch(() => live && setQuote(null));
     return () => { live = false; };
@@ -114,6 +120,9 @@ export function AddResidentModal({ open, onClose, societyId, onSaved }: { open: 
           <Input label="Mobile" value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" />
           <Input label="Flat" value={flat} onChange={(e) => setFlat(e.target.value)} placeholder="B-402" />
         </div>
+        {offered.isError && !data && (
+          <ErrorState message="Couldn't load this society's plans and car types." onRetry={() => void offered.refetch()} busy={offered.isFetching} className="p-4" />
+        )}
         <div className="flex items-center justify-between">
           <p className="text-sm font-medium">Cars</p>
           <div className="flex items-center gap-2">
@@ -231,6 +240,9 @@ export function StaffBookPremiumModal({ open, onClose, societyId, centerId, enro
                 className={`shrink-0 rounded-xl border px-3 py-2 text-sm ${day === d ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0] font-semibold" : "border-[#E4E9F1]"}`}>{formatDay(d)}</button>
             ))}
           </div>
+          {slots.isError && !slots.data && (
+            <ErrorState message="Couldn't load slots for this day." onRetry={() => void slots.refetch()} busy={slots.isFetching} className="p-4" />
+          )}
           <div className="grid grid-cols-2 gap-2">
             {(slots.data || []).map((s) => (
               <button key={s.key} type="button" disabled={s.status === "full"} onClick={() => setSlot(s.key)}

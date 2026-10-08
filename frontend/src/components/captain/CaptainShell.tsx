@@ -4,7 +4,8 @@
  * every tab needs — live job pushes, the location pings while a job is
  * active, and new-notification toasts with a chime.
  */
-import { type CSSProperties, type ReactNode, useEffect, useRef } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef } from "react";
+import "../layout/staffTheme.css";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ClipboardList, House, User, Wallet } from "lucide-react";
@@ -134,6 +135,14 @@ export function CaptainShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   useJobPlumbing();
   useNotificationAlerts();
+  // Same as the manager/admin shell: `staff-v2` on <body>, so whatever is
+  // portalled out of this frame — the set-password gate, the confirm box,
+  // toasts, the document viewer — gets the v2 look too, not the old
+  // black/gold primitives.
+  useLayoutEffect(() => {
+    document.body.classList.add("staff-v2");
+    return () => document.body.classList.remove("staff-v2");
+  }, []);
 
   // A job's own screens carry their own bottom action bar.
   const onJobScreen = /^\/captain\/jobs\/[^/]+/.test(pathname);

@@ -14,7 +14,7 @@ import { RotateCcw, SlidersHorizontal, Table2, BarChart3 } from "lucide-react";
 import { kpiApi, type KpiExplorerBucket, type KpiExplorerFilters } from "../../../api/admin";
 import { bookingApi } from "../../../api/booking";
 import { subscriptionApi, type PlanPurchaseRow } from "../../../api/engagement";
-import { Select, StatusBadge } from "../../ui";
+import { ErrorState, Select, StatusBadge } from "../../ui";
 import { DatePicker } from "../../ui/DatePicker";
 import { KpiListModal } from "./KpiListModal";
 import { BookingDetailDrawer } from "../../shared/BookingDetailDrawer";
@@ -125,7 +125,7 @@ export function KpiExplorer() {
     [preset, custom, center, service, vehicleType, source, granularity],
   );
 
-  const { data, isLoading, isFetching, isError } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ["kpi-explorer", filters],
     queryFn: () => kpiApi.explorer(filters),
     placeholderData: keepPreviousData,
@@ -262,7 +262,7 @@ export function KpiExplorer() {
       </div>
 
       {isError && !data ? (
-        <p className="rounded-[14px] border border-[#F6D3D3] bg-[#FFF5F5] p-4 text-sm text-[#C62828]">Couldn't load trends — try again in a moment.</p>
+        <ErrorState message="Couldn't load trends." onRetry={() => void refetch()} busy={isFetching} />
       ) : isLoading && !data ? (
         <div className="h-[420px] animate-pulse rounded-[14px] bg-[#EEF3FA]" />
       ) : data && t && p ? (

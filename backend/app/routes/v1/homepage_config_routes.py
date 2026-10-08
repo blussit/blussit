@@ -4,7 +4,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin
 from app.core.responses import success
 from app.schemas.content_schema import HomepageConfigUpdateRequest
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, field_changes
 from app.services.homepage_config_service import HomepageConfigService
 
 router = APIRouter(prefix="/homepage-config", tags=["Homepage Config"])
@@ -22,6 +22,12 @@ async def set_homepage_config(
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    result = await HomepageConfigService(db).set_config(payload.model_dump(exclude_unset=True), updated_by=current_user.id)
-    await AuditService(db).log_action(current_user.id, current_user.role, "UPDATE_HOMEPAGE_CONFIG", "settings", None, payload.model_dump(exclude_unset=True))
+    service = HomepageConfigService(db)
+    before = await service.get_config()
+    result = await service.set_config(payload.model_dump(exclude_unset=True), updated_by=current_user.id)
+    # Before/after for what really changed (ADM-12).
+    await AuditService(db).log_action(
+        current_user.id, current_user.role, "UPDATE_HOMEPAGE_CONFIG", "settings", "homepage_config",
+        {"changes": field_changes(before, result, payload.model_dump(exclude_unset=True))},
+    )
     return success(result, "Homepage settings updated")

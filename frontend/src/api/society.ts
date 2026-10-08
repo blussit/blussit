@@ -1,6 +1,7 @@
 /** Society plans — see docs/SOCIETY_PLANS.md. */
 import { apiClient, type ApiSuccess } from "../lib/api-client";
 import type { AuthResult } from "./auth";
+import type { PassExtension } from "../types";
 import { titleCase } from "../components/public/landing/shared";
 import { formatClockIST } from "../lib/date";
 
@@ -47,6 +48,9 @@ export interface CarType {
 
 export interface SocietyFormData {
   society: { name: string; area?: string | null; city?: string | null };
+  /** false: the society's form is switched off — no new sign-ups (enrol
+   *  answers 404); an existing resident's hub still opens. */
+  form_enabled?: boolean;
   plans: SocietyPlanOption[];
   customise: {
     enabled: boolean;
@@ -133,9 +137,41 @@ export interface EnrollmentCar {
     end_date: string | null;
     cycle_start: string | null;
     can_renew: boolean;
+    /** Extension (founder rule): days a manager added after the plan
+     *  month, so the remaining premium washes can still be booked. */
+    extension_days?: number;
+    extended_until?: string | null;
+    bookable_until?: string | null;
+    /** YYYY-MM-DD — the last day a booking can be dated on. */
+    last_bookable_day?: string | null;
+    /** Its human form, "6 Nov 2026" — shown as "Last Booking Day: …". */
+    last_booking_day_label?: string | null;
+    in_extension?: boolean;
+    /** Staff list only. */
+    extension_days_left?: number;
+    can_extend?: boolean;
+    extensions?: PassExtension[];
   };
   bucket_used: number | null;
   bucket_allowance: number;
+}
+
+/** One society pass after an extension (staff view). */
+export interface SocietyPassView {
+  id: string;
+  registration_number?: string | null;
+  status: "active" | "expired" | "cancelled";
+  remaining: number;
+  total: number;
+  end_date: string | null;
+  extension_days: number;
+  extension_days_left: number;
+  extended_until: string | null;
+  bookable_until: string | null;
+  last_bookable_day: string | null;
+  last_booking_day_label?: string | null;
+  in_extension: boolean;
+  extensions?: PassExtension[];
 }
 
 export interface SocietyEnrollment {
@@ -407,7 +443,9 @@ export const societyApi = {
   setCaptain: (id: string, payload: { captain_id: string | null; date?: string }) => data<SocietyDetail>(apiClient.put(`/societies/${id}/captain`, payload)),
   enrollments: (id: string, status?: string) => data<SocietyEnrollment[]>(apiClient.get(`/societies/${id}/enrollments`, { params: status ? { status } : undefined })),
   plansOffered: (id: string, phone?: string) => data<SocietyFormData>(apiClient.get(`/societies/${id}/plans`, { params: phone ? { phone } : undefined })),
-  quote: (id: string, payload: PlanChoice & { vehicle_types: string[]; coupon_code?: string }) => data<SocietyQuote>(apiClient.post(`/societies/${id}/quote`, payload)),
+  /** `phone`: the resident being added — a customer's personal plan is priced for that number. */
+  quote: (id: string, payload: PlanChoice & { vehicle_types: string[]; coupon_code?: string; phone?: string }) =>
+    data<SocietyQuote>(apiClient.post(`/societies/${id}/quote`, payload)),
   addResident: (id: string, payload: EnrollPayload & { collect_cash?: boolean }) =>
     data<SocietyEnrollment>(apiClient.post(`/societies/${id}/enrollments`, payload)),
   attendance: (id: string, month?: string) => data<AttendanceMonth>(apiClient.get(`/societies/${id}/attendance`, { params: month ? { month } : undefined })),
@@ -424,6 +462,9 @@ export const societyApi = {
   cancel: (enrollmentId: string, vehicleIds?: string[]) =>
     data<SocietyEnrollment>(apiClient.post(`/society-enrollments/${enrollmentId}/cancel`, { vehicle_ids: vehicleIds ?? null })),
   /** Razorpay link to the resident's WhatsApp — paying it activates (or renews) the plan by itself. */
+  /** A few more days (1..days left of 10) so the remaining premium washes can still be booked. */
+  extendPass: (societyId: string, subscriptionId: string, days: number, note?: string) =>
+    data<SocietyPassView>(apiClient.post(`/societies/${societyId}/passes/${subscriptionId}/extend`, { days, note: note || undefined })),
   paymentLink: (enrollmentId: string, renewal = false) =>
     data<{ short_url: string; amount: number; order_id: string; reused: boolean; sent: boolean }>(
       apiClient.post(`/society-enrollments/${enrollmentId}/payment-link`, { renewal, send_whatsapp: true }),

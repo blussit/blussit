@@ -2,7 +2,7 @@ import { lazy, Suspense } from "react";
 import { PageLoader } from "./components/ui";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
-import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider, hydrate, type DehydratedState } from "@tanstack/react-query";
 import { getErrorMessage } from "./lib/api-client";
 import { toastBus } from "./context/ToastContext";
 import { AuthProvider } from "./context/AuthContext";
@@ -16,15 +16,23 @@ import { ScrollRestoration } from "./components/shared/ScrollRestoration";
 import { VisitBeacon } from "./components/shared/VisitBeacon";
 
 import LandingPage from "./pages/public/LandingPage";
+// The search-landing pages are pre-rendered to HTML at build time, so they
+// load with the entry bundle: a lazy chunk would swap that HTML for a
+// spinner before showing the very same page.
+import ServicesPage from "./pages/public/seo/ServicesPage";
+import ServiceDetailPage from "./pages/public/seo/ServiceDetailPage";
+import IndoreCarWashPage from "./pages/public/seo/IndoreCarWashPage";
+import PlansPage from "./pages/public/seo/PlansPage";
+import NotFoundPage from "./pages/public/seo/NotFoundPage";
+import ServicePolicyPage from "./pages/public/ServicePolicyPage";
+import CancellationPolicyPage from "./pages/public/CancellationPolicyPage";
+import PrivacyPolicyPage from "./pages/public/PrivacyPolicyPage";
+import TermsPage from "./pages/public/TermsPage";
 import { loadBookPage, loadLoginPage } from "./routes/prefetch";
 
 // Only the landing page ships in the first download; everything else loads
 // on demand (the booking wizard and login are also prefetched while idle —
 // see routes/prefetch.ts — so they still open instantly).
-const ServicePolicyPage = lazy(() => import("./pages/public/ServicePolicyPage"));
-const CancellationPolicyPage = lazy(() => import("./pages/public/CancellationPolicyPage"));
-const PrivacyPolicyPage = lazy(() => import("./pages/public/PrivacyPolicyPage"));
-const TermsPage = lazy(() => import("./pages/public/TermsPage"));
 const BookPage = lazy(loadBookPage);
 const LoginPage = lazy(loadLoginPage);
 // Local test setup only — dropped entirely from production builds.
@@ -44,6 +52,7 @@ const SupportPage = lazy(() => import("./pages/customer/SupportPage"));
 const GaragePage = lazy(() => import("./pages/customer/GaragePage"));
 const SettingsPage = lazy(() => import("./pages/customer/SettingsPage"));
 const OffersPage = lazy(() => import("./pages/customer/OffersPage"));
+const WalletPage = lazy(() => import("./pages/customer/WalletPage"));
 
 const CaptainLayout = lazy(() => import("./pages/captain/CaptainLayout"));
 const CaptainTodayPage = lazy(() => import("./pages/captain/CaptainTodayPage"));
@@ -68,6 +77,8 @@ const ManagerReviewsPage = lazy(() => import("./pages/manager/ManagerReviewsPage
 const ManagerSocietiesPage = lazy(() => import("./pages/manager/ManagerSocietiesPage"));
 const ManagerSocietyDetailPage = lazy(() => import("./pages/manager/ManagerSocietyDetailPage"));
 const ManagerSocietyPlannerPage = lazy(() => import("./pages/manager/ManagerSocietyPlannerPage"));
+const ManagerChargesPage = lazy(() => import("./pages/manager/ManagerChargesPage"));
+const ManagerCustomPlansPage = lazy(() => import("./pages/manager/ManagerCustomPlansPage"));
 
 const AdminLayout = lazy(() => import("./pages/admin/AdminLayout"));
 const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage"));
@@ -95,6 +106,8 @@ const AdminSocietiesPage = lazy(() => import("./pages/admin/AdminSocietiesPage")
 const AdminSocietyDetailPage = lazy(() => import("./pages/admin/AdminSocietyDetailPage"));
 const AdminSocietyPlansPage = lazy(() => import("./pages/admin/AdminSocietyPlansPage"));
 const AdminSocietyPlannerPage = lazy(() => import("./pages/admin/AdminSocietyPlannerPage"));
+const AdminChargesPage = lazy(() => import("./pages/admin/AdminChargesPage"));
+const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
 const CustomerProfilePage = lazy(() => import("./pages/customer/CustomerProfilePage"));
@@ -108,10 +121,16 @@ const queryClient = new QueryClient({
     // (suspend user, delete coupon, resolve issue, mark-read, ...).
     onError: (error, _variables, _context, mutation) => {
       if (mutation.options.onError) return; // handled locally
-      toastBus.emit?.({ tone: "error", title: "That didn't save", message: getErrorMessage(error) });
+      toastBus.emit?.({ tone: "error", title: "That Didn't Save", message: getErrorMessage(error) });
     },
   }),
 });
+
+// A pre-rendered page ships the API data it was rendered with (see
+// scripts/prerender.mjs): start from it so the first render matches the HTML,
+// then refetch as usual — it's stale by definition.
+const prerendered = (window as { __BLUSSIT_QUERIES__?: DehydratedState }).__BLUSSIT_QUERIES__;
+if (prerendered) hydrate(queryClient, prerendered);
 
 // A render crash anywhere in the route tree used to take the whole app to
 // a blank white page — nothing caught it. This resets automatically on
@@ -142,9 +161,11 @@ export default function App() {
           <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
-            {/* One-page site: the old pages are sections of the landing now. */}
-            <Route path="/services" element={<Navigate to={{ pathname: "/", hash: "#services" }} replace />} />
-            <Route path="/plans" element={<Navigate to={{ pathname: "/", hash: "#plans" }} replace />} />
+            {/* Search-landing pages — keep in step with src/prerender/entry.tsx and src/seo/pages.json. */}
+            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/services/:slug" element={<ServiceDetailPage />} />
+            <Route path="/plans" element={<PlansPage />} />
+            <Route path="/doorstep-car-wash-indore" element={<IndoreCarWashPage />} />
             <Route path="/cancellation-policy" element={<CancellationPolicyPage />} />
             <Route path="/service-policy" element={<ServicePolicyPage />} />
             <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
@@ -183,6 +204,7 @@ export default function App() {
                 <Route path="garage" element={<GaragePage />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route path="offers" element={<OffersPage />} />
+                <Route path="wallet" element={<WalletPage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
             </Route>
@@ -216,12 +238,14 @@ export default function App() {
                 <Route path="captains" element={<ManagerCaptainsPage />} />
                 <Route path="subscribers" element={<ManagerSubscribersPage />} />
                 <Route path="sell-plan" element={<ManagerSellPlanPage />} />
+                <Route path="custom-plans" element={<ManagerCustomPlansPage />} />
                 <Route path="inventory" element={<ManagerInventoryPage />} />
                 <Route path="complaints" element={<ManagerComplaintsPage />} />
                 <Route path="reviews" element={<ManagerReviewsPage />} />
                 <Route path="societies" element={<ManagerSocietiesPage />} />
                 <Route path="societies/:id" element={<ManagerSocietyDetailPage />} />
                 <Route path="society-planner" element={<ManagerSocietyPlannerPage />} />
+                <Route path="charges" element={<ManagerChargesPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
@@ -248,6 +272,7 @@ export default function App() {
                 <Route path="pricing" element={<AdminPricingPage />} />
                 <Route path="subscription-plans" element={<AdminSubscriptionPlansPage />} />
                 <Route path="purchased-plans" element={<AdminPurchasedPlansPage />} />
+                <Route path="custom-plans" element={<AdminCustomPlansPage />} />
                 <Route path="coupons" element={<AdminCouponsPage />} />
                 <Route path="complaints" element={<AdminComplaintsPage />} />
                 <Route path="reviews" element={<AdminReviewsPage />} />
@@ -256,12 +281,13 @@ export default function App() {
                 <Route path="societies/:id" element={<AdminSocietyDetailPage />} />
                 <Route path="society-plans" element={<AdminSocietyPlansPage />} />
                 <Route path="society-planner" element={<AdminSocietyPlannerPage />} />
+                <Route path="charges" element={<AdminChargesPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
             </Route>
 
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<NotFoundPage />} />
           </Routes>
           </Suspense>
           </RoutedErrorBoundary>

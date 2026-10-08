@@ -198,16 +198,21 @@ npm run dev
 
 | Role | Where | Login |
 |---|---|---|
-| Admin | http://localhost:5173/login | `admin@doorstepvehiclecare.in` / `Admin@12345` |
-| Manager | same | `manager.indore@doorstepvehiclecare.in` / `Manager@12345` |
-| Captain | same (use a phone-size window or your phone) | `captain.indore@doorstepvehiclecare.in` / `Captain@12345` |
+| Admin | http://localhost:5173/login | `admin@doorstepvehiclecare.in` / local dev password (see below) |
+| Manager | same | `manager.indore@doorstepvehiclecare.in` / local dev password |
+| Captain | same (use a phone-size window or your phone) | `captain.indore@doorstepvehiclecare.in` / local dev password |
 | Customer — new | same | `9000000001`, OTP `123456` |
 | Customer — has a plan | same | `9000000002`, OTP `123456` |
 | Customer — has past washes | same | `9000000003`, OTP `123456` |
 
 Only with Option B (the owner's data): society resident **Neha Verma**
 `9821315703` + OTP `123456`, and a second captain **Amit Yadav**
-`9876512340` / `Captain@12345`.
+`9876512340` (ask the owner for that account's password).
+
+Staff passwords: `SEED_ADMIN_PASSWORD` / `SEED_MANAGER_PASSWORD` /
+`SEED_CAPTAIN_PASSWORD` if you set them before seeding, otherwise the
+local-only defaults in `backend/app/seed.py`. The seed creates these staff
+accounts only on a database running on your own computer.
 
 Any other 10-digit mobile number also works with OTP `123456` — it creates a
 new customer, exactly like a real first booking.

@@ -83,11 +83,14 @@ async def test_a_deleted_accounts_refresh_token_is_rejected(db, cleanup):
 
 async def test_deleting_a_captain_with_no_wallet_row_still_works(db, cleanup):
     """Captains carry a separate wallet document with no cross-reference
-    back to prevent deletion — the guard is specifically about ACTIVE
-    BOOKINGS, not incidental related records."""
+    back to prevent deletion — a settled (₹0) wallet is an incidental
+    related record, not a blocker. (A wallet still HOLDING money does block
+    it — audit ADM-03, see tests/test_fix_ops_admin.py — so this captain's
+    factory wallet is settled to ₹0 first; the test used to delete a captain
+    holding ₹200, which is exactly the orphaned-money bug.)"""
     center_id = await make_service_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
-    captain_id = await make_captain(db, center_id)
+    captain_id = await make_captain(db, center_id, wallet_balance=0)
     cleanup.append(("users", {"_id": ObjectId(captain_id)}))
     cleanup.append(("captain_wallets", {"captain_id": captain_id}))
 

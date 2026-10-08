@@ -11,16 +11,19 @@ import { scheduleApi, type CaptainVisit } from "../../../api/societySchedule";
 import { formatDay, todayIST } from "../../../lib/date";
 import { addDays } from "../../society/schedule/scheduleUi";
 import { titleCase } from "../../public/landing/shared";
+import { LoadError } from "../ui";
 
 type Lang = "en" | "hi";
 const T = {
   en: {
     visit: "Society Visit", washes: (n: number) => `${n} Premium Wash${n === 1 ? "" : "es"}`, upcoming: "Coming Up",
     confirmed: (d: string) => `Cars are confirmed on ${d}`, open: "Open Job", planned: "Planned", directions: "Directions",
+    loadError: "Couldn't Load Your Society Visits", loadErrorSub: "Check your internet and try again.", tryAgain: "Try Again",
   },
   hi: {
     visit: "सोसाइटी विज़िट", washes: (n: number) => `${n} प्रीमियम वॉश`, upcoming: "आगे",
     confirmed: (d: string) => `गाड़ियाँ ${d} को पक्की होंगी`, open: "जॉब खोलें", planned: "योजना में", directions: "रास्ता",
+    loadError: "सोसाइटी विज़िट लोड नहीं हो सकीं", loadErrorSub: "इंटरनेट जाँचें और फिर से कोशिश करें।", tryAgain: "फिर से कोशिश करें",
   },
 };
 
@@ -33,6 +36,9 @@ export function CaptainSocietyVisits({ language = "en", hideWhenEmpty = false }:
   const t = T[language];
   const q = useQuery({ queryKey: ["captain-society-visits"], queryFn: scheduleApi.captainVisits, refetchInterval: 120_000 });
   if (q.isLoading) return null;
+  // A failed read is not "no visits" — say so even where empty is hidden.
+  if (q.isError && !q.data)
+    return <LoadError title={t.loadError} sub={t.loadErrorSub} retryLabel={t.tryAgain} onRetry={() => void q.refetch()} busy={q.isFetching} />;
   const visits = q.data?.visits || [];
   if (!visits.length && hideWhenEmpty) return null;
   const today = todayIST();

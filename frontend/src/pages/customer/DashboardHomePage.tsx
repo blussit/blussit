@@ -9,14 +9,20 @@
  * garage (saved + washed cars, merged server-side), and the (cached, shared
  * with the booking flow) catalogue.
  */
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, Bike, CarFront, ChevronRight, Droplets, Gift, Plus, RefreshCw, RotateCcw, Sparkles, SprayCan, Star, UserRound, Wind, type LucideIcon } from "lucide-react";
+import { ArrowRight, Bike, CarFront, ChevronRight, Droplets, Gift, Plus, RefreshCw, RotateCcw, Sparkles, SprayCan, Star, UserRound, Wallet, Wind, type LucideIcon } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { addressApi, vehicleApi } from "../../api/profile";
 import { subscriptionApi } from "../../api/engagement";
+import { customerWalletMeApi, MY_WALLET_QUERY_KEY } from "../../api/customerWalletMe";
+import { customPlansMeApi, MY_CUSTOM_PLANS_QUERY_KEY } from "../../api/customPlansMe";
+import { arrangeCustomPlans, CustomPlanCard } from "../../components/customer/CustomPlanCard";
+import { lastBookingDay, lastBookingDayText } from "../../components/customer/passDates";
+import { carFromPass, isCarBoundPass, PlanWashSheet } from "../../components/customer/PlanWashSheet";
+import { visitDue } from "../../components/customer/money";
 import { PassStatusBadge } from "../../components/customer/PassStatusBadge";
 import { usePassPurchase } from "../../components/customer/usePassPurchase";
 import { btn, card, greetingIST, IconTile, SectionTitle, Skeleton, StatusChip } from "../../components/customer/ui";
@@ -27,7 +33,7 @@ import { useAuth } from "../../context/AuthContext";
 import { format, formatDay, formatSlot } from "../../lib/date";
 import { toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { passHeadlinePrice } from "../../lib/passPricing";
-import { buyAgainCandidates, isLivePass, isSocietyPass, passState, societyPassPath } from "../../lib/passState";
+import { buyAgainCandidates, isCustomPlanPass, isLivePass, isSocietyPass, passState, societyPassPath } from "../../lib/passState";
 import type { ApiPaginated } from "../../lib/api-client";
 import type { GarageCar } from "../../api/profile";
 import type { Service, UserSubscription } from "../../types";
@@ -77,12 +83,24 @@ function renewLine(sub: UserSubscription): string {
   // A society pass: premium washes can run out, the daily washes don't.
   if (isSocietyPass(sub)) {
     return passState(sub) === "used_up"
-      ? `Premium washes used · daily washes till ${format(sub.end_date)}`
-      : `Valid till ${format(sub.end_date)} · renew on your society page`;
+      ? `Premium washes used · daily washes till ${lastBookingDay(sub)}`
+      : `${lastBookingDayText(sub)} · renew on your society page`;
   }
   if (passState(sub) === "renewing") return "Your next month starts once the auto-pay charge goes through.";
-  if (passState(sub) === "used_up") return `All washes used · ${sub.auto_renew ? "renews" : "valid till"} ${format(sub.end_date)}`;
-  return `${sub.auto_renew ? "Renews" : "Valid till"} ${format(sub.end_date)}`;
+  if (passState(sub) === "used_up") return sub.auto_renew ? `All washes used · renews ${format(sub.end_date)}` : `All washes used · ${lastBookingDayText(sub)}`;
+  return sub.auto_renew ? `Renews ${format(sub.end_date)}` : lastBookingDayText(sub);
+}
+
+/** A read that failed — said plainly with a retry, never shown as "none". */
+function LoadFailedLine({ what, onRetry, busy }: { what: string; onRetry: () => void; busy?: boolean }) {
+  return (
+    <p role="alert" className="text-sm text-[#5F6878]">
+      Couldn't load {what}.{" "}
+      <button type="button" disabled={busy} onClick={onRetry} className="font-semibold text-[#0A66F0] underline underline-offset-2 disabled:opacity-60">
+        {busy ? "Trying…" : "Try Again"}
+      </button>
+    </p>
+  );
 }
 
 export default function CustomerDashboardPage() {
@@ -97,6 +115,18 @@ export default function CustomerDashboardPage() {
     queryFn: () => bookingApi.myBookings({ page: 1, page_size: BOOKINGS_FETCHED }),
   });
   const subsQuery = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions });
+  // The wallet (credit used on / a balance due added to the next booking) —
+  // a small chip whenever it isn't zero.
+  const { data: wallet } = useQuery({
+    queryKey: [...MY_WALLET_QUERY_KEY, "summary"],
+    queryFn: () => customerWalletMeApi.me({ page: 1, page_size: 1 }),
+    staleTime: 60_000,
+  });
+  const walletBalance = Math.round(wallet?.balance ?? 0);
+  // Manager-built custom plans: one card per plan (all its cars).
+  const customQuery = useQuery({ queryKey: MY_CUSTOM_PLANS_QUERY_KEY, queryFn: customPlansMeApi.my, staleTime: 30_000 });
+  // Each live plan carries its upcoming renewal (shown inside its card).
+  const liveCarts = arrangeCustomPlans(customQuery.data || []).live;
   const garageQuery = useQuery({ queryKey: GARAGE_QUERY_KEY, queryFn: vehicleApi.garage, staleTime: 30_000 });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   // The same cached catalogue the booking flow uses — opening a quick
@@ -105,7 +135,7 @@ export default function CustomerDashboardPage() {
   const services = servicesQuery.data?.data || [];
 
   // ---- passes ---------------------------------------------------------------
-  const subs = subsQuery.data || [];
+  const subs = (subsQuery.data || []).filter((s) => !isCustomPlanPass(s));
   const livePasses = subs
     .filter(isLivePass)
     .sort((a, b) => Number(passState(b) === "active") - Number(passState(a) === "active") || new Date(a.end_date).getTime() - new Date(b.end_date).getTime());
@@ -143,7 +173,15 @@ export default function CustomerDashboardPage() {
     void queryClient.prefetchQuery({ queryKey: ["addresses"], queryFn: addressApi.list, staleTime: 60_000 });
   };
   // A society pass books (a day ahead) and renews on its society page.
-  const bookWithPass = (sub: UserSubscription) => navigate((isSocietyPass(sub) && societyPassPath(sub)) || `/app/book?subscription=${sub.id}`);
+  // A pass bought for one car books through the car-bound sheet.
+  const [planWashSub, setPlanWashSub] = useState<UserSubscription | null>(null);
+  const bookWithPass = (sub: UserSubscription) => {
+    if (isCarBoundPass(sub) && passState(sub) === "active") {
+      setPlanWashSub(sub);
+      return;
+    }
+    navigate((isSocietyPass(sub) && societyPassPath(sub)) || `/app/book?subscription=${sub.id}`);
+  };
   const coversLine = (sub: UserSubscription): ReactNode =>
     isSocietyPass(sub) ? (
       <>
@@ -300,6 +338,7 @@ export default function CustomerDashboardPage() {
           <button
             type="button"
             className={btn("primary", "md", "w-full sm:w-auto")}
+            disabled={purchase.purchaseHeld}
             onClick={() => purchase.start(plan, { vehicleType: sub.vehicle_type, serviceId: sub.service_id, autoPay: true })}
           >
             <RotateCcw className="h-4 w-4" /> Buy Again
@@ -321,8 +360,9 @@ export default function CustomerDashboardPage() {
       <Link key={slab.key} to={`/app/bookings/${b.id}`} className={`${card} flex items-start gap-3.5 p-4 transition-shadow hover:shadow-[0_12px_32px_-16px_rgba(14,26,51,0.28)]`}>
         <DateTile date={b.scheduled_date} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-[#0E1A33]">
-            {formatDay(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
+          {/* Wraps instead of truncating — "Tomorrow · 9:00 AM – 12:00 PM" lost its end time at 360px. */}
+          <p className="text-sm font-semibold text-[#0E1A33]">
+            {formatDay(b.scheduled_date)} · <span className="whitespace-nowrap">{formatSlot(b.scheduled_slot)}</span>
           </p>
           <p className="mt-0.5 truncate text-sm text-[#5F6878]">{visitTypeServiceLabel(slab, vehicleTypes)}</p>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -373,6 +413,8 @@ export default function CustomerDashboardPage() {
       <SectionTitle title="Your Cars" to="/app/garage" linkLabel={cars.length ? "Garage" : "Add A Car"} />
       {garageQuery.isLoading ? (
         <Skeleton className="h-[84px]" />
+      ) : garageQuery.isError && !garageQuery.data ? (
+        <LoadFailedLine what="your cars" busy={garageQuery.isFetching} onRetry={() => void garageQuery.refetch()} />
       ) : cars.length ? (
         <div className={`${card} overflow-hidden`}>{cars.slice(0, CARS_SHOWN).map((c, i, arr) => carRow(c, i === arr.length - 1))}</div>
       ) : (
@@ -393,6 +435,8 @@ export default function CustomerDashboardPage() {
       <SectionTitle title="Quick Services" />
       {servicesQuery.isLoading ? (
         <Skeleton className="h-[92px]" />
+      ) : servicesQuery.isError && !servicesQuery.data ? (
+        <LoadFailedLine what="services" busy={servicesQuery.isFetching} onRetry={() => void servicesQuery.refetch()} />
       ) : (
         <div className="grid gap-2 sm:gap-3" style={{ gridTemplateColumns: `repeat(${Math.max(4, quick.length + (quickMore ? 1 : 0))}, minmax(0, 1fr))` }}>
           {quick.map((s) => {
@@ -406,7 +450,7 @@ export default function CustomerDashboardPage() {
                   }`}
                 >
                   <Icon className="h-6 w-6" />
-                  {offer && <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#FFD21F] px-1.5 py-px text-[9px] font-bold uppercase text-[#0E1A33]">Offer</span>}
+                  {offer && <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#FFD21F] px-1.5 py-px text-[10px] font-bold uppercase leading-tight text-[#0E1A33]">Offer</span>}
                 </span>
                 <span className="w-full truncate text-[11px] font-medium text-[#0E1A33] sm:text-xs">{titleCase(shortServiceName(s.name))}</span>
               </Link>
@@ -450,7 +494,7 @@ export default function CustomerDashboardPage() {
     </Link>
   );
 
-  const hasLivePass = livePasses.length > 0;
+  const hasLivePass = livePasses.length > 0 || liveCarts.length > 0;
   const passSection = subsQuery.isLoading ? (
     <section aria-busy="true">
       <SectionTitle title="Your Plan" />
@@ -465,8 +509,13 @@ export default function CustomerDashboardPage() {
     </p>
   ) : hasLivePass ? (
     <section>
-      <SectionTitle title={livePasses.length > 1 ? "Your Plans" : "Your Plan"} to="/app/subscriptions" linkLabel="Manage" />
-      <div className="space-y-3">{livePasses.length === 1 ? passCard(livePasses[0]) : livePasses.map(compactPassCard)}</div>
+      <SectionTitle title={livePasses.length + liveCarts.length > 1 ? "Your Plans" : "Your Plan"} to="/app/subscriptions" linkLabel="Manage" />
+      <div className="space-y-3">
+        {liveCarts.map(({ cart, renewal }) => (
+          <CustomPlanCard key={cart.id} cart={cart} renewal={renewal} />
+        ))}
+        {livePasses.length === 1 && !liveCarts.length ? passCard(livePasses[0]) : livePasses.map(compactPassCard)}
+      </div>
     </section>
   ) : rebuy ? (
     <section>
@@ -501,6 +550,22 @@ export default function CustomerDashboardPage() {
         </div>
       )}
 
+      {walletBalance !== 0 && (
+        <Link
+          to="/app/wallet"
+          data-testid="dashboard-wallet-chip"
+          className={`flex min-h-[44px] items-center gap-2.5 rounded-full border px-4 py-2 text-sm transition-colors sm:w-fit ${
+            walletBalance > 0 ? "border-[#CBEBD6] bg-[#F1FAF4] text-[#1E7B3C] hover:border-[#1E7B3C]" : "border-[#F6D3D3] bg-[#FFF5F5] text-[#C62828] hover:border-[#C62828]"
+          }`}
+        >
+          <Wallet className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1 font-semibold">
+            {walletBalance > 0 ? `₹${walletBalance} Wallet Credit — Used On Your Next Booking` : `You Owe ₹${-walletBalance} — Added To Your ${(wallet?.previous_balance_due ?? 0) <= 0 && (wallet?.carried_due ?? 0) > 0 ? "Upcoming" : "Next"} Booking`}
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0" />
+        </Link>
+      )}
+
       {unpaid && (
         <div className="flex flex-col gap-3 rounded-2xl border border-[#FFD8A8] bg-[#FFF8EE] p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <div className="min-w-0">
@@ -510,7 +575,7 @@ export default function CustomerDashboardPage() {
             </p>
           </div>
           <Link to={`/app/bookings/${unpaid.primary.id}`} className={btn("primary", "md")}>
-            Pay ₹{Math.round(unpaid.totalAmount)} Now
+            Pay ₹{Math.round(visitDue(unpaid.bookings))} Now
           </Link>
         </div>
       )}
@@ -548,6 +613,21 @@ export default function CustomerDashboardPage() {
       </div>
 
       {purchase.sheet}
+      <PlanWashSheet
+        cars={
+          planWashSub
+            ? [
+                carFromPass(
+                  planWashSub,
+                  typeNameOf(vehicleTypes, planWashSub.vehicle_type),
+                  serviceQueries[serviceIds.indexOf(planWashSub.service_id || "")]?.data?.name
+                ),
+              ]
+            : []
+        }
+        open={!!planWashSub}
+        onClose={() => setPlanWashSub(null)}
+      />
     </div>
   );
 }

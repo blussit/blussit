@@ -117,3 +117,35 @@ class UserSubscriptionModel(BusinessRecordBase):
     wash_reminder_sent_at: Optional[datetime] = None
     used_up_notice_sent_at: Optional[datetime] = None
     expiry_reminder_sent: bool = False
+    # Which product sold this pass: None (monthly pass), "society"
+    # (SocietyService) or "custom" (CustomPlanService — a manager's
+    # multi-car cart; `custom_plan_id` is the cart, one pass per car).
+    plan_kind: Optional[str] = None
+    custom_plan_id: Optional[str] = None
+    custom_plan_revision: Optional[int] = None
+    # A custom pass's per-service quotas (service_id -> washes). The flat
+    # total/remaining_service_count above are kept equal to their sums.
+    total_by_service: Optional[dict[str, int]] = None
+    remaining_by_service: Optional[dict[str, int]] = None
+    # Manager/admin extension of the 30-day period (any pass kind since
+    # 2026-10-07, at most PASS_EXTENSION_MAX_DAYS per period): bookable —
+    # remaining washes only — until `extended_until`; history in `extensions`.
+    extension_days: int = 0
+    extended_until: Optional[datetime] = None
+    extensions: list[dict] = []
+    # Custom-plan renewal (PLANS-2, 2026-10-07). A renewal paid while the
+    # car's old pass is still live is stored with status "scheduled"
+    # (SubscriptionStatus.SCHEDULED = subscription_service.PASS_SCHEDULED):
+    # it starts the day after the old pass's Last Booking Day and holds the
+    # car's claim from creation; promote_scheduled_passes / the first use
+    # flip it to "active" at its start. The new pass names the one it
+    # renews; the old pass names its successor (and can't be extended).
+    renewal_of_subscription_id: Optional[str] = None
+    renewed_by_custom_plan_id: Optional[str] = None
+    renewed_by_subscription_id: Optional[str] = None
+    promoted_at: Optional[datetime] = None
+    # One car of a custom plan refunded to the customer wallet: the pass is
+    # cancelled with its washes zeroed and this records {amount, max_amount,
+    # washes, reason, by, by_role, at, subscription_id, key}. A refunded
+    # pass never gets washes back (restore_consumption skips it).
+    refund: Optional[dict] = None

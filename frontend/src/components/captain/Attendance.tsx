@@ -13,7 +13,7 @@ import { todayIST } from "../../lib/date";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { clock } from "./jobState";
 import { tryPosition } from "./photo";
-import { Btn, Panel } from "./ui";
+import { Btn, LoadError, Panel } from "./ui";
 
 export function useTodayAttendance() {
   const q = useQuery({ queryKey: ["attendance"], queryFn: () => attendanceApi.mine({ page: 1, page_size: 15 }) });
@@ -39,9 +39,21 @@ const hours = (m?: number | null) => (m == null ? "" : m >= 60 ? `${Math.floor(m
 
 export function AttendanceCard() {
   const { t } = useCaptainTranslation();
-  const { today, isLoading } = useTodayAttendance();
+  const { today, isLoading, isError, data, isFetching, refetch } = useTodayAttendance();
   const { clockIn, clockOut, error } = useClock();
   if (isLoading) return null;
+  // A failed read is not "you're not clocked in" — that would invite a
+  // second punch.
+  if (isError && !data)
+    return (
+      <LoadError
+        title="Couldn't Load Today's Attendance"
+        sub={t("captain.v2.loadFailedSub")}
+        retryLabel={t("captain.v2.tryAgain")}
+        busy={isFetching}
+        onRetry={() => void refetch()}
+      />
+    );
   return (
     <Panel className="p-4">
       {!today ? (

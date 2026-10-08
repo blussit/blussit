@@ -25,7 +25,8 @@ export const walletApi = {
   myWithdrawals: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<WithdrawalRequest>>("/wallet/withdrawals/my", { params }).then((r) => r.data),
 
-  pendingWithdrawals: (params?: { page?: number; page_size?: number }) =>
+  /** `status: "approved"` = approved, awaiting the bank transfer. */
+  pendingWithdrawals: (params?: { status?: "pending" | "approved"; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<WithdrawalRequest>>("/wallet/withdrawals/pending", { params }).then((r) => r.data),
 
   reviewWithdrawal: (withdrawalId: string, status: "approved" | "rejected" | "paid", review_note?: string) =>

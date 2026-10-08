@@ -191,10 +191,20 @@ async def test_otp_login_request_refuses_staff_and_unknown_numbers(db, cleanup):
         staff = await client.post("/api/v1/auth/otp/request", json={"identifier": manager_phone})
         unknown = await client.post("/api/v1/auth/otp/request", json={"identifier": "9722200099"})
         assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 0
-        # Staff still reset a password by code.
+        # Staff reset a password by code only once they've verified the
+        # phone themselves while signed in (AUTH-01 / P0-2: a staff phone is
+        # typed in by an admin — a code sent there proved nothing). Before
+        # that: refused, nothing sent, "ask your admin".
+        refused = await client.post("/api/v1/auth/forgot-password", json={"identifier": manager_phone})
+        assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 0
+        await db.users.update_one(
+            {"_id": ObjectId(manager_id)},
+            {"$set": {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc), "self_verified_phone": manager_phone}},
+        )
         reset = await client.post("/api/v1/auth/forgot-password", json={"identifier": manager_phone})
     assert staff.status_code == 400 and "Staff login" in staff.json()["message"]
     assert unknown.status_code == 404 and "No account found" in unknown.json()["message"]
+    assert refused.status_code == 400 and "ask your admin" in refused.json()["message"], refused.text
     assert reset.status_code == 200, reset.text
     assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 1
 
@@ -295,17 +305,21 @@ async def test_widget_token_binds_to_the_phone_whatever_its_format(db, cleanup, 
     await auth.ensure_customer_by_phone(phone, "Widget Formats")
     _stub_msg91(monkeypatch)
     mine = _fake_jwt({"identifier": f"91{phone}"})
+    mine_again = _fake_jwt({"identifier": f"91{phone}", "n": 2})
     someone_else = _fake_jwt({"identifier": "919722200010"})
 
     assert await auth.verify_phone_proof("+91 97222 00009", None, mine) is True
     assert await auth.verify_phone_proof(phone, None, someone_else) is False
     with pytest.raises(BadRequestException):
         await auth.reset_password_widget(someone_else, phone, "Widget#Pass1")
-    await auth.reset_password_widget(mine, "09722200009", "Widget#Pass1")
+    # Widget tokens are single use (AUTH-03): `mine` was spent above.
+    with pytest.raises(BadRequestException):
+        await auth.reset_password_widget(mine, phone, "Widget#Pass1")
+    await auth.reset_password_widget(mine_again, "09722200009", "Widget#Pass1")
     assert (await auth.login(phone, "Widget#Pass1"))["user"]["phone"] == phone
     with pytest.raises(Msg91Unavailable):
         _stub_msg91(monkeypatch, exc=httpx.ReadTimeout("slow"))
-        await auth.verify_phone_proof(phone, None, mine)
+        await auth.verify_phone_proof(phone, None, _fake_jwt({"identifier": f"91{phone}", "n": 3}))
 
 
 @pytest.mark.asyncio

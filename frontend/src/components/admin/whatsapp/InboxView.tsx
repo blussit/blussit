@@ -11,7 +11,7 @@ import {
   ArrowLeft, Bot, Check, CheckCheck, ChevronDown, CircleAlert, FileText,
   Info, MapPin, MessageSquarePlus, Paperclip, Search, Send, User, X,
 } from "lucide-react";
-import { Badge, Button, Select, Spinner } from "../../ui";
+import { Badge, Button, ErrorState, Select, Spinner } from "../../ui";
 import { MENU_ITEM, MENU_ITEM_IDLE, MENU_PANEL } from "../../ui/fieldStyles";
 import { whatsappCrmApi, type WaConversation, type WaMessage } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
@@ -50,6 +50,11 @@ function StatusTicks({ status }: { status: WaMessage["status"] }) {
 }
 
 const PAGE_SIZE = 40;
+// Beyond this many loaded pages the list stops re-reading itself on a timer.
+const MAX_POLLED_PAGES = 3;
+/** What a page of the list looks like — a change means "refresh it". */
+const conversationsSig = (rows: WaConversation[]) =>
+  rows.map((c) => `${c.wa_id}:${c.last_message_at || ""}:${c.unread_count}:${c.crm_status}`).join("|");
 
 export function InboxView({ initialActive = null }: { initialActive?: string | null }) {
   const [filter, setFilter] = useState("all");
@@ -59,15 +64,33 @@ export function InboxView({ initialActive = null }: { initialActive?: string | n
   const [newOpen, setNewOpen] = useState(false);
   const debouncedSearch = useDebouncedValue(search.trim(), 350);
 
-  // Newest page polls; older pages load on demand through the cursor.
-  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
-    queryKey: ["wa-conversations", filter, debouncedSearch],
+  // Older pages load on demand through the cursor. An interval refetch of
+  // an infinite query re-reads EVERY loaded page, so the list polls itself
+  // only while a few pages are loaded; past that, one cheap probe of the
+  // newest page polls instead and a full refresh runs only when it changed.
+  const qc = useQueryClient();
+  const listKey = ["wa-conversations", filter, debouncedSearch];
+  const { data, isLoading, isError: listFailed, isFetching: listFetching, refetch: refetchList, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: listKey,
     queryFn: ({ pageParam }) => whatsappCrmApi.conversations(filter, debouncedSearch, pageParam, PAGE_SIZE),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.length < PAGE_SIZE ? undefined : last[last.length - 1]?.last_message_at || undefined),
-    refetchInterval: 10000,
+    refetchInterval: (query) => ((query.state.data?.pages.length ?? 0) > MAX_POLLED_PAGES ? false : 10000),
   });
   const conversations = useMemo(() => data?.pages.flat() || [], [data]);
+  const deep = (data?.pages.length ?? 0) > MAX_POLLED_PAGES;
+  const { data: head } = useQuery({
+    queryKey: ["wa-conversations-head", filter, debouncedSearch],
+    queryFn: () => whatsappCrmApi.conversations(filter, debouncedSearch, null, PAGE_SIZE),
+    enabled: deep,
+    refetchInterval: deep ? 10000 : false,
+  });
+  const headSig = head ? conversationsSig(head) : "";
+  const loadedSig = data?.pages[0] ? conversationsSig(data.pages[0]) : "";
+  useEffect(() => {
+    if (deep && headSig && loadedSig && headSig !== loadedSig) void qc.invalidateQueries({ queryKey: listKey, exact: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deep, headSig]);
 
   const activeConvo = useMemo(() => conversations.find((c) => c.wa_id === active) || null, [conversations, active]);
 
@@ -110,7 +133,10 @@ export function InboxView({ initialActive = null }: { initialActive?: string | n
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {isLoading && <div className="flex justify-center py-10"><Spinner /></div>}
-          {!isLoading && conversations.length === 0 && (
+          {!isLoading && listFailed && !data && (
+            <ErrorState className="m-3 p-4" message="Couldn't load conversations." busy={listFetching} onRetry={() => void refetchList()} />
+          )}
+          {!isLoading && !(listFailed && !data) && conversations.length === 0 && (
             <p className="px-4 py-10 text-center text-sm text-[var(--color-text-secondary)]">No conversations found.</p>
           )}
           {conversations.map((c) => (
@@ -205,7 +231,7 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError: threadFailed, isFetching: threadFetching, refetch: refetchThread } = useQuery({
     queryKey: ["wa-thread", waId],
     queryFn: () => whatsappCrmApi.thread(waId),
     refetchInterval: 5000,
@@ -244,6 +270,22 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
     onError: (e) => setError(getErrorMessage(e)),
   });
 
+  // One send at a time: Enter pressed twice before the first request came
+  // back sent the same reply twice (isPending only flips on the next render,
+  // so a ref guards the gap).
+  const sendingRef = useRef(false);
+  const send = () => {
+    if (sendingRef.current || sendText.isPending || sendFile.isPending) return;
+    const done = { onSettled: () => { sendingRef.current = false; } };
+    if (pendingFile) {
+      sendingRef.current = true;
+      sendFile.mutate(pendingFile, done);
+    } else if (text.trim()) {
+      sendingRef.current = true;
+      sendText.mutate(undefined, done);
+    }
+  };
+
   // Group messages by day for date separators.
   const groups = useMemo(() => {
     const out: { day: string; messages: WaMessage[] }[] = [];
@@ -275,6 +317,9 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
       {/* Messages */}
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto bg-[#f6f4ef] px-3 py-3">
         {isLoading && <div className="flex justify-center py-10"><Spinner /></div>}
+        {!isLoading && threadFailed && !data && (
+          <ErrorState className="mx-auto max-w-sm p-4" message="Couldn't load this conversation." busy={threadFetching} onRetry={() => void refetchThread()} />
+        )}
         {groups.map((g) => (
           <div key={g.day}>
             <div className="my-2 flex justify-center">
@@ -311,7 +356,7 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (pendingFile) sendFile.mutate(pendingFile); else if (text.trim()) sendText.mutate(); } }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               placeholder={pendingFile ? "Caption (optional)…" : "Type a reply…"}
               rows={1}
               className="max-h-28 min-h-[2.25rem] flex-1 resize-y rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
@@ -319,7 +364,7 @@ function ChatWindow({ waId, convo, onBack, onToggleProfile }: { waId: string; co
             <Button
               className="!h-9 !px-3"
               isLoading={sendText.isPending || sendFile.isPending}
-              onClick={() => (pendingFile ? sendFile.mutate(pendingFile) : text.trim() && sendText.mutate())}
+              onClick={send}
             >
               <Send className="h-4 w-4" />
             </Button>
@@ -510,13 +555,19 @@ function MessageBody({ m }: { m: WaMessage }) {
 function CustomerPanel({ waId, onClose }: { waId: string; onClose: () => void }) {
   const qc = useQueryClient();
   const [customer360, setCustomer360] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({ queryKey: ["wa-profile", waId], queryFn: () => whatsappCrmApi.contactProfile(waId) });
+  const { data, isLoading, isError: profileFailed, isFetching: profileFetching, refetch: refetchProfile } = useQuery({ queryKey: ["wa-profile", waId], queryFn: () => whatsappCrmApi.contactProfile(waId) });
   const { data: defaultTags } = useQuery({ queryKey: ["wa-default-tags"], queryFn: whatsappCrmApi.defaultTags, staleTime: 600000 });
   const setTags = useMutation({
     mutationFn: (tags: string[]) => whatsappCrmApi.setTags(waId, tags),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["wa-profile", waId] }); qc.invalidateQueries({ queryKey: ["wa-conversations"] }); },
   });
 
+  if (profileFailed && !data)
+    return (
+      <div className="flex flex-1 items-center justify-center p-3">
+        <ErrorState className="p-4" message="Couldn't load this customer." busy={profileFetching} onRetry={() => void refetchProfile()} />
+      </div>
+    );
   if (isLoading || !data) return <div className="flex flex-1 items-center justify-center"><Spinner /></div>;
   const c = data.customer;
   const s = data.stats;

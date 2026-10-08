@@ -73,10 +73,13 @@ async def list_addresses(current_user: CurrentUser = Depends(get_current_user), 
 
 
 @address_router.get("/customer/{customer_id}", dependencies=[Depends(require_manager_or_admin)])
-async def list_customer_addresses(customer_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def list_customer_addresses(
+    customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
     """Staff: an existing customer's saved addresses (same shape as GET
-    /addresses), so a staff booking reuses one instead of adding a copy."""
-    return await AddressController(db).list_for_customer(customer_id)
+    /addresses), so a staff booking reuses one instead of adding a copy.
+    A manager: only customers known to their center (404 otherwise)."""
+    return await AddressController(db).list_for_customer(current_user, customer_id)
 
 
 @address_router.post("")

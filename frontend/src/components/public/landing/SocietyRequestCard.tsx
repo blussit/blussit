@@ -12,6 +12,7 @@ import { societyLeadApi } from "../../../api/society";
 import { getErrorMessage } from "../../../lib/api-client";
 import { validateIndianMobile } from "../../../lib/validators";
 import { INR } from "./shared";
+import { trackLead } from "../../../lib/metaPixel";
 
 const FALLBACK_FROM = 1649;
 const field =
@@ -25,7 +26,9 @@ export function SocietyRequestCard() {
 
   return (
     <div
-      className="group relative flex flex-col overflow-hidden rounded-[22px] border-2 border-[#0A66F0]/35 bg-[#EEF3FA] shadow-[0_10px_30px_rgba(10,102,240,0.12)] sm:flex-row lg:h-full lg:flex-col"
+      // The footer's "Society Plans" button lands here (/plans#society).
+      id="society"
+      className="group relative flex scroll-mt-24 flex-col overflow-hidden rounded-[22px] border-2 border-[#0A66F0]/35 bg-[#EEF3FA] shadow-[0_10px_30px_rgba(10,102,240,0.12)] sm:flex-row lg:h-full lg:flex-col"
       data-testid="landing-society-card"
     >
       <span className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-full bg-[#FDE9A6] px-3 py-1 text-[11px] font-bold text-[#071A3D] shadow-sm">
@@ -72,8 +75,12 @@ export function SocietyRequestCard() {
         className="relative order-first h-[160px] w-full shrink-0 overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)] sm:absolute sm:inset-y-0 sm:right-0 sm:order-none sm:h-auto sm:w-[52%] sm:[mask-image:linear-gradient(to_right,transparent,black_48%)] lg:relative lg:h-[180px] lg:w-full lg:order-first lg:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
       >
         <img
-          src="/plans-card3.png"
+          src="/img/plans-card3-800.webp"
           alt=""
+          width={800}
+          height={450}
+          loading="lazy"
+          decoding="async"
           className="absolute inset-0 h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-105"
         />
       </div>
@@ -112,6 +119,7 @@ export function SocietyRequestModal({ open, onClose }: { open: boolean; onClose:
         society_name: form.society_name.trim(), area: form.area.trim(), pincode: form.pincode, contact_name: form.contact_name.trim(),
         phone, approx_cars: cars, note: form.note.trim() || undefined,
       });
+      trackLead("Society enquiry");
       setSent(message || "Thanks! Our team will call you within a day.");
     } catch (err) {
       setError(getErrorMessage(err));

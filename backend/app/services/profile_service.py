@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException
@@ -14,6 +16,42 @@ from app.schemas.profile_schema import (
 from app.utils.address_match import fill_empty_fields, same_place
 from app.utils.serializers import serialize_doc
 from app.utils.text import normalize_plate
+
+# What a booking keeps of the address it was booked to (spec 1.3, "address
+# side door"): a booking is a promise to come to THIS place. Editing or
+# re-pinning the saved address later only changes future bookings — every
+# display, geofence and captain route of a live booking reads its own
+# snapshot (BookingService._address_of).
+ADDRESS_SNAPSHOT_FIELDS = ("label", "line1", "line2", "landmark", "city", "state", "pincode", "latitude", "longitude")
+_LIVE_BOOKING_STATUSES = ("awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled")
+
+
+def address_snapshot(address: dict | None) -> dict | None:
+    """The frozen copy of an address a booking stores (address_snapshot)."""
+    if not address:
+        return None
+    snap = {key: address.get(key) for key in ADDRESS_SNAPSHOT_FIELDS}
+    raw_id = address.get("_id") or address.get("id")
+    snap["address_id"] = str(raw_id) if raw_id else None
+    return snap
+
+
+async def freeze_live_bookings_for_address(db, address: dict) -> int:
+    """Give every live booking that still READS this address (booked before
+    snapshots existed) its own snapshot of it as it is NOW — called before
+    the address is edited, so the edit can't reach them. Idempotent: only
+    rows without a snapshot are written. Returns how many were frozen."""
+    if not address or not address.get("_id"):
+        return 0
+    result = await db.bookings.update_many(
+        {
+            "address_id": str(address["_id"]),
+            "status": {"$in": list(_LIVE_BOOKING_STATUSES)},
+            "address_snapshot": {"$exists": False},
+        },
+        {"$set": {"address_snapshot": address_snapshot(address), "updated_at": datetime.now(timezone.utc)}},
+    )
+    return int(result.modified_count)
 
 
 class VehicleService:
@@ -74,6 +112,14 @@ class VehicleService:
         if payload.is_default:
             await self.repo.clear_default(owner_id)
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None and k != "acknowledge_shared_registration"}
+        if data.get("vehicle_type") and data["vehicle_type"] != existing.get("vehicle_type"):
+            # A pass is priced for the car's type when bought — retyping the
+            # car would let a hatchback pass wash an XUV.
+            live_pass = await self.repo.collection.database.user_subscriptions.find_one(
+                {"vehicle_id": vehicle_id, "status": {"$in": ["active", "scheduled"]}, "is_deleted": {"$ne": True}}
+            )
+            if live_pass:
+                raise BadRequestException("This vehicle has an active plan, so its type can't be changed until the plan ends.")
         if payload.registration_number and normalize_plate(payload.registration_number) != existing.get("registration_number_normalized"):
             normalized = normalize_plate(payload.registration_number)
             await self._ensure_plate_not_saved(owner_id, normalized, payload.registration_number, exclude_id=vehicle_id)
@@ -96,12 +142,19 @@ class VehicleService:
                 f"This vehicle is used by booking {blocking['booking_number']}, which isn't finished yet — "
                 "cancel or complete that booking before removing the vehicle."
             )
-        # No longer checks for an "attached" subscription here — a
-        # subscription covers a vehicle TYPE, not one specific vehicle
-        # (see UserSubscriptionModel.vehicle_id's docstring), so removing
-        # one vehicle never orphans a subscription; it just means one
-        # fewer eligible vehicle for it, and it remains usable against any
-        # other matching vehicle the customer owns.
+        # A pass bound to THIS car (vehicle_id set — every pass since the
+        # 2026-09 one-car model, and every society pass) would be orphaned:
+        # the resident's daily washes and premium bookings name this car
+        # (SOC-10). Refused while such a pass is live — active or paused and
+        # not past its end date. Legacy type-only passes (vehicle_id None)
+        # are unaffected by removing a car.
+        now = datetime.now(timezone.utc)
+        live_pass = await self.repo.collection.database.user_subscriptions.find_one({
+            "customer_id": owner_id, "vehicle_id": vehicle_id, "status": {"$in": ["active", "paused", "scheduled"]},
+            "is_deleted": {"$ne": True}, "$or": [{"end_date": None}, {"end_date": {"$gte": now}}],
+        }, {"_id": 1})
+        if live_pass:
+            raise BadRequestException("This vehicle is on an active plan, so it can't be removed until the plan ends.")
         await self.repo.soft_delete(vehicle_id, owner_id)
 
 
@@ -170,6 +223,13 @@ class AddressService:
         if payload.is_default:
             await self.repo.clear_default(owner_id)
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        # The side door (spec 1.3): editing a saved address used to move
+        # every live booking pointing at it — no lock, no center check, no
+        # re-price. A live booking keeps the place it was booked to (its
+        # address_snapshot); only bookings made from now on use the edit.
+        # To move a booking, the customer edits the BOOKING
+        # (PATCH /bookings/{id}), which re-checks the center and re-prices.
+        await freeze_live_bookings_for_address(self.repo.collection.database, existing)
         updated = await self.repo.update_by_id(address_id, data)
         return serialize_doc(updated)
 
