@@ -35,8 +35,7 @@ import { formatDay, formatShortDate, formatSlot, todayIST } from "../../lib/date
 import { getErrorMessage } from "../../lib/api-client";
 import { combinedStatus } from "../../lib/bookingGroups";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay, sentence } from "../../lib/razorpay";
-import { vehicleLabel } from "../../lib/constants";
-import { bookingEventId, trackPurchase } from "../../lib/metaPixel";
+import { cn } from "../../lib/cn";
 import type { Booking } from "../../types";
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = { cash: "Cash On Service", online: "Online", subscription: "Plan" };
@@ -334,10 +333,13 @@ export default function BookingDetailPage() {
   // online later isn't a new sale. Read when the action starts, before a
   // live update can change the status under it.
   const confirmsBooking = useRef(false);
+  // The amount the action settles, read when it starts (the due amount then).
+  const confirmedAmount = useRef(0);
   const trackConfirmed = () => {
-    if (!confirmsBooking.current || !booking || !(visitTotal > 0)) return;
+    const value = confirmedAmount.current;
+    if (!confirmsBooking.current || !booking || !(value > 0)) return;
     trackPurchase({
-      value: visitTotal,
+      value,
       eventId: bookingEventId(groupId, booking.id),
       contentType: "booking",
       numItems: trailCars.length,
@@ -349,6 +351,7 @@ export default function BookingDetailPage() {
       setPayNote(null);
       setError("");
       confirmsBooking.current = booking?.status === "awaiting_payment";
+      confirmedAmount.current = dueAmount;
       return payWithRazorpay(
         // A visit is paid for once — every car on it, one order.
         groupId ? { purpose: "booking_group", booking_group_id: groupId } : { purpose: "booking", booking_id: id as string },
@@ -364,6 +367,8 @@ export default function BookingDetailPage() {
       );
     },
     onSuccess: () => {
+      // Paid: hold the pay buttons until the booking reloads as paid.
+      setPaymentPendingAt(Date.now());
       setPayNote(null);
       trackConfirmed();
     },
@@ -391,6 +396,7 @@ export default function BookingDetailPage() {
     // One decision for the whole visit.
     mutationFn: async (): Promise<void> => {
       confirmsBooking.current = booking?.status === "awaiting_payment";
+      confirmedAmount.current = dueAmount;
       if (groupId) await bookingApi.switchGroupToCash(groupId);
       else await bookingApi.switchToCash(id as string);
     },

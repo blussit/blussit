@@ -21,6 +21,14 @@ class UserRepository(BaseRepository):
             return await self.find_by_email(raw)
         return await self.find_one({"$or": [{"email": raw}, {"phone": raw}]})
 
+    async def list_by_role(self, role: str, page: int, page_size: int, search: Optional[str] = None, extra_filters: Optional[dict] = None):
+        filters: dict = {"role": role}
+        if extra_filters:
+            filters.update(extra_filters)
+        if search:
+            filters.update(build_search_filter(search, ["full_name", "email", "phone"]))
+        return await self.find_many(filters, page=page, page_size=page_size)
+
 
 async def lowercase_user_emails(db) -> int:
     """Boot task: store every account email lower-case so login is
@@ -38,11 +46,3 @@ async def lowercase_user_emails(db) -> int:
         res = await db.users.update_one({"_id": user["_id"], "email": user["email"]}, {"$set": {"email": lower}})
         changed += res.modified_count
     return changed
-
-    async def list_by_role(self, role: str, page: int, page_size: int, search: Optional[str] = None, extra_filters: Optional[dict] = None):
-        filters: dict = {"role": role}
-        if extra_filters:
-            filters.update(extra_filters)
-        if search:
-            filters.update(build_search_filter(search, ["full_name", "email", "phone"]))
-        return await self.find_many(filters, page=page, page_size=page_size)

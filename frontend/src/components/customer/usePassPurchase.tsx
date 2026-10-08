@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay } from "../../lib/razorpay";
 import { trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
+import { stashThankYouToken } from "../../lib/thankYou";
 import type { SubscriptionPlan } from "../../types";
 import { PassPurchaseSheet, type PassPrefill } from "./PassPurchaseSheet";
 

@@ -45,6 +45,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorCode, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
+import { stashThankYouToken } from "../../lib/thankYou";
 import { bookingEventId, trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
 import { ensureGoogleMaps } from "../../lib/googleMaps";
 import { daysAgoIST, formatSlot, formatTime12, nowTimeIST, todayIST } from "../../lib/date";
@@ -1370,6 +1371,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         // Wallet credit was used / a previous balance was carried in.
         queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
       }
+      // The slot just booked (or held) is no longer free for the next visitor on this tab.
+      queryClient.invalidateQueries({ queryKey: ["available-slots"] });
       // A pay-online booking isn't real until it's paid — that Purchase
       // comes from the payment instead. A ₹0 visit fully covered by a plan
       // was already counted when the plan was bought.
@@ -1382,7 +1385,11 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           numItems: result.vehicle_count,
         });
       }
-      navigate(`/thank-you?token=${result.confirmation_token}`, {
+      if (result.confirmation_token) stashThankYouToken(result.confirmation_token);
+      // Replaces the confirm step: Back from the confirmation must not land
+      // on a booking form (with a stale #confirm) that was already used.
+      navigate("/thank-you", {
+        replace: true,
         state: {
           token: result.confirmation_token,
           type: "booking",
@@ -1553,14 +1560,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
             onClick={() => {
               setPlanIssue("");
               setStep(1);
-              if (!isManager) {
-                trackInitiateCheckout({
-                  value: payable,
-                  contentType: "booking",
-                  contentName: lines.map(lineLabel).join(" + "),
-                  numItems: lines.reduce((n, l) => n + l.count, 0),
-                });
-              }
             }}
           >
             Continue

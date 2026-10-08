@@ -63,3 +63,12 @@ async def test_boot_task_lower_cases_existing_emails_and_skips_collisions(db):
     assert (await db.users.find_one({"_id": ObjectId(c_)}))["email"] == clash.upper(), "a collision is left for an admin"
     await lowercase_user_emails(db)  # idempotent: re-running changes nothing for these rows
     assert (await db.users.find_one({"_id": ObjectId(a)}))["email"] == plain.lower()
+
+
+def test_user_repository_keeps_all_its_methods():
+    """A helper added to the module must never swallow the class's methods
+    (list_by_role once fell out of UserRepository and 500'd two pages)."""
+    from app.repositories.user_repository import UserRepository
+
+    for name in ("find_by_email", "find_by_phone", "find_by_identifier", "list_by_role"):
+        assert callable(getattr(UserRepository, name, None)), name

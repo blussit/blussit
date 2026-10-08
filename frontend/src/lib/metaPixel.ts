@@ -62,3 +62,32 @@ export function trackInitiateCheckout(args: { value?: number; contentType: "book
 export function trackLead(contentName: string) {
   track("Lead", { content_name: contentName });
 }
+
+/** Someone opened a booking/plan page — the top of the funnel in Ads Manager. */
+export function trackViewContent(contentName: string) {
+  track("ViewContent", { content_name: contentName });
+}
+
+/** Signed-in portals (customer app, staff) talking to us isn't ad traffic. */
+const PORTAL_PATH = /^\/(app|admin|manager|captain)(\/|$)/;
+
+/** Reached out: "whatsapp", "phone" or "contact form". */
+export function trackContact(channel: string) {
+  if (PORTAL_PATH.test(window.location.pathname)) return;
+  track("Contact", { content_name: channel });
+}
+
+/** Every call / WhatsApp link on the public site counts as a Contact — one
+ *  listener instead of an onClick on each link. Installed once (main.tsx). */
+export function installContactTracking() {
+  document.addEventListener(
+    "click",
+    (e) => {
+      const link = (e.target as Element | null)?.closest?.("a[href]");
+      const href = link?.getAttribute("href") || "";
+      if (/^tel:/i.test(href)) trackContact("phone");
+      else if (/^https?:\/\/(wa\.me|api\.whatsapp\.com|(www\.)?whatsapp\.com)\//i.test(href)) trackContact("whatsapp");
+    },
+    { capture: true }
+  );
+}
