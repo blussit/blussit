@@ -1,16 +1,17 @@
 import { type HTMLAttributes } from "react";
 import { cn } from "../../lib/cn";
+import { toTitle } from "../../lib/titleCase";
 
 type Tone = "neutral" | "primary" | "success" | "warning" | "error" | "info";
 
 const toneClasses: Record<Tone, string> = {
   neutral: "bg-gray-100 text-gray-700",
   primary: "bg-[var(--color-primary-light)] text-[var(--color-primary)]",
-  success: "bg-[var(--color-accent-light)] text-[var(--color-success)]",
+  success: "bg-[var(--ui-success-bg,var(--color-accent-light))] text-[var(--color-success)]",
   warning: "bg-amber-50 text-amber-700",
   error: "bg-red-50 text-[var(--color-error)]",
-  // Light-yellow tint + dark text — never blue, never a solid fill.
-  info: "bg-[#FFF4CD] text-[#8A6600]",
+  // Light blue tint + blue text — never a solid fill.
+  info: "bg-[var(--ui-tint,#E8F0FE)] text-[var(--ui-tint-ink,#0A66F0)]",
 };
 
 export function Badge({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: Tone }) {
@@ -42,7 +43,7 @@ const statusToneMap: Record<string, Tone> = {
 
 /** Statuses whose raw value doesn't read well to a customer. */
 const statusLabelMap: Record<string, string> = {
-  awaiting_payment: "Payment pending",
+  awaiting_payment: "Payment Pending",
 };
 
 export function StatusBadge({ status, label }: { status: string | null | undefined; label?: string }) {
@@ -55,5 +56,5 @@ export function StatusBadge({ status, label }: { status: string | null | undefin
   const tone = statusToneMap[status] || "neutral";
   // `label` lets a localized surface (the captain panel) pass its own
   // wording while every other caller keeps the shared English one.
-  return <Badge tone={tone}>{label || statusLabelMap[status] || status.replace(/_/g, " ")}</Badge>;
+  return <Badge tone={tone}>{label || statusLabelMap[status] || toTitle(status)}</Badge>;
 }

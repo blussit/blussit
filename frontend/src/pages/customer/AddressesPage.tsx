@@ -2,10 +2,11 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MapPin, Pencil, Plus, Trash2 } from "lucide-react";
 import { addressApi } from "../../api/profile";
-import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, PageLoader } from "../../components/ui";
 import { LocationPicker, type LocationValue } from "../../components/shared/LocationPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { useConfirm } from "../../context/ConfirmContext";
+import { PageHeader } from "../../components/customer/ui";
 
 const emptyForm = {
   label: "Home",
@@ -22,7 +23,7 @@ const emptyForm = {
 export default function AddressesPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
-  const { data: addresses, isLoading } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
+  const { data: addresses, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list });
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
@@ -35,7 +36,13 @@ export default function AddressesPage() {
     mutationFn: () => {
       const payload = {
         ...form,
-        line1: location ? [form.line1, location.area, location.city].filter(Boolean).join(", ") : form.line1,
+        // The pin's area/city ride along once — an edited address already
+        // carries them in line1, and re-pinning used to append them again.
+        line1: location
+          ? [form.line1.trim(), ...[location.area, location.city].filter((part) => part && !form.line1.toLowerCase().includes(part.toLowerCase()))]
+              .filter(Boolean)
+              .join(", ")
+          : form.line1,
         latitude: form.latitude ?? undefined,
         longitude: form.longitude ?? undefined,
       };
@@ -72,25 +79,32 @@ export default function AddressesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="font-display text-2xl font-bold text-black">My addresses</h1>
-        <Button variant="info" onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add address
-        </Button>
-      </div>
+      <PageHeader
+        back="/app/settings"
+        title="My Addresses"
+        right={
+          <Button variant="info" onClick={() => setOpen(true)}>
+            <Plus className="h-4 w-4" />
+            <span className="sm:hidden">Add</span>
+            <span className="hidden sm:inline">Add Address</span>
+          </Button>
+        }
+      />
 
       {deleteError && <p className="text-sm text-[var(--color-error)]">{deleteError}</p>}
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !addresses ? (
+        <ErrorState message="Couldn't load your addresses." busy={isFetching} onRetry={() => void refetch()} />
       ) : !addresses?.length ? (
-        <EmptyState icon={MapPin} title="No addresses yet" action={<Button variant="info" onClick={() => setOpen(true)}>Add address</Button>} />
+        <EmptyState icon={MapPin} title="No Addresses Yet" action={<Button variant="info" onClick={() => setOpen(true)}>Add Address</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {addresses.map((a) => (
             <Card key={a.id} className="p-5">
               <div className="flex items-start justify-between">
-                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-gray-100 text-black">
+                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#EEF3FA] text-[#0E1A33]">
                   <MapPin className="h-5 w-5" />
                 </span>
                 <div className="flex items-center gap-2">
@@ -114,7 +128,7 @@ export default function AddressesPage() {
                       setError("");
                       setOpen(true);
                     }}
-                    className="text-gray-400 hover:text-black"
+                    className="text-gray-400 hover:text-[#0E1A33]"
                   >
                     <Pencil className="h-4 w-4" />
                   </button>
@@ -123,7 +137,7 @@ export default function AddressesPage() {
                   </button>
                 </div>
               </div>
-              <h3 className="mt-3 font-semibold text-black">{a.label}</h3>
+              <h3 className="mt-3 font-semibold text-[#0E1A33]">{a.label}</h3>
               <p className="mt-0.5 text-sm text-gray-600">
                 {a.line1}, {a.city}, {a.state} - {a.pincode}
               </p>
@@ -143,7 +157,7 @@ export default function AddressesPage() {
           setForm(emptyForm);
           setLocation(null);
         }}
-        title={editingId ? "Edit address" : "Add an address"}
+        title={editingId ? "Edit Address" : "Add An Address"}
         maxWidth="max-w-xl"
       >
         <form
@@ -155,7 +169,7 @@ export default function AddressesPage() {
           }}
         >
           <div>
-            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Pin your exact location</p>
+            <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Pin Your Exact Location</p>
             <LocationPicker
               value={location}
               onUnavailable={() => setMapsDown(true)}
@@ -173,8 +187,8 @@ export default function AddressesPage() {
             />
           </div>
           <Input label="Label (e.g. Home, Office)" value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} required />
-          <Input label="House / flat, gali no." placeholder="e.g. 75, Gali No. 2" value={form.line1} onChange={(e) => setForm({ ...form, line1: e.target.value })} required />
-          <Input label="Landmark (optional)" value={form.landmark} onChange={(e) => setForm({ ...form, landmark: e.target.value })} />
+          <Input label="House / Flat, Gali No." placeholder="e.g. 75, Gali No. 2" value={form.line1} onChange={(e) => setForm({ ...form, line1: e.target.value })} required />
+          <Input label="Landmark (Optional)" value={form.landmark} onChange={(e) => setForm({ ...form, landmark: e.target.value })} />
           {mapsDown && (
             <>
               <div className="grid grid-cols-2 gap-3">
@@ -186,14 +200,14 @@ export default function AddressesPage() {
           )}
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
             <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} />
-            Set as default address
+            Set As Default Address
           </label>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           {!mapsDown && form.latitude == null && (
             <p className="text-xs text-amber-700">Pin your location on the map first.</p>
           )}
           <Button type="submit" variant="info" className="w-full" disabled={!editingId && !mapsDown && form.latitude == null} isLoading={createMutation.isPending}>
-            {editingId ? "Save changes" : "Add address"}
+            {editingId ? "Save Changes" : "Add Address"}
           </Button>
         </form>
       </Modal>

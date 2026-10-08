@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Clock, X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { FIELD_ERROR, FIELD_ICON, FIELD_LABEL, FIELD_PLACEHOLDER, MENU_ITEM_IDLE, MENU_ITEM_SELECTED, MENU_PANEL, fieldBox } from "./fieldStyles";
 
 const ALL_HOURS_12 = Array.from({ length: 12 }, (_, i) => i + 1); // 1-12
 const ALL_MINUTES = Array.from({ length: 12 }, (_, i) => i * 5); // 0,5,...,55
@@ -41,7 +42,8 @@ function toValue({ hour12, minute, period }: Parsed): string {
 function displayLabel(value: string | undefined): string {
   const parsed = parseValue(value);
   if (!parsed) return "";
-  return `${String(parsed.hour12).padStart(2, "0")}:${String(parsed.minute).padStart(2, "0")} ${parsed.period}`;
+  // "9:30 AM", not "09:30 AM" — the same 12-hour style as every other time.
+  return `${parsed.hour12}:${String(parsed.minute).padStart(2, "0")} ${parsed.period}`;
 }
 
 function parseHM(hm: string): { h: number; m: number } {
@@ -205,13 +207,13 @@ export function TimePicker({
   const columnBtn = (active: boolean) =>
     cn(
       "w-full rounded-lg px-3 py-1.5 text-center text-sm transition-colors",
-      active ? "bg-[var(--color-primary)] font-medium text-white" : "text-[var(--color-text-primary)] hover:bg-gray-100"
+      active ? MENU_ITEM_SELECTED : MENU_ITEM_IDLE
     );
 
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={fieldId} className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
+        <label htmlFor={fieldId} className={FIELD_LABEL}>
           {label}
         </label>
       )}
@@ -224,27 +226,26 @@ export function TimePicker({
           aria-haspopup="dialog"
           aria-expanded={open}
           className={cn(
-            "flex w-full items-center justify-between gap-2 rounded-xl border bg-[var(--color-surface,#fff)] px-3.5 py-2.5 text-left text-sm transition-colors",
-            "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)]",
-            disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:border-[var(--color-primary)]",
-            error ? "border-[var(--color-error)]" : "border-gray-300",
+            fieldBox({ error, open, disabled }),
+            "flex items-center justify-between gap-2 pr-3 text-left",
+            !disabled && "cursor-pointer",
             className
           )}
         >
-          <span className={cn("truncate", value ? "text-[var(--color-text-primary)]" : "text-gray-400")}>
+          <span className={cn("truncate", !value && !disabled && FIELD_PLACEHOLDER)}>
             {value ? displayLabel(value) : placeholder}
           </span>
           <span className="flex shrink-0 items-center gap-1">
             {value && !required && (
               <X
-                className="h-3.5 w-3.5 text-gray-400 hover:text-[var(--color-text-primary)]"
+                className="h-3.5 w-3.5 text-[#5F6878] hover:text-[#0E1A33]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onChange("");
                 }}
               />
             )}
-            <Clock className="h-4 w-4 text-gray-400" />
+            <Clock className={cn(FIELD_ICON, open && "text-[#0A66F0]")} />
           </span>
         </button>
 
@@ -253,17 +254,17 @@ export function TimePicker({
             ref={panelRef}
             role="dialog"
             style={{ position: "fixed", top: pos.top, left: pos.left, width: 232 }}
-            className="z-50 rounded-xl border border-gray-200 bg-[var(--color-surface,#fff)] p-2 shadow-lg"
+            className={cn("z-50 p-2", MENU_PANEL)}
           >
             {ranged && minTime && maxTime && (
-              <p className="mb-1.5 px-1 text-[11px] text-[var(--color-text-secondary)]">
-                Store hours: {displayLabel(minTime)} – {displayLabel(maxTime)}
+              <p className="mb-1.5 px-1 text-[11px] text-[#5F6878]">
+                Store Hours: {displayLabel(minTime)} – {displayLabel(maxTime)}
               </p>
             )}
             <div className="grid grid-cols-3 gap-1.5 text-center">
-              <span className="text-xs font-medium text-gray-400">Hour</span>
-              <span className="text-xs font-medium text-gray-400">Min</span>
-              <span className="text-xs font-medium text-gray-400">&nbsp;</span>
+              <span className="text-xs font-medium text-[#5F6878]">Hour</span>
+              <span className="text-xs font-medium text-[#5F6878]">Min</span>
+              <span className="text-xs font-medium text-[#5F6878]">&nbsp;</span>
 
               {/* min-h-0 is required here — inside a grid row, an overflow-y-auto
                   item otherwise sizes to its full content height instead of
@@ -307,7 +308,7 @@ export function TimePicker({
                       type="button"
                       disabled={!availableInRange}
                       onClick={() => (ranged ? pickRangedPeriod(p) : set({ period: p }))}
-                      className={cn(columnBtn(selected?.period === p), !availableInRange && "cursor-not-allowed text-gray-300 hover:bg-transparent")}
+                      className={cn(columnBtn(selected?.period === p), !availableInRange && "cursor-not-allowed !text-[#C3CAD6] hover:!bg-transparent")}
                     >
                       {p}
                     </button>
@@ -316,7 +317,7 @@ export function TimePicker({
               </div>
             </div>
 
-            <div className="mt-2 flex items-center justify-between border-t border-gray-100 pt-2">
+            <div className="mt-2 flex items-center justify-between border-t border-[#E4E9F1] pt-2">
               <button
                 type="button"
                 onClick={() => {
@@ -336,18 +337,18 @@ export function TimePicker({
                     onChange(toValue({ hour12, minute, period }));
                   }
                 }}
-                className="text-xs font-medium text-[var(--color-primary)] hover:underline"
+                className="text-xs font-semibold text-[#0A66F0] hover:underline"
               >
                 Now
               </button>
-              <button type="button" onClick={() => setOpen(false)} className="text-xs font-medium text-gray-400 hover:text-[var(--color-text-primary)]">
+              <button type="button" onClick={() => setOpen(false)} className="text-xs font-semibold text-[#0E1A33] hover:text-[#0A66F0]">
                 Done
               </button>
             </div>
           </div>
         )}
       </div>
-      {error && <p className="mt-1 text-xs text-[var(--color-error)]">{error}</p>}
+      {error && <p className={FIELD_ERROR}>{error}</p>}
     </div>
   );
 }

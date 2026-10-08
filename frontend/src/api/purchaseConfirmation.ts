@@ -18,6 +18,11 @@ export interface PurchaseConfirmation {
     payment_link?: string | null;
     awaiting_payment?: boolean;
     total_amount?: number;
+    payment_method?: "cash" | "online" | string | null;
+    /** A previous late-cancellation charge included in total_amount. */
+    cancellation_charge?: number | null;
+    /** Car type ("Sedan") — the ticket's label is only the service names. */
+    vehicle_type_name?: string | null;
   };
   expires_at: string;
 }

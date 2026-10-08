@@ -6,6 +6,9 @@ import { adminServiceCenterApi, adminUserApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { MapPicker } from "../../components/shared/MapPicker";
 import { getErrorMessage } from "../../lib/api-client";
+import { useToast } from "../../context/ToastContext";
+import { useConfirm } from "../../context/ConfirmContext";
+import { toTitle } from "../../lib/titleCase";
 import type { ServiceCenter } from "../../types";
 
 const emptyForm = {
@@ -29,7 +32,9 @@ const emptyForm = {
 export default function AdminServiceCentersPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
+  const { push: pushToast } = useToast();
+  const confirm = useConfirm();
+  const { data, isLoading, error: centersError, refetch: refetchCenters } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
   const { data: managers } = useQuery({ queryKey: ["admin-managers"], queryFn: () => adminUserApi.list({ role: "manager", page: 1, page_size: 100 }) });
 
   const [open, setOpen] = useState(false);
@@ -50,12 +55,14 @@ export default function AdminServiceCentersPage() {
       radius_km: Number(form.radius_km) || 6,
       service_pincodes: form.service_pincodes.split(",").map((p) => p.trim()).filter(Boolean),
     },
-    contact_phone: form.contact_phone || undefined,
-    contact_email: form.contact_email || undefined,
-    manager_id: form.manager_id || undefined,
+    // null (not undefined, which JSON drops) so a cleared contact or an
+    // unassigned manager actually clears on save.
+    contact_phone: form.contact_phone.trim() || null,
+    contact_email: form.contact_email.trim() || null,
+    manager_id: form.manager_id || null,
     working_hours_start: form.working_hours_start,
     working_hours_end: form.working_hours_end,
-    slot_duration_minutes: form.slot_duration_minutes ? Number(form.slot_duration_minutes) : undefined,
+    slot_duration_minutes: form.slot_duration_minutes ? Number(form.slot_duration_minutes) : null,
   });
 
   const createMutation = useMutation({
@@ -79,6 +86,7 @@ export default function AdminServiceCentersPage() {
   const toggleActiveMutation = useMutation({
     mutationFn: (center: ServiceCenter) => adminServiceCenterApi.update(center.id, { is_active: !center.is_active }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-centers"] }),
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   const closeModal = () => {
@@ -133,24 +141,26 @@ export default function AdminServiceCentersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Service centers</h1>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Service Centers</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             Manage regional hubs — coordinates and radius drive automatic booking dispatch.
           </p>
         </div>
         <Button onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add service center
+          <Plus className="h-4 w-4" /> Add Service Center
         </Button>
       </div>
 
       <DataTable<ServiceCenter>
         isLoading={isLoading}
+        error={centersError}
+        onRetry={() => void refetchCenters()}
         data={data?.data || []}
-        emptyTitle="No service centers yet"
+        emptyTitle="No Service Centers Yet"
         columns={[
-          { header: "Name", accessor: (c) => c.name },
+          { header: "Name", accessor: (c) => toTitle(c.name) },
           { header: "Code", accessor: (c) => <span className="font-mono-num">{c.code}</span> },
-          { header: "City", accessor: (c) => c.location.city },
+          { header: "City", accessor: (c) => toTitle(c.location.city) },
           {
             header: "Coverage",
             accessor: (c) =>
@@ -159,7 +169,7 @@ export default function AdminServiceCentersPage() {
                   {c.location.latitude.toFixed(3)}, {c.location.longitude?.toFixed(3)} · {c.location.radius_km}km
                 </span>
               ) : (
-                <span className="text-xs text-[var(--color-text-secondary)]">Pincode only</span>
+                <span className="text-xs text-[var(--color-text-secondary)]">Pincode Only</span>
               ),
           },
           { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
@@ -176,8 +186,25 @@ export default function AdminServiceCentersPage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  isLoading={toggleActiveMutation.isPending}
-                  onClick={() => toggleActiveMutation.mutate(c)}
+                  aria-label={c.is_active ? `Deactivate ${c.name}` : `Activate ${c.name}`}
+                  title={c.is_active ? "Deactivate" : "Activate"}
+                  isLoading={toggleActiveMutation.isPending && toggleActiveMutation.variables?.id === c.id}
+                  disabled={toggleActiveMutation.isPending}
+                  onClick={async () => {
+                    // One tap used to switch a live center off — new bookings,
+                    // coverage and slots for its area stop at once.
+                    const ok = await confirm(
+                      c.is_active
+                        ? {
+                            title: `Deactivate ${toTitle(c.name)}?`,
+                            message: "Customers in its area can't book until it's switched back on. Bookings already made are not cancelled.",
+                            confirmLabel: "Deactivate",
+                            tone: "danger",
+                          }
+                        : { title: `Activate ${toTitle(c.name)}?`, message: "It starts taking bookings for its area right away.", confirmLabel: "Activate" }
+                    );
+                    if (ok) toggleActiveMutation.mutate(c);
+                  }}
                 >
                   <Power className="h-3.5 w-3.5" />
                 </Button>
@@ -187,7 +214,7 @@ export default function AdminServiceCentersPage() {
         ]}
       />
 
-      <Modal open={open} onClose={closeModal} title={editing ? "Edit service center" : "Add service center"} maxWidth="max-w-xl">
+      <Modal open={open} onClose={closeModal} title={editing ? "Edit Service Center" : "Add Service Center"} maxWidth="max-w-xl">
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -196,7 +223,7 @@ export default function AdminServiceCentersPage() {
             editing ? updateMutation.mutate() : createMutation.mutate();
           }}
         >
-          <Input label="Center name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          <Input label="Center Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
           <Input label="Address" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} required />
           <div className="grid grid-cols-2 gap-3">
             <Input label="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required />
@@ -206,9 +233,9 @@ export default function AdminServiceCentersPage() {
 
           <div className="rounded-xl border border-dashed border-gray-300 p-4">
             <div className="mb-3 flex items-center justify-between">
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">Dispatch coordinates</p>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">Dispatch Coordinates</p>
               <Button type="button" size="sm" variant="outline" isLoading={locating} onClick={useMyLocation}>
-                <LocateFixed className="h-3.5 w-3.5" /> Use my location
+                <LocateFixed className="h-3.5 w-3.5" /> Use My Location
               </Button>
             </div>
             <MapPicker
@@ -218,7 +245,7 @@ export default function AdminServiceCentersPage() {
             />
             <Input
               className="mt-3"
-              label="Radius (km)"
+              label="Radius (Km)"
               type="number"
               min={1}
               value={form.radius_km}
@@ -230,29 +257,29 @@ export default function AdminServiceCentersPage() {
           </div>
 
           <Input
-            label="Service pincodes (comma separated)"
+            label="Service Pincodes (Comma Separated)"
             value={form.service_pincodes}
             onChange={(e) => setForm({ ...form, service_pincodes: e.target.value })}
             hint="e.g. 452001, 452002, 452010"
             required
           />
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Contact phone" value={form.contact_phone} onChange={(e) => setForm({ ...form, contact_phone: e.target.value })} />
-            <Input label="Contact email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} />
+            <Input label="Contact Phone" value={form.contact_phone} onChange={(e) => setForm({ ...form, contact_phone: e.target.value })} />
+            <Input label="Contact Email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} />
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Opens at" type="time" value={form.working_hours_start} onChange={(e) => setForm({ ...form, working_hours_start: e.target.value })} />
-            <Input label="Closes at" type="time" value={form.working_hours_end} onChange={(e) => setForm({ ...form, working_hours_end: e.target.value })} />
+            <Input label="Opens At" type="time" value={form.working_hours_start} onChange={(e) => setForm({ ...form, working_hours_start: e.target.value })} />
+            <Input label="Closes At" type="time" value={form.working_hours_end} onChange={(e) => setForm({ ...form, working_hours_end: e.target.value })} />
           </div>
 
           <div className="rounded-xl border border-dashed border-gray-300 p-4">
-            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Booking slot duration</p>
+            <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Booking Slot Duration</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
               Customers book into admin-generated slots (e.g. 09:00-12:00) within the hours above — this only controls how
               long each slot is. Leave blank to use the platform-wide default from Pricing &amp; wallets.
             </p>
             <Input
-              label="Slot duration (min)"
+              label="Slot Duration (Min)"
               type="number"
               min={5}
               placeholder="Platform default"
@@ -275,7 +302,7 @@ export default function AdminServiceCentersPage() {
           </div>
 
           <Select label="Manager" value={form.manager_id} onChange={(e) => setForm({ ...form, manager_id: e.target.value })}>
-            <option value="">Not assigned</option>
+            <option value="">Not Assigned</option>
             {(managers?.data || []).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.full_name}
@@ -285,7 +312,7 @@ export default function AdminServiceCentersPage() {
 
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createMutation.isPending || updateMutation.isPending}>
-            {editing ? "Save changes" : "Add service center"}
+            {editing ? "Save Changes" : "Add Service Center"}
           </Button>
         </form>
       </Modal>

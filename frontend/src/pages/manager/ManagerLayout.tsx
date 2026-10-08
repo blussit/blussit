@@ -1,17 +1,20 @@
 import { Outlet } from "react-router-dom";
-import { AlertTriangle, BarChart3, CalendarPlus, CheckCircle2, CreditCard, Gift, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
+import { AlertTriangle, Building, CalendarDays, CalendarPlus, CalendarX2, CheckCircle2, CreditCard, Gift, Layers, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 import { CustomerLookup } from "../../components/shared/CustomerLookup";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/manager", icon: LayoutDashboard, end: true },
-  { label: "KPIs", to: "/manager/kpi", icon: BarChart3 },
-  { label: "New booking", to: "/manager/new-booking", icon: CalendarPlus },
-  { label: "Log a done job", to: "/manager/log-job", icon: CheckCircle2 },
-  { label: "Booking queue", to: "/manager/bookings", icon: ListChecks },
+  { label: "New Booking", to: "/manager/new-booking", icon: CalendarPlus },
+  { label: "Log A Done Job", to: "/manager/log-job", icon: CheckCircle2 },
+  { label: "Booking Queue", to: "/manager/bookings", icon: ListChecks },
+  { label: "Cancellation Charges", to: "/manager/charges", icon: CalendarX2 },
   { label: "Captains", to: "/manager/captains", icon: Users },
   { label: "Subscriptions", to: "/manager/subscribers", icon: Gift },
-  { label: "Sell a plan", to: "/manager/sell-plan", icon: CreditCard },
+  { label: "Sell A Plan", to: "/manager/sell-plan", icon: CreditCard },
+  { label: "Custom Plans", to: "/manager/custom-plans", icon: Layers },
+  { label: "Societies", to: "/manager/societies", icon: Building },
+  { label: "Society Planner", to: "/manager/society-planner", icon: CalendarDays },
   { label: "Inventory", to: "/manager/inventory", icon: Package },
   { label: "Complaints", to: "/manager/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/manager/reviews", icon: Star },
@@ -20,7 +23,7 @@ const navItems: NavItem[] = [
 
 export default function ManagerLayout() {
   return (
-    <DashboardShell navItems={navItems} portalLabel="Manager" brand headerRight={<CustomerLookup />}>
+    <DashboardShell navItems={navItems} portalLabel="Manager" headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

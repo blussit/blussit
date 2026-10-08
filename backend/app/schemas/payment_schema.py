@@ -7,8 +7,16 @@ class CreateOrderRequest(BaseModel):
     """The client only NAMES what it's paying for — the amount is always
     resolved server-side from the stored booking/plan (see
     PaymentService.create_order)."""
-    purpose: Literal["booking", "booking_group", "subscription"]
+    purpose: Literal["booking", "booking_group", "subscription", "society"]
     booking_id: Optional[str] = None
+    # Society plans (docs/SOCIETY_PLANS.md): the enrollment being paid for,
+    # and whether this is its next-cycle renewal. The amount comes from the
+    # enrollment's frozen per-car prices, never from the client.
+    society_enrollment_id: Optional[str] = None
+    society_renewal: bool = False
+    # Renewal only: a coupon the resident applied (validated server-side;
+    # a first payment uses the coupon frozen on the request).
+    society_coupon_code: Optional[str] = Field(default=None, max_length=30)
     # A multi-vehicle visit is paid for ONCE — the order covers every car on
     # it, and one verified signature settles them all.
     booking_group_id: Optional[str] = None
@@ -30,8 +38,12 @@ class CreateOrderRequest(BaseModel):
 
 
 class CollectPaymentRequest(BaseModel):
-    """Captain doorstep settlement — names the booking being settled."""
+    """Captain doorstep settlement — names the booking being settled.
+    `expected_amount` (cash): the amount due the captain's screen showed —
+    refused with 409 AMOUNT_DUE_CHANGED when that is no longer what is due
+    (never trusted as the amount itself: the server collects amount_due)."""
     booking_id: str = Field(min_length=1, max_length=50)
+    expected_amount: Optional[float] = Field(default=None, ge=0, le=1_000_000)
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -79,6 +91,11 @@ class PaymentFailureReport(BaseModel):
 
 
 class ResolveAttentionRequest(BaseModel):
-    """What the admin did about a parked payment (refunded, activated…)."""
+    """What the admin did about a parked payment (refunded, activated…).
+    `outcome="refunded"` records the refund itself: the payment row and the
+    booking(s) it paid for then read "refunded" and reports stop counting
+    the money — `refund_amount` (rupees) for a partial refund, else all of it."""
 
     note: str = Field(min_length=3, max_length=300)
+    outcome: Optional[Literal["refunded", "activated", "other"]] = None
+    refund_amount: Optional[float] = Field(default=None, gt=0, le=1_000_000)

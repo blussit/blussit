@@ -34,8 +34,15 @@ export function ScrollRestoration() {
         // Private browsing / storage blocked — nothing to restore.
       }
     }
+    // A link to a spot on a page (the footer's /plans#society) lands on
+    // that spot, not the top.
+    const target = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null;
+    if (target) {
+      requestAnimationFrame(() => target.scrollIntoView());
+      return;
+    }
     window.scrollTo(0, 0);
-  }, [location.key, navType]);
+  }, [location.key, location.hash, navType]);
 
   // A single persistent scroll listener keeps saving the CURRENT route's
   // position as the user scrolls — far simpler and more reliable than

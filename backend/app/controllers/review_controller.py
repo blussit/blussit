@@ -34,8 +34,8 @@ class ReviewController:
         items, total = await self.service.list_public(pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def list_all_for_admin(self, pagination: PaginationParams, include_deleted: bool):
-        items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size, include_deleted)
+    async def list_all_for_admin(self, pagination: PaginationParams, include_deleted: bool, **filters):
+        items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size, include_deleted, **filters)
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def captain_summary(self, captain_id: str):
@@ -45,7 +45,7 @@ class ReviewController:
         return success(await self.service.list_for_captain(captain_id))
 
     async def get_for_booking(self, current_user: CurrentUser, booking_id: str):
-        return success(await self.service.get_for_booking(booking_id, current_user.id, current_user.role))
+        return success(await self.service.get_for_booking(booking_id, current_user.id, current_user.role, current_user.service_center_id))
 
     async def list_for_center(self, current_user: CurrentUser, service_center_id: str, pagination: PaginationParams):
         items, total = await self.service.list_for_center(service_center_id, current_user.role, current_user.service_center_id, pagination.page, pagination.page_size)

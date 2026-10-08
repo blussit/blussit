@@ -1,10 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Helmet } from "react-helmet-async";
 import { Star } from "lucide-react";
 import { contentApi } from "../../../api/catalog";
 import { SectionHeader, SectionShell } from "./shared";
 import { AutoRail } from "./AutoRail";
-import seoConfig from "../../../seo/pages.json";
 
 interface ReviewItem {
   id: string;
@@ -18,60 +16,38 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
   const reviews: ReviewItem[] = data || [];
 
   // Honesty over decoration: this section used to show three HARDCODED
-  // fake reviews forever (no admin surface exists yet to add real ones).
-  // Until real testimonials are seeded, the section simply doesn't render.
-  // That same rule applies to the AggregateRating schema below — it's
-  // built from this exact list, so it only ever appears alongside reviews
-  // that are actually visible here, never as a number invented for SEO.
+  // fake reviews forever. Until real testimonials are seeded, it simply
+  // doesn't render. No review/rating structured data either: these are
+  // testimonials the business picks, and star markup built from a curated
+  // list on our own business is "self-serving" to Google — not eligible,
+  // and misleading as an average of all customers.
   if (!reviews.length) return null;
 
-  const average = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
-  const jsonLd = {
-    "@context": "https://schema.org",
-    "@type": "LocalBusiness",
-    name: "Blussit",
-    url: seoConfig.siteUrl + "/",
-    aggregateRating: {
-      "@type": "AggregateRating",
-      ratingValue: average.toFixed(1),
-      reviewCount: reviews.length,
-    },
-    review: reviews.map((r) => ({
-      "@type": "Review",
-      author: { "@type": "Person", name: r.customer_name },
-      reviewRating: { "@type": "Rating", ratingValue: r.rating, bestRating: 5 },
-      reviewBody: r.comment,
-    })),
-  };
-
   return (
-    <SectionShell id={id} className="border-t border-cream-line-soft bg-white">
-      <Helmet>
-        <script type="application/ld+json">{JSON.stringify(jsonLd)}</script>
-      </Helmet>
-      <SectionHeader title="What customers say" subtitle="Real doorstep washes, in their own words." />
+    <SectionShell id={id} className="border-t border-[#EDF0F5] bg-white">
+      <SectionHeader title="What Customers Say" subtitle="Real doorstep washes, in their own words." />
 
       {/* Auto-advancing swipe row on phones, grid from tablet up */}
-      <AutoRail className="mt-8 sm:mt-10" gridClassName="sm:grid-cols-2 lg:grid-cols-3 lg:gap-5">
+      <AutoRail className="mt-6 lg:mt-8" gridClassName="sm:grid-cols-2 lg:grid-cols-3 lg:gap-5">
         {reviews.map((r) => (
           <figure
             key={r.id}
-            className="flex w-[80vw] max-w-[340px] shrink-0 snap-center sm:w-auto sm:max-w-none flex-col rounded-2xl border border-card-border bg-white p-6"
+            className="flex w-[80vw] max-w-[340px] shrink-0 snap-center sm:w-auto sm:max-w-none flex-col rounded-2xl border border-[#E4E9F1] bg-white p-6 shadow-[0_6px_22px_rgba(14,26,51,0.05)]"
           >
             <div className="flex gap-0.5" aria-label={`${r.rating} out of 5 stars`}>
               {Array.from({ length: 5 }).map((_, i) => (
                 <Star
                   key={i}
-                  className={`h-4 w-4 ${i < r.rating ? "fill-black text-black" : "fill-neutral-200 text-neutral-200"}`}
+                  className={`h-4 w-4 ${i < r.rating ? "fill-[#FFD21F] text-[#FFD21F]" : "fill-[#E4E9F1] text-[#E4E9F1]"}`}
                 />
               ))}
             </div>
-            <blockquote className="mt-4 flex-1 text-[15px] leading-relaxed text-neutral-800">“{r.comment}”</blockquote>
+            <blockquote className="mt-4 flex-1 text-[15px] leading-relaxed text-[#0E1A33]">“{r.comment}”</blockquote>
             <figcaption className="mt-5 flex items-center gap-3">
-              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-black text-[13px] font-bold text-white">
+              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#E8F0FE] text-[13px] font-bold text-[#0A66F0]">
                 {initials(r.customer_name)}
               </span>
-              <span className="text-[14px] font-semibold text-black">{r.customer_name}</span>
+              <span className="text-[14px] font-semibold text-[#0E1A33]">{r.customer_name}</span>
             </figcaption>
           </figure>
         ))}

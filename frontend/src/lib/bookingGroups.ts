@@ -2,7 +2,7 @@ import type { Booking } from "../types";
 import { vehicleLabel } from "./constants";
 
 /**
- * Several cars washed on ONE visit are several bookings underneath — each
+ * Several cars wash on ONE visit are several bookings underneath — each
  * needs its own plate check, photos and proof of work — but to everyone
  * LOOKING at them they are one job at one address in one slot. Showing them
  * as separate rows makes a customer think they booked twice and makes a
@@ -55,7 +55,16 @@ export function combinedStatus(bookings: Booking[]): string {
   }, live[0].status);
 }
 
-const serviceOf = (b: Booking) => b.combo_name || b.service_names?.join(", ") || "Service";
+/** " · Society plan (Green Acres)" after a booking's service, for a wash
+ *  on a society pass (docs/SOCIETY_PLANS.md); "" otherwise. */
+export const societyPlanSuffix = (b: { society_name?: string | null; plan_label?: string | null }) =>
+  b.plan_label ? ` · ${b.plan_label}` : b.society_name ? ` · Society plan (${b.society_name})` : "";
+
+/** "Star Wash" — or "Star Wash · Society plan (Green Acres)" on a society pass. */
+export const bookingServiceLabel = (b: Booking, fallback = "Service") =>
+  `${b.combo_name || b.service_names?.join(", ") || fallback}${societyPlanSuffix(b)}`;
+
+const serviceOf = (b: Booking) => bookingServiceLabel(b);
 
 /** Group a flat booking list into visits, preserving the incoming order. */
 export function toSlabs(bookings: Booking[]): BookingSlab[] {

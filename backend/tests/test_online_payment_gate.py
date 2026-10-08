@@ -11,6 +11,7 @@ handed back.
 """
 import itertools
 from datetime import timedelta
+from unittest.mock import ANY
 
 import pytest
 from bson import ObjectId
@@ -40,8 +41,17 @@ class _StubOrders:
         return {"id": f"order_gate_{next(_seq):06d}", **payload}
 
 
+class _StubPayments:
+    """verify asks Razorpay what the signed payment is (PAY-09): captured,
+    for the order and amount being verified (mock.ANY)."""
+
+    def fetch(self, payment_id):
+        return {"id": payment_id, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"}
+
+
 class _StubClient:
     order = _StubOrders()
+    payment = _StubPayments()
 
 
 @pytest.fixture

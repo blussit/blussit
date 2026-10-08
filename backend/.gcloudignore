@@ -1,0 +1,27 @@
+# What `gcloud run deploy --source backend` must NOT upload to Cloud Build.
+# Without this file gcloud uploads the whole directory — including the live
+# .env.production — to a Cloud Build storage bucket (.dockerignore only
+# filters the docker build that runs AFTER the upload).
+# The image needs only Dockerfile, requirements-runtime.txt and app/.
+.gcloudignore
+.git
+.gitignore
+
+.env
+.env.*
+
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vite/
+
+uploads/
+tests/
+logs/
+*.log

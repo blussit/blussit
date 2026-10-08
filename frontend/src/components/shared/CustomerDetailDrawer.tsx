@@ -1,13 +1,21 @@
-import { useState } from "react";
+import { useId, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Calendar, Car, CreditCard, IndianRupee, MapPin, Phone } from "lucide-react";
-import { crmApi, type Customer360Booking } from "../../api/crm";
-import { Badge, PageLoader, StatusBadge } from "../ui";
+import { AlertTriangle, Calendar, CalendarPlus, Car, CreditCard, IndianRupee, MapPin, MessageCircle, Phone } from "lucide-react";
+import { crmApi, type Customer360Booking, type Customer360Subscription } from "../../api/crm";
+import type { StaffPassExtras } from "../../api/customPlans";
+import { Badge, PageLoader, StatusBadge, useDialogStack } from "../ui";
+import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 import { BookingDetailDrawer } from "./BookingDetailDrawer";
+import { CustomerChargesPanel } from "./CancellationCharges";
+import { CustomerWalletPanel } from "./CustomerWalletPanel";
+import { SendWhatsAppMessageDialog } from "./SendWhatsAppMessageDialog";
+import { ExtendPassDialog, extensionLine, type ExtendTarget } from "../society/PassExtension";
 import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format, formatSlot } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -26,19 +34,27 @@ function Stat({ label, value }: { label: string; value: string }) {
  */
 export function CustomerDetailDrawer({ customerId, onClose }: { customerId: string | null; onClose: () => void }) {
   const [openBooking, setOpenBooking] = useState<Customer360Booking | null>(null);
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [extendFor, setExtendFor] = useState<ExtendTarget | null>(null);
   const { user } = useAuth();
+  const isStaff = user?.role === "manager" || user?.role === "admin";
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["customer-360", customerId],
     queryFn: () => crmApi.customer360(customerId as string),
     enabled: !!customerId,
   });
+  // Opened from inside other popups (a complaint, a booking): it lives on
+  // <body> like they do, so it lands on top instead of behind them.
+  const dialogId = useId();
+  useDialogStack(!!customerId, onClose, dialogId);
+  useBodyScrollLock(!!customerId);
 
   if (!customerId) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-[2px]" onClick={onClose} />
-      <div className="relative z-10 max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[#F3E5B5] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)]">
+      <div className="relative z-10 max-h-[88dvh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[#F3E5B5] bg-white p-4 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.28)] sm:p-6">
         {isError ? (
           <div className="space-y-3 py-6 text-center">
             <p className="text-sm text-gray-600">{getErrorMessage(error)}</p>
@@ -50,10 +66,12 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
           <PageLoader />
         ) : (
           <>
+            {/* Narrow phones: the name/phone wrap and the actions stack (✕ on
+                top) instead of pushing the header past the screen edge. */}
             <div className="mb-4 flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-lg font-semibold text-black">{data.profile.full_name}</h3>
-                <p className="mt-0.5 flex items-center gap-3 text-sm text-gray-500">
+              <div className="min-w-0 flex-1">
+                <h3 className="break-words text-lg font-semibold text-black">{data.profile.full_name}</h3>
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500">
                   {data.profile.phone && (
                     <a href={`tel:${data.profile.phone}`} className="flex items-center gap-1 hover:text-black">
                       <Phone className="h-3.5 w-3.5" /> {data.profile.phone}
@@ -66,14 +84,14 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                   )}
                 </p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-col-reverse items-end gap-2 sm:flex-row sm:items-center">
                 {user?.role === "manager" && (
                   <Link
                     to={`/manager/sell-plan?${new URLSearchParams({ name: data.profile.full_name || "", phone: data.profile.phone || "" })}`}
                     onClick={onClose}
-                    className="flex items-center gap-1.5 rounded-full bg-[#E8A900] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#D99A00]"
+                    className="flex items-center gap-1.5 whitespace-nowrap rounded-full bg-[#E8A900] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#D99A00]"
                   >
-                    <CreditCard className="h-3.5 w-3.5" /> Sell a plan
+                    <CreditCard className="h-3.5 w-3.5" /> Sell A Plan
                   </Link>
                 )}
                 <button onClick={onClose} className="rounded-full p-1.5 text-gray-400 hover:bg-gray-100 hover:text-black" aria-label="Close">
@@ -81,6 +99,18 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                 </button>
               </div>
             </div>
+
+            {isStaff && (
+              <div className="-mt-1 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setMessageOpen(true)}
+                  className="flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full border border-[#F3E5B5] bg-white px-3.5 text-sm font-semibold text-black hover:border-black sm:min-h-9"
+                >
+                  <MessageCircle className="h-4 w-4" /> Send WhatsApp Message
+                </button>
+              </div>
+            )}
 
             {data.same_day_repeat_dates.length > 0 && (
               <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -92,40 +122,81 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
             )}
 
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <Stat label="Total bookings" value={String(data.total_bookings)} />
-              <Stat label="Booking spend" value={`₹${data.lifetime_spend.toLocaleString()}`} />
-              <Stat label="Plan spend" value={`₹${data.lifetime_plan_spend.toLocaleString()}`} />
-              <Stat label="Total amount" value={`₹${data.lifetime_total_spend.toLocaleString()}`} />
+              <Stat label="Total Bookings" value={String(data.total_bookings)} />
+              <Stat label="Booking Spend" value={`₹${data.lifetime_spend.toLocaleString()}`} />
+              <Stat label="Plan Spend" value={`₹${data.lifetime_plan_spend.toLocaleString()}`} />
+              <Stat label="Total Amount" value={`₹${data.lifetime_total_spend.toLocaleString()}`} />
             </div>
+
+            {/* Wallet: balance, ledger, pay back for a booking (admin: adjust). */}
+            {isStaff && <CustomerWalletPanel customerId={customerId} customerName={data.profile.full_name} />}
+
+            {/* Late-cancellation charges that can still be reduced or waived. */}
+            {isStaff && <CustomerChargesPanel customerId={customerId} />}
 
             {data.subscriptions.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Plans</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Plans</p>
                 <div className="divide-y divide-[#FAF3DF] rounded-xl border border-[#F3E5B5]">
-                  {data.subscriptions.map((s) => (
-                    <div key={s.id} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-black">{s.plan_name}</p>
-                        <p className="text-xs text-gray-500">
-                          {s.remaining_service_count}/{s.total_service_count} washes left
-                          {s.amount_paid != null ? ` · ₹${s.amount_paid} paid` : ""}
-                        </p>
+                  {data.subscriptions.map((sub) => {
+                    const s = sub as Customer360Subscription & StaffPassExtras;
+                    const ext = extensionLine(s.extension_days, s.extended_until);
+                    return (
+                      <div key={s.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-3.5 py-2.5">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-black">
+                            {toTitle(s.plan_name)}
+                            {carAndService(s.vehicle_type_name, s.service_name) ? ` · ${carAndService(s.vehicle_type_name, s.service_name)}` : ""}
+                            {s.registration_number ? <span className="font-mono-num font-normal text-gray-500"> · {s.registration_number}</span> : null}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {s.remaining_service_count}/{s.total_service_count} washes left
+                            {s.amount_paid != null ? ` · ₹${s.amount_paid} paid` : ""}
+                          </p>
+                          {ext && <p className="text-xs font-semibold text-black" data-testid="pass-extension-line">{ext}</p>}
+                          {String(s.effective_status) === "scheduled" && s.start_date && (
+                            <p className="text-xs font-semibold text-black">Starts {format(s.start_date)}</p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {isStaff && s.can_extend && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExtendFor({
+                                  societyId: s.society_id,
+                                  subscriptionId: s.id,
+                                  plate: s.registration_number || carAndService(s.vehicle_type_name, s.service_name) || "This pass",
+                                  planName: toTitle(s.plan_name),
+                                  remaining: s.remaining_service_count ?? 0,
+                                  endDate: s.end_date,
+                                  daysUsed: s.extension_days ?? 0,
+                                  daysLeft: s.extension_days_left ?? 10 - (s.extension_days ?? 0),
+                                  extensions: s.extensions,
+                                })
+                              }
+                              className="flex min-h-11 items-center gap-1 rounded-full border border-[#F3E5B5] px-3 text-xs font-semibold text-black hover:border-black sm:min-h-8"
+                            >
+                              <CalendarPlus className="h-3.5 w-3.5" /> Extend
+                            </button>
+                          )}
+                          <StatusBadge status={s.effective_status} />
+                        </div>
                       </div>
-                      <StatusBadge status={s.effective_status} />
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
 
             {data.vehicles.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Vehicles</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Vehicles</p>
                 <div className="flex flex-wrap gap-2">
                   {data.vehicles.map((v) => (
                     <span key={v.id} className="flex items-center gap-1.5 rounded-full border border-[#F3E5B5] bg-white px-3 py-1 text-xs text-black">
                       <Car className="h-3 w-3 text-gray-400" /> {v.brand} {v.model}
-                      {v.vehicle_type_name ? ` · ${v.vehicle_type_name}` : ""}
+                      {v.vehicle_type_name ? ` · ${toTitle(v.vehicle_type_name)}` : ""}
                       {v.registration_number ? ` · ${v.registration_number}` : ""}
                     </span>
                   ))}
@@ -134,7 +205,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
             )}
 
             <div className="mt-5">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              <p className="mb-2 text-xs font-semibold text-gray-500">
                 Bookings {data.bookings.length ? `(${data.bookings.length})` : ""}
               </p>
               {!data.bookings.length ? (
@@ -149,7 +220,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-black">
-                          {(b.service_names || []).join(", ") || "Service"} · {b.vehicle_label}
+                          {[toTitle(b.vehicle_type_name || b.vehicle_label), toTitle((b.service_names || []).join(", ")) || "Service"].filter(Boolean).join(" · ")}
                         </p>
                         <p className="flex items-center gap-1 text-xs text-gray-500">
                           <Calendar className="h-3 w-3" /> {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
@@ -170,7 +241,7 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
 
             {data.complaints.length > 0 && (
               <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Complaints</p>
+                <p className="mb-2 text-xs font-semibold text-gray-500">Complaints</p>
                 <div className="flex flex-wrap gap-2">
                   {data.complaints.map((c) => (
                     <Badge key={c.id} tone={c.status === "resolved" || c.status === "closed" ? "neutral" : "warning"}>
@@ -183,7 +254,17 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
           </>
         )}
       </div>
-      <BookingDetailDrawer booking={openBooking} onClose={() => setOpenBooking(null)} centerName={openBooking?.service_center_name} />
-    </div>
+      <BookingDetailDrawer
+        booking={openBooking}
+        onClose={() => setOpenBooking(null)}
+        centerName={openBooking?.service_center_name}
+        hasComplaint={!!openBooking && (data?.complaints ?? []).some((c) => (c as { booking_id?: string | null }).booking_id === openBooking.id)}
+      />
+      {isStaff && (
+        <SendWhatsAppMessageDialog open={messageOpen} onClose={() => setMessageOpen(false)} customerId={customerId} customerName={data?.profile.full_name} />
+      )}
+      <ExtendPassDialog target={extendFor} onClose={() => setExtendFor(null)} />
+    </div>,
+    document.body,
   );
 }

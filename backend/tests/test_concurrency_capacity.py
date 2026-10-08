@@ -13,6 +13,8 @@ exercise the atomic guards rather than the happy path.
   3. Two settlements of the same booking (payment + captain's cash tap)
      cannot both apply.
 """
+from types import SimpleNamespace
+from unittest.mock import ANY
 import asyncio
 import itertools
 from datetime import timedelta
@@ -181,6 +183,9 @@ async def test_a_booking_cannot_be_settled_twice(db, cleanup, monkeypatch):
 
     class _StubClient:
         order = _StubOrders()
+        # verify asks Razorpay what the signed payment is (PAY-09): captured,
+        # for the order and amount being verified (mock.ANY).
+        payment = SimpleNamespace(fetch=lambda pid: {"id": pid, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"})
 
     monkeypatch.setattr(payment_service.settings, "RAZORPAY_KEY_ID", "rzp_test_stub")
     monkeypatch.setattr(payment_service.settings, "RAZORPAY_KEY_SECRET", "stub_secret_key")

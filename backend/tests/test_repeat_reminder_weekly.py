@@ -35,6 +35,8 @@ from tests.factories import (
     make_customer_with_vehicle,
     make_manager,
     make_service_center,
+    make_recorded_photo_url,
+    own_upload_url,
 )
 from tests.test_reminder_loop import _stub_sweeps, lease  # noqa: F401 — fixture
 
@@ -98,7 +100,15 @@ async def _last_completed(db, customer_id: str):
     return user.get("last_completed_at")
 
 
-async def test_every_completion_path_moves_last_completed_at_forward(db, shop, cleanup):
+@pytest.fixture
+def on_the_bookings_day(monkeypatch):
+    """MGR-06: a booking is marked done on (or after) its own day, never
+    before — these tests book a day or two ahead, so the manager's
+    mark-done happens "on the day"."""
+    monkeypatch.setattr("app.services.booking_service._ist_today", lambda: "2999-12-31")
+
+
+async def test_every_completion_path_moves_last_completed_at_forward(db, shop, cleanup, on_the_bookings_day):
     bs = BookingService(db)
 
     # 1. The captain's after-photo.
@@ -110,7 +120,7 @@ async def test_every_completion_path_moves_last_completed_at_forward(db, shop, c
     }})
     before = _utc_now()
     await bs.capture_after_photo_and_complete(
-        booking["id"], PhotoCaptureRequest(image_url="https://example.com/after.jpg", latitude=22.7, longitude=75.8), shop["captain_id"]
+        booking["id"], PhotoCaptureRequest(image_url=await make_recorded_photo_url(db, shop["captain_id"], "after"), latitude=22.7, longitude=75.8), shop["captain_id"]
     )
     stamped = await _last_completed(db, captain_customer)
     assert stamped is not None and stamped.replace(tzinfo=timezone.utc) >= before - timedelta(seconds=1)
@@ -208,7 +218,7 @@ async def test_finder_uses_the_setting_as_cooldown_and_skips_who_it_should(db, c
     due = await customer(10)
     reminded_last_week = await customer(20, last_repeat_reminder_at=now - timedelta(days=8))
     skipped = {
-        "washed 5 days ago": await customer(5),
+        "wash 5 days ago": await customer(5),
         "reminded 3 days ago": await customer(20, last_repeat_reminder_at=now - timedelta(days=3)),
         "opted out": await customer(10, marketing_opt_out=True),
         "suspended": await customer(10, status="suspended"),
@@ -221,9 +231,9 @@ async def test_finder_uses_the_setting_as_cooldown_and_skips_who_it_should(db, c
     await db.user_subscriptions.insert_one({"customer_id": on_pass, "status": "active", "is_deleted": False,
                                             "remaining_service_count": 2, "end_date": now + timedelta(days=10)})
     skipped["holds a live pass"] = on_pass
-    never_washed = await make_customer(db)
-    cleanup.append(("users", {"_id": ObjectId(never_washed)}))
-    skipped["never had a wash"] = never_washed
+    never_wash = await make_customer(db)
+    cleanup.append(("users", {"_id": ObjectId(never_wash)}))
+    skipped["never had a wash"] = never_wash
 
     found = {str(u["_id"]) for u in await bs.find_customers_due_repeat_reminder(7, limit=5000)}
     # Reminded 8 days ago: due again on a weekly setting (the old hard-coded

@@ -5,9 +5,10 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Input, Modal, Select } from "../../ui";
+import { Button, ErrorState, Input, Modal, Select } from "../../ui";
 import { whatsappCrmApi, type WaTemplate } from "../../../api/admin";
 import { getErrorMessage } from "../../../lib/api-client";
+import { toTitle } from "../../../lib/titleCase";
 
 export function fillTemplate(body: string, params: string[]): string {
   return body.replace(/\{\{(\d+)\}\}/g, (_, n) => params[Number(n) - 1] || `{{${n}}}`);
@@ -22,32 +23,35 @@ export function TemplatePreview({ body, params }: { body: string; params: string
 }
 
 function useApprovedTemplates() {
-  const { data } = useQuery({ queryKey: ["wa-templates"], queryFn: whatsappCrmApi.templates });
-  return (data || []).filter((t) => t.status === "APPROVED" && !t.disabled);
+  // Server-filtered: approved, enabled, and sendable by an agent (no
+  // URL-button parameter, not an OTP template — Meta rejects those here).
+  const q = useQuery({ queryKey: ["wa-templates", "sendable"], queryFn: () => whatsappCrmApi.templates({ sendable: true }) });
+  return { templates: q.data || [], failed: q.isError && !q.data, retry: () => void q.refetch(), retrying: q.isFetching };
 }
 
 export function TemplateForm({
   onSend,
   isSending,
   error,
-  sendLabel = "Send template",
+  sendLabel = "Send Template",
 }: {
   onSend: (template: WaTemplate, params: string[]) => void;
   isSending: boolean;
   error: string;
   sendLabel?: string;
 }) {
-  const templates = useApprovedTemplates();
+  const { templates, failed, retry, retrying } = useApprovedTemplates();
   const [name, setName] = useState("");
   const [params, setParams] = useState<string[]>([]);
   const selected = useMemo(() => templates.find((t) => t.name === name), [templates, name]);
 
   return (
     <div className="space-y-3">
-      <Select label="Approved template" value={name} onChange={(e) => { setName(e.target.value); setParams([]); }}>
+      {failed && <ErrorState message="Couldn't load approved templates." onRetry={retry} busy={retrying} className="p-4" />}
+      <Select label="Approved Template" value={name} onChange={(e) => { setName(e.target.value); setParams([]); }}>
         <option value="">Select…</option>
         {templates.map((t) => (
-          <option key={t.name} value={t.name}>{t.name} ({t.category?.toLowerCase()})</option>
+          <option key={t.name} value={t.name}>{t.name} ({toTitle(t.category?.toLowerCase())})</option>
         ))}
       </Select>
       {selected && (
@@ -75,7 +79,7 @@ export function TemplateForm({
       >
         {sendLabel}
       </Button>
-      {templates.length === 0 && (
+      {templates.length === 0 && !failed && (
         <p className="text-xs text-[var(--color-text-secondary)]">No approved templates yet — check the Templates tab and sync approval status.</p>
       )}
     </div>
@@ -91,7 +95,7 @@ export function SendTemplateModal({ waId, open, onClose }: { waId: string; open:
     onError: (e) => setError(getErrorMessage(e)),
   });
   return (
-    <Modal open={open} onClose={onClose} title="Send approved template">
+    <Modal open={open} onClose={onClose} title="Send Approved Template">
       <TemplateForm error={error} isSending={send.isPending} onSend={(t, params) => send.mutate({ name: t.name, params })} />
     </Modal>
   );
@@ -112,16 +116,16 @@ export function NewConversationModal({ open, onClose, onStarted }: { open: boole
     onError: (e) => setError(getErrorMessage(e)),
   });
   return (
-    <Modal open={open} onClose={onClose} title="New conversation">
+    <Modal open={open} onClose={onClose} title="New Conversation">
       <div className="space-y-3">
-        <Input label="WhatsApp number" placeholder="10-digit number, e.g. 9876543210" value={phone} onChange={(e) => setPhone(e.target.value)} />
+        <Input label="WhatsApp Number" placeholder="10-digit number, e.g. 9876543210" value={phone} onChange={(e) => setPhone(e.target.value)} />
         <p className="text-xs text-[var(--color-text-secondary)]">
           First contact must be an approved template — WhatsApp does not allow free-form messages to customers who haven't messaged you.
         </p>
         <TemplateForm
           error={error}
           isSending={start.isPending}
-          sendLabel="Send message"
+          sendLabel="Send Message"
           onSend={(t, params) => {
             if (phone.replace(/\D/g, "").length < 10) { setError("Enter a valid phone number"); return; }
             start.mutate({ name: t.name, params });

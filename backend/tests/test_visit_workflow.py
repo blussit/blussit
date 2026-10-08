@@ -32,7 +32,7 @@ from app.services.booking_service import BookingService
 from app.services.payment_service import PaymentService
 from app.utils.timezone import now_ist
 
-from tests.factories import get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_service_center, make_vehicle
+from tests.factories import get_hatchback_type_id, make_captain, make_customer_with_vehicle, make_recorded_photo_url, make_service_center, make_vehicle, own_upload_url
 
 pytestmark = pytest.mark.asyncio
 
@@ -119,9 +119,10 @@ async def test_heading_out_once_covers_every_car(rig, db):
 
 async def test_the_visit_is_confirmed_and_assigned_once(rig, db):
     group_id, _ = await _visit(rig, db)
-    confirmed = await db.notifications.find({"user_id": rig["customer_id"], "title": {"$regex": "booked$"}}).to_list(length=10)
+    # Title is "Booking confirmed" since NTF-07 (it was "<visit label> booked").
+    confirmed = await db.notifications.find({"user_id": rig["customer_id"], "title": "Booking confirmed"}).to_list(length=10)
     assert len(confirmed) == 1, "one booking, one confirmation"
-    assert "2 vehicles" in confirmed[0]["title"]
+    assert "2 vehicles" in confirmed[0]["message"]
 
     await _assign(db, rig, group_id)
     assert await db.notifications.count_documents({"user_id": rig["captain_id"], "title": {"$regex": "^New job"}}) == 1
@@ -228,10 +229,13 @@ async def test_completion_is_announced_when_the_last_car_is_done(rig, db):
         )
     from app.schemas.booking_schema import PhotoCaptureRequest
 
-    photo = PhotoCaptureRequest(image_url="https://example.com/after.jpg", latitude=22.7, longitude=75.8)
-    await bs.capture_after_photo_and_complete(ids[0], photo, rig["captain_id"])
+    # Each car's own after-photo (CAP-02: one photo can't finish two cars).
+    def photo(url: str) -> PhotoCaptureRequest:
+        return PhotoCaptureRequest(image_url=url, latitude=22.7, longitude=75.8)
+
+    await bs.capture_after_photo_and_complete(ids[0], photo(await make_recorded_photo_url(db, rig["captain_id"], "after")), rig["captain_id"])
     assert await db.notifications.count_documents({"user_id": rig["customer_id"], "title": "Service completed"}) == 0, "first car done — the visit isn't"
-    await bs.capture_after_photo_and_complete(ids[1], photo, rig["captain_id"])
+    await bs.capture_after_photo_and_complete(ids[1], photo(await make_recorded_photo_url(db, rig["captain_id"], "after")), rig["captain_id"])
     done = await db.notifications.find({"user_id": rig["customer_id"], "title": "Service completed"}).to_list(length=5)
     assert len(done) == 1 and "2 vehicles" in done[0]["message"]
 

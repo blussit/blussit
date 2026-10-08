@@ -8,9 +8,22 @@ export function format(dateStr: string): string {
   }
 }
 
+/** A server instant sent without a zone ("2026-10-07T10:56:33") is UTC
+ *  (that's how Mongo stores it) — never the browser's local time. Strings
+ *  that already carry Z / an offset, and plain dates, pass through. */
+export function asUtcInstant(iso: string): string {
+  return /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(iso) ? `${iso}Z` : iso;
+}
+
+/** "7 Oct 2026, 2:35 PM" (IST) — the same 12-hour clock as every other
+ *  person-facing time (en-IN alone gives "02:35 pm"). */
 export function formatDateTime(dateStr: string): string {
   try {
-    return new Date(dateStr).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true, timeZone: IST_TZ });
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return dateStr;
+    const day = d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: IST_TZ });
+    const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: IST_TZ });
+    return `${day}, ${time}`;
   } catch {
     return dateStr;
   }
@@ -58,11 +71,11 @@ export function formatSlot(slot?: string | null): string {
   return `${formatTime12(start.trim())} – ${formatTime12(end.trim())}`;
 }
 
-/** A clock reading (ISO instant) as IST 12-hour time, e.g. "2:30 pm". */
+/** A clock reading (ISO instant) as IST 12-hour time, e.g. "2:30 PM". */
 export function formatClockIST(iso?: string | null): string {
   if (!iso) return "";
   try {
-    return new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: IST_TZ });
+    return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: IST_TZ });
   } catch {
     return "";
   }

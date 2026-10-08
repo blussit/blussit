@@ -8,6 +8,7 @@ import { baseGroups } from "../../lib/serviceMix";
 import { getErrorMessage } from "../../lib/api-client";
 import type { SubscriptionPlan } from "../../types";
 import { VehicleIcon } from "../shared/VehicleIcon";
+import { titleCase } from "../public/landing/shared";
 
 /**
  * Buying a monthly pass asks exactly TWO questions (2026-09 model):
@@ -46,8 +47,18 @@ export function PassPurchaseSheet({
   error?: string;
   prefill?: PassPrefill | null;
 }) {
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
-  const { data: servicesData } = useQuery({
+  const {
+    data: vehicleTypes,
+    isError: typesFailed,
+    isFetching: typesFetching,
+    refetch: refetchTypes,
+  } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(), enabled: open });
+  const {
+    data: servicesData,
+    isError: servicesFailed,
+    isFetching: servicesFetching,
+    refetch: refetchServices,
+  } = useQuery({
     queryKey: ["services-for-passes"],
     queryFn: () => catalogApi.services({ page_size: 100 }),
     enabled: open,
@@ -103,7 +114,7 @@ export function PassPurchaseSheet({
 
   // The live price — re-quoted from the server whenever the type or the
   // service changes, never computed here.
-  const { data: quote, isFetching: quoting, error: quoteError } = useQuery({
+  const { data: quote, isFetching: quoting, error: quoteError, refetch: refetchQuote } = useQuery({
     queryKey: ["pass-quote", plan?.id, vehicleType, serviceId],
     queryFn: () => subscriptionApi.quotePass({ plan_id: plan!.id, vehicle_type: vehicleType!, service_id: serviceId! }),
     enabled: !!plan && !!vehicleType && !!serviceId,
@@ -115,11 +126,11 @@ export function PassPurchaseSheet({
   const canPay = !!vehicleType && !!serviceId && !!quote && !blocked && !quoting;
 
   return (
-    <Modal open={open} onClose={onClose} title={plan ? `Monthly pass — ${plan.name}` : "Monthly pass"}>
+    <Modal open={open} onClose={onClose} title={plan ? `Monthly Pass — ${titleCase(plan.name)}` : "Monthly Pass"}>
       <div className="space-y-6">
         {/* ---- 1. Which vehicle type ---- */}
         <div>
-          <p className="text-sm font-semibold text-black">1. Which vehicle is this pass for?</p>
+          <p className="text-sm font-semibold text-[#0E1A33]">1. Which Vehicle Is This Pass For?</p>
           <p className="mt-0.5 text-xs text-gray-500">Just the type — it applies to any {chosenType ? chosenType.name.toLowerCase() : "vehicle of that type"} you book.</p>
           <div className="mt-2.5 flex flex-wrap gap-2">
             {types.map((t) => (
@@ -129,21 +140,33 @@ export function PassPurchaseSheet({
                 onClick={() => setVehicleType(t.id)}
                 aria-pressed={vehicleType === t.id}
                 className={`flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors ${
-                  vehicleType === t.id ? "border-black bg-[var(--color-primary-light)] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                  vehicleType === t.id ? "border-[#0A66F0] bg-[var(--color-primary-light)] text-[#0E1A33]" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                 }`}
               >
                 <VehicleIcon vehicleTypeId={t.id} className="h-4 w-4 text-gray-500" />
-                {t.name}
-                {vehicleType === t.id && <Check className="h-4 w-4 text-black" />}
+                {titleCase(t.name)}
+                {vehicleType === t.id && <Check className="h-4 w-4 text-[#0E1A33]" />}
               </button>
             ))}
-            {!types.length && <p className="text-xs text-gray-500">Loading vehicle types…</p>}
+            {!types.length &&
+              (typesFailed && !vehicleTypes ? (
+                <p role="alert" className="text-xs text-gray-500">
+                  Couldn't load vehicle types.{" "}
+                  <button type="button" disabled={typesFetching} onClick={() => void refetchTypes()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                    {typesFetching ? "Trying…" : "Try Again"}
+                  </button>
+                </p>
+              ) : vehicleTypes ? (
+                <p className="text-xs text-gray-500">This pass isn't sold for any vehicle type right now.</p>
+              ) : (
+                <p className="text-xs text-gray-500">Loading vehicle types…</p>
+              ))}
           </div>
         </div>
 
         {/* ---- 2. Which service ---- */}
         <div>
-          <p className="text-sm font-semibold text-black">2. Which service should it cover?</p>
+          <p className="text-sm font-semibold text-[#0E1A33]">2. Which Service Should It Cover?</p>
           <p className="mt-0.5 text-xs text-gray-500">Every visit on this pass is this wash. Add-ons can still be added per booking.</p>
           <div className="mt-2.5 flex flex-wrap gap-2">
             {menu.map((s) => (
@@ -153,22 +176,32 @@ export function PassPurchaseSheet({
                 onClick={() => setServiceId(s.id)}
                 aria-pressed={serviceId === s.id}
                 className={`rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors ${
-                  serviceId === s.id ? "border-black bg-[var(--color-primary-light)] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                  serviceId === s.id ? "border-[#0A66F0] bg-[var(--color-primary-light)] text-[#0E1A33]" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                 }`}
               >
-                {s.name}
+                {titleCase(s.name)}
               </button>
             ))}
-            {!menu.length && (
-              <p className="text-xs text-gray-500">
-                {chosenType ? `No service on this pass is offered for a ${chosenType.name}. Try another type, or request a custom plan.` : "Pick a vehicle type first."}
-              </p>
-            )}
+            {!menu.length &&
+              (servicesFailed && !servicesData ? (
+                <p role="alert" className="text-xs text-gray-500">
+                  Couldn't load the services.{" "}
+                  <button type="button" disabled={servicesFetching} onClick={() => void refetchServices()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                    {servicesFetching ? "Trying…" : "Try Again"}
+                  </button>
+                </p>
+              ) : chosenType && !servicesData ? (
+                <p className="text-xs text-gray-500">Loading services…</p>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  {chosenType ? `No service on this pass is offered for a ${chosenType.name}. Try another type, or request a custom plan.` : "Pick a vehicle type first."}
+                </p>
+              ))}
           </div>
         </div>
 
         {/* ---- the price, straight from the server ---- */}
-        <div className="rounded-xl border border-[#E5E7EB] bg-[#FAFAFA] p-4">
+        <div className="rounded-xl border border-[#E5E7EB] bg-[#F7F9FC] p-4">
           {!vehicleType || !serviceId ? (
             <p className="text-sm text-gray-500">Pick a vehicle type and a service to see the price.</p>
           ) : quoting ? (
@@ -176,15 +209,20 @@ export function PassPurchaseSheet({
               <Spinner className="h-4 w-4" /> Working out your price…
             </p>
           ) : quoteError ? (
-            <p className="text-sm text-[var(--color-error)]">{getErrorMessage(quoteError)}</p>
+            <p className="text-sm text-[var(--color-error)]">
+              {getErrorMessage(quoteError)}{" "}
+              <button type="button" onClick={() => void refetchQuote()} className="font-semibold text-[#0A66F0] hover:underline">
+                Try Again
+              </button>
+            </p>
           ) : quote ? (
             <>
               <div className="flex items-baseline justify-between gap-3">
                 <span className="text-sm text-gray-600">
-                  {quote.visits} × {quote.service_name}
-                  {chosenType ? ` · ${chosenType.name}` : ""}
+                  {chosenType ? `${titleCase(chosenType.name)} · ` : ""}
+                  {quote.visits} × {titleCase(quote.service_name)}
                 </span>
-                <span className="font-mono-num text-xl font-bold text-black">₹{quote.price}</span>
+                <span className="font-mono-num text-xl font-bold text-[#0E1A33]">₹{quote.price}</span>
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 ₹{quote.price_per_wash} per wash
@@ -199,11 +237,11 @@ export function PassPurchaseSheet({
 
         {/* ---- renewal ---- */}
         <div>
-          <p className="mb-2 text-sm font-semibold text-black">How should it renew?</p>
+          <p className="mb-2 text-sm font-semibold text-[#0E1A33]">How Should It Renew?</p>
           <div className="flex gap-2">
             {[
-              { value: true, label: "Auto-pay on", hint: "Renews every month · cancel anytime" },
-              { value: false, label: "Just this month", hint: "Ends when the washes run out" },
+              { value: true, label: "Auto-Pay On", hint: "Renews every month · cancel anytime" },
+              { value: false, label: "Just This Month", hint: "Ends when the washes run out" },
             ].map((option) => (
               <button
                 key={String(option.value)}
@@ -211,7 +249,7 @@ export function PassPurchaseSheet({
                 onClick={() => setAutoPay(option.value)}
                 aria-pressed={autoPay === option.value}
                 className={`flex-1 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-colors ${
-                  autoPay === option.value ? "border-black bg-[var(--color-primary-light)] font-semibold text-black" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
+                  autoPay === option.value ? "border-[#0A66F0] bg-[var(--color-primary-light)] font-semibold text-[#0E1A33]" : "border-[#E5E7EB] text-gray-600 hover:border-gray-400"
                 }`}
               >
                 {option.label}
@@ -224,7 +262,7 @@ export function PassPurchaseSheet({
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
         <Button variant="info" className="w-full font-semibold" disabled={!canPay} isLoading={isPaying} onClick={() => onConfirm({ vehicleType: vehicleType!, serviceId: serviceId!, autoPay })}>
-          {quote ? `Pay ₹${quote.price} & activate` : "Pay & activate"}
+          {quote ? `Pay ₹${quote.price} & Activate` : "Pay & Activate"}
         </Button>
         <p className="text-center text-[11px] text-gray-500">
           Online payment only — UPI, cards or netbanking. The pass starts as soon as the payment goes through.

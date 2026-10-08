@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
 
@@ -35,7 +35,9 @@ async def list_centers(active_only: bool = False, pagination: PaginationParams =
 
 
 @router.get("/lookup")
-async def lookup_by_pincode(pincode: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def lookup_by_pincode(pincode: str = Query(..., max_length=10), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Public — "do you serve this pincode?". Answers with the public face
+    of a center only (see ServiceCenterService.find_for_pincode)."""
     return await ServiceCenterController(db).find_for_pincode(pincode)
 
 
@@ -141,10 +143,12 @@ async def cancel_capacity_policy(
 
 
 @router.get("/{center_id}", dependencies=[Depends(require_manager_or_admin)])
-async def get_center(center_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def get_center(center_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Manager/admin — a manager needs this for their own center (e.g. its
-    working hours, to bound the reschedule time picker), nothing here is
-    sensitive enough to restrict to admin-only."""
+    working hours, to bound the reschedule time picker). Their OWN center
+    only: the doc carries the manager and contact details of whichever
+    center is asked for."""
+    ensure_own_center(current_user.role, current_user.service_center_id, center_id)
     return await ServiceCenterController(db).get(center_id)
 
 

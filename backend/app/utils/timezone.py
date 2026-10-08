@@ -54,3 +54,16 @@ CUSTOMER_MESSAGE_HOURS = (10, 19)
 def in_customer_message_hours(now: datetime | None = None) -> bool:
     start, end = CUSTOMER_MESSAGE_HOURS
     return start <= to_ist(now or now_ist()).hour < end
+
+
+def day_label(value, *, year: bool = True) -> str | None:
+    """A day as people read it — "6 Nov 2026" (no leading zero; `year=False`
+    → "6 Nov"). Takes a date, a datetime ALREADY in the zone you mean (call
+    from_stored / to_ist first), or an ISO "YYYY-MM-DD…" string. One helper
+    for every pass label and message ("Last Booking Day: 6 Nov 2026",
+    "Starts 6 Nov 2026", "Your plan continues on 6 Nov 2026 …")."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        value = datetime.strptime(value[:10], "%Y-%m-%d")
+    return f"{value.day} {value.strftime('%b %Y' if year else '%b')}"

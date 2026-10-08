@@ -1,11 +1,12 @@
 """
 Permanently deletes bookings (and the rows that only exist because of them)
-from the database in backend/.env. Built for cleaning out test / mistaken
+from the database in the active env file (backend/.env.development by default;
+ENV_FILE=.env.production for the live one). Built for cleaning out test / mistaken
 entries.
 
   python -m app.scripts.delete_booking BK0001-BK0007 BK0009            # look only
   python -m app.scripts.delete_booking BK0001-BK0007 BK0009 --delete   # really delete
-  python -m app.scripts.delete_booking BK0015 --phone 7879858805       # one booking, phone must match
+  python -m app.scripts.delete_booking BK0015 --phone 98XXXXXXXX       # one booking, phone must match
 
 Numbers can be single (BK0009) or ranges (BK0001-BK0007). Run it from backend/.
 
@@ -23,9 +24,12 @@ Safe by default:
 
 Removed together with a booking: status history, in-app notifications, review,
 GPS breadcrumbs, unpaid payment links, the thank-you-page ticket. Handed back:
-a coupon's usage, a subscription pass's spent value, and the slot seat the
-booking was holding (once per visit). Kept on purpose: audit-log entries and
-WhatsApp send records; customer accounts are never touched.
+a coupon's usage, a subscription pass's spent value, late-cancellation charges
+it carried (back on the customer's account), and the slot seat — only from the
+booking that RECORDS holding it (holds_seat), through the same release helper
+the app uses, in the same transaction as the delete (once per visit). Kept on
+purpose: audit-log entries and WhatsApp send records; customer accounts are
+never touched.
 """
 import argparse
 import asyncio
@@ -37,9 +41,6 @@ from bson import json_util
 
 from app.core.config import settings
 from app.core.database import close_mongo_connection, connect_to_mongo, mongodb
-from app.utils.timezone import to_ist
-
-_ACTIVE_SEAT_STATUSES = {"pending", "assigned", "captain_on_the_way", "service_started", "rescheduled", "completed"}
 
 
 def _digits(value: str) -> str:
@@ -143,16 +144,24 @@ async def run(tokens: list[str], phone: str | None, do_delete: bool) -> int:
     print("\nRelated rows to remove: " + ", ".join(f"{name}={len(rows)}" for name, rows in found.items()))
     print(f"Kept (not deleted): audit_logs={await db.audit_logs.count_documents({'target_id': {'$in': ids}})}")
 
-    # What gets handed back.
+    from app.services.booking_service import BookingService
+
+    booking_service = BookingService(db)
+    # What gets handed back. The seat: only bookings that RECORD holding one
+    # (holds_seat) — a row from before ownership was recorded is judged by
+    # the same rule the app's own backfill applies, never guessed here.
     coupons = [b for b in bookings if b.get("coupon_code")]
     passes = [b for b in bookings if b.get("subscription_id") and b.get("subscription_consumption")]
-    seats: dict[tuple, dict] = {}
+    visits: dict[str, list[dict]] = {}
     for b in bookings:
-        if b.get("completed_by_role") == "manager" or b.get("status") not in _ACTIVE_SEAT_STATUSES:
-            continue  # manager-logged jobs never took a seat; cancelled ones already gave it back
-        key = (b["service_center_id"], to_ist(b["scheduled_date"]).strftime("%Y-%m-%d"), b["scheduled_slot"], b.get("booking_group_id") or str(b["_id"]))
-        seats[key] = b
-    print(f"Handed back: coupon uses={len(coupons)}, subscription passes={len(passes)}, slot seats={len(seats)}")
+        visits.setdefault(b.get("booking_group_id") or str(b["_id"]), []).append(b)
+    legacy_holders: set[str] = set()
+    for cars in visits.values():
+        legacy_holders |= booking_service._legacy_seat_holders(cars)
+    seats = sum(1 for b in bookings if b.get("holds_seat") is True or str(b["_id"]) in legacy_holders)
+    charges = sum(1 for b in bookings if float(b.get("cancellation_charge") or 0) > 0)
+    print(f"Handed back: coupon uses={len(coupons)}, subscription passes={len(passes)}, slot seats={seats}, "
+          f"bookings carrying cancellation charges={charges}")
 
     if problems:
         print("\nREFUSING — nothing was changed:")
@@ -170,37 +179,68 @@ async def run(tokens: list[str], phone: str | None, do_delete: bool) -> int:
     backup.write_text(json_util.dumps({"bookings": bookings, **found}, indent=2))
     print(f"\nBackup written: {backup.resolve()}")
 
-    from app.services.booking_service import BookingService
     from app.services.coupon_service import CouponService
     from app.services.subscription_service import UserSubscriptionService
 
-    booking_service = BookingService(db)
-    seat_given_back: set[tuple] = set()
     deleted = 0
-    # One booking at a time: hand back what it holds, THEN delete it. If anything
-    # goes wrong the script stops right there — bookings already done are fully
-    # done, the rest are untouched — so re-running never hands anything back twice.
-    for b in bookings:
-        bid = str(b["_id"])
+    # One VISIT at a time, in ONE transaction: the cars are marked deleted,
+    # the seat goes back from the car that records holding it (the app's own
+    # _release_seat — never to a car of this same visit), its late-
+    # cancellation charges go back on the account, and the rows go. Only
+    # after that commits are the coupon use and pass wash handed back — a
+    # re-run can never find (and hand back) the same booking twice. If
+    # anything goes wrong the script stops right there.
+    for visit_key, cars in visits.items():
+        numbers = ", ".join(c["booking_number"] for c in cars)
+        ids_ = [str(c["_id"]) for c in cars]
+
+        async def _do(session, cars=cars, ids_=ids_):
+            await booking_service._touch_customer(cars[0].get("customer_id"), session)
+            await booking_service._backfill_seats(cars, session)
+            for car in cars:
+                await db.bookings.update_one({"_id": car["_id"]}, {"$set": {"is_deleted": True}}, session=session)
+            for car in cars:
+                await booking_service._release_seat(car, session)
+                await booking_service.charges.release_for_booking(session, car, reason="deleted")
+            # Customer-wallet money on these rows (credit spent on them, a
+            # previous balance they carried — spec 1.1) goes back to the
+            # wallet before the rows go; a cancelled row already settled is
+            # skipped by MoneyService itself.
+            # A job that was DONE keeps its money (deleting its record is not a refund).
+            unfinished = [c for c in cars if c.get("status") != "completed"]
+            if any(float(c.get("wallet_applied") or 0) > 0 or float(c.get("wallet_due_carried") or 0) > 0 for c in unfinished):
+                await booking_service.money.on_booking_cancelled(
+                    [c["_id"] for c in unfinished], charge_amount=0, actor={"id": "system", "role": "system", "name": "Delete script"},
+                    session=session, reason="booking deleted",
+                )
+            for name, flt in child_filters(ids_).items():
+                await db[name].delete_many(flt, session=session)
+            await db.bookings.delete_many({"_id": {"$in": [c["_id"] for c in cars]}}, session=session)
+
         try:
-            if b.get("subscription_id") and b.get("subscription_consumption"):
-                await UserSubscriptionService(db).restore_consumption(b["subscription_id"], b["subscription_consumption"])
-            if b.get("coupon_code"):
-                await CouponService(db).reverse_usage(b["coupon_code"], b["customer_id"], bid)
-            for key in seats:
-                if key[3] == (b.get("booking_group_id") or bid) and key not in seat_given_back:
-                    seat_given_back.add(key)
-                    await booking_service._release_slot_capacity(key[0], key[1], key[2])
-            for name, flt in child_filters([bid]).items():
-                await db[name].delete_many(flt)
-            await db.bookings.delete_one({"_id": b["_id"]})
-            deleted += 1
-            print(f"  deleted {b['booking_number']}")
+            async with await db.client.start_session() as session:
+                await session.with_transaction(_do)
         except Exception as exc:  # noqa: BLE001
-            print(f"\nSTOPPED at {b['booking_number']}: {type(exc).__name__}: {exc}")
-            print(f"{deleted} booking(s) before it were fully deleted; {b['booking_number']} and the rest were left as they are. Backup: {backup.resolve()}")
+            print(f"\nSTOPPED at {numbers}: {type(exc).__name__}: {exc}")
+            print(f"{deleted} booking(s) before it were fully deleted; {numbers} and the rest were left as they are. Backup: {backup.resolve()}")
             await close_mongo_connection()
             return 1
+        for b in cars:
+            bid = str(b["_id"])
+            try:
+                # Not a wash already handed back by its cancel, nor one a
+                # late cancel used up (consumption_forfeited, spec 1.2).
+                if (
+                    b.get("subscription_id") and b.get("subscription_consumption")
+                    and not b.get("consumption_restored") and not b.get("consumption_forfeited")
+                ):
+                    await UserSubscriptionService(db).restore_consumption(b["subscription_id"], b["subscription_consumption"])
+                if b.get("coupon_code"):
+                    await CouponService(db).reverse_usage(b["coupon_code"], b["customer_id"], bid)
+            except Exception as exc:  # noqa: BLE001 — the booking is gone; say exactly what to hand back by hand
+                print(f"  WARNING {b['booking_number']} deleted, but its pass/coupon could not be handed back: {type(exc).__name__}: {exc}")
+            deleted += 1
+            print(f"  deleted {b['booking_number']}")
     print(f"\nDeleted {deleted} of {len(bookings)} booking(s).")
     print("Still there afterwards:", await db.bookings.count_documents({"booking_number": {"$in": wanted}}), "(should be 0)")
     await close_mongo_connection()

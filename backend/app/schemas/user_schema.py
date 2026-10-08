@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import UserRole, UserStatus
 from app.utils.timezone import from_stored
@@ -16,6 +16,9 @@ class RegisterRequest(BaseModel):
     # Guest-wizard silent registration: the password is random and unknown
     # to the person, so the mandatory set-a-password gate must catch them.
     guest: bool = False
+    # Proof the phone is the registrant's — one of the two is required.
+    phone_otp: Optional[str] = Field(default=None, max_length=10)
+    phone_access_token: Optional[str] = Field(default=None, max_length=4096)
 
     @field_validator("phone")
     @classmethod
@@ -102,6 +105,12 @@ class StaffCreateRequest(BaseModel):
     # this is what customers see on their booking's "Your captain" card.
     photo_url: Optional[str] = Field(default=None, max_length=500)
 
+    @field_validator("email")
+    @classmethod
+    def lower_email(cls, v):
+        # Emails are stored lower-case, so login works however it's typed.
+        return v.strip().lower() if v else v
+
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, v):
@@ -122,6 +131,14 @@ class StaffCreateRequest(BaseModel):
         if self.role == UserRole.CAPTAIN and not self.phone:
             raise ValueError("A captain account needs a phone number — job alerts and customer contact depend on it")
         return self
+
+
+class StaffPasswordResetRequest(BaseModel):
+    """Admin (any staff) / manager (own center's captains) setting a
+    temporary password for a staff member who can't reset by code — the
+    same shape as StaffCreateRequest.password: typed by the admin, handed
+    over privately, replaced by the staff member at the next login."""
+    temp_password: str = Field(min_length=8, max_length=72)
 
 
 class ManagerCreateCustomerRequest(BaseModel):
@@ -152,8 +169,10 @@ class ManagerCreateCustomerRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    full_name: Optional[str] = None
-    profile_image: Optional[str] = None
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    full_name: Optional[str] = Field(None, min_length=2, max_length=100)
+    profile_image: Optional[str] = Field(None, max_length=1000, pattern=r"^(https?://|/)\S+$")
     # The "WhatsApp reminders & offers" switch (true = opted out). Stops the
     # marketing-template WhatsApps — "time for a wash?", "N washes left on
     # your pass" — never booking/payment updates or in-app notices.
@@ -214,8 +233,16 @@ class UserPublic(BaseModel):
     # True when phone_verified is absent OR older than the 90-day window —
     # the frontend re-runs the OTP gate on this.
     phone_verification_stale: bool = True
+    # The account holder proved THIS phone themselves while signed in. For
+    # staff it decides whether "Forgot password" by code works (it doesn't
+    # until they verify — AuthService._ensure_code_reset_allowed); the
+    # profile page offers "Verify" when it's false.
+    phone_self_verified: bool = False
     # See UserUpdateRequest.marketing_opt_out.
     marketing_opt_out: bool = False
+    # Managers: "WhatsApp me new bookings" (on unless switched off — see
+    # PUT /notifications/preferences). In-app alerts are unaffected.
+    whatsapp_new_booking_alerts: bool = True
     created_at: datetime
 
     @classmethod
@@ -233,7 +260,9 @@ class UserPublic(BaseModel):
             must_change_password=doc.get("must_change_password", False),
             phone_verified=doc.get("phone_verified", False),
             phone_verification_stale=_verification_stale(doc),
+            phone_self_verified=bool(doc.get("phone") and doc.get("phone_verified") and doc.get("self_verified_phone") == doc.get("phone")),
             marketing_opt_out=bool(doc.get("marketing_opt_out", False)),
+            whatsapp_new_booking_alerts=doc.get("whatsapp_new_booking_alerts") is not False,
             # created_at is a computed timestamp (aware at write time) — Mongo
             # hands it back naive-holding-UTC-digits, so it must go through
             # from_stored() here too. This bypasses serialize_doc entirely

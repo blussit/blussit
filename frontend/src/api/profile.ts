@@ -1,8 +1,42 @@
 import { apiClient, type ApiSuccess } from "../lib/api-client";
 import type { Address, User, Vehicle } from "../types";
 
+/**
+ * One car in My Garage (GET /vehicles/garage): a saved vehicle and/or a car
+ * from the customer's booking history, merged server-side — one row per
+ * vehicle record, else per plate, else per vehicle type (plateless).
+ */
+export interface GarageCar {
+  /** Stable row key: "v:<vehicleId>" | "p:<plate>" | "t:<vehicleTypeId>". */
+  id: string;
+  /** Set only for a saved vehicle (edit/remove apply). */
+  vehicle_id: string | null;
+  saved: boolean;
+  is_default: boolean;
+  vehicle_type: string | null;
+  vehicle_type_name: string;
+  brand: string | null;
+  model: string | null;
+  registration_number: string | null;
+  /** YYYY-MM-DD (IST) of the newest completed wash. */
+  last_washed_on: string | null;
+  wash_count: number;
+  /** The soonest open booking from today on. */
+  next_wash_on: string | null;
+  next_wash_slot: string | null;
+  next_booking_id: string | null;
+  /** Newest finished single-car booking — what "Clean again" replays. */
+  repeat_booking_id: string | null;
+  last_booking_id: string | null;
+  /** Service(s) on the next visit / the last finished wash, e.g. "Star Wash". */
+  next_service_name?: string | null;
+  last_wash_booking_id?: string | null;
+  last_wash_service_name?: string | null;
+}
+
 export const vehicleApi = {
   list: () => apiClient.get<ApiSuccess<Vehicle[]>>("/vehicles").then((r) => r.data.data),
+  garage: () => apiClient.get<ApiSuccess<GarageCar[]>>("/vehicles/garage").then((r) => r.data.data),
   // Never trust this alone as the real guard — the backend re-checks at
   // actual create/update time regardless — it's purely so the frontend can
   // show the "already registered elsewhere — Continue/Cancel" dialog

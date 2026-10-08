@@ -28,16 +28,15 @@ export function SlotPicker({
   value,
   onChange,
   enableHold = false,
+  hideDate = false,
 }: {
   serviceCenterId: string | undefined;
   date: string;
   onDateChange: (date: string) => void;
   value: string;
   onChange: (slotKey: string) => void;
-  /** Theater-seat mode: picking a slot claims it for 5 minutes (renewed
-   * while this picker is on screen, up to HOLD_RENEW_CAP_MS); other
-   * customers see it as taken. */
   enableHold?: boolean;
+  hideDate?: boolean;
 }) {
   const queryClient = useQueryClient();
   const queryKey = ["available-slots", serviceCenterId, date];
@@ -136,24 +135,25 @@ export function SlotPicker({
 
   return (
     <div className="space-y-4">
-      <Input
-        label="Date"
-        type="date"
-        min={todayIST()}
-        max={maxBookingDateIST()}
-        value={date}
-        onChange={(e) => {
-          onDateChange(e.target.value);
-          onChange("");
-        }}
-        required
-      />
+      {!hideDate && (
+        <Input
+          label="Date"
+          type="date"
+          min={todayIST()}
+          max={maxBookingDateIST()}
+          value={date}
+          onChange={(e) => {
+            onDateChange(e.target.value);
+            onChange("");
+          }}
+          required
+        />
+      )}
 
       {!serviceCenterId ? (
         <p className="text-xs text-[var(--color-text-secondary)]">Add your address to see the slots.</p>
       ) : !date ? null : (
         <div>
-          <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Time slot</p>
           {isLoading ? (
             <p className="text-sm text-[var(--color-text-secondary)]">Loading slots…</p>
           ) : isError ? (
@@ -161,7 +161,7 @@ export function SlotPicker({
           ) : !slots?.length ? (
             <p className="text-sm text-[var(--color-error)]">No slots are configured for this service center yet.</p>
           ) : (
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2.5">
               {slots.map((s) => {
                 const disabled = s.status === "full";
                 const selected = value === s.key;
@@ -171,7 +171,6 @@ export function SlotPicker({
                     type="button"
                     disabled={disabled}
                     onClick={() => {
-                      // Re-tapping a slot whose hold lapsed claims it again.
                       if (enableHold && (heldRef.current?.slot !== s.key || !secondsLeft)) {
                         if (heldRef.current?.slot !== s.key) releaseCurrent();
                         heldSinceRef.current = Date.now();
@@ -179,18 +178,22 @@ export function SlotPicker({
                       }
                       onChange(s.key);
                     }}
-                    className={`rounded-full border-2 px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                      selected ? "border-black bg-[#FFF4CD] text-black" : "border-[#F3E5B5] bg-white text-gray-700 hover:border-gray-400"
+                    className={`flex min-w-0 flex-col items-center justify-center rounded-[12px] border py-2.5 px-1 sm:px-4 text-center transition-all ${
+                      disabled
+                        ? "border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed"
+                        : selected
+                          ? "border-[#1677F2] bg-[#F0F7FF] text-[#1677F2] ring-1 ring-[#1677F2]"
+                          : "border-gray-200 bg-white text-[#0B1B3A] hover:border-gray-300 hover:bg-gray-50"
                     }`}
                   >
-                    <span className="font-mono-num">
+                    {/* Wraps on a 320 px phone (two chips a row in a dialog) instead of spilling out of the chip. */}
+                    <span className="text-[13px] font-semibold leading-tight sm:whitespace-nowrap">
                       {formatTime12(s.start)} – {formatTime12(s.end)}
                     </span>
-                    {s.status === "full" && <span className="ml-1.5 text-xs text-gray-500">· Full</span>}
-                    {s.status === "low" && (
-                      <span className="ml-1.5 text-xs font-semibold text-black">
-                        · {s.remaining} spot{s.remaining === 1 ? "" : "s"} left
-                      </span>
+                    {disabled && <span className="text-[11px] font-medium text-red-400 mt-0.5">Full</span>}
+                    {/* The backend only sends a count when 2 or fewer are left. */}
+                    {s.status === "low" && s.remaining != null && (
+                      <span className="mt-0.5 text-[11px] font-semibold text-[#A15C00]">{s.remaining} Left</span>
                     )}
                   </button>
                 );
@@ -201,7 +204,7 @@ export function SlotPicker({
           {enableHold && value && secondsLeft != null && secondsLeft > 0 && (
             <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-gray-500">
               <Timer className="h-3.5 w-3.5" />
-              Held for you · {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
+              Held For You · {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
             </p>
           )}
         </div>

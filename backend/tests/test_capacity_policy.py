@@ -197,7 +197,13 @@ async def test_resync_preserves_booked_count_and_respects_manual_override(rig):
     bs = BookingService(rig["db"])
     today = now_ist().replace(tzinfo=None).strftime("%Y-%m-%d")
 
-    await bs.admin_slot_capacity(rig["center_id"], today)  # touch
+    # Touch today's slot the way its first reservation does (the capacity
+    # GET used for this no longer writes — audit MGR-05).
+    center = await rig["db"].service_centers.find_one({"_id": ObjectId(rig["center_id"])})
+    await bs.slot_capacity_repo.get_or_init(
+        {"service_center_id": rig["center_id"], "date": today, "slot_key": "09:00-12:00"},
+        {"capacity": await bs._default_slot_capacity(center, today, "09:00-12:00"), "booked_count": 0, "is_closed": False},
+    )
     await rig["db"].slot_capacity.update_one(
         {"service_center_id": rig["center_id"], "date": today, "slot_key": "09:00-12:00"}, {"$set": {"booked_count": 3}}
     )

@@ -53,7 +53,7 @@ export function MandatoryGates() {
   if (user.must_change_password) {
     const valid = password.length >= 8 && password === confirm;
     return (
-      <Modal open onClose={() => undefined} title="Set your password">
+      <Modal open onClose={() => undefined} dismissible={false} title="Set Your Password">
         <div className="space-y-4">
           <div className="flex items-start gap-3 rounded-xl bg-[var(--color-primary-light)] p-3.5">
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-primary)]" />
@@ -61,9 +61,9 @@ export function MandatoryGates() {
               Your account is using a temporary password. Choose your own password to continue — you'll use it to log in from now on.
             </p>
           </div>
-          <Input label="New password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} hint="At least 8 characters" autoFocus />
+          <Input label="New Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} hint="At least 8 characters" autoFocus />
           <Input
-            label="Confirm password"
+            label="Confirm Password"
             type="password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
@@ -71,7 +71,7 @@ export function MandatoryGates() {
           />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button className="w-full" disabled={!valid} isLoading={save.isPending} onClick={() => save.mutate()}>
-            Save password &amp; continue
+            Save Password &amp; Continue
           </Button>
           {/* The one escape hatch — this modal is deliberately
               non-dismissible, but "non-dismissible with no way out" meant
@@ -81,7 +81,7 @@ export function MandatoryGates() {
             onClick={logout}
             className="w-full text-center text-xs font-medium text-[var(--color-text-secondary)] underline hover:text-[var(--color-text-primary)]"
           >
-            Log out instead
+            Log Out Instead
           </button>
         </div>
       </Modal>

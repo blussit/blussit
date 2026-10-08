@@ -33,7 +33,9 @@ def _segments_cross(a, b, c, d) -> bool:
 
 
 def _validate_ring(ring: list) -> list:
-    if not isinstance(ring, list) or len(ring) < 4:
+    # An OPEN ring of 3 corners (a triangle drawn on the map) is valid — it
+    # gets closed below; the "< 4" check belongs after closing.
+    if not isinstance(ring, list) or len(ring) < 3:
         raise BadRequestException("A zone needs at least 3 corners")
     cleaned = []
     for point in ring:
@@ -99,6 +101,8 @@ class ZoneService:
             update["is_active"] = is_active
         if not update:
             raise BadRequestException("Nothing to update")
+        if not ObjectId.is_valid(zone_id):
+            raise NotFoundException("Zone not found")
         try:
             result = await self.db.service_zones.find_one_and_update(
                 {"_id": ObjectId(zone_id)}, {"$set": update}, return_document=True
@@ -110,6 +114,8 @@ class ZoneService:
         return serialize_doc(result)
 
     async def delete_zone(self, zone_id: str) -> None:
+        if not ObjectId.is_valid(zone_id):  # VAL-6: a malformed id is a 404, not a 500
+            raise NotFoundException("Zone not found")
         result = await self.db.service_zones.update_one({"_id": ObjectId(zone_id)}, {"$set": {"is_deleted": True, "is_active": False}})
         if not result.matched_count:
             raise NotFoundException("Zone not found")

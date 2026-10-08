@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.authz import ensure_own_center
@@ -67,10 +68,12 @@ class ComplaintService:
 
     async def list_for_center(
         self, service_center_id: str, status: str | None, page: int, page_size: int, actor_role: str, actor_center_id: str | None,
-        search: str | None = None,
+        search: str | None = None, extra: dict | None = None,
     ):
         ensure_own_center(actor_role, actor_center_id, service_center_id)
-        items, total = await self.repo.list_for_center(service_center_id, status, page, page_size, await self.search_filter(search))
+        items, total = await self.repo.list_for_center(
+            service_center_id, status, page, page_size, {**(extra or {}), **await self.search_filter(search)},
+        )
         return await self._enrich(items), total
 
     async def list_all(self, filters: dict, page: int, page_size: int, search: str | None = None):
@@ -134,17 +137,19 @@ class ComplaintService:
         # Same center-scoping as add_reply below — a manager may only touch
         # complaints routed to THEIR center (this method used to skip it,
         # letting any manager resolve any center's complaints).
-        if complaint.get("service_center_id"):
-            ensure_own_center(actor_role, actor_center_id, complaint["service_center_id"])
+        self._ensure_staff_scope(complaint, actor_role, actor_center_id)
 
         data = {k: v.value if hasattr(v, "value") else v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
         if data.get("status") == ComplaintStatus.RESOLVED.value:
             data["resolved_by"] = resolved_by
+            data["resolved_at"] = datetime.now(timezone.utc)
 
+        if not data:
+            raise BadRequestException("Nothing to update — change the status, priority or note.")
         updated = await self.repo.update_by_id(complaint_id, data)
         # Re-prioritising is internal triage — only a change the customer
         # can see (status, resolution note) is worth a message to them.
-        if set(data) - {"priority"}:
+        if set(data) - {"priority", "updated_at"}:
             await self.notifications.notify(
                 complaint["customer_id"],
                 "Complaint update",
@@ -152,7 +157,68 @@ class ComplaintService:
                 NotificationType.COMPLAINT,
                 complaint_id,
             )
-        return serialize_doc(updated)
+        return (await self._enrich([updated]))[0]
+
+    _STATUS_LABELS = {
+        ComplaintStatus.OPEN.value: "Open",
+        ComplaintStatus.IN_PROGRESS.value: "In progress",
+        ComplaintStatus.RESOLVED.value: "Resolved",
+        ComplaintStatus.CLOSED.value: "Closed",
+    }
+
+    async def _ticket_handlers(self, complaint: dict) -> list[str]:
+        """Who hears about a customer's reply: the ticket's center's
+        managers (the center's own manager_id first), else the admins."""
+        # "inactive" switches an account off exactly like "suspended"
+        # (authz.account_switched_off) — neither hears about tickets.
+        on_duty = {"$nin": ["suspended", "inactive"]}
+        ids: list[str] = []
+        center_id = complaint.get("service_center_id")
+        if center_id:
+            center = await self.center_repo.find_by_id(center_id)
+            managers, _ = await self.user_repo.find_many(
+                {"role": "manager", "service_center_id": center_id, "status": on_duty}, page=1, page_size=20,
+            )
+            on_duty_ids = [str(m["_id"]) for m in managers]
+            # The center's own manager_id first — when he is still on duty.
+            own = str((center or {}).get("manager_id") or "")
+            if own in on_duty_ids:
+                ids.append(own)
+            elif ObjectId.is_valid(own) and await self.user_repo.find_one({"_id": ObjectId(own), "status": on_duty}):
+                ids.append(own)
+            ids.extend(on_duty_ids)
+        if not ids:
+            admins, _ = await self.user_repo.find_many({"role": "admin", "status": on_duty}, page=1, page_size=5)
+            ids.extend(str(a["_id"]) for a in admins)
+        return list(dict.fromkeys(ids))
+
+    @staticmethod
+    def _ensure_staff_scope(complaint: dict, actor_role: str, actor_center_id: str | None) -> None:
+        """Admin: any ticket. Manager: only tickets routed to their own
+        center — a legacy ticket with no center is admin-only, never
+        "anyone's"."""
+        if actor_role == "admin":
+            return
+        if actor_role != "manager" or not complaint.get("service_center_id"):
+            raise ForbiddenException("You don't have access to this complaint")
+        ensure_own_center(actor_role, actor_center_id, complaint["service_center_id"])
+
+    async def get_one(self, complaint_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """One ticket, fresh from the database, for whoever may see it: the
+        customer who raised it (404 for anyone else's — a guessed id
+        confirms nothing), a manager of its center, or an admin. The staff
+        drawer reads the thread from HERE after every post instead of
+        trusting a copy of a list row, so a second, third... update always
+        shows up."""
+        complaint = await self.repo.find_by_id(complaint_id)
+        if not complaint:
+            raise NotFoundException("Complaint not found")
+        if actor_role == "customer":
+            if complaint.get("customer_id") != actor_id:
+                raise NotFoundException("Complaint not found")
+        else:
+            self._ensure_staff_scope(complaint, actor_role, actor_center_id)
+        return (await self._enrich([complaint]))[0]
 
     async def add_reply(
         self, complaint_id: str, actor_id: str, actor_role: str, actor_center_id: str | None, message: str, status: str | None = None
@@ -172,26 +238,57 @@ class ComplaintService:
             if complaint.get("customer_id") != actor_id:
                 raise NotFoundException("Complaint not found")
             status = None
-        elif complaint.get("service_center_id"):
-            ensure_own_center(actor_role, actor_center_id, complaint["service_center_id"])
+        else:
+            self._ensure_staff_scope(complaint, actor_role, actor_center_id)
 
-        reply = {"author_id": actor_id, "author_role": actor_role, "message": message, "created_at": datetime.now(timezone.utc)}
-        updated = await self.repo.push_to_array(complaint_id, "replies", reply)
+        message = (message or "").strip()
+        status_changes = bool(status) and status != complaint.get("status")
+        if not message and actor_role != "customer" and status_changes:
+            # Staff may just move the status — the thread still records it,
+            # in words the customer understands.
+            message = f"Status changed to {self._STATUS_LABELS.get(status, status)}."
+        if not message:
+            raise BadRequestException("Write the update before posting it.")
+        now = datetime.now(timezone.utc)
+        author = await self.user_repo.collection.find_one({"_id": ObjectId(actor_id)}, {"full_name": 1}) if ObjectId.is_valid(actor_id) else None
+        reply = {
+            "author_id": actor_id,
+            "author_role": actor_role,
+            "author_name": (author or {}).get("full_name"),
+            "message": message,
+            "created_at": now,
+        }
 
-        update_data: dict = {}
+        set_data: dict = {"updated_at": now}
         if status and status != complaint.get("status"):
-            update_data["status"] = status
+            set_data["status"] = status
             if status == ComplaintStatus.RESOLVED.value:
-                update_data["resolved_by"] = actor_id
-        if update_data:
-            updated = await self.repo.update_by_id(complaint_id, update_data)
+                set_data["resolved_by"] = actor_id
+                set_data["resolved_at"] = now
+        # A legacy ticket can carry `replies: null` (or no field at all) —
+        # $push onto null is a write error, which would make every update
+        # on that ticket fail. Normalise it first, then append the reply
+        # and apply the status change in ONE atomic write.
+        if not isinstance(complaint.get("replies"), list):
+            await self.repo.collection.update_one(
+                {"_id": ObjectId(complaint_id), "replies": {"$not": {"$type": "array"}}}, {"$set": {"replies": []}}
+            )
+        await self.repo.collection.update_one(
+            {"_id": ObjectId(complaint_id), "is_deleted": {"$ne": True}},
+            {"$push": {"replies": reply}, "$set": set_data},
+        )
+        updated = await self.repo.find_by_id(complaint_id)
+        if not updated:
+            raise NotFoundException("Complaint not found")
 
         if actor_role == "customer":
-            # Tell the serving center's manager, not the customer themselves.
-            center = await self.center_repo.find_by_id(complaint["service_center_id"]) if complaint.get("service_center_id") else None
-            if center and center.get("manager_id"):
+            # Tell the staff who handle it, not the customer themselves: the
+            # serving center's managers — or, for a ticket with no center
+            # (or a center with no manager), the admins, so a customer's
+            # reply never lands in nobody's inbox.
+            for staff_id in await self._ticket_handlers(complaint):
                 await self.notifications.notify(
-                    center["manager_id"],
+                    staff_id,
                     "Customer replied on a complaint",
                     f"'{complaint['subject']}': {message[:120]}",
                     NotificationType.COMPLAINT,
@@ -205,4 +302,4 @@ class ComplaintService:
                 NotificationType.COMPLAINT,
                 complaint_id,
             )
-        return serialize_doc(updated)
+        return (await self._enrich([updated]))[0]

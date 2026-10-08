@@ -31,9 +31,16 @@ from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from pymongo.errors import DuplicateKeyError
+
 from app.core.config import settings
 from app.core.exceptions import BadRequestException, NotFoundException
-from app.services.whatsapp_service import WhatsAppService
+from app.services.whatsapp_service import (
+    MetaCloudWhatsAppProvider,
+    WhatsAppService,
+    mask_phone,
+    record_complete_template_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +67,9 @@ EVENT_TEMPLATES = {
     "booking_confirmed": "blussit_booking_confirmed_v5",
     "captain_assigned": "blussit_captain_assigned_v5",
     "captain_on_the_way": "blussit_captain_on_the_way_v6",
+    # No call site yet (NTF-03): the arrival step should send it with
+    # wa_params=[services, reference, date, slot, vehicle].
+    "captain_arrived": "blussit_captain_arrived_v1",
     "service_started": "blussit_service_started_v5",
     "service_completed": "blussit_service_completed_v5",
     "review_request": "blussit_review_request",
@@ -69,14 +79,36 @@ EVENT_TEMPLATES = {
     "booking_cancelled": "blussit_booking_cancelled_v4",
     "payment_pending": "blussit_payment_pending_v4",
     "captain_released": "blussit_captain_released_v5",
-    # Staff alert (to the center's managers) — see BLUSSIT_STAFF_TEMPLATE_DEFS.
-    "manager_new_booking": "blussit_manager_new_booking_v1",
+    # Staff alert (to the center's managers) — v2 has an "Open Bookings"
+    # button; v1 (no button) keeps working until v2 is approved.
+    "manager_new_booking": "blussit_manager_new_booking_v2",
+    "manager_new_booking_v2": "blussit_manager_new_booking_v2",
+    # 2026-10-07 events (MONEY / BOOKING / PLANS call these — params in
+    # CURRENT_TEMPLATE_DEFS and docs/FEATURE_PLAN_WALLET_EDITS_PLANS_2026-10-07.md):
+    # booking_edited: [services, ref, date, slot, vehicle, new total (no ₹)]
+    "booking_edited": "blussit_booking_edited_v1",
+    # wallet_credited / wallet_debited: [name, amount (no ₹), reason, balance text (with ₹, may be negative)]
+    "wallet_credited": "blussit_wallet_credited_v1",
+    "wallet_debited": "blussit_wallet_debited_v1",
+    # payment_failed: [services, ref, amount (no ₹)] — reference_id = booking id (retry button)
+    "payment_failed": "blussit_payment_failed_v1",
+    # booking_cancelled_v5: [services, ref, date, slot, "who cancelled + wallet line"]
+    "booking_cancelled_v5": "blussit_booking_cancelled_wallet_v1",
+    # review_request_google: [name, services] — NotificationService.send_review_requests only
+    "review_request_google": "blussit_review_request_google_v1",
+    # universal_message: [name, message] — NotificationService.send_universal_message
+    "universal_message": "blussit_universal_message_v1",
+    # book_now: [name] — MARKETING (send with wa_marketing=True)
+    "book_now": "blussit_book_now_v1",
+    # plan_expiring_v2: [name, plan, end date, washes left]
+    "plan_expiring_v2": "blussit_plan_expiring_v2",
     # Manager-sold plan (see BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS).
     "subscription_payment_link": "blussit_subscription_payment_link_v1",
     "subscription_autopay_link": "blussit_subscription_autopay_link_v1",
     "subscription_activated": "blussit_subscription_activated",
     "subscription_renewed": "blussit_subscription_renewed",
-    "subscription_expiring": "blussit_subscription_expiring",
+    # Same params as plan_expiring_v2; the old template is its fallback.
+    "subscription_expiring": "blussit_plan_expiring_v2",
     "subscription_expired": "blussit_subscription_expired",
     # "N washes left — book now" (main.remind_pass_washes): same approved
     # body ("ends on {{3}} with {{4}} washes left. Book them..."), its own
@@ -89,7 +121,29 @@ EVENT_TEMPLATES = {
     "we_miss_you": "blussit_we_miss_you",
 }
 
+# Older templates an event may still use while its preferred one is in
+# review — ONLY when they take exactly the same parameters in the same
+# order (booking_cancelled_v5's wallet line must never land in v4's
+# "vehicle" slot, so it has none).
+EVENT_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "manager_new_booking": ("blussit_manager_new_booking_v1",),
+    "manager_new_booking_v2": ("blussit_manager_new_booking_v1",),
+    "subscription_expiring": ("blussit_subscription_expiring",),
+    "plan_expiring_v2": ("blussit_subscription_expiring",),
+}
+
 WINDOW_HOURS = 24
+
+# Who paused the bot on a thread (bot_paused_by): the bot's own handoff
+# after two inputs it couldn't understand, or an agent (a manual message,
+# an agent template, "Pause booking bot" in the inbox). Only a BOT handoff
+# that no agent picked up expires — after BOT_HANDOFF_RESUME_HOURS the bot
+# answers again, instead of staying silent for that customer forever. An
+# agent's pause lasts until the thread is resolved or handed back. Older
+# rows without bot_paused_by are treated as an agent's (never auto-resume).
+PAUSED_BY_BOT = "bot"
+PAUSED_BY_AGENT = "agent"
+BOT_HANDOFF_RESUME_HOURS = 12
 
 # Both spellings: the CRM originally listed "on_the_way"/"in_progress", but
 # bookings actually move through captain_on_the_way/service_started — an
@@ -109,6 +163,22 @@ def _aware(dt: datetime | None) -> datetime | None:
 def _iso(dt: datetime | None) -> str | None:
     a = _aware(dt)
     return a.isoformat() if a else None
+
+
+def validate_https_url(raw) -> str:
+    """"" (cleared) or an absolute https:// URL with a host and no spaces."""
+    from urllib.parse import urlparse
+
+    url = str(raw or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https" or not parsed.hostname or "." not in parsed.hostname
+        or any(ch.isspace() for ch in url) or len(url) > 500
+    ):
+        raise BadRequestException("Enter a full https:// link (e.g. your Google review link)")
+    return url
 
 
 def _local_phone(wa_id: str) -> str:
@@ -200,7 +270,7 @@ class WhatsAppCrmService:
             if not existing:
                 await self._notify_admins("New WhatsApp conversation", f"{profile_name or _local_phone(wa_id)} messaged for the first time: {text[:80]}")
         except Exception:  # noqa: BLE001 — never break webhook processing
-            logger.exception("Failed recording inbound WhatsApp message from %s", wa_id)
+            logger.exception("Failed recording inbound WhatsApp message from %s", mask_phone(wa_id))
 
     async def _notify_admins(self, title: str, message: str) -> None:
         try:
@@ -214,8 +284,24 @@ class WhatsAppCrmService:
             logger.exception("Failed notifying admins for WhatsApp CRM event")
 
     async def is_bot_paused(self, wa_id: str) -> bool:
-        convo = await self.db.whatsapp_conversations.find_one({"wa_id": wa_id}, {"bot_paused": 1})
-        return bool(convo and convo.get("bot_paused"))
+        convo = await self.db.whatsapp_conversations.find_one({"wa_id": wa_id}, {"bot_paused": 1, "bot_paused_by": 1, "bot_paused_at": 1})
+        if not (convo and convo.get("bot_paused")):
+            return False
+        paused_at = _aware(convo.get("bot_paused_at"))
+        if (
+            convo.get("bot_paused_by") == PAUSED_BY_BOT
+            and paused_at
+            and datetime.now(timezone.utc) - paused_at >= timedelta(hours=BOT_HANDOFF_RESUME_HOURS)
+        ):
+            # Guarded on the same handoff: an agent who took the thread
+            # over meanwhile (bot_paused_by -> agent) keeps it.
+            await self.db.whatsapp_conversations.update_one(
+                {"wa_id": wa_id, "bot_paused": True, "bot_paused_by": PAUSED_BY_BOT, "bot_paused_at": convo["bot_paused_at"]},
+                {"$set": {"bot_paused": False}, "$unset": {"bot_paused_by": "", "bot_paused_at": ""}},
+            )
+            fresh = await self.db.whatsapp_conversations.find_one({"wa_id": wa_id}, {"bot_paused": 1})
+            return bool(fresh and fresh.get("bot_paused"))
+        return True
 
     # ------------------------------------------------------------------
     # Conversations
@@ -435,14 +521,15 @@ class WhatsAppCrmService:
         return convo
 
     async def _after_agent_send(self, wa_id: str, text: str) -> None:
+        now = datetime.now(timezone.utc)
         await self.db.whatsapp_conversations.update_one(
             {"wa_id": wa_id},
             {"$set": {
-                "last_message_text": text[:200], "last_message_at": datetime.now(timezone.utc),
+                "last_message_text": text[:200], "last_message_at": now,
                 "last_message_direction": "out",
                 # A human joined the thread: the booking bot must stop
                 # reacting to this customer's replies until resolved.
-                "bot_paused": True,
+                "bot_paused": True, "bot_paused_by": PAUSED_BY_AGENT, "bot_paused_at": now,
             }},
         )
 
@@ -469,7 +556,8 @@ class WhatsAppCrmService:
         now = datetime.now(timezone.utc)
         await self.db.whatsapp_conversations.update_one(
             {"wa_id": wa_id},
-            {"$set": {"phone": phone, "last_message_text": f"[template] {template_name}", "last_message_at": now, "last_message_direction": "out", "bot_paused": True},
+            {"$set": {"phone": phone, "last_message_text": f"[template] {template_name}", "last_message_at": now, "last_message_direction": "out",
+                      "bot_paused": True, "bot_paused_by": PAUSED_BY_AGENT, "bot_paused_at": now},
              "$setOnInsert": {"wa_id": wa_id, "created_at": now, "tags": [], "unread_count": 0, "crm_status": "open"}},
             upsert=True,
         )
@@ -516,11 +604,14 @@ class WhatsAppCrmService:
         if status not in CRM_STATUSES:
             raise BadRequestException("Status must be open, pending or resolved")
         await self._require_convo(wa_id)
-        update: dict = {"crm_status": status}
+        update: dict = {"$set": {"crm_status": status}}
         if status == "resolved":
-            update["resolved_at"] = datetime.now(timezone.utc)
-            update["bot_paused"] = False  # resolve hands the customer back to the bot
-        await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": update})
+            update["$set"]["resolved_at"] = datetime.now(timezone.utc)
+            update["$set"]["bot_paused"] = False  # resolve hands the customer back to the bot
+            # ...and a later question is a new issue: the bot may ping the
+            # admins for it again (see WhatsAppBotService._ping_admins).
+            update["$unset"] = {"bot_paused_by": "", "bot_paused_at": "", "admin_pinged_at": ""}
+        await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, update)
         return {"crm_status": status}
 
     async def set_tags(self, wa_id: str, tags: list[str]) -> dict:
@@ -531,7 +622,11 @@ class WhatsAppCrmService:
 
     async def set_bot_paused(self, wa_id: str, paused: bool) -> dict:
         await self._require_convo(wa_id)
-        await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": {"bot_paused": paused}})
+        if paused:
+            update = {"$set": {"bot_paused": True, "bot_paused_by": PAUSED_BY_AGENT, "bot_paused_at": datetime.now(timezone.utc)}}
+        else:
+            update = {"$set": {"bot_paused": False}, "$unset": {"bot_paused_by": "", "bot_paused_at": ""}}
+        await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, update)
         return {"bot_paused": paused}
 
     # ------------------------------------------------------------------
@@ -543,11 +638,14 @@ class WhatsAppCrmService:
         out: dict = {"conversation": await self._convo_out(convo), "customer": None, "vehicles": [], "current_booking": None, "stats": None}
         customer_id = convo.get("customer_id")
         if not customer_id:
-            # The bot links accounts lazily; try by phone.
+            # The bot links accounts lazily; try by phone. Only a CUSTOMER
+            # account is linked — a staff phone's chat is shown, never tied
+            # to the staff account as if it were a customer (AUTH-05).
             user = await self.db.users.find_one({"phone": convo.get("phone") or _local_phone(wa_id)})
             if user:
                 customer_id = str(user["_id"])
-                await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": {"customer_id": customer_id}})
+                if user.get("role") == "customer":
+                    await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": {"customer_id": customer_id}})
         if not customer_id or not ObjectId.is_valid(customer_id):
             return out
         user = await self.db.users.find_one({"_id": ObjectId(customer_id)})
@@ -644,6 +742,9 @@ class WhatsAppCrmService:
         for t in remote:
             body = next((c.get("text", "") for c in t.get("components", []) if c.get("type") == "BODY"), "")
             buttons_component = next((c for c in t.get("components", []) if c.get("type") == "BUTTONS"), None)
+            url_button = next(
+                (b for b in (buttons_component or {}).get("buttons", []) if b.get("type") == "URL"), None
+            )
             # Authoritative, straight from Meta — whatever the template
             # ACTUALLY has approved, not just what we asked for at
             # creation time (in case it was edited directly on Meta's
@@ -661,11 +762,85 @@ class WhatsAppCrmService:
                     "rejected_reason": None if t.get("rejected_reason") in (None, "NONE") else t.get("rejected_reason"),
                     "param_count": body.count("{{"),
                     "has_url_param": has_url_param,
+                    "button_url": (url_button or {}).get("url"),
                     "synced_at": datetime.now(timezone.utc),
                 }, "$setOnInsert": {"disabled": False, "created_at": datetime.now(timezone.utc)}},
                 upsert=True,
             )
+        # Meta's WHOLE list arrived (list_templates returns None for a
+        # partial one): from now on a configured name that isn't in it is
+        # unusable (WhatsAppService._usable_template).
+        await record_complete_template_sync(self.db, len(remote))
         return {"synced": len(remote)}
+
+    async def sync_templates_if_due(self, max_age_minutes: int = 60) -> dict:
+        """sync_templates at most once per `max_age_minutes` across every
+        instance (claimed on a db.locks doc) — for boot and the hourly loop
+        (DEP-04): an approval, pause or rejection on Meta's side reaches
+        event_template_if_ready / the update template without anyone
+        pressing Sync. A failed sync is retried after ~5 minutes."""
+        now = datetime.now(timezone.utc)
+        lock_id = "whatsapp_template_sync"
+        try:
+            await self.db.locks.find_one_and_update(
+                {"_id": lock_id, "$or": [{"synced_at": {"$lt": now - timedelta(minutes=max_age_minutes)}}, {"synced_at": {"$exists": False}}]},
+                {"$set": {"synced_at": now}},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            return {"skipped": True, "reason": "synced recently"}
+        try:
+            result = await self.sync_templates()
+        except Exception:  # noqa: BLE001 — retried by the next due call
+            logger.exception("WhatsApp template sync failed")
+            result = {"synced": 0, "error": "sync failed"}
+        failed = "error" in result or (
+            "note" in result and isinstance(self.wa.provider, MetaCloudWhatsAppProvider) and settings.WHATSAPP_BUSINESS_ACCOUNT_ID
+        )
+        if failed:
+            retry_at = now - timedelta(minutes=max(max_age_minutes - 5, 0))
+            await self.db.locks.update_one({"_id": lock_id, "synced_at": now}, {"$set": {"synced_at": retry_at}})
+        return result
+
+    async def apply_template_event(self, field: str, value: dict) -> None:
+        """Meta's template webhooks: `message_template_status_update`
+        (APPROVED / REJECTED / PAUSED / DISABLED / …) and
+        `template_category_update`. Updates the local row at once; a
+        template we don't know yet is fetched by a full sync."""
+        name = value.get("message_template_name")
+        if not name:
+            return
+        now = datetime.now(timezone.utc)
+        if field == "template_category_update":
+            category = value.get("new_category")
+            if category:
+                await self.db.whatsapp_templates.update_one(
+                    {"name": name},
+                    {"$set": {"category": category, "previous_category": value.get("previous_category"), "category_updated_at": now}},
+                )
+                # Honoured on every send (NotificationService._deliver): a
+                # MARKETING template no longer reaches opted-out customers.
+                logger.warning(
+                    "WhatsApp template %s re-categorised %s -> %s by Meta",
+                    name, value.get("previous_category") or "?", category,
+                )
+            return
+        event = str(value.get("event") or "").upper()
+        if not event:
+            return
+        # REINSTATED = approved again; FLAGGED = quality warning, still sendable.
+        status = "APPROVED" if event in ("REINSTATED", "FLAGGED") else event
+        reason = value.get("reason")
+        result = await self.db.whatsapp_templates.update_one(
+            {"name": name},
+            {"$set": {
+                "status": status, "last_status_event": event, "status_updated_at": now,
+                "rejected_reason": None if reason in (None, "NONE") else reason,
+            }},
+        )
+        logger.info("WhatsApp template %s is now %s (%s)", name, status, reason or "-")
+        if not result.matched_count and status == "APPROVED":
+            await self.sync_templates()  # its body/param count are needed to send it
 
     async def list_local_templates(self) -> list[dict]:
         rows = await self.db.whatsapp_templates.find({}).sort("name", 1).to_list(length=None)
@@ -680,13 +855,30 @@ class WhatsAppCrmService:
             "usage": usage.get(r["name"], 0), "synced_at": _iso(r.get("synced_at")),
         } for r in rows]
 
-    async def create_template(self, name: str, category: str, language: str, body: str, button_text: str | None, button_url: str | None) -> dict:
+    async def agent_sendable_templates(self) -> list[dict]:
+        """What an agent can actually send from the inbox: approved, not
+        switched off, no URL-button parameter and not an OTP template — the
+        agent send never fills those, so Meta rejects every such attempt."""
+        blocked = set(await self.db.whatsapp_templates.distinct("name", {"has_url_param": True}))
+        return [
+            t for t in await self.list_local_templates()
+            if t["status"] == "APPROVED" and not t["disabled"] and t["name"] not in blocked and t.get("category") != "AUTHENTICATION"
+        ]
+
+    async def create_template(
+        self, name: str, category: str, language: str, body: str, button_text: str | None, button_url: str | None,
+        examples: list[str] | None = None,
+    ) -> dict:
+        """`examples`: one realistic value per {{n}} — Meta reviews the
+        template WITH them, and "Sample 1" placeholders get rejected."""
         if category not in ("UTILITY", "MARKETING", "AUTHENTICATION"):
             raise BadRequestException("Category must be UTILITY, MARKETING or AUTHENTICATION")
         components: list[dict] = [{"type": "BODY", "text": body}]
         n = body.count("{{")
         if n:
-            components[0]["example"] = {"body_text": [[f"Sample {i + 1}" for i in range(n)]]}
+            values = [str(e) for e in (examples or [])][:n]
+            values += [f"Sample {i + 1}" for i in range(len(values), n)]
+            components[0]["example"] = {"body_text": [values]}
         # A URL button with its own {{1}} (e.g. ".../app/bookings/{{1}}")
         # needs its own example too, or Meta rejects the submission — the
         # static ones (no "{{") don't take one at all.
@@ -703,7 +895,8 @@ class WhatsAppCrmService:
             {"name": name},
             {"$set": {"name": name, "status": result.get("status", "PENDING"), "category": result.get("category", category),
                       "language": language or "en_US", "body": body, "param_count": n, "disabled": False,
-                      "has_url_param": has_url_param, "synced_at": datetime.now(timezone.utc)},
+                      "has_url_param": has_url_param, "button_url": button_url if button_text else None,
+                      "synced_at": datetime.now(timezone.utc)},
              "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
@@ -764,13 +957,86 @@ class WhatsAppCrmService:
     # ------------------------------------------------------------------
 
     async def event_template_if_ready(self, event: str) -> dict | None:
+        """The approved template that carries `event` right now: the
+        preferred one (or a newer version of it, submitted after a
+        rejection — see submit_template_def), else a same-parameter
+        fallback. None = nothing approved (notify uses the generic)."""
         name = EVENT_TEMPLATES.get(event)
         if not name:
             return None
-        tpl = await self.db.whatsapp_templates.find_one({"name": name})
-        if tpl and tpl.get("status") == "APPROVED" and not tpl.get("disabled"):
-            return tpl
+        for row in await _family_rows(self.db, name):
+            if row.get("status") == "APPROVED" and not row.get("disabled"):
+                return row
+        for fallback in EVENT_TEMPLATE_FALLBACKS.get(event, ()):
+            tpl = await self.db.whatsapp_templates.find_one({"name": fallback})
+            if tpl and tpl.get("status") == "APPROVED" and not tpl.get("disabled"):
+                return tpl
         return None
+
+    # ------------------------------------------------------------------
+    # Settings (admin): the Google review URL
+    # ------------------------------------------------------------------
+
+    SETTINGS_KEY = "whatsapp_settings"
+
+    async def get_settings(self) -> dict:
+        doc = await self.db.settings.find_one({"key": self.SETTINGS_KEY}, {"value": 1})
+        value = (doc or {}).get("value") or {}
+        return {"google_review_url": value.get("google_review_url") or ""}
+
+    async def update_settings(self, changes: dict, actor_id: str | None = None) -> dict:
+        """Only known keys; the URL must be https:// (it becomes a WhatsApp
+        button, opened by customers). "" clears it (review requests stop)."""
+        from app.repositories.content_repository import SettingRepository
+
+        current = await self.get_settings()
+        if "google_review_url" in changes:
+            current["google_review_url"] = validate_https_url(changes.get("google_review_url"))
+        await SettingRepository(self.db).upsert(
+            self.SETTINGS_KEY, current, "WhatsApp settings (Google review URL)", updated_by=actor_id
+        )
+        return current
+
+    # ------------------------------------------------------------------
+    # Template catalogue (Admin → WhatsApp → Templates → Submit)
+    # ------------------------------------------------------------------
+
+    async def template_catalogue(self) -> list[dict]:
+        """Every current definition with what Meta has for it and what
+        Submit would send now."""
+        out = []
+        review_url = (await self.get_settings()).get("google_review_url")
+        for d in CURRENT_TEMPLATE_DEFS:
+            plan = await _submission_plan(self.db, d)
+            family = await _family_rows(self.db, d["name"])
+            newest = family[0] if family else None
+            out.append({
+                "key": template_key(d["name"]),
+                "name": d["name"],
+                "live_name": newest["name"] if newest else None,
+                "status": (newest or {}).get("status") or "NOT_SUBMITTED",
+                "meta_category": (newest or {}).get("category"),
+                "rejected_reason": (newest or {}).get("rejected_reason"),
+                "can_submit": plan["action"] == "submit",
+                "submit_name": plan["name"] if plan["action"] == "submit" else None,
+                "category": d["category"],
+                "body": d["body"],
+                "examples": d["examples"],
+                "button_text": d.get("button_text"),
+                "button_url": review_url if d.get("button_url") == GOOGLE_REVIEW_URL_SETTING else d.get("button_url"),
+                "events": _events_for(d["name"]),
+                "note": d.get("note") or "",
+            })
+        return out
+
+    async def submit_catalogue_template(self, key: str) -> dict:
+        d = next((d for d in CURRENT_TEMPLATE_DEFS if template_key(d["name"]) == key), None)
+        if not d:
+            raise NotFoundException("No such template in the catalogue")
+        result = await submit_template_def(self.db, d)
+        if result.get("status") in ("ERROR", "SKIPPED"):
+            raise BadRequestException(result.get("note") or "Could not submit the template")
+        return result
 
     # ------------------------------------------------------------------
     # Analytics
@@ -864,116 +1130,269 @@ class WhatsAppCrmService:
             "avg_resolution_hours": round(sum(resolution) / len(resolution), 1) if resolution else None,
         }
 
+
 # ----------------------------------------------------------------------
-# The 9 BLUSSIT operational templates + 1 future marketing draft.
-# Submitted through the normal create_template path; marketing stays a
-# LOCAL DRAFT only (never auto-submitted — consent rules differ).
+# The template catalogue (2026-10-07).
+#
+# CURRENT_TEMPLATE_DEFS is the ONE list bootstrap / "Submit" sends to Meta:
+# every template an EVENT_TEMPLATES entry (or the generic fallback) uses
+# today. Templates replaced by a newer version are listed in
+# SUPERSEDED_TEMPLATE_NAMES and never submitted again — they stay on the
+# WABA (an approved template that's never sent costs nothing).
+#
+# Versioning: a name Meta REJECTED is never resubmitted unchanged (Meta
+# refuses a duplicate name anyway). Submitting a definition whose latest
+# version was rejected uses the NEXT version name (…_v1 rejected → …_v2),
+# and event_template_if_ready picks up whichever version Meta approves.
+# A definition whose copy (param count / meaning) changes must get a new
+# version in code — the old approved one keeps working meanwhile.
+#
+# Founder's rules for the copy: short; headings and buttons in Title Case;
+# car type + service on booking messages; never a code in a Utility body
+# (Meta re-files it as an OTP-like / marketing message); no promo wording
+# in Utility templates (Meta re-files them as MARKETING, which bills more
+# and respects opt-outs — see NotificationService._deliver).
 # ----------------------------------------------------------------------
-BLUSSIT_TEMPLATE_DEFS = [
-    # NOTE: "welcome"-style copy ("Welcome to X!", promo lines, Book Now
-    # buttons, emojis) is auto-filed as MARKETING by Meta's classifier —
-    # blussit_welcome went live that way and stays on the WABA unused.
-    # The utility-safe framing is an account-created confirmation.
-    ("blussit_account_created", "UTILITY", "Hi {{1}}, your Blussit account has been created. Reply here anytime for help with your bookings.", None),
-    ("blussit_booking_confirmed", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_assigned", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}}\n⏰ {{3}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_on_the_way", "UTILITY", "🚗 Captain heading out\n🚗 {{1}}\nCall us for any query.", "Track Booking"),
-    ("blussit_service_completed", "UTILITY", "✅ Service done\n⭐ Rate your wash\nCall us for any query.", "Rate Service"),
-    ("blussit_review_request", "UTILITY", "Hi {{1}} 👋\n\nHow was your BLUSSIT experience?\n\nYour feedback helps us improve.", "Leave a Review"),
-    ("blussit_booking_reminder", "UTILITY", "⏰ Booking reminder\n🚗 {{1}}\n📅 {{2}} · {{3}}\nCall us for any query.", "View Booking"),
-    ("blussit_reschedule_confirmation", "UTILITY", "🔁 Booking rescheduled\n📅 {{1}} · {{2}}\n🚗 {{3}}\nCall us for any query.", "View Booking"),
-    ("blussit_payment_confirmation", "UTILITY", "✅ Payment received\n💰 ₹{{1}}\n🚗 {{2}}\nCall us for any query.", "View Booking"),
-    # Every remaining moment a customer hears from us, so nothing has to
-    # wait for a template review later. Each pairs with an EVENT_TEMPLATES
-    # entry above and a notify(..., wa_event=...) call site.
-    ("blussit_booking_cancelled", "UTILITY", "❌ Booking cancelled\n🚗 {{1}}\nCall us for any query.", "Book Again"),
-    ("blussit_payment_pending", "UTILITY", "💳 Payment pending\n🚗 {{1}}\n⏳ Pay within {{2}} minutes\nCall us for any query.", "Complete Payment"),
-    ("blussit_captain_released", "UTILITY", "🧑‍🔧 Assigning new captain\n🚗 {{1}}\nCall us for any query.", "View Booking"),
-    ("blussit_subscription_activated", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}", "View Plan"),
-    ("blussit_subscription_renewed", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass has renewed.\n\nPlan: {{2}}\nValid till: {{3}}\n\nAuto-pay went through — nothing to do.", "View Plan"),
-    ("blussit_subscription_expiring", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) ends on {{3}} with {{4}} washes left.\n\nBook them before it ends, or renew to keep going.", "Book Now"),
-    ("blussit_subscription_expired", "UTILITY", "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) has ended.\n\nRenew any time to keep your car shining.", "Renew Pass"),
+SITE = "https://blussit.com"
+BOOKING_LINK = f"{SITE}/app/bookings/{{{{1}}}}"  # "…/app/bookings/{{1}}", filled with the booking id
+
+_BOOKING_EXAMPLE = ["Star Wash", "BK-1042", "12 Oct 2026", "9:00 AM – 12:00 PM", "Hatchback"]
+
+
+def _def(name: str, category: str, body: str, examples: list[str], button_text: str | None = None,
+         button_url: str | None = None, note: str = "") -> dict:
+    return {"name": name, "category": category, "body": body, "examples": examples,
+            "button_text": button_text, "button_url": button_url, "note": note}
+
+
+# Marker for a button whose URL is an admin setting, resolved at submit time.
+GOOGLE_REVIEW_URL_SETTING = "setting:google_review_url"
+
+CURRENT_TEMPLATE_DEFS: list[dict] = [
+    # -- account ---------------------------------------------------------
+    _def("blussit_account_created", "UTILITY",
+         "Hi {{1}}, your Blussit account has been created. Reply here anytime for help with your bookings.",
+         ["Asha"]),
+    # -- booking lifecycle (button deep-links to the booking) -------------
+    _def("blussit_booking_confirmed_v5", "UTILITY",
+         "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK),
+    _def("blussit_captain_assigned_v5", "UTILITY",
+         "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}} ({{3}})\n📅 {{4}} · {{5}}\n🚙 {{6}}\nCall us for any query.",
+         ["Ravi", *_BOOKING_EXAMPLE], "View Booking", BOOKING_LINK),
+    _def("blussit_captain_on_the_way_v6", "UTILITY",
+         "🚗 Your captain is on the way\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "Track Booking", BOOKING_LINK),
+    _def("blussit_captain_arrived_v1", "UTILITY",
+         "📍 Your captain has arrived\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK),
+    _def("blussit_service_started_v5", "UTILITY",
+         "🧽 Service started\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "Track Booking", BOOKING_LINK),
+    _def("blussit_service_completed_v5", "UTILITY",
+         "✅ Service done\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "Rate Now", BOOKING_LINK),
+    _def("blussit_booking_reminder_v5", "UTILITY",
+         "⏰ Booking reminder\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK, "Pre-slot reminder (NotificationService.send_slot_reminders)"),
+    _def("blussit_reschedule_confirmation_v5", "UTILITY",
+         "🔁 Booking rescheduled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK),
+    _def("blussit_booking_edited_v1", "UTILITY",
+         "✏️ Booking Updated\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\n💰 New Total: ₹{{6}}\nCall us for any query.",
+         [*_BOOKING_EXAMPLE, "499"], "View Booking", BOOKING_LINK),
+    _def("blussit_booking_cancelled_v4", "UTILITY",
+         "❌ Booking cancelled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK),
+    _def("blussit_booking_cancelled_wallet_v1", "UTILITY",
+         "❌ Booking Cancelled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n💳 {{5}}\nCall us for any query.",
+         [*_BOOKING_EXAMPLE[:4], "Cancelled by you. ₹299 added to your wallet."], "View Booking", BOOKING_LINK,
+         "{{5}} = who cancelled + the wallet line"),
+    _def("blussit_captain_released_v5", "UTILITY",
+         "🧑‍🔧 Captain unavailable\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nA replacement captain will be assigned.\nCall us for any query.",
+         _BOOKING_EXAMPLE, "View Booking", BOOKING_LINK),
+    # -- money -----------------------------------------------------------
+    _def("blussit_payment_confirmation_v4", "UTILITY",
+         "✅ Payment received\n🚗 {{1}} ({{2}})\n💰 ₹{{3}}\nCall us for any query.",
+         ["Star Wash", "BK-1042", "299"], "View Booking", BOOKING_LINK),
+    _def("blussit_payment_pending_v4", "UTILITY",
+         "💳 Payment pending\n🚗 {{1}} ({{2}})\n⏳ Pay within {{3}} minutes\nCall us for any query.",
+         ["Star Wash", "BK-1042", "15"], "Complete Payment", BOOKING_LINK),
+    _def("blussit_payment_failed_v1", "UTILITY",
+         "❌ Payment Failed\n🚗 {{1}} ({{2}})\n💰 ₹{{3}}\nYour booking is not paid yet. Tap below to try again.\nCall us for any query.",
+         ["Star Wash", "BK-1042", "299"], "Retry Payment", BOOKING_LINK),
+    _def("blussit_wallet_credited_v1", "UTILITY",
+         "Hi {{1}}, ₹{{2}} has been added to your Blussit wallet.\nReason: {{3}}\nWallet Balance: {{4}}\nCall us for any query.",
+         ["Asha", "299", "Booking BK-1042 cancelled", "₹299"], "View Wallet", f"{SITE}/app/wallet"),
+    _def("blussit_wallet_debited_v1", "UTILITY",
+         "Hi {{1}}, ₹{{2}} has been deducted from your Blussit wallet.\nReason: {{3}}\nWallet Balance: {{4}}\nCall us for any query.",
+         ["Asha", "50", "Late cancellation charge for BK-1042", "-₹50"], "View Wallet", f"{SITE}/app/wallet"),
+    # -- plans -----------------------------------------------------------
+    _def("blussit_subscription_payment_link_v1", "UTILITY",
+         "💳 Pay ₹{{1}} to activate {{2}}:\n{{3}}\nCall us for any query.",
+         ["999", "Monthly Pass (Hatchback)", "https://rzp.io/i/AbC123"]),
+    _def("blussit_subscription_autopay_link_v1", "UTILITY",
+         "🔄 Auto-pay ₹{{1}}/mo to activate {{2}}:\n{{3}}\nCall us for any query.",
+         ["999", "Monthly Pass (Hatchback)", "https://rzp.io/i/AbC123"]),
+    _def("blussit_subscription_activated", "UTILITY",
+         "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass is active.\n\nPlan: {{2}}\nVehicle: {{3}}\nWashes: {{4}}\nValid till: {{5}}",
+         ["Asha", "Monthly Pass", "Hatchback MP09AB1234", "4", "12 Nov 2026"], "View Plan", f"{SITE}/app/subscriptions"),
+    _def("blussit_subscription_renewed", "UTILITY",
+         "Hi {{1}} 👋\n\nYour BLUSSIT monthly pass has renewed.\n\nPlan: {{2}}\nValid till: {{3}}\n\nAuto-pay went through — nothing to do.",
+         ["Asha", "Monthly Pass", "12 Nov 2026"], "View Plan", f"{SITE}/app/subscriptions"),
+    _def("blussit_plan_expiring_v2", "UTILITY",
+         "Hi {{1}}, your {{2}} ends on {{3}} with {{4}} washes left.\nTap below to view your plan.",
+         ["Asha", "Monthly Pass", "12 Nov 2026", "2"], "View Plan", f"{SITE}/app/subscriptions"),
+    # Meta filed this one as MARKETING — still the "N washes left" nudge
+    # (pass_wash_reminder, sent wa_marketing) and plan_expiring's fallback.
+    _def("blussit_subscription_expiring", "UTILITY",
+         "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) ends on {{3}} with {{4}} washes left.\n\nBook them before it ends, or renew to keep going.",
+         ["Asha", "Monthly Pass", "12 Nov 2026", "2"], "Book Now", f"{SITE}/"),
+    _def("blussit_subscription_expired", "UTILITY",
+         "Hi {{1}} 👋\n\nYour BLUSSIT pass ({{2}}) has ended.\n\nRenew any time to keep your car shining.",
+         ["Asha", "Monthly Pass"], "Renew Pass", f"{SITE}/app/subscriptions"),
+    # -- staff -----------------------------------------------------------
+    _def("blussit_manager_new_booking_v2", "UTILITY",
+         "📥 New Booking\nCustomer: {{1}} ({{2}})\nVehicle: {{3}}\nService: {{4}}\nWhen: {{5}}\nArea: {{6}}\nPlease assign a captain.",
+         ["Asha", "9876543210", "Hatchback", "Star Wash", "12 Oct 2026 · 9:00 AM – 12:00 PM", "Vijay Nagar, Indore"],
+         "Open Bookings", f"{SITE}/manager/bookings"),
+    # -- talking to one customer ------------------------------------------
+    _def("blussit_universal_message_v1", "UTILITY",
+         "Hi {{1}},\n{{2}}\n\nReply here if you need any help.\n— Team Blussit",
+         ["Asha", "Your captain will reach about 15 minutes late today because of traffic."],
+         note="Admin/manager writes {{2}} in the CRM (POST /notifications/universal-message)"),
+    # Feedback on a specific completed booking = UTILITY under Meta's rules
+    # (transaction-specific, no offer); if Meta re-files it MARKETING the
+    # sweep respects opt-outs (see send_review_requests).
+    _def("blussit_review_request_google_v1", "UTILITY",
+         "Hi {{1}}, thanks for choosing Blussit for your {{2}}.\nHow did we do? Your Google review helps other car owners find us.\n— Team Blussit",
+         ["Asha", "Star Wash"], "Rate Us On Google", GOOGLE_REVIEW_URL_SETTING,
+         "Button = the admin's Google review URL at submit time (WhatsApp → Settings)"),
+    # -- the generic fallback ("*{{1}}*\n{{2}}") ----------------------------
+    _def("blussit_service_update_v3", "UTILITY", "*{{1}}*\n{{2}}\nCall us for any query.",
+         ["Booking Update", "Your captain will reach by 10:30 AM."],
+         note="Generic fallback — point WHATSAPP_UPDATE_TEMPLATE_NAME at the approved version"),
+    # -- marketing: sent only to customers who haven't opted out ---------
+    _def("blussit_book_now_v1", "MARKETING",
+         "Hi {{1}}, is your car due for a wash? 🚗\nBook a Blussit doorstep wash in a minute — we come to you.",
+         ["Asha"], "Book Now", f"{SITE}/book"),
+    _def("blussit_repeat_booking", "MARKETING",
+         "Hi {{1}} 👋\n\nReady for your next BLUSSIT car wash?\n\nBook a doorstep wash whenever your car needs it.",
+         ["Asha"], "Book Now", f"{SITE}/"),
+    _def("blussit_we_miss_you", "MARKETING",
+         "Hi {{1}} 👋\n\nIt's been a while since your last BLUSSIT wash.\n\nYour car deserves a shine — we'll come to your doorstep whenever suits you.",
+         ["Asha"], "Book Now", f"{SITE}/"),
 ]
 
-# "View Booking" / "Track Booking" on the templates above go to a STATIC
-# "https://blussit.com/" — every one of these buttons opened the plain
-# homepage, never the actual booking (see bootstrap_blussit_templates).
-# A URL button's target can't be edited on an already-APPROVED template —
-# Meta requires a new template for a structural change like this — so
-# these are new, versioned templates with a real per-booking link
-# ("https://blussit.com/app/bookings/{{1}}", filled with the booking id
-# at send time — see NotificationService._send_whatsapp). Same body copy
-# as the originals; EVENT_TEMPLATES below points these 9 events at the
-# new name so send_event_template only ever uses one or the other, not
-# both. Each needs Meta's approval before event_template_if_ready will
-# actually pick it (see bootstrap_blussit_templates); the originals stay
-# on the WABA, approved but unused, until then.
-BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS = [
-    ("blussit_booking_confirmed_v5", "UTILITY", "✅ Booking confirmed\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_assigned_v5", "UTILITY", "🧑‍🔧 Captain assigned\n👤 {{1}}\n🚗 {{2}} ({{3}})\n📅 {{4}} · {{5}}\n🚙 {{6}}\nCall us for any query.", "View Booking"),
-    ("blussit_captain_on_the_way_v6", "UTILITY", "🚗 Your captain is on the way\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Track Booking"),
-    ("blussit_service_started_v5", "UTILITY", "🧽 Service started\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Track Booking"),
-    ("blussit_service_completed_v5", "UTILITY", "✅ Service done\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "Rate Now"),
-    ("blussit_booking_reminder_v5", "UTILITY", "⏰ Booking reminder\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
-    ("blussit_reschedule_confirmation_v5", "UTILITY", "🔁 Booking rescheduled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
-    ("blussit_payment_confirmation_v4", "UTILITY", "✅ Payment received\n🚗 {{1}} ({{2}})\n💰 ₹{{3}}\nCall us for any query.", "View Booking"),
-    ("blussit_booking_cancelled_v4", "UTILITY", "❌ Booking cancelled\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nCall us for any query.", "View Booking"),
-    ("blussit_payment_pending_v4", "UTILITY", "💳 Payment pending\n🚗 {{1}} ({{2}})\n⏳ Pay within {{3}} minutes\nCall us for any query.", "Complete Payment"),
-    ("blussit_captain_released_v5", "UTILITY", "🧑‍🔧 Captain unavailable\n🚗 {{1}} ({{2}})\n📅 {{3}} · {{4}}\n🚙 {{5}}\nA replacement captain will be assigned.\nCall us for any query.", "View Booking"),
-]
+# Replaced by a newer version above — never submitted again (the 10-07
+# investigation found bootstrap still resubmitting them, and resubmitting
+# REJECTED names unchanged, which Meta refuses).
+SUPERSEDED_TEMPLATE_NAMES = (
+    "blussit_booking_confirmed",
+    "blussit_captain_assigned",
+    "blussit_captain_on_the_way",
+    "blussit_service_completed",
+    "blussit_review_request",
+    "blussit_booking_reminder",
+    "blussit_reschedule_confirmation",
+    "blussit_payment_confirmation",
+    "blussit_booking_cancelled",
+    "blussit_payment_pending",
+    "blussit_captain_released",
+    "blussit_manager_new_booking_v1",
+)
 
-# Alert to the MANAGER when a booking comes in: who, phone, what, when,
-# where. No button (nothing to deep-link to) and no customer-facing
-# wording. Until Meta approves it the same facts go out through the generic
-# template (event_template_if_ready falls back), so nothing waits on review.
-BLUSSIT_STAFF_TEMPLATE_DEFS = [
-    ("blussit_manager_new_booking_v1", "UTILITY", "New booking received for your service center.\n\nCustomer: {{1}}, phone {{2}}\nVehicle: {{3}}\nService: {{4}}\nDate and time: {{5}}\nArea: {{6}}\n\nPlease open the booking queue and assign a captain.", None),
-]
+_VERSION = re.compile(r"^(?P<base>.+?)_v(?P<n>\d+)$")
+_LIVE_STATUSES = ("APPROVED", "PENDING", "IN_APPEAL", "PAUSED")
 
-# A manager sold a plan over the phone/at the door — the link IS the message
-# (a Razorpay short_url has no fixed domain suffix, so it can't be a URL
-# BUTTON parameter the way "/app/bookings/{{1}}" is; it goes straight into
-# the body instead, which WhatsApp still renders as a tappable link).
-BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS = [
-    ("blussit_subscription_payment_link_v1", "UTILITY", "💳 Pay ₹{{1}} to activate {{2}}:\n{{3}}\nCall us for any query.", None),
-    ("blussit_subscription_autopay_link_v1", "UTILITY", "🔄 Auto-pay ₹{{1}}/mo to activate {{2}}:\n{{3}}\nCall us for any query.", None),
-]
 
-# The GENERIC fallback template — every notify() call that doesn't (yet)
-# have its own dedicated approved template above goes out through this
-# one, so it has to work for any title/message pair (booking updates,
-# complaint replies, payment/subscription pings, anything). The version
-# actually live on the WABA today (see WHATSAPP_UPDATE_TEMPLATE_NAME in
-# .env, "blussit_service_update") wraps every message in a long fixed
-# preamble/postamble — "You have an update on your Blussit Car Wash
-# service. {{1}}: {{2}}. If anything looks wrong, just reply here and our
-# team will help you right away." — which is what actually made every
-# single notification read as one long paragraph, whatever the title/
-# message text itself said. This trims it to just the two lines that
-# carry real information. Same "can't edit an approved template in
-# place" constraint as the booking-link ones above: submit this, wait for
-# Meta's approval, then point WHATSAPP_UPDATE_TEMPLATE_NAME at
-# "blussit_service_update_v3" and restart — nothing switches over on its
-# own, so the current (longer) template keeps working exactly as today
-# until that's done.
-BLUSSIT_GENERIC_UPDATE_TEMPLATE_DEFS = [
-    ("blussit_service_update_v3", "UTILITY", "*{{1}}*\n{{2}}\nCall us for any query.", None),
-]
+def split_version(name: str) -> tuple[str, int]:
+    """("blussit_booking_edited", 1) for "blussit_booking_edited_v1"; an
+    unversioned name is version 1 of itself."""
+    m = _VERSION.match(name)
+    return (m.group("base"), int(m.group("n"))) if m else (name, 1)
 
-# Marketing templates are SUBMITTED for approval up front too (an approved
-# template that's never sent costs nothing; one that's missing when the
-# founder wants a campaign costs a week). Sending stays gated: approved +
-# not opted out, via NotificationService's wa_marketing path only.
-MARKETING_TEMPLATE_DEFS = [
-    ("blussit_repeat_booking", "MARKETING", "Hi {{1}} 👋\n\nReady for your next BLUSSIT car wash?\n\nBook a doorstep wash whenever your car needs it.", "Book Now"),
-    ("blussit_we_miss_you", "MARKETING", "Hi {{1}} 👋\n\nIt's been a while since your last BLUSSIT wash.\n\nYour car deserves a shine — we'll come to your doorstep whenever suits you.", "Book Now"),
-]
-MARKETING_DRAFTS = MARKETING_TEMPLATE_DEFS  # kept for older callers
+
+def template_key(name: str) -> str:
+    """The catalogue key of a definition: its name without the version."""
+    return split_version(name)[0]
+
+
+def versioned_name(base: str, version: int) -> str:
+    return f"{base}_v{version}"
+
+
+def _events_for(name: str) -> list[str]:
+    return sorted(e for e, n in EVENT_TEMPLATES.items() if n == name) + sorted(
+        e for e, names in EVENT_TEMPLATE_FALLBACKS.items() if name in names
+    )
+
+
+async def _family_rows(db: AsyncIOMotorDatabase, name: str) -> list[dict]:
+    """Rows of every version of `name`'s template at or above its own
+    version, newest version first."""
+    base, version = split_version(name)
+    rows = await db.whatsapp_templates.find({"name": {"$regex": f"^{re.escape(base)}(_v[0-9]+)?$"}}).to_list(length=100)
+    family = [r for r in rows if split_version(r["name"])[0] == base and split_version(r["name"])[1] >= version
+              and (r["name"] == name or _VERSION.match(r["name"]))]
+    return sorted(family, key=lambda r: split_version(r["name"])[1], reverse=True)
+
+
+async def _submission_plan(db: AsyncIOMotorDatabase, d: dict) -> dict:
+    """What submitting definition `d` would do now: "exists" (a live
+    version is approved / in review) or "submit" with the name to use —
+    the definition's own name, or the next version after a rejection."""
+    family = await _family_rows(db, d["name"])
+    live = next((r for r in family if r.get("status") in _LIVE_STATUSES and not r.get("disabled")), None)
+    if live:
+        return {"action": "exists", "name": live["name"], "status": live.get("status")}
+    if not family:
+        return {"action": "submit", "name": d["name"], "status": "NOT_SUBMITTED"}
+    newest = family[0]
+    base, version = split_version(newest["name"])
+    if newest.get("status") in (None, "", "DRAFT") and newest["name"] == d["name"]:
+        return {"action": "submit", "name": d["name"], "status": "NOT_SUBMITTED"}
+    return {
+        "action": "submit", "name": versioned_name(base, version + 1), "status": newest.get("status") or "UNKNOWN",
+        "previous": newest["name"], "previous_reason": newest.get("rejected_reason"),
+    }
+
+
+async def _resolve_button_url(db: AsyncIOMotorDatabase, d: dict) -> str | None:
+    if d.get("button_url") != GOOGLE_REVIEW_URL_SETTING:
+        return d.get("button_url")
+    return (await WhatsAppCrmService(db).get_settings()).get("google_review_url") or None
+
+
+async def submit_template_def(db: AsyncIOMotorDatabase, d: dict) -> dict:
+    """Submit one catalogue definition (or report why not). Never raises
+    for a Meta refusal — the result says ERROR with Meta's message."""
+    plan = await _submission_plan(db, d)
+    if plan["action"] == "exists":
+        return {"name": plan["name"], "status": plan["status"], "note": "already exists"}
+    button_url = await _resolve_button_url(db, d)
+    if d.get("button_text") and not button_url:
+        return {"name": plan["name"], "status": "SKIPPED",
+                "note": "Set the Google review URL first (WhatsApp → Settings) — it is the template's button"}
+    try:
+        result = await WhatsAppCrmService(db).create_template(
+            plan["name"], d["category"], "en_US", d["body"], d.get("button_text"), button_url, examples=d["examples"],
+        )
+    except BadRequestException as exc:
+        return {"name": plan["name"], "status": "ERROR", "note": exc.message}
+    note = d.get("note") or ""
+    if plan.get("previous"):
+        reason = plan.get("previous_reason") or plan["status"]
+        note = (f"{plan['previous']} was {plan['status']} ({reason}) — submitted as {plan['name']}. "
+                "If the reason was the wording, change the copy in code first. " + note).strip()
+    result["note"] = note or "submitted"
+    return result
 
 
 async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
-    """Submits the operational templates that don't exist yet; records the
-    marketing draft locally WITHOUT submitting it."""
+    """Submits every CURRENT template that isn't approved / in review yet
+    (rejected ones as their next version) plus the OTP template. Superseded
+    legacy templates are never submitted."""
     crm = WhatsAppCrmService(db)
     await crm.sync_templates()
     results = []
@@ -988,69 +1407,6 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
             results.append(r)
         except BadRequestException as exc:
             results.append({"name": otp_name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in BLUSSIT_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/")
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in BLUSSIT_BOOKING_LINK_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/app/bookings/{{1}}")
-            r["note"] = "deep-links to the specific booking once approved — see EVENT_TEMPLATES"
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in BLUSSIT_STAFF_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, None)
-            r["note"] = "manager new-booking alert — EVENT_TEMPLATES picks it up once approved"
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in BLUSSIT_SUBSCRIPTION_LINK_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, None)
-            r["note"] = "manager-sold plan link — EVENT_TEMPLATES picks it up once approved"
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in BLUSSIT_GENERIC_UPDATE_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, None)
-            r["note"] = "shorter replacement for the generic fallback — point WHATSAPP_UPDATE_TEMPLATE_NAME at this once approved"
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
-    for name, category, body, button in MARKETING_TEMPLATE_DEFS:
-        existing = await db.whatsapp_templates.find_one({"name": name})
-        if existing and existing.get("status") in ("APPROVED", "PENDING"):
-            results.append({"name": name, "status": existing["status"], "note": "already exists"})
-            continue
-        try:
-            r = await crm.create_template(name, category, "en_US", body, button, "https://blussit.com/")
-            r["note"] = "marketing — sent only via this template, to customers who haven't opted out"
-            results.append(r)
-        except BadRequestException as exc:
-            results.append({"name": name, "status": "ERROR", "note": exc.message})
+    for d in CURRENT_TEMPLATE_DEFS:
+        results.append(await submit_template_def(db, d))
     return results

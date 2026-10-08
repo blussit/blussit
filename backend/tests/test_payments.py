@@ -5,6 +5,7 @@ paid-exactly-once claim, server-side amount resolution, and the
 online-only subscription rule.
 """
 import itertools
+from unittest.mock import ANY
 
 import pytest
 from bson import ObjectId
@@ -41,17 +42,29 @@ class _StubLinks:
         return {"id": link_id, "status": self.status, "payments": [{"payment_id": "pay_linkpay"}]}
 
 
+class _StubPayments:
+    """verify asks Razorpay what the signed payment actually is (PAY-09):
+    here it is always a captured payment for the order being verified, for
+    its exact amount (mock.ANY matches the order id / amount checked)."""
+
+    def fetch(self, payment_id):
+        return {"id": payment_id, "status": "captured", "order_id": ANY, "amount": ANY, "currency": "INR"}
+
+
 class _StubClient:
     order = _StubOrders()
+    payment = _StubPayments()
 
     def __init__(self):
         self.payment_link = _StubLinks()
 
 
-async def _seed_booking(db, customer_id, *, method="online", status="pending", total=349.0):
+async def _seed_booking(db, customer_id, *, method="online", status="pending", total=349.0, center="ctr-pay"):
+    # `center`: a captain collecting must belong to the booking's center
+    # (CAP-01), so captain tests pass the captain's real center.
     res = await db.bookings.insert_one({
         "booking_number": f"BK-PAYT-{str(ObjectId())[-6:]}",
-        "customer_id": customer_id, "service_center_id": "ctr-pay", "status": "pending",
+        "customer_id": customer_id, "service_center_id": center, "status": "pending",
         "payment_method": method, "payment_status": status, "total_amount": total,
         "scheduled_date": now_ist().replace(tzinfo=None), "scheduled_slot": "09:00-12:00",
         "is_deleted": False, "created_at": now_ist(),
@@ -172,14 +185,23 @@ async def test_whatsapp_payment_link_callback_and_sweep(db, cleanup, monkeypatch
     assert (await db.bookings.find_one({"_id": ObjectId(booking_id)}))["payment_status"] == "paid"
 
     # The sweep finding the same link paid must NOT double-notify.
+    # (2026-10-07, NTF-01/02: the receipt is sent once by the settle path
+    # itself — whichever of callback / webhook / sweep won the claim — so it
+    # is counted on the customer's notifications, not via a sweep callback,
+    # which is no longer called.)
+    cleanup.append(("notifications", {"user_id": customer_id}))
     stub.payment_link.status = "paid"
     notified = []
 
     async def notify(order_doc):
         notified.append(order_doc["booking_number"])
 
+    async def receipts():
+        return await db.notifications.count_documents({"user_id": customer_id, "title": "Payment Received"})
+
+    assert await receipts() == 1  # the callback's own receipt
     settled = await svc.sync_pending_links(notify)
-    assert settled == 0 and notified == []
+    assert settled == 0 and notified == [] and await receipts() == 1
 
     # A second, still-pending link settles VIA the sweep (dev path: no
     # public callback URL) and notifies exactly once.
@@ -188,7 +210,7 @@ async def test_whatsapp_payment_link_callback_and_sweep(db, cleanup, monkeypatch
     booking2 = await db.bookings.find_one({"_id": ObjectId(booking2_id)})
     await svc.create_payment_link(booking2, contact_phone=None, name=None)
     settled = await svc.sync_pending_links(notify)
-    assert settled == 1 and len(notified) == 1
+    assert settled == 1 and await receipts() == 2
     assert (await db.bookings.find_one({"_id": ObjectId(booking2_id)}))["payment_status"] == "paid"
 
 
@@ -213,7 +235,7 @@ async def test_captain_doorstep_settlement(db, cleanup, monkeypatch):
     monkeypatch.setattr(payment_service, "_razorpay_client", lambda: stub)
     svc = PaymentService(db)
 
-    booking_id = await _seed_booking(db, customer_id, method="cash")
+    booking_id = await _seed_booking(db, customer_id, method="cash", center=center_id)
     cleanup.append(("bookings", {"_id": ObjectId(booking_id)}))
     await db.bookings.update_one({"_id": ObjectId(booking_id)}, {"$set": {"captain_id": captain_id, "status": "service_started"}})
 
@@ -241,7 +263,7 @@ async def test_captain_doorstep_settlement(db, cleanup, monkeypatch):
         await svc.captain_payment_link(booking_id, captain_id)
 
     # And the pure-cash path on a second booking: completed + unpaid → paid-by-cash.
-    b2 = await _seed_booking(db, customer_id, method="cash")
+    b2 = await _seed_booking(db, customer_id, method="cash", center=center_id)
     cleanup.append(("bookings", {"_id": ObjectId(b2)}))
     await db.bookings.update_one({"_id": ObjectId(b2)}, {"$set": {"captain_id": captain_id, "status": "completed"}})
     result = await svc.captain_collect_cash(b2, captain_id)
@@ -253,38 +275,46 @@ async def test_captain_doorstep_settlement(db, cleanup, monkeypatch):
 
 async def test_hack_paying_a_cancelled_or_drifted_booking_is_parked(db, cleanup, monkeypatch):
     """Money landing on a booking that changed since checkout must NEVER
-    silently apply: cancelled-meanwhile and total-drift both park the
-    order as needs-attention (admin queue) and leave the booking alone."""
+    silently mark it paid. Founder 2026-10-07 (wallet model, spec 1.5):
+    instead of parking the order for a refund, every rupee the booking no
+    longer owes is credited to the customer's wallet — never lost, never
+    applied to a cancelled booking, never more than what is due."""
+    from app.services.customer_wallet_service import CustomerWalletService
+
     customer_id = await make_customer(db)
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     cleanup.append(("payment_orders", {"customer_id": customer_id}))
+    cleanup.append(("customer_wallets", {"customer_id": customer_id}))
+    cleanup.append(("customer_wallet_ledger", {"customer_id": customer_id}))
     monkeypatch.setattr(payment_service, "_razorpay_client", lambda: _StubClient())
     svc = PaymentService(db)
+    wallet = CustomerWalletService(db)
 
-    # Case 1: cancelled between order and verify.
+    # Case 1: cancelled between order and verify — the payment is wallet credit.
     b1 = await _seed_booking(db, customer_id)
     cleanup.append(("bookings", {"_id": ObjectId(b1)}))
     order1 = await svc.create_order(customer_id, CreateOrderRequest(purpose="booking", booking_id=b1))
     await db.bookings.update_one({"_id": ObjectId(b1)}, {"$set": {"status": "cancelled"}})
     sig1 = _expected_signature(order1["order_id"], "pay_c1")
-    with pytest.raises(BadRequestException, match="flagged"):
-        await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order1["order_id"], razorpay_payment_id="pay_c1", razorpay_signature=sig1))
+    await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order1["order_id"], razorpay_payment_id="pay_c1", razorpay_signature=sig1))
     fresh1 = await db.bookings.find_one({"_id": ObjectId(b1)})
     assert fresh1["payment_status"] == "pending"  # a cancelled booking never becomes "paid"
-    parked1 = await db.payment_orders.find_one({"razorpay_order_id": order1["order_id"]})
-    assert parked1["status"] == "paid_attention" and "cancelled" in parked1["attention_reason"]
+    assert await wallet.balance(customer_id) == order1["amount"] / 100
+    assert (await db.payment_orders.find_one({"razorpay_order_id": order1["order_id"]}))["status"] == "paid"
 
-    # Case 2: total changed between order and verify.
+    # Case 2: total raised between order and verify — applied as a part payment.
     b2 = await _seed_booking(db, customer_id)
     cleanup.append(("bookings", {"_id": ObjectId(b2)}))
     order2 = await svc.create_order(customer_id, CreateOrderRequest(purpose="booking", booking_id=b2))
     await db.bookings.update_one({"_id": ObjectId(b2)}, {"$set": {"total_amount": 999.0}})
     sig2 = _expected_signature(order2["order_id"], "pay_c2")
-    with pytest.raises(BadRequestException):
-        await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order2["order_id"], razorpay_payment_id="pay_c2", razorpay_signature=sig2))
-    assert (await db.bookings.find_one({"_id": ObjectId(b2)}))["payment_status"] == "pending"
+    await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order2["order_id"], razorpay_payment_id="pay_c2", razorpay_signature=sig2))
+    fresh2 = await db.bookings.find_one({"_id": ObjectId(b2)})
+    assert fresh2["payment_status"] == "partially_paid" and fresh2["amount_paid"] == order2["amount"] / 100
+    assert fresh2["amount_due"] == round(999.0 - order2["amount"] / 100, 2)
 
-    # Case 3: online payment races the captain's cash tap — second settle parks.
+    # Case 3: online payment races the captain's cash tap — cash stands, the
+    # online money is the customer's wallet credit.
     center_id = await make_service_center(db)
     cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
     from tests.factories import make_captain
@@ -292,24 +322,29 @@ async def test_hack_paying_a_cancelled_or_drifted_booking_is_parked(db, cleanup,
     captain_id = await make_captain(db, center_id)
     cleanup.append(("users", {"_id": ObjectId(captain_id)}))
     cleanup.append(("captain_wallets", {"captain_id": captain_id}))
-    b3 = await _seed_booking(db, customer_id)
+    b3 = await _seed_booking(db, customer_id, center=center_id)
     cleanup.append(("bookings", {"_id": ObjectId(b3)}))
     await db.bookings.update_one({"_id": ObjectId(b3)}, {"$set": {"captain_id": captain_id, "status": "completed"}})
     order3 = await svc.create_order(customer_id, CreateOrderRequest(purpose="booking", booking_id=b3))
+    before = await wallet.balance(customer_id)
     await svc.captain_collect_cash(b3, captain_id)  # cash lands first
     sig3 = _expected_signature(order3["order_id"], "pay_c3")
-    with pytest.raises(BadRequestException):
-        await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order3["order_id"], razorpay_payment_id="pay_c3", razorpay_signature=sig3))
+    await svc.verify_payment(customer_id, VerifyPaymentRequest(razorpay_order_id=order3["order_id"], razorpay_payment_id="pay_c3", razorpay_signature=sig3))
     fresh3 = await db.bookings.find_one({"_id": ObjectId(b3)})
     assert fresh3["payment_method"] == "cash"  # the first settlement stands untouched
-    parked3 = await db.payment_orders.find_one({"razorpay_order_id": order3["order_id"]})
-    assert parked3["status"] == "paid_attention"
+    assert await wallet.balance(customer_id) == before + order3["amount"] / 100
 
 
 async def test_hack_link_paid_after_cancellation_never_pings_customer(db, cleanup, monkeypatch):
+    """A link paid after its booking was cancelled: no "payment received ✅"
+    for the booking — the money is the customer's wallet credit (spec 1.5)."""
+    from app.services.customer_wallet_service import CustomerWalletService
+
     customer_id = await make_customer(db)
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     cleanup.append(("payment_orders", {"customer_id": customer_id}))
+    cleanup.append(("customer_wallets", {"customer_id": customer_id}))
+    cleanup.append(("customer_wallet_ledger", {"customer_id": customer_id}))
     stub = _StubClient()
     monkeypatch.setattr(payment_service, "_razorpay_client", lambda: stub)
     svc = PaymentService(db)
@@ -317,7 +352,7 @@ async def test_hack_link_paid_after_cancellation_never_pings_customer(db, cleanu
     booking_id = await _seed_booking(db, customer_id)
     cleanup.append(("bookings", {"_id": ObjectId(booking_id)}))
     booking = await db.bookings.find_one({"_id": ObjectId(booking_id)})
-    await svc.create_payment_link(booking, contact_phone=None, name=None)
+    link = await svc.create_payment_link(booking, contact_phone=None, name=None)
     await db.bookings.update_one({"_id": ObjectId(booking_id)}, {"$set": {"status": "cancelled"}})
 
     stub.payment_link.status = "paid"
@@ -326,10 +361,11 @@ async def test_hack_link_paid_after_cancellation_never_pings_customer(db, cleanu
     async def notify(order_doc):
         notified.append(order_doc)
 
-    settled = await svc.sync_pending_links(notify)
-    assert settled == 0 and notified == []  # no "payment received ✅" for a parked case
+    await svc.sync_pending_links(notify)
+    assert notified == []
     assert (await db.bookings.find_one({"_id": ObjectId(booking_id)}))["payment_status"] == "pending"
-    assert await db.payment_orders.count_documents({"booking_id": booking_id, "status": "paid_attention"}) == 1
+    assert await CustomerWalletService(db).balance(customer_id) == link["amount_paise"] / 100  # link amount: rupees, paise named
+    assert await db.notifications.count_documents({"user_id": customer_id, "title": "Payment Received"}) == 0
 
 
 async def test_hack_subscription_plan_vanishing_after_payment_is_parked(db, cleanup, monkeypatch):

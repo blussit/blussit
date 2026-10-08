@@ -8,11 +8,11 @@ class InventoryRepository(BaseRepository):
 
     async def list_for_center(self, service_center_id: str, page: int, page_size: int, low_stock_only: bool = False):
         filters: dict = {"service_center_id": service_center_id}
-        items, total = await self.find_many(filters, page=page, page_size=page_size)
         if low_stock_only:
-            items = [i for i in items if i["quantity_available"] <= i.get("reorder_level", 0)]
-            total = len(items)
-        return items, total
+            # In the query, not after it: filtering one fetched page in
+            # Python missed every low item past page 1 and mis-counted.
+            filters["$expr"] = {"$lte": ["$quantity_available", {"$ifNull": ["$reorder_level", 0]}]}
+        return await self.find_many(filters, page=page, page_size=page_size)
 
     async def adjust_quantity(self, item_id: str, delta: float) -> dict | None:
         update: dict = {"$inc": {"quantity_available": delta}, "$set": {"updated_at": datetime.now(timezone.utc)}}

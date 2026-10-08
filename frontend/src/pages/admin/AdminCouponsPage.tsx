@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { adminCouponApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
+import { Pager } from "../../components/shared/ListControls";
 import { getErrorMessage } from "../../lib/api-client";
+import { format } from "../../lib/date";
 import type { Coupon } from "../../types";
 
 const emptyForm = {
@@ -23,7 +26,13 @@ const emptyForm = {
 export default function AdminCouponsPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
-  const { data, isLoading } = useQuery({ queryKey: ["admin-coupons"], queryFn: () => adminCouponApi.list({ page: 1, page_size: 30 }) });
+  const { push: pushToast } = useToast();
+  const [page, setPage] = useState(1);
+  const { data, isLoading, isFetching, error: listError, refetch } = useQuery({
+    queryKey: ["admin-coupons", page],
+    queryFn: () => adminCouponApi.list({ page, page_size: 30 }),
+    placeholderData: keepPreviousData,
+  });
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
@@ -64,7 +73,8 @@ export default function AdminCouponsPage() {
   };
 
   const buildPayload = () => ({
-    description: form.description || undefined,
+    // null (not omitted) so a cleared description actually clears.
+    description: form.description.trim() || null,
     offer_kind: form.offer_kind,
     coupon_type: form.coupon_type,
     value: form.offer_kind === "free_addon_with_service" ? 0 : form.value,
@@ -100,12 +110,20 @@ export default function AdminCouponsPage() {
 
   const toggleActiveMutation = useMutation({
     mutationFn: (c: Coupon) => adminCouponApi.update(c.id, { is_active: !c.is_active }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-coupons"] }),
+    onSuccess: (c) => {
+      queryClient.invalidateQueries({ queryKey: ["admin-coupons"] });
+      pushToast({ tone: "success", title: c.is_active ? `${c.code} is live` : `${c.code} switched off` });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => adminCouponApi.remove(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-coupons"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-coupons"] });
+      pushToast({ tone: "success", title: "Coupon deleted" });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
   return (
@@ -116,38 +134,49 @@ export default function AdminCouponsPage() {
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Create promotional discounts and offer codes.</p>
         </div>
         <Button onClick={openCreate}>
-          <Plus className="h-4 w-4" /> Add coupon
+          <Plus className="h-4 w-4" /> Add Coupon
         </Button>
       </div>
 
       <DataTable<Coupon>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle="No coupons yet"
+        error={listError}
+        onRetry={() => void refetch()}
+        emptyTitle="No Coupons Yet"
         columns={[
           { header: "Code", accessor: (c) => <span className="font-mono-num font-semibold">{c.code}</span> },
-          { header: "Offer", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Free add-on" : "Standard") },
+          { header: "Offer", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Free Add-On" : "Standard") },
           { header: "Type", accessor: (c) => <span className="capitalize">{c.coupon_type}</span> },
           { header: "Value", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Configured" : c.coupon_type === "percentage" ? `${c.value}%` : `₹${c.value}`) },
-          { header: "Min order", accessor: (c) => `₹${c.min_order_value}` },
-          { header: "Valid until", accessor: (c) => new Date(c.valid_until).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) },
+          { header: "Min Order", accessor: (c) => `₹${c.min_order_value}` },
+          { header: "Valid Until", accessor: (c) => format(c.valid_until) },
           { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
           {
             header: "",
             accessor: (c) => (
               <div className="flex gap-2">
-                <Button size="sm" variant="ghost" onClick={() => openEdit(c)}>
+                <Button size="sm" variant="ghost" aria-label={`Edit ${c.code}`} title="Edit" onClick={() => openEdit(c)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(c)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={c.is_active ? `Switch ${c.code} off` : `Switch ${c.code} on`}
+                  title={c.is_active ? "Switch off" : "Switch on"}
+                  isLoading={toggleActiveMutation.isPending && toggleActiveMutation.variables?.id === c.id}
+                  onClick={() => toggleActiveMutation.mutate(c)}
+                >
                   <Power className={`h-3.5 w-3.5 ${c.is_active ? "" : "opacity-40"}`} />
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
-                  isLoading={deleteMutation.isPending}
+                  aria-label={`Delete ${c.code}`}
+                  title="Delete"
+                  isLoading={deleteMutation.isPending && deleteMutation.variables === c.id}
                   onClick={async () => {
-                    if (await confirm({ title: `Delete coupon "${c.code}"?`, tone: "danger" })) deleteMutation.mutate(c.id);
+                    if (await confirm({ title: `Delete Coupon "${c.code}"?`, tone: "danger" })) deleteMutation.mutate(c.id);
                   }}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-[var(--color-error)]" />
@@ -157,8 +186,9 @@ export default function AdminCouponsPage() {
           },
         ]}
       />
+      {data?.meta && <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />}
 
-      <Modal open={open} onClose={closeModal} title={editingId ? `Edit ${form.code}` : "Add coupon"}>
+      <Modal open={open} onClose={closeModal} title={editingId ? `Edit ${form.code}` : "Add Coupon"}>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -169,7 +199,7 @@ export default function AdminCouponsPage() {
           }}
         >
           <Input
-            label="Coupon code"
+            label="Coupon Code"
             value={form.code}
             onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
             disabled={!!editingId}
@@ -177,20 +207,20 @@ export default function AdminCouponsPage() {
             required
           />
           <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional admin note" />
-          <Select label="Offer type" value={form.offer_kind} onChange={(e) => setForm({ ...form, offer_kind: e.target.value as "standard" | "free_addon_with_service" })}>
-            <option value="standard">Standard discount</option>
-            <option value="free_addon_with_service">Free add-on with selected service</option>
+          <Select label="Offer Type" value={form.offer_kind} onChange={(e) => setForm({ ...form, offer_kind: e.target.value as "standard" | "free_addon_with_service" })}>
+            <option value="standard">Standard Discount</option>
+            <option value="free_addon_with_service">Free Add-On With Selected Service</option>
           </Select>
           {form.offer_kind === "standard" ? (
             <>
-              <Select label="Discount type" value={form.coupon_type} onChange={(e) => setForm({ ...form, coupon_type: e.target.value as "flat" | "percentage" })}>
-                <option value="flat">Flat amount</option>
+              <Select label="Discount Type" value={form.coupon_type} onChange={(e) => setForm({ ...form, coupon_type: e.target.value as "flat" | "percentage" })}>
+                <option value="flat">Flat Amount</option>
                 <option value="percentage">Percentage</option>
               </Select>
               <div className="grid grid-cols-2 gap-3">
                 <Input label="Value" type="number" value={form.value} onChange={(e) => setForm({ ...form, value: Number(e.target.value) })} required />
                 <Input
-                  label="Min order value"
+                  label="Min Order Value"
                   type="number"
                   value={form.min_order_value}
                   onChange={(e) => setForm({ ...form, min_order_value: Number(e.target.value) })}
@@ -200,14 +230,14 @@ export default function AdminCouponsPage() {
           ) : (
             <div className="space-y-3 rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
               <Input
-                label="Eligible service keywords"
+                label="Eligible Service Keywords"
                 value={form.eligible_service_keywords}
                 onChange={(e) => setForm({ ...form, eligible_service_keywords: e.target.value })}
                 placeholder="star, deep cleaning"
                 required
               />
               <Input
-                label="Free add-on keywords"
+                label="Free Add-On Keywords"
                 value={form.free_addon_keywords}
                 onChange={(e) => setForm({ ...form, free_addon_keywords: e.target.value })}
                 placeholder="extra bike wash"
@@ -216,12 +246,12 @@ export default function AdminCouponsPage() {
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Valid from" type="date" value={form.valid_from} onChange={(e) => setForm({ ...form, valid_from: e.target.value })} required />
-            <Input label="Valid until" type="date" value={form.valid_until} onChange={(e) => setForm({ ...form, valid_until: e.target.value })} required />
+            <Input label="Valid From" type="date" value={form.valid_from} onChange={(e) => setForm({ ...form, valid_from: e.target.value })} required />
+            <Input label="Valid Until" type="date" value={form.valid_until} onChange={(e) => setForm({ ...form, valid_until: e.target.value })} required />
           </div>
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={editingId ? updateMutation.isPending : createMutation.isPending}>
-            {editingId ? "Save changes" : "Add coupon"}
+            {editingId ? "Save Changes" : "Add Coupon"}
           </Button>
         </form>
       </Modal>

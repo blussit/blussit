@@ -6,6 +6,7 @@ content (FAQs, testimonials) so the app is demo-ready immediately.
 Run with:  python -m app.seed
 """
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
@@ -16,30 +17,46 @@ from app.core.security import hash_password
 from app.utils.text import slugify
 
 
+# Demo staff logins (admin / center manager / captain). The defaults are
+# LOCAL-ONLY: they sit in this public repo, so staff accounts are created
+# only when the target database is on this machine (settings.mongo_is_local)
+# — never on Atlas/production, where anyone who read the repo could log in
+# with them. SEED_ADMIN_PASSWORD / SEED_MANAGER_PASSWORD /
+# SEED_CAPTAIN_PASSWORD override them. The catalogue below seeds anywhere.
+_DEV_STAFF_PASSWORDS = {"admin": "Admin@12345", "manager": "Manager@12345", "captain": "Captain@12345"}
+
+
+def _staff_password(role: str) -> str:
+    return os.environ.get(f"SEED_{role.upper()}_PASSWORD") or _DEV_STAFF_PASSWORDS[role]
+
+
 async def seed() -> None:
     await connect_to_mongo()
     db = mongodb.db
 
     print("Seeding database:", settings.MONGO_DB_NAME)
+    staff_allowed = settings.mongo_is_local
+    if not staff_allowed:
+        print("Not a local database: demo staff accounts are NOT created (catalogue data only).")
 
     # --- Super Admin -------------------------------------------------
     admin_email = "admin@doorstepvehiclecare.in"
     existing_admin = await db.users.find_one({"email": admin_email})
-    if not existing_admin:
+    if not existing_admin and staff_allowed:
         await db.users.insert_one(
             {
                 "full_name": "Platform Super Admin",
                 "email": admin_email,
                 "phone": "9999999999",
-                "password_hash": hash_password("Admin@12345"),
+                "password_hash": hash_password(_staff_password("admin")),
                 "role": "admin",
                 "status": "active",
                 "is_deleted": False,
                 "created_at": datetime.now(timezone.utc),
             }
         )
-        print(f"Created super admin -> {admin_email} / Admin@12345")
-    else:
+        print(f"Created super admin -> {admin_email} (password: SEED_ADMIN_PASSWORD or the local dev default)")
+    elif existing_admin:
         print("Super admin already exists, skipping.")
 
     # --- Vehicle Types -------------------------------------------------
@@ -219,9 +236,12 @@ async def seed() -> None:
                 "manager_id": None,
                 "contact_phone": "9999900000",
                 "contact_email": "indore@doorstepvehiclecare.in",
-                "working_hours_start": "08:00",
-                "working_hours_end": "20:00",
-                # 3-hour admin slots (08-11, 11-14, 14-17, 17-20), 50/day
+                # The real opening hours, 7:00 AM – 7:00 PM (founder,
+                # 2026-10-07) — only for a NEW seeded center; an existing
+                # center's stored hours are never touched here.
+                "working_hours_start": "07:00",
+                "working_hours_end": "19:00",
+                # 3-hour admin slots (07-10, 10-13, 13-16, 16-19), 50/day
                 # split evenly across them by default — see
                 # app/utils/slots.py / BookingService._reserve_slot_capacity.
                 "slot_duration_minutes": 180,
@@ -233,13 +253,16 @@ async def seed() -> None:
         )
         center_id = str(result.inserted_id)
 
+    if not existing_center and not staff_allowed:
+        print("Created service center (no demo manager/captain — not a local database).")
+    elif not existing_center:
         manager_email = "manager.indore@doorstepvehiclecare.in"
         manager_result = await db.users.insert_one(
             {
                 "full_name": "Indore Hub Manager",
                 "email": manager_email,
                 "phone": "9999911111",
-                "password_hash": hash_password("Manager@12345"),
+                "password_hash": hash_password(_staff_password("manager")),
                 "role": "manager",
                 "status": "active",
                 "service_center_id": center_id,
@@ -248,7 +271,7 @@ async def seed() -> None:
             }
         )
         await db.service_centers.update_one({"_id": result.inserted_id}, {"$set": {"manager_id": str(manager_result.inserted_id)}})
-        print(f"Created service center + manager -> {manager_email} / Manager@12345")
+        print(f"Created service center + manager -> {manager_email} (password: SEED_MANAGER_PASSWORD or the local dev default)")
 
         captain_email = "captain.indore@doorstepvehiclecare.in"
         captain_result = await db.users.insert_one(
@@ -256,7 +279,7 @@ async def seed() -> None:
                 "full_name": "Rahul Verma",
                 "email": captain_email,
                 "phone": "9999922222",
-                "password_hash": hash_password("Captain@12345"),
+                "password_hash": hash_password(_staff_password("captain")),
                 "role": "captain",
                 "status": "active",
                 "service_center_id": center_id,
@@ -268,7 +291,7 @@ async def seed() -> None:
         await db.captain_wallets.insert_one(
             {"captain_id": captain_id, "balance": 200.0, "minimum_balance": 50.0, "is_deleted": False}
         )
-        print(f"Created captain -> {captain_email} / Captain@12345 (wallet seeded with ₹200)")
+        print(f"Created captain -> {captain_email} (password: SEED_CAPTAIN_PASSWORD or the local dev default; wallet seeded with ₹200)")
 
     # --- Pricing configuration --------------------------------------------
     existing_pricing = await db.settings.find_one({"key": "pricing_config"})

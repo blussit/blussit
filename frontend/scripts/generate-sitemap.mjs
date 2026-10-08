@@ -12,10 +12,13 @@ import seoConfig from "../src/seo/pages.json" with { type: "json" };
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outFile = path.join(__dirname, "..", "public", "sitemap.xml");
 
+const today = new Date().toISOString().slice(0, 10);
+
 const urls = seoConfig.pages
   .map(
     (p) => `  <url>
     <loc>${seoConfig.siteUrl}${p.path}</loc>
+    <lastmod>${today}</lastmod>
     <changefreq>${p.changefreq}</changefreq>
     <priority>${p.priority}</priority>
   </url>`

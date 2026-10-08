@@ -36,8 +36,8 @@ export class ErrorBoundary extends Component<{ children: ReactNode; resetKey?: s
   render() {
     if (!this.state.hasError) return this.props.children;
     return (
-      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-[var(--color-bg-primary)] p-6 text-center">
-        <p className="text-lg font-bold text-[var(--color-text-primary)]">Something went wrong</p>
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-white p-6 text-center">
+        <p className="text-lg font-bold text-[var(--color-text-primary)]">Something Went Wrong</p>
         <p className="max-w-sm text-sm text-[var(--color-text-secondary)]">
           This page hit an unexpected error. Nothing you did caused this — try reloading, or head back to the homepage.
         </p>
@@ -47,16 +47,16 @@ export class ErrorBoundary extends Component<{ children: ReactNode; resetKey?: s
             onClick={() => window.location.reload()}
             className="rounded-xl border border-[#D9DDE3] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-primary)] hover:bg-gray-50"
           >
-            Reload page
+            Reload Page
           </button>
           <button
             type="button"
             onClick={() => {
               window.location.href = "/";
             }}
-            className="rounded-xl bg-[#F5B400] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#EAAA00]"
+            className="rounded-xl bg-[#0A66F0] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#0857D0]"
           >
-            Go to homepage
+            Go To Homepage
           </button>
         </div>
       </div>

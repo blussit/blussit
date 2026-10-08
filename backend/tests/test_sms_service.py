@@ -44,7 +44,8 @@ async def test_otp_channel_sms_sends_via_sms_first(db, customer, monkeypatch):
     await AuthService(db).request_phone_verification(customer_id)
     sms = await db.sms_outbox.find_one({"phone": phone})
     otp_doc = await db.otp_requests.find_one({"identifier": phone})
-    assert sms is not None and otp_doc["otp"] in sms["message"]
+    # Sent — but the code itself is never kept in the outbox.
+    assert sms is not None and sms["kind"] == "otp" and otp_doc["otp"] not in sms["message"]
     # WhatsApp untouched — SMS succeeded first.
     assert await db.whatsapp_outbox.count_documents({"phone": phone}) == 0
 
@@ -78,4 +79,4 @@ async def test_sms_service_temp_password_uses_free_text_route(db, cleanup, monke
     ok = await service.send_temp_password("9876500002", "Ab12Cd34Ef")
     assert ok is True
     doc = await db.sms_outbox.find_one({"phone": "9876500002"})
-    assert "Ab12Cd34Ef" in doc["message"]
+    assert doc["kind"] == "temp_password" and "Ab12Cd34Ef" not in doc["message"]

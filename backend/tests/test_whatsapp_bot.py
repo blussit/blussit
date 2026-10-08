@@ -80,12 +80,50 @@ async def last_out(db, phone: str) -> dict:
     return await db.whatsapp_outbox.find_one({"phone": phone}, sort=[("_id", -1)])
 
 
+# Where these suites' customers drop their WhatsApp pin, and the pincode
+# their factory-made saved addresses carry (factories.make_address default).
+BOT_PIN = (22.701, 75.801)
+BOT_PINCODE = "452099"
+
+
+async def park_competing_centers(db, center_id: str) -> list:
+    """Other suites can leave active centers behind on the factory defaults
+    (pin 22.7/75.8, pincode 452099). Either kind would win this suite's
+    nearest-center / pincode lookups by insertion order, so for the length
+    of one test they are switched off — and switched back on by
+    unpark_centers. Only centers that would actually compete are touched:
+    ones covering BOT_PIN or serving BOT_PINCODE."""
+    from app.utils.geo import haversine_km
+
+    parked = []
+    async for c in db.service_centers.find({"is_active": True, "is_deleted": {"$ne": True}, "_id": {"$ne": ObjectId(center_id)}}):
+        loc = c.get("location") or {}
+        covers_pin = loc.get("latitude") is not None and loc.get("longitude") is not None and (
+            haversine_km(BOT_PIN[0], BOT_PIN[1], loc["latitude"], loc["longitude"]) <= loc.get("radius_km", 6.0)
+        )
+        if covers_pin or BOT_PINCODE in (loc.get("service_pincodes") or []):
+            parked.append(c["_id"])
+    if parked:
+        await db.service_centers.update_many({"_id": {"$in": parked}}, {"$set": {"is_active": False}})
+    return parked
+
+
+async def unpark_centers(db, parked: list) -> None:
+    if parked:
+        await db.service_centers.update_many({"_id": {"$in": parked}}, {"$set": {"is_active": True}})
+
+
 async def make_default_hours_center(db) -> str:
     """A brand-new chat has no address yet, so the bot's day/time list is
     the default (oldest active) center's grid until the pin resolves the
     real center. Giving the test center the same hours keeps a slot picked
     from that list valid here — the seed's hours are data, not a constant
-    this suite may assume."""
+    this suite may assume.
+
+    The center sits exactly on BOT_PIN, so the pin resolves to it and not
+    to a center another suite left behind nearby (the shared factory
+    default, 22.7/75.8, is 0.15 km away — a tie with leftovers there was
+    broken by insertion order, so the bot tests failed after other suites)."""
     default = await db.service_centers.find_one({"is_active": True, "is_deleted": {"$ne": True}}, sort=[("_id", 1)])
     return await make_service_center(
         db,
@@ -93,6 +131,8 @@ async def make_default_hours_center(db) -> str:
         working_hours_end=default.get("working_hours_end", "20:00"),
         slot_duration_minutes=default.get("slot_duration_minutes") or 180,
         default_slot_capacity=5,
+        latitude=BOT_PIN[0],
+        longitude=BOT_PIN[1],
     )
 
 
@@ -111,7 +151,9 @@ async def rig(db, cleanup):
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
     cleanup.append(("daily_capacity", {"service_center_id": center_id}))
     cleanup.append(("whatsapp_message_dedup", {"wamid": {"$regex": "^wamid.TEST"}}))
-    return {"db": db, "center_id": center_id, "manager_id": manager_id, "hatchback": hatchback, "foam": foam}
+    parked = await park_competing_centers(db, center_id)
+    yield {"db": db, "center_id": center_id, "manager_id": manager_id, "hatchback": hatchback, "foam": foam}
+    await unpark_centers(db, parked)
 
 
 def _register_wa_cleanup(cleanup, wa_id: str, phone: str):
@@ -182,7 +224,7 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     await bot.handle_webhook(wa_payload(wa_id, reply=f"when:{date_str}|{slot_key}"))
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "location_request"
-    await bot.handle_webhook(wa_payload(wa_id, location=(22.701, 75.801)))
+    await bot.handle_webhook(wa_payload(wa_id, location=BOT_PIN))
     address = await db.addresses.find_one({"owner_id": str(user["_id"])})
     assert address and address["latitude"] == 22.701
     assert address["line1"] == "Shared WhatsApp location"

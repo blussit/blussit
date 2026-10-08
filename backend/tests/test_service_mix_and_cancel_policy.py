@@ -188,36 +188,45 @@ def _payload(rig, star_id, days=2):
 
 
 @pytest.mark.asyncio
-async def test_customer_can_cancel_early_but_not_inside_4h_window(rig, db):
+async def test_customer_can_cancel_early_free_and_late_with_the_tier_charge(rig, db):
+    """Founder rule 2026-10-07 (was: locked inside 4 h): a customer cancels
+    any time until the captain heads out — more than 4 h before the slot
+    free, inside it charged by the policy tier (to the wallet)."""
+    from app.services.customer_wallet_service import CustomerWalletService
+
     bs = BookingService(db)
     star = await _svc(db, "Star Wash")
 
-    # >4h before the slot: fine.
+    # >4h before the slot: fine, free.
     early = await bs.create_booking(rig["customer_id"], _payload(rig, str(star["_id"]), days=2))
     out = await bs.cancel_booking(early["id"], BookingCancelRequest(reason="test"), rig["customer_id"], "customer")
-    assert out["status"] == "cancelled"
+    assert out["status"] == "cancelled" and out["late_cancellation_charge"] is None
 
-    # Same booking shape but with the slot now <4h away: locked for the
-    # customer, still open for the manager (customer calls in).
+    # Same booking shape but with the slot now <4h away: still the
+    # customer's to cancel, now with the 1–4 h charge on their wallet.
     late = await bs.create_booking(rig["customer_id"], _payload(rig, str(star["_id"]), days=3))
     soon = datetime.now(timezone.utc) + timedelta(hours=2)
     await db.bookings.update_one(
         {"_id": ObjectId(late["id"])},
         {"$set": {"slot_start": soon, "slot_end": soon + timedelta(hours=3)}},
     )
-    with pytest.raises(BadRequestException, match="Cancellations close"):
-        await bs.cancel_booking(late["id"], BookingCancelRequest(reason="test"), rig["customer_id"], "customer")
-    manager_id = await make_manager(db, rig["center_id"])
-    result = await bs.cancel_booking(late["id"], BookingCancelRequest(reason="customer called"), manager_id, "manager", rig["center_id"])
-    assert result["status"] == "cancelled"
-    await db.users.delete_one({"_id": ObjectId(manager_id)})
+    before = await CustomerWalletService(db).balance(rig["customer_id"])
+    out = await bs.cancel_booking(late["id"], BookingCancelRequest(reason="test"), rig["customer_id"], "customer")
+    assert out["status"] == "cancelled" and out["late_cancellation_charge"]["amount"] == 50
+    assert await CustomerWalletService(db).balance(rig["customer_id"]) == before - 50
 
 
 @pytest.mark.asyncio
-async def test_customer_cannot_cancel_once_assigned(rig, db):
+async def test_customer_cannot_cancel_once_the_captain_heads_out(rig, db):
+    """The boundary is now the captain heading out (assigned is still the
+    customer's to cancel)."""
     bs = BookingService(db)
     star = await _svc(db, "Star Wash")
     booking = await bs.create_booking(rig["customer_id"], _payload(rig, str(star["_id"]), days=4))
-    await db.bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"status": "assigned"}})
+    await db.bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"status": "captain_on_the_way"}})
     with pytest.raises(BadRequestException, match="captain is already"):
         await bs.cancel_booking(booking["id"], BookingCancelRequest(reason="test"), rig["customer_id"], "customer")
+    assigned = await bs.create_booking(rig["customer_id"], _payload(rig, str(star["_id"]), days=5))
+    await db.bookings.update_one({"_id": ObjectId(assigned["id"])}, {"$set": {"status": "assigned"}})
+    out = await bs.cancel_booking(assigned["id"], BookingCancelRequest(reason="test"), rig["customer_id"], "customer")
+    assert out["status"] == "cancelled"

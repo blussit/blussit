@@ -7,6 +7,8 @@ freezes every request and WebSocket on the instance while it hashes. The
 sync versions remain for seed data and scripts.
 """
 import asyncio
+import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -49,6 +51,24 @@ async def verify_password_async(plain_password: str, hashed_password: str | None
     return await asyncio.to_thread(verify_password, plain_password, hashed_password)
 
 
+_dummy_hash: str | None = None
+
+
+async def verify_password_or_dummy_async(plain_password: str, hashed_password: str | None) -> bool:
+    """verify_password_async that costs one bcrypt check EVEN WHEN there is
+    nothing to check against (no such account, or a password-less one) —
+    against a throwaway hash, always answering False. Login uses it so its
+    response time doesn't reveal which identifiers have accounts (ENUM-1:
+    an unknown one answered in ~18 ms, a real one in ~1 s)."""
+    global _dummy_hash
+    if hashed_password:
+        return await verify_password_async(plain_password, hashed_password)
+    if _dummy_hash is None:
+        _dummy_hash = await hash_password_async(secrets.token_urlsafe(24))
+    await asyncio.to_thread(verify_password, plain_password, _dummy_hash)
+    return False
+
+
 def create_token(subject: str, role: str, token_type: TokenType, extra_claims: dict[str, Any] | None = None) -> str:
     now = datetime.now(timezone.utc)
     if token_type == TokenType.ACCESS:
@@ -73,10 +93,16 @@ def create_access_token(subject: str, role: str, extra_claims: dict[str, Any] | 
     return create_token(subject, role, TokenType.ACCESS, extra_claims)
 
 
-def create_refresh_token(subject: str, role: str, token_version: int = 0) -> str:
+def create_refresh_token(subject: str, role: str, token_version: int = 0, family: str | None = None) -> str:
     # tv lets a password change (or forced logout) invalidate every
     # refresh token issued before it — see AuthService.refresh.
-    return create_token(subject, role, TokenType.REFRESH, {"tv": token_version})
+    # jti makes each refresh token single-use (rotation with reuse
+    # detection); fam ties a login's chain of rotated tokens together so a
+    # replayed one can kill exactly that chain (one device's session).
+    return create_token(
+        subject, role, TokenType.REFRESH,
+        {"tv": token_version, "jti": uuid.uuid4().hex, "fam": family or uuid.uuid4().hex},
+    )
 
 
 def decode_token(token: str) -> dict[str, Any]:

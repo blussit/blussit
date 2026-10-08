@@ -36,9 +36,11 @@ class TestimonialUpdateRequest(BaseModel):
 
 
 class SettingUpsertRequest(BaseModel):
-    key: str
+    """Generic setting write — only whitelisted keys, each value validated
+    against its own schema (SettingService.validated_value, ADM-01)."""
+    key: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     value: dict
-    description: Optional[str] = None
+    description: Optional[str] = Field(None, max_length=300)
 
 
 class ContactMessageCreateRequest(BaseModel):

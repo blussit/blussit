@@ -21,12 +21,14 @@ Design notes, deliberately stated:
   so "vs previous" is always apples to apples.
 """
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException
+from app.services.subscription_service import PLAN_ORDER_PURPOSES, custom_plan_refunds
 from app.utils.timezone import now_ist
 
 _ACTIVE_STATUSES = ["pending", "assigned", "on_the_way", "in_progress", "rescheduled"]
@@ -47,6 +49,44 @@ _DEFAULT_SETTINGS = {
     #   "campaign": str, "spend": float, "leads": int, "customers": int, "revenue": float}]
     "marketing_entries": [],
 }
+
+_MARKETING_TEXT_FIELDS = ("date", "source", "campaign")
+_MARKETING_NUMBER_FIELDS = ("spend", "leads", "customers", "revenue")
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validated_settings(payload: dict) -> dict:
+    """The known keys of a settings update, each checked against the JSON
+    type of its default. Values used to be stored untyped — one
+    {"targets": "oops"} (or a NaN, which JSON bodies may carry) and every
+    later read of the dashboard answered 500 until someone fixed the doc
+    by hand. Unknown keys are dropped, as before."""
+    out: dict = {}
+    for key, default in _DEFAULT_SETTINGS.items():
+        if key not in payload:
+            continue
+        value = payload[key]
+        if isinstance(default, (int, float)):
+            if not _is_number(value):
+                raise BadRequestException(f"{key} must be a number.")
+        elif isinstance(default, dict):
+            if not isinstance(value, dict) or any(not _is_number(v) for k, v in value.items() if k in default):
+                raise BadRequestException(f"{key} must be a set of numbers.")
+            value = {k: v for k, v in value.items() if k in default}
+        elif isinstance(default, list):
+            if not isinstance(value, list) or not all(isinstance(entry, dict) for entry in value):
+                raise BadRequestException(f"{key} must be a list of entries.")
+            for entry in value:
+                if any(entry.get(f) is not None and not isinstance(entry[f], str) for f in _MARKETING_TEXT_FIELDS) or any(
+                    entry.get(f) is not None and not _is_number(entry[f]) for f in _MARKETING_NUMBER_FIELDS
+                ):
+                    raise BadRequestException("Each marketing entry needs text date/source/campaign and numeric spend/leads/customers/revenue.")
+        out[key] = value
+    return out
+
 
 _DAY_MS = 86_400_000
 
@@ -212,10 +252,16 @@ class KpiService:
                 "travel_n": _count_if(has_travel),
                 "service_sum": _sum_if(has_service, "$actual_duration_minutes"),
                 "service_n": _count_if(has_service),
+                # Founder: a manager's discount and a tip both count in the
+                # job's total (so in revenue) and go to nobody's wallet —
+                # shown as their own lines so the admin sees them.
+                "manager_discounts": _sum_if(completed, {"$ifNull": ["$manager_discount", 0]}),
+                "tips": _sum_if(completed, {"$ifNull": ["$tip_amount", 0]}),
             }},
         ])
         keys = ("bookings", "completed", "revenue", "cancelled", "captain_cancelled", "started", "on_time",
-                "subscription_revenue", "subscription_charged", "travel_sum", "travel_n", "service_sum", "service_n")
+                "subscription_revenue", "subscription_charged", "travel_sum", "travel_n", "service_sum", "service_n",
+                "manager_discounts", "tips")
         return {k: row.get(k) or 0 for k in keys}
 
     async def _customers_seen_before(self, customer_ids, before: datetime) -> set:
@@ -270,10 +316,24 @@ class KpiService:
         admin_collections already uses for its own subscriptions figure, so
         this dashboard number and that report never disagree."""
         rows = await self.db.payment_orders.aggregate([
-            {"$match": {"purpose": "subscription", "status": "paid", "created_at": {"$gte": s, "$lt": e}}},
+            {"$match": {"purpose": {"$in": PLAN_ORDER_PURPOSES}, "status": "paid", "created_at": {"$gte": s, "$lt": e}}},
             {"$group": {"_id": None, "amount_paise": {"$sum": "$amount_paise"}}},
         ]).to_list(length=1)
         return _rupees((rows[0]["amount_paise"] if rows else 0) / 100)
+
+    async def _plan_refunds(self, s, e, service_center_id: str | None = None) -> float:
+        """Custom-plan cars refunded to the wallet in the window (PLANS-2) —
+        shown beside the gross plan revenue as `plan_refunds`, with
+        `plan_revenue_net` = plan_revenue − plan_refunds."""
+        return _rupees((await custom_plan_refunds(self.db, s, e, service_center_id))["amount"])
+
+    async def _society_revenue(self, s, e, service_center_id: str | None = None) -> float:
+        """Society plan money in the window — its own line next to booking
+        and monthly-pass revenue (SOC-1): online society payments (paid
+        orders) + society cash (society_payments). See society_revenue."""
+        from app.services.society_service import society_revenue
+
+        return _rupees((await society_revenue(self.db, s, e, service_center_id))["amount"])
 
     async def get_settings(self) -> dict:
         doc = await self.db.business_settings.find_one({"_id": "singleton"})
@@ -283,7 +343,7 @@ class KpiService:
         return merged
 
     async def update_settings(self, payload: dict) -> dict:
-        allowed = {k: payload[k] for k in _DEFAULT_SETTINGS if k in payload}
+        allowed = _validated_settings(payload)
         await self.db.business_settings.update_one(
             {"_id": "singleton"}, {"$set": allowed}, upsert=True
         )
@@ -310,21 +370,38 @@ class KpiService:
             "revenue": _rupees(totals["revenue"]),
             "completion_rate": _pct(totals["completed"], totals["bookings"]),
             "repeat_customer_rate": _pct(split["repeat"], split["customers"]),
+            # Already inside revenue — listed so they're visible.
+            "manager_discounts": _rupees(totals["manager_discounts"]),
+            "tips": _rupees(totals["tips"]),
         }
 
     async def overview(self, s, e, ps, pe) -> dict:
-        cur_b, prev_b, new_cur, new_prev, plan_rev_cur, plan_rev_prev, settings = await asyncio.gather(
+        (
+            cur_b, prev_b, new_cur, new_prev, plan_rev_cur, plan_rev_prev, soc_cur, soc_prev, settings, ref_cur, ref_prev,
+        ) = await asyncio.gather(
             self._overview_block(s, e),
             self._overview_block(ps, pe),
             self.db.users.count_documents({"role": "customer", "created_at": {"$gte": s, "$lt": e}}),
             self.db.users.count_documents({"role": "customer", "created_at": {"$gte": ps, "$lt": pe}}),
             self._plan_revenue(s, e),
             self._plan_revenue(ps, pe),
+            self._society_revenue(s, e),
+            self._society_revenue(ps, pe),
             self.get_settings(),
+            self._plan_refunds(s, e),
+            self._plan_refunds(ps, pe),
         )
+
+        def money(block: dict, plan_rev: float, soc_rev: float, refunds: float) -> dict:
+            # plan_revenue / combined_revenue stay gross; refunds + net beside.
+            return {
+                "plan_revenue": plan_rev, "plan_refunds": refunds, "plan_revenue_net": _rupees(plan_rev - refunds),
+                "society_revenue": soc_rev, "combined_revenue": _rupees(block["revenue"] + plan_rev + soc_rev),
+            }
+
         return {
-            "current": {**cur_b, "new_customers": new_cur, "plan_revenue": plan_rev_cur, "combined_revenue": _rupees(cur_b["revenue"] + plan_rev_cur)},
-            "previous": {**prev_b, "new_customers": new_prev, "plan_revenue": plan_rev_prev, "combined_revenue": _rupees(prev_b["revenue"] + plan_rev_prev)},
+            "current": {**cur_b, "new_customers": new_cur, **money(cur_b, plan_rev_cur, soc_cur, ref_cur)},
+            "previous": {**prev_b, "new_customers": new_prev, **money(prev_b, plan_rev_prev, soc_prev, ref_prev)},
             "targets": settings["targets"],
             "alerts": await self._alerts(s, e, ps, pe, cur_b, prev_b, settings),
         }
@@ -341,20 +418,35 @@ class KpiService:
 
         extra = {"service_center_id": service_center_id}
         subs = UserSubscriptionService(self.db)
-        cur, prev, (cur_plan_rev, cur_plans_sold), (prev_plan_rev, prev_plans_sold) = await asyncio.gather(
+        (
+            cur, prev, (cur_plan_rev, cur_plans_sold), (prev_plan_rev, prev_plans_sold), cur_soc, prev_soc, cur_ref, prev_ref,
+        ) = await asyncio.gather(
             self._window_totals(s, e, extra),
             self._window_totals(ps, pe, extra),
             subs.center_plan_revenue(service_center_id, s, e),
             subs.center_plan_revenue(service_center_id, ps, pe),
+            self._society_revenue(s, e, service_center_id),
+            self._society_revenue(ps, pe, service_center_id),
+            self._plan_refunds(s, e, service_center_id),
+            self._plan_refunds(ps, pe, service_center_id),
         )
 
         def block(t):
-            return {"bookings": t["bookings"], "completed": t["completed"], "revenue": _rupees(t["revenue"])}
+            return {
+                "bookings": t["bookings"], "completed": t["completed"], "revenue": _rupees(t["revenue"]),
+                "manager_discounts": _rupees(t["manager_discounts"]), "tips": _rupees(t["tips"]),
+            }
+
+        def money(b: dict, sold: int, plan_rev: float, soc_rev: float, refunds: float) -> dict:
+            return {
+                "plans_sold": sold, "plan_revenue": plan_rev, "plan_refunds": refunds, "plan_revenue_net": _rupees(plan_rev - refunds),
+                "society_revenue": soc_rev, "combined_revenue": _rupees(b["revenue"] + plan_rev + soc_rev),
+            }
 
         cur_b, prev_b = block(cur), block(prev)
         return {
-            "current": {**cur_b, "plans_sold": cur_plans_sold, "plan_revenue": cur_plan_rev, "combined_revenue": _rupees(cur_b["revenue"] + cur_plan_rev)},
-            "previous": {**prev_b, "plans_sold": prev_plans_sold, "plan_revenue": prev_plan_rev, "combined_revenue": _rupees(prev_b["revenue"] + prev_plan_rev)},
+            "current": {**cur_b, **money(cur_b, cur_plans_sold, cur_plan_rev, cur_soc, cur_ref)},
+            "previous": {**prev_b, **money(prev_b, prev_plans_sold, prev_plan_rev, prev_soc, prev_ref)},
         }
 
     async def _alerts(self, s, e, ps, pe, cur_b, prev_b, settings) -> list[dict]:
@@ -773,6 +865,10 @@ class KpiService:
         return {
             "inputs": {k: settings[k] for k in ("variable_cost_per_wash", "fixed_cost_monthly", "kit_cost", "kits_count")},
             "gross_revenue": revenue,
+            # Inside gross_revenue already: what managers knocked off jobs
+            # they logged, and the tips customers added on top.
+            "manager_discounts": _rupees(cur["manager_discounts"]),
+            "tips_included": _rupees(cur["tips"]),
             "washes": washes,
             "aov": aov,
             "variable_cost": variable_cost,
@@ -932,12 +1028,26 @@ class KpiService:
         rows = await self.db.bookings.aggregate([
             {"$match": _window_match(s, e)},
             {"$group": {
-                "_id": {"a": "$address_id", "c": "$customer_id"},
+                # The booking's own snapshot area (spec 1.3) when it has one —
+                # a later edit of the saved address doesn't move old bookings.
+                "_id": {
+                    "a": "$address_id", "c": "$customer_id",
+                    "sc": "$address_snapshot.city", "sp": "$address_snapshot.pincode",
+                },
                 "bookings": _count_if(created),
                 "revenue": _sum_if(completed, "$total_amount"),
             }},
         ], allowDiskUse=True).to_list(length=None)
-        addr_ids = sorted({r["_id"].get("a") for r in rows if isinstance(r["_id"].get("a"), str) and ObjectId.is_valid(r["_id"]["a"])})
+        def _snap(r: dict) -> dict | None:
+            key = r["_id"]
+            if key.get("sc") is None and key.get("sp") is None:
+                return None
+            return {k: v for k, v in (("city", key.get("sc")), ("pincode", key.get("sp"))) if v is not None}
+
+        addr_ids = sorted({
+            r["_id"].get("a") for r in rows
+            if _snap(r) is None and isinstance(r["_id"].get("a"), str) and ObjectId.is_valid(r["_id"]["a"])
+        })
         addresses: dict[str, dict] = {}
         for i in range(0, len(addr_ids), _CHUNK):
             for a in await self.db.addresses.find(
@@ -948,7 +1058,7 @@ class KpiService:
 
         by_area: dict[str, dict] = {}
         for r in rows:
-            a = addresses.get(r["_id"].get("a") or "")
+            a = _snap(r) or addresses.get(r["_id"].get("a") or "")
             label = f"{a.get('city', '?')} · {a.get('pincode', '?')}" if a else "Unknown"
             row = by_area.setdefault(label, {"area": label, "bookings": 0, "revenue": 0.0, "customers": set(), "repeat_customers": set()})
             row["bookings"] += r["bookings"]
@@ -969,3 +1079,316 @@ class KpiService:
             for row in by_area.values()
         ]
         return {"areas": sorted(out, key=lambda r: (-r["bookings"], r["area"]))}
+
+    # ---------------------------------------------------------------- explorer
+    # The admin dashboard's interactive charts: one filterable slice of the
+    # business (period + center + service + car type + channel), bucketed
+    # by day/week/month, broken down by service, car type, center, channel
+    # and plan. Same definitions as every section above — bookings count on
+    # created_at, revenue on completion (_completed_in), a multi-service
+    # booking's amount split evenly across its services (business()'s
+    # service mix), plan revenue from paid subscription payment_orders
+    # (_plan_revenue) — so a number here matches the tile it sits under.
+    # Bounded: every pipeline starts on the indexed window match and returns
+    # aggregated rows only (≤ one per day / service / type / center / plan).
+
+    EXPLORER_MAX_DAYS = 731
+    SOURCE_LABELS = {"app": "Website / app", "whatsapp": "WhatsApp", "staff": "Staff (phone / walk-in)"}
+
+    @staticmethod
+    def explorer_granularity(s: datetime, e: datetime, requested: str | None) -> str:
+        if requested in ("day", "week", "month"):
+            return requested
+        days = (e - s).days
+        return "day" if days <= 31 else "week" if days <= 183 else "month"
+
+    @staticmethod
+    def _bucket_start(day: datetime, granularity: str) -> datetime:
+        if granularity == "week":  # ISO week, Monday first
+            return day - timedelta(days=day.weekday())
+        if granularity == "month":
+            return day.replace(day=1)
+        return day
+
+    @staticmethod
+    def _next_bucket(start: datetime, granularity: str) -> datetime:
+        if granularity == "week":
+            return start + timedelta(days=7)
+        if granularity == "month":
+            return (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return start + timedelta(days=1)
+
+    async def explorer(
+        self,
+        s: datetime,
+        e: datetime,
+        ps: datetime,
+        pe: datetime,
+        *,
+        service_center_id: str | None = None,
+        service_id: str | None = None,
+        vehicle_type: str | None = None,
+        source: str | None = None,
+        granularity: str | None = None,
+    ) -> dict:
+        if (e - s).days > self.EXPLORER_MAX_DAYS:
+            raise BadRequestException("Pick a range of two years or less.")
+        gran = self.explorer_granularity(s, e, granularity)
+        tz = _tz(s)
+
+        booking_filter: dict = {}
+        if service_center_id:
+            booking_filter["service_center_id"] = service_center_id
+        if service_id:
+            booking_filter["service_ids"] = service_id
+        if vehicle_type:
+            booking_filter["vehicle_type"] = vehicle_type
+        if source:
+            booking_filter["source"] = source
+
+        # Plans follow every filter that means something for a plan sale:
+        # center (resolved per order like the manager view), the plan's
+        # service tier and its car type. Channel is a booking concept.
+        plan_match: dict = {"purpose": {"$in": PLAN_ORDER_PURPOSES}, "status": "paid", "created_at": {"$gte": s, "$lt": e}}
+        prev_plan_match: dict = {"purpose": {"$in": PLAN_ORDER_PURPOSES}, "status": "paid", "created_at": {"$gte": ps, "$lt": pe}}
+        for m in (plan_match, prev_plan_match):
+            if service_id:
+                m["service_id"] = service_id
+            if vehicle_type:
+                m["vehicle_type"] = vehicle_type
+
+        def plan_pipeline(match: dict) -> list[dict]:
+            if service_center_id:
+                from app.services.subscription_service import UserSubscriptionService
+
+                return UserSubscriptionService._center_orders(match, service_center_id)
+            return [{"$match": match}]
+
+        created, completed = _created_in(s, e), _completed_in(s, e)
+        day_of = lambda expr: {"$dateToString": {"format": "%Y-%m-%d", "date": expr, "timezone": tz}}  # noqa: E731
+
+        async def refunds(rs, re_, *, by_day: bool = False) -> dict:
+            # Custom-plan car refunds (PLANS-2). A custom cart's order
+            # carries no service / car type, so the gross above excludes it
+            # under those filters — and so do its refunds.
+            if service_id or vehicle_type:
+                return {"amount": 0.0, "count": 0, "by_day": {}}
+            return await custom_plan_refunds(self.db, rs, re_, service_center_id, by_day_tz=tz if by_day else None)
+
+        (
+            cur, prev, daily, svc_rows, vt_rows, center_rows, source_rows,
+            plan_daily, plan_rows, prev_plans, services, vehicle_types, centers, plans, cur_refunds, prev_refunds,
+        ) = await asyncio.gather(
+            self._window_totals(s, e, booking_filter),
+            self._window_totals(ps, pe, booking_filter),
+            self._agg_one(self.db.bookings, [
+                {"$match": _window_match(s, e, booking_filter)},
+                {"$facet": {
+                    "created": [
+                        {"$match": {"$expr": created}},
+                        {"$group": {
+                            "_id": day_of("$created_at"),
+                            "n": {"$sum": 1},
+                            "cancelled": _count_if({"$eq": ["$status", "cancelled"]}),
+                        }},
+                    ],
+                    "completed": [
+                        {"$match": {"$expr": completed}},
+                        {"$group": {
+                            "_id": day_of({"$ifNull": ["$closed_at", "$created_at"]}),
+                            "n": {"$sum": 1},
+                            "amount": {"$sum": "$total_amount"},
+                        }},
+                    ],
+                }},
+            ]),
+            self.db.bookings.aggregate([
+                {"$match": _window_match(s, e, {**booking_filter, "service_ids.0": {"$exists": True}})},
+                {"$project": {
+                    "service_ids": 1, "c": created, "d": completed,
+                    "share": {"$divide": ["$total_amount", {"$size": "$service_ids"}]},
+                }},
+                {"$unwind": "$service_ids"},
+                *([{"$match": {"service_ids": service_id}}] if service_id else []),
+                {"$group": {"_id": "$service_ids", "bookings": _count_if("$c"), "completed": _count_if("$d"), "revenue": _sum_if("$d", "$share")}},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.bookings.aggregate([
+                {"$match": _window_match(s, e, booking_filter)},
+                {"$group": {
+                    "_id": {
+                        "vt": {"$cond": [_truthy("$vehicle_type"), "$vehicle_type", None]},
+                        "vid": {"$cond": [_truthy("$vehicle_type"), None, "$vehicle_id"]},
+                    },
+                    "bookings": _count_if(created),
+                    "revenue": _sum_if(completed, "$total_amount"),
+                }},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.bookings.aggregate([
+                {"$match": _window_match(s, e, booking_filter)},
+                {"$group": {"_id": "$service_center_id", "bookings": _count_if(created), "revenue": _sum_if(completed, "$total_amount")}},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.bookings.aggregate([
+                {"$match": _window_match(s, e, booking_filter)},
+                {"$group": {"_id": {"$ifNull": ["$source", "app"]}, "bookings": _count_if(created), "revenue": _sum_if(completed, "$total_amount")}},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.payment_orders.aggregate([
+                *plan_pipeline(plan_match),
+                {"$group": {"_id": day_of("$created_at"), "n": {"$sum": 1}, "paise": {"$sum": {"$ifNull": ["$amount_paise", 0]}}}},
+            ], allowDiskUse=True).to_list(length=None),
+            self.db.payment_orders.aggregate([
+                *plan_pipeline(plan_match),
+                {"$group": {"_id": "$plan_id", "n": {"$sum": 1}, "paise": {"$sum": {"$ifNull": ["$amount_paise", 0]}}}},
+            ], allowDiskUse=True).to_list(length=None),
+            self._agg_one(self.db.payment_orders, [
+                *plan_pipeline(prev_plan_match),
+                {"$group": {"_id": None, "n": {"$sum": 1}, "paise": {"$sum": {"$ifNull": ["$amount_paise", 0]}}}},
+            ]),
+            self.db.services.find({}, {"name": 1}).to_list(length=500),
+            self.db.vehicle_types.find({}, {"name": 1, "display_order": 1}).to_list(length=200),
+            self.db.service_centers.find({}, {"name": 1}).to_list(length=500),
+            self.db.subscription_plans.find({}, {"name": 1}).to_list(length=500),
+            refunds(s, e, by_day=True),
+            refunds(ps, pe),
+        )
+
+        # ---- time series, rolled up from daily rows to the bucket size.
+        buckets: dict[str, dict] = {}
+        order: list[str] = []
+        day = s
+        while day < e:
+            b = self._bucket_start(day, gran)
+            key = b.date().isoformat()
+            if key not in buckets:
+                end_b = min(self._next_bucket(b, gran), e)
+                buckets[key] = {
+                    "key": key,
+                    # Inclusive IST dates the bucket covers inside the range —
+                    # exactly what a drill-down passes back as start/end.
+                    "start": max(b, s).date().isoformat(),
+                    "end": (end_b - timedelta(days=1)).date().isoformat(),
+                    "bookings": 0, "completed": 0, "cancelled": 0, "revenue": 0.0,
+                    "plans_sold": 0, "plan_revenue": 0.0, "plan_refunds": 0.0,
+                }
+                order.append(key)
+            day += timedelta(days=1)
+
+        def bucket_for(iso_day: str) -> dict | None:
+            try:
+                d = datetime.strptime(iso_day, "%Y-%m-%d").replace(tzinfo=s.tzinfo)
+            except (TypeError, ValueError):
+                return None
+            return buckets.get(self._bucket_start(d, gran).date().isoformat())
+
+        for r in daily.get("created", []):
+            if (b := bucket_for(r["_id"])) is not None:
+                b["bookings"] += r["n"]
+                b["cancelled"] += r["cancelled"]
+        for r in daily.get("completed", []):
+            if (b := bucket_for(r["_id"])) is not None:
+                b["completed"] += r["n"]
+                b["revenue"] += r["amount"] or 0
+        for r in plan_daily:
+            if (b := bucket_for(r["_id"])) is not None:
+                b["plans_sold"] += r["n"]
+                b["plan_revenue"] += (r["paise"] or 0) / 100
+        for iso_day, amount in (cur_refunds.get("by_day") or {}).items():
+            if (b := bucket_for(iso_day)) is not None:
+                b["plan_refunds"] += amount
+        series = []
+        for key in order:
+            b = buckets[key]
+            b["revenue"] = _rupees(b["revenue"])
+            b["plan_revenue"] = _rupees(b["plan_revenue"])
+            b["plan_refunds"] = _rupees(b["plan_refunds"])
+            b["plan_revenue_net"] = _rupees(b["plan_revenue"] - b["plan_refunds"])
+            series.append(b)
+
+        # ---- breakdowns
+        svc_names = {str(x["_id"]): x.get("name", "?") for x in services}
+        by_service = sorted(
+            (
+                {"id": r["_id"], "name": svc_names.get(r["_id"], "Unknown service"), "bookings": r["bookings"],
+                 "completed": r["completed"], "revenue": _rupees(r["revenue"])}
+                for r in svc_rows if r["bookings"] or r["revenue"]
+            ),
+            key=lambda r: (-r["bookings"], -r["revenue"], r["name"]),
+        )
+
+        v_ids = {g["_id"]["vid"] for g in vt_rows if isinstance(g["_id"].get("vid"), str) and ObjectId.is_valid(g["_id"]["vid"])}
+        vehicles = (
+            {str(v["_id"]): v for v in await self.db.vehicles.find(
+                {"_id": {"$in": [ObjectId(i) for i in v_ids]}}, {"vehicle_type": 1}).to_list(length=len(v_ids))}
+            if v_ids else {}
+        )
+        vt_names = {str(x["_id"]): x.get("name", "?") for x in vehicle_types}
+        vt_acc: dict[str, dict] = {}
+        for g in vt_rows:
+            v = vehicles.get(g["_id"].get("vid") or "")
+            vt_id = str(g["_id"].get("vt") or (v.get("vehicle_type") if v else "") or "")
+            row = vt_acc.setdefault(vt_id or "unknown", {
+                "id": vt_id or None, "name": vt_names.get(vt_id, "Unknown type"), "bookings": 0, "revenue": 0.0})
+            row["bookings"] += g["bookings"]
+            row["revenue"] += g["revenue"] or 0
+        by_vehicle_type = sorted(
+            ({**r, "revenue": _rupees(r["revenue"])} for r in vt_acc.values() if r["bookings"] or r["revenue"]),
+            key=lambda r: (-r["bookings"], -r["revenue"], r["name"]),
+        )
+
+        center_names = {str(x["_id"]): x.get("name", "?") for x in centers}
+        by_center = sorted(
+            (
+                {"id": r["_id"], "name": center_names.get(str(r["_id"] or ""), "No center"), "bookings": r["bookings"], "revenue": _rupees(r["revenue"])}
+                for r in center_rows if r["bookings"] or r["revenue"]
+            ),
+            key=lambda r: (-r["bookings"], -r["revenue"], r["name"]),
+        )
+        by_source = sorted(
+            (
+                {"key": r["_id"], "name": self.SOURCE_LABELS.get(r["_id"], str(r["_id"]).replace("_", " ").capitalize()),
+                 "bookings": r["bookings"], "revenue": _rupees(r["revenue"])}
+                for r in source_rows if r["bookings"] or r["revenue"]
+            ),
+            key=lambda r: (-r["bookings"], r["name"]),
+        )
+        plan_names = {str(x["_id"]): x.get("name", "?") for x in plans}
+        by_plan = sorted(
+            ({"id": r["_id"], "name": plan_names.get(str(r["_id"] or ""), "Unknown plan"), "sold": r["n"], "revenue": _rupees((r["paise"] or 0) / 100)}
+             for r in plan_rows),
+            key=lambda r: (-r["sold"], -r["revenue"], r["name"]),
+        )
+
+        plans_sold = sum(r["sold"] for r in by_plan)
+        plan_revenue = _rupees(sum(r["revenue"] for r in by_plan))
+
+        def totals(t: dict, sold: int, plan_rev: float, plan_refunds: float) -> dict:
+            rev = _rupees(t["revenue"])
+            return {
+                "bookings": t["bookings"], "completed": t["completed"], "cancelled": t["cancelled"],
+                "revenue": rev, "aov": _rupees(rev / t["completed"]) if t["completed"] else 0,
+                "completion_rate": _pct(t["completed"], t["bookings"]),
+                "plans_sold": sold, "plan_revenue": plan_rev, "combined_revenue": _rupees(rev + plan_rev),
+                # Gross above; custom-plan refunds and the net beside it.
+                "plan_refunds": _rupees(plan_refunds), "plan_revenue_net": _rupees(plan_rev - plan_refunds),
+            }
+
+        return {
+            "range": {"start": s.date().isoformat(), "end": (e - timedelta(days=1)).date().isoformat(), "granularity": gran},
+            "filters": {"service_center_id": service_center_id, "service_id": service_id, "vehicle_type": vehicle_type, "source": source},
+            "totals": totals(cur, plans_sold, plan_revenue, cur_refunds["amount"]),
+            "previous": totals(prev, prev_plans.get("n") or 0, _rupees((prev_plans.get("paise") or 0) / 100), prev_refunds["amount"]),
+            "series": series,
+            "by_service": by_service,
+            "by_vehicle_type": by_vehicle_type,
+            "by_center": by_center,
+            "by_source": by_source,
+            "by_plan": by_plan,
+            "options": {
+                "centers": sorted(({"id": str(c["_id"]), "name": c.get("name", "?")} for c in centers), key=lambda r: r["name"]),
+                "services": sorted(({"id": str(c["_id"]), "name": c.get("name", "?")} for c in services), key=lambda r: r["name"]),
+                "vehicle_types": [
+                    {"id": str(c["_id"]), "name": c.get("name", "?")}
+                    for c in sorted(vehicle_types, key=lambda c: (c.get("display_order") or 0, c.get("name") or ""))
+                ],
+                "sources": [{"key": k, "name": v} for k, v in self.SOURCE_LABELS.items()],
+            },
+        }

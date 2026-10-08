@@ -1,43 +1,52 @@
 import { useState, useEffect, useRef } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { Menu, X, ArrowRight } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Menu, X, ArrowRight, MapPin } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../../context/AuthContext";
 import { prefetchBooking } from "../../routes/prefetch";
 import { roleHomePath } from "../../lib/roleHome";
 import { ContactUsModal } from "../public/ContactUsModal";
+import { type LandingSection, scrollToSection, sectionHref, sectionInView } from "../../lib/sections";
 
-const navLinks = [
-  { label: "Home", href: "/" },
-  { label: "Services", href: "/services" },
-  { label: "How It Works", href: "/#how-it-works" },
-  { label: "Plans", href: "/plans" },
-  { label: "Contact Us", href: "#contact" },
+// One landing page: every link jumps to its section; Contact opens the form.
+const navLinks: { label: string; section?: LandingSection }[] = [
+  { label: "Home", section: "top" },
+  { label: "Services", section: "services" },
+  { label: "Plans", section: "plans" },
+  { label: "Reviews", section: "reviews" },
+  { label: "Contact Us" },
 ];
 
-function BlussitLogo() {
+/** We serve Indore only — a plain label, not a picker. */
+function LocationChip({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-[#F3F6FA] font-semibold text-[#0E1A33] ${
+        compact ? "px-2.5 py-1.5 text-[12px]" : "px-3.5 py-2 text-[13px]"
+      }`}
+    >
+      <MapPin className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} strokeWidth={2.2} />
+      Indore, MP
+    </span>
+  );
+}
+
+function BlussitLogo({ onClick }: { onClick?: (e: React.MouseEvent) => void }) {
   return (
     <Link
       to="/"
-      className="flex flex-col items-start group cursor-default"
+      onClick={onClick}
+      className="flex flex-col items-start group cursor-pointer"
     >
       <img
         src="/img/blussit-logo-480.webp"
-        alt="BLUSSIT"
+        width={480}
+        height={63}
+        alt="Blussit"
         className="h-6 md:h-7 w-auto object-contain transition-transform duration-500 group-hover:-rotate-2 group-hover:scale-105"
       />
 
-      <span
-        className="mt-1.5 whitespace-nowrap text-[6.5px] font-semibold tracking-[0.12em] text-[var(--color-gold)] leading-none sm:text-[7px]"
-        style={{
-          fontFamily: "'Montserrat', sans-serif",
-          WebkitFontSmoothing: "antialiased",
-          MozOsxFontSmoothing: "grayscale",
-        }}
-      >
-        PREMIUM CAR WASH AT DOORSTEP.
-      </span>
     </Link>
   );
 }
@@ -51,6 +60,32 @@ export function PublicNavbar() {
 
   const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const onLanding = location.pathname === "/";
+  // Which section is on screen — drives the underline as the visitor scrolls.
+  const [active, setActive] = useState<LandingSection | null>(onLanding ? "top" : null);
+  useEffect(() => {
+    if (!onLanding) {
+      setActive(null);
+      return;
+    }
+    const update = () => setActive(sectionInView());
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    return () => window.removeEventListener("scroll", update);
+  }, [onLanding]);
+
+  const goTo = (section: LandingSection) => (e: React.MouseEvent) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // new tab etc.
+    e.preventDefault();
+    setOpen(false);
+    if (onLanding && scrollToSection(section)) {
+      window.history.replaceState(null, "", sectionHref(section));
+      setActive(section);
+    } else {
+      navigate(sectionHref(section));
+    }
+  };
   const queryClient = useQueryClient();
   // Every public page has this bar: once the page is idle, quietly load the
   // booking wizard + its catalogue so tapping "Book Now" is instant.
@@ -102,26 +137,36 @@ export function PublicNavbar() {
         transition-all duration-500
         ${
           scrolled
-            ? "bg-white/85 backdrop-blur-xl shadow-[0_8px_30px_rgba(49,45,38,0.08)] border-b border-[#E1D7C4]/70 py-3"
-            : "bg-white/95 backdrop-blur-md border-b border-black/5 py-5"
+            ? "bg-white/90 backdrop-blur-xl shadow-[0_8px_30px_rgba(15,30,60,0.08)] border-b border-[#E4E9F1] py-2.5 lg:py-3"
+            : "bg-white/95 backdrop-blur-md border-b border-black/5 py-2.5 lg:py-3.5"
         }
       `}
     >
-      <div className="container-page flex items-center justify-between">
-        {/* Logo */}
-        <BlussitLogo />
+      <div className="container-page flex items-center justify-between gap-3">
+        {/* Logo (mobile: menu button on its left, as in the v2 design) */}
+        <div className="flex items-center gap-3">
+          <button
+            className="-ml-1 flex h-10 w-10 items-center justify-center rounded-xl text-[#0E1A33] transition-colors hover:bg-[#F3F6FA] xl:hidden"
+            onClick={() => setOpen((o) => !o)}
+            aria-label="Toggle menu"
+            aria-expanded={open}
+          >
+            {open ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+          </button>
+          <BlussitLogo onClick={goTo("top")} />
+        </div>
 
         {/* Desktop Navigation */}
-        <nav className="hidden items-center gap-9 lg:flex">
-          {navLinks.map((link) => link.label === "Contact Us" ? (
+        <nav className="hidden items-center gap-8 whitespace-nowrap xl:flex">
+          {navLinks.map((link) => !link.section ? (
             <button
               key={link.label}
               ref={contactTriggerRef}
               type="button"
               onClick={() => setContactOpen(true)}
               className="
-                text-sm font-semibold text-black/70
-                hover:text-[var(--color-gold)]
+                text-sm font-semibold text-[#071A3D]
+                hover:text-[#1677FF]
                 transition-colors
                 relative
                 cursor-pointer
@@ -131,7 +176,7 @@ export function PublicNavbar() {
                 after:left-0
                 after:h-[2px]
                 after:w-0
-                after:bg-[var(--color-gold)]
+                after:bg-[#1677FF]
                 after:rounded-full
                 after:transition-all
                 after:duration-300
@@ -142,27 +187,29 @@ export function PublicNavbar() {
               {link.label}
             </button>
           ) : (
-            <a key={link.label} href={link.href} className="
-              text-sm font-semibold text-black/70 hover:text-[var(--color-gold)] transition-colors relative
-              after:content-[''] after:absolute after:-bottom-1.5 after:left-0 after:h-[2px] after:w-0 after:bg-[var(--color-gold)] after:rounded-full after:transition-all after:duration-300 hover:after:w-full 
-            ">{link.label}</a>
+            <a key={link.label} href={sectionHref(link.section)} onClick={goTo(link.section)} aria-current={active === link.section ? "location" : undefined} className={`
+              text-sm font-semibold transition-colors relative hover:text-[#0A66F0]
+              after:content-[''] after:absolute after:-bottom-2 after:left-0 after:h-[2px] after:bg-[#0A66F0] after:rounded-full after:transition-all after:duration-300 hover:after:w-full
+              ${active === link.section ? "text-[#0E1A33] after:w-full" : "text-[#0E1A33] after:w-0"}
+            `}>{link.label}</a>
           ))}
         </nav>
 
         {/* Desktop Actions */}
-        <div className="hidden items-center gap-3 lg:flex">
+        <div className="hidden items-center gap-3 xl:flex">
+          <LocationChip />
           {isAuthenticated ? (
             <button
               onClick={() => navigate(roleHomePath(user?.role))}
               className="
                 group inline-flex cursor-pointer items-center gap-2
                 rounded-[10px]
-                bg-[var(--color-gold)]
+                bg-[#FFD21F]
                 px-6 py-2.5
-                text-sm font-bold text-white
+                text-sm font-bold text-[#0E1A33]
                 transition-all duration-200
                 hover:-translate-y-0.5
-                hover:bg-[#D99A00]
+                hover:bg-[#F5C400]
                 
               "
             >
@@ -180,37 +227,16 @@ export function PublicNavbar() {
             <>
               <button
                 onClick={() => navigate(authTarget)}
-                className="
-                  cursor-pointer
-                  rounded-[10px]
-                  border border-black/15
-                  px-5 py-2.5
-                  text-sm font-semibold
-                  text-black/80
-                  transition-all duration-200
-                  hover:border-[var(--color-gold)]/50
-                  hover:text-[#A87400]
-                  hover:bg-[#FFF4CD]/30
-                "
+                className="cursor-pointer rounded-xl bg-[#0A66F0] px-5 py-2.5 text-sm font-bold text-white shadow-[0_8px_18px_rgba(10,102,240,0.25)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#0858D0]"
               >
                 {authLabel}
               </button>
 
               <a
                 href={bookHref}
-                className="
-                  group inline-flex cursor-pointer items-center gap-2
-                  rounded-[10px]
-                  bg-[var(--color-gold)]
-                  px-6 py-2.5
-                  text-sm font-bold text-white
-                  transition-all duration-200
-                  hover:-translate-y-0.5
-                  hover:bg-[#D99A00]
-                  
-                "
+                className="group inline-flex cursor-pointer items-center gap-2 rounded-xl bg-[#FFD21F] px-5 py-2.5 text-sm font-bold text-[#0E1A33] shadow-[0_8px_18px_rgba(255,200,0,0.30)] transition-all duration-200 hover:-translate-y-0.5"
               >
-                Book Now
+                Book A Wash
 
                 <ArrowRight
                   className="
@@ -224,32 +250,10 @@ export function PublicNavbar() {
           )}
         </div>
 
-        {/* Mobile Menu Button */}
-        <button
-          className="
-            lg:hidden
-            flex items-center justify-center
-            h-10 w-10
-            rounded-xl
-            border border-[#E1D7C4]/80
-            bg-white/60
-            backdrop-blur-lg
-            text-[#312D26]
-            shadow-[0_4px_16px_rgba(49,45,38,0.06)]
-            transition-all duration-200
-            hover:bg-[#FFF4CD]/60
-            hover:border-[var(--color-gold)]/40
-          "
-          onClick={() => setOpen((o) => !o)}
-          aria-label="Toggle menu"
-          aria-expanded={open}
-        >
-          {open ? (
-            <X className="h-5 w-5" />
-          ) : (
-            <Menu className="h-5 w-5" />
-          )}
-        </button>
+        {/* Mobile: location only — notifications live in the dashboards. */}
+        <div className="flex items-center xl:hidden">
+          <LocationChip compact />
+        </div>
       </div>
 
       {/* Mobile Glass Menu */}
@@ -266,10 +270,10 @@ export function PublicNavbar() {
         left-4
         right-4
         z-50
-        lg:hidden
+        xl:hidden
         rounded-2xl
-        border border-[#E1D7C4]/70
-        bg-[#FFFCF5]/90
+        border border-[#D9E8FF]/70
+        bg-white
         backdrop-blur-xl
         shadow-[0_20px_50px_rgba(49,45,38,0.14)]
         p-3
@@ -279,7 +283,7 @@ export function PublicNavbar() {
 
         {/* Navigation Links */}
         <div className="flex w-full flex-col items-center py-3">
-          {navLinks.map((link) => link.label === "Contact Us" ? (
+          {navLinks.map((link) => !link.section ? (
             <button
               key={link.label}
               type="button"
@@ -294,25 +298,26 @@ export function PublicNavbar() {
                 py-3
                 text-base
                 font-semibold
-                text-[#312D26]
+                text-[#071A3D]
                 transition-all
                 duration-200
-                hover:bg-[#FFF4CD]
-                hover:text-[#A87400]
+                hover:bg-[#F5F9FF]
+                hover:text-[#1677FF]
                 cursor-pointer
               "
             >
               {link.label}
             </button>
           ) : (
-            <a key={link.label} href={link.href} onClick={() => setOpen(false)} className="
-              flex w-full items-center justify-center rounded-xl px-5 py-3 text-base font-semibold text-[#312D26] transition-all duration-200 hover:bg-[#FFF4CD] hover:text-[#A87400]
-            ">{link.label}</a>
+            <a key={link.label} href={sectionHref(link.section)} onClick={goTo(link.section)} className={`
+              flex w-full items-center justify-center rounded-xl px-5 py-3 text-base font-semibold transition-all duration-200 hover:bg-[#F5F9FF] hover:text-[#0A66F0]
+              ${active === link.section ? "bg-[#F5F9FF] text-[#0A66F0]" : "text-[#071A3D]"}
+            `}>{link.label}</a>
           ))}
         </div>
 
         {/* Divider */}
-        <div className="my-2 h-px w-[90%] bg-[#E1D7C4]/70" />
+        <div className="my-2 h-px w-[90%] bg-[#E4E9F1]" />
 
         {/* Actions */}
         <div className="flex w-full flex-col items-center gap-3 px-1 pb-1 pt-2">
@@ -325,19 +330,18 @@ export function PublicNavbar() {
               className="
                 w-full
                 rounded-xl
-                bg-[var(--color-gold)]
+                bg-[#FFD21F] text-[#0E1A33]
                 px-5
                 py-3
                 text-sm
                 font-bold
-                text-white
                 transition-all
                 duration-200
-                hover:bg-[#D99A00]
+                hover:bg-[#F5C400]
                 
               "
             >
-              Go to Dashboard
+              Go To Dashboard
             </button>
           ) : (
             <>
@@ -346,22 +350,7 @@ export function PublicNavbar() {
                   setOpen(false);
                   navigate(authTarget);
                 }}
-                className="
-                  w-full
-                  rounded-xl
-                  border
-                  border-[#E1D7C4]
-                  bg-white/70
-                  px-5
-                  py-3
-                  text-sm
-                  font-bold
-                  text-[#312D26]
-                  transition-all
-                  duration-200
-                  hover:border-[var(--color-gold)]
-                  hover:bg-[#FFF4CD]/60
-                "
+                className="w-full rounded-xl bg-[#0A66F0] px-5 py-3 text-sm font-bold text-white shadow-[0_8px_18px_rgba(10,102,240,0.25)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#0858D0]"
               >
                 {authLabel}
               </button>
@@ -376,20 +365,19 @@ export function PublicNavbar() {
                   justify-center
                   gap-2
                   rounded-xl
-                  bg-[var(--color-gold)]
+                  bg-[#FFD21F] text-[#0E1A33]
                   px-5
                   py-3
                   text-sm
                   font-bold
-                  text-white
                   transition-all
                   duration-200
                   hover:-translate-y-0.5
-                  hover:bg-[#D99A00]
+                  hover:bg-[#F5C400]
                   
                 "
               >
-                Book Now
+                Book A Wash
                 <ArrowRight className="h-4 w-4" />
               </a>
             </>

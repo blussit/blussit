@@ -95,3 +95,27 @@ async def test_customers_behind_one_proxy_get_separate_buckets(trusted):
     assert await send("203.0.113.7") == 429
     # Same peer (the proxy), different customer: its own bucket.
     assert await send("198.51.100.1") == 200
+
+
+@pytest.mark.asyncio
+async def test_post_and_any_method_rules_on_one_prefix_keep_separate_buckets(monkeypatch):
+    """/society-forms has a POST rule (30) and an any-method rule (60) on the
+    same prefix: reads must not use up the budget for enrolling, and vice
+    versa (they used to share one counter)."""
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", False)
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(rate_limit, "_WINDOWS", rate_limit.defaultdict(int))
+
+    async def ok(_request):
+        return JSONResponse({"ok": True})
+
+    async def hit(method: str) -> int:
+        response = await rate_limit.rate_limit_middleware(_request(path="/api/v1/society-forms/abcdefghijklmnopqrstuvwx", method=method), ok)
+        return response.status_code
+
+    post_limit = next(r[1] for r in rate_limit.RULES if r[0] == "/api/v1/society-forms" and r[3] == "POST")
+    get_limit = next(r[1] for r in rate_limit.RULES if r[0] == "/api/v1/society-forms" and r[3] is None)
+    assert [await hit("GET") for _ in range(get_limit)] == [200] * get_limit
+    assert await hit("GET") == 429
+    assert [await hit("POST") for _ in range(post_limit)] == [200] * post_limit
+    assert await hit("POST") == 429

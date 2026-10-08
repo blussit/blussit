@@ -33,7 +33,7 @@ export function SettingsHistory({ settingKey, labels = {} }: { settingKey: strin
         </span>
         {!!data?.length && (
           <button type="button" onClick={() => setOpen((v) => !v)} className="inline-flex items-center gap-1 font-semibold text-black underline underline-offset-2">
-            {open ? "Hide history" : `Show history (${data.length})`}
+            {open ? "Hide History" : `Show History (${data.length})`}
             <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
           </button>
         )}

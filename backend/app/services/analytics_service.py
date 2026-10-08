@@ -205,7 +205,7 @@ class AnalyticsService:
         counts and average rating, computed live from stored data (never
         cached/manually entered). Two grouped aggregations for all centers
         at once (bookings, reviews) instead of five queries per center."""
-        centers, _ = await self.center_repo.find_many({"is_active": True}, page=1, page_size=200)
+        centers, _ = await self.center_repo.find_many({"is_active": {"$ne": False}}, page=1, page_size=200)
         center_ids = [str(c["_id"]) for c in centers]
         if not center_ids:
             return []

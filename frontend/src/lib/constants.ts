@@ -1,21 +1,32 @@
 import type { Booking } from "../types";
+import { toTitle } from "./titleCase";
 
 // Shared across every place that renders a booking's issue_flag (manager
 // queue, captain dashboard, booking detail) so they stay in sync — add a new
 // flag value here once, not in three separate files.
 export const ISSUE_LABELS: Record<string, string> = {
-  captain_not_started: "Captain hasn't started — past scheduled time",
+  captain_not_started: "Captain Hasn't Started — Past Scheduled Time",
   // Distinct from captain_not_started above: the window is now so far
   // expired the captain can no longer even start it (see the backend's
   // captain_start_lockout_hours) — this always needs a reschedule/reassign
   // decision, not just a nudge.
-  captain_missed_window: "Missed its window — reschedule or reassign needed",
-  captain_not_reached: "Never got a captain — window expired",
-  captain_late_start: "Captain started late",
-  captain_delay: "Taking unusually long on the way",
-  captain_reported_risk: "Captain flagged a delay risk",
-  service_overrun: "Wash taking longer than expected",
+  captain_missed_window: "Missed Its Window — Reschedule Or Reassign Needed",
+  captain_not_reached: "Never Got A Captain — Window Expired",
+  captain_late_start: "Captain Started Late",
+  captain_delay: "Taking Unusually Long On The Way",
+  captain_reported_risk: "Captain Flagged A Delay Risk",
+  service_overrun: "Wash Taking Longer Than Expected",
+  arrival_code_locked: "Arrival Check Locked — Too Many Wrong Codes",
+  completed_too_fast: "Completed Too Fast",
 };
+
+/** A flag code in words — the label above, else the code in Title Case
+ *  (never the raw "snake_case" code). */
+export const issueLabel = (code?: string | null): string => (code ? ISSUE_LABELS[code] || toTitle(code) : "");
+
+/** Too many wrong arrival codes locked this visit — a manager must unlock it. */
+export const isArrivalLocked = (b: Booking) =>
+  (!!b.arrival_code_locked || (b.issue_flag === "arrival_code_locked" && !b.issue_resolved)) && !["completed", "cancelled"].includes(b.status);
 
 // Every role's dashboard base path — shared so route/redirect logic doesn't
 // drift across DashboardShell, ProtectedRoute, GuestOnlyRoute, etc.

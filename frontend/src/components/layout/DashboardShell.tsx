@@ -1,4 +1,5 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import "./staffTheme.css";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import {
@@ -6,7 +7,6 @@ import {
   BellOff,
   LogOut,
   Menu,
-  Sparkles,
   User as UserIcon,
   X,
   type LucideIcon,
@@ -37,36 +37,17 @@ function toastToneFor(notification: Notification): ToastTone {
 export function DashboardShell({
   navItems,
   portalLabel,
-  brand = false,
-  bottomNav,
-  centerMenu,
   headerRight,
   children,
 }: {
   navItems: NavItem[];
   portalLabel: string;
-  /** Brand look (white surface, neutral hairline borders, black type, gold
-      reserved for CTAs/selection — used by the customer and captain portals;
-      staff portals keep the default theme. */
-  brand?: boolean;
-  /** Mobile app-style bottom tab bar (5 items; index 2 renders as the
-      raised gold action button). When set, the sidebar is desktop-only. */
-  bottomNav?: NavItem[];
-  /** Options shown in a bottom sheet when the raised center button is
-      tapped (instead of navigating directly). */
-  centerMenu?: {
-    label: string;
-    description: string;
-    icon: LucideIcon;
-    to: string;
-  }[];
   /** Custom element to render in the header next to the notification bell. */
   headerRight?: ReactNode;
   children: ReactNode;
 }) {
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [centerMenuOpen, setCenterMenuOpen] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -222,76 +203,65 @@ export function DashboardShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notifData, user]);
 
-  // Landing-theme scope: same palette the public pages use. primary stays
-  // BLACK (headings/buttons) with gold as the accent; primary-light stays a
-  // LIGHT tint — selected states are tint + dark text, never solid black.
-  const brandVars = brand
-    ? ({
-        // Settled after three user rounds: pure WHITE ground, BLACK type,
-        // gray icon tiles/labels — but box BOUNDARIES are light yellow
-        // (#F3E5B5, this var + the literal borders across customer/captain
-        // views), which the user explicitly asked to keep. Beyond borders,
-        // gold appears only where it means something: CTAs (bg-[#E8A900] +
-        // glow), selected chips (tint + black border), progress fills, and
-        // accents inside black panels. No cream page wash, no yellow tiles.
-        "--color-surface": "#FFFFFF",
-        "--color-card-border": "#F3E5B5",
-        "--color-primary": "#0A0A0A",
-        "--color-primary-dark": "#000000",
-        "--color-primary-light": "#FFF4CD",
-        "--color-secondary": "#E8A900",
-        "--color-secondary-light": "#FFF4CD",
-        "--color-accent": "#E8A900",
-        "--color-accent-light": "#FFF4CD",
-      } as React.CSSProperties)
-    : undefined;
+  // The staff portals (manager + admin — the only users of this shell) run
+  // the v2 theme: white ground, navy #0E1A33 type, blue #0A66F0 for the
+  // active nav / primary buttons / focus, #E4E9F1 hairlines, #E8F0FE tints,
+  // and yellow #FFD21F kept for the ONE key CTA a page has. The --ui-*
+  // tokens are read by the shared ui components (StatCard, Panel,
+  // DataTable, Modal, Badge, Switch, EmptyState).
+  // On <body>, not just this frame: popups, drawers and the confirm box are
+  // rendered at the end of <body> and must get the same v2 look.
+  useLayoutEffect(() => {
+    document.body.classList.add("staff-v2");
+    return () => document.body.classList.remove("staff-v2");
+  }, []);
+  const staffVars = {
+    "--color-surface": "#FFFFFF",
+    "--color-card-border": "#E4E9F1",
+    "--color-primary": "#0A66F0",
+    "--color-primary-dark": "#0852C2",
+    "--color-primary-light": "#E8F0FE",
+    "--color-secondary": "#FFD21F",
+    "--color-secondary-light": "#FFF6CC",
+    "--color-accent": "#0E1A33",
+    "--color-accent-light": "#EEF3FA",
+    "--color-text-primary": "#0E1A33",
+    "--color-text-secondary": "#5F6878",
+    "--radius-card": "14px",
+    "--ui-ink": "#0E1A33",
+    "--ui-muted": "#5F6878",
+    "--ui-hover-line": "#0A66F0",
+    "--ui-row-line": "#EEF2F7",
+    "--ui-row-hover": "#F5F8FC",
+    "--ui-tint": "#E8F0FE",
+    "--ui-tint-ink": "#0A66F0",
+    "--ui-accent": "#0A66F0",
+    "--ui-icon-bg": "#EEF3FA",
+    "--ui-success-bg": "#E7F6EC",
+    color: "#0E1A33",
+  } as React.CSSProperties;
 
   return (
     <div
       className="min-h-screen bg-[var(--color-surface)] [&_a]:cursor-pointer [&_button]:cursor-pointer"
-      style={brandVars}
+      style={staffVars}
     >
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 w-[248px] transform flex-col border-r-0 bg-[#F8F8F7] transition-transform duration-200 md:translate-x-0 ${
-          bottomNav ? "hidden md:flex" : "flex"
-        } ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
+        className={`fixed inset-y-0 left-0 z-40 flex w-[248px] transform flex-col border-r border-[#E4E9F1] bg-white transition-transform duration-200 md:translate-x-0 ${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
       >
-        <div className="flex h-16 shrink-0 items-center justify-between border-b border-gray-200 px-5">
-          {brand ? (
-            <Link
-              to="/"
-              className="flex w-full flex-col items-start"
-              aria-label="Blussit home"
-            >
-              <img
-                src="/img/blussit-logo-480.webp"
-                alt="BLUSSIT"
-                className="h-auto w-[158px] object-contain object-left"
-              />
-              <span className="mt-0.5 whitespace-nowrap text-[6.5px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
-                Premium Car Wash At Your Doorstep.
-              </span>
-            </Link>
-          ) : (
-            <Link
-              to="/"
-              className="flex items-center gap-2 font-display text-base font-bold text-[var(--color-primary)]"
-            >
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-primary)] text-[var(--color-secondary)]">
-                <Sparkles className="h-4 w-4" />
-              </span>
-              BLUSSIT
-            </Link>
-          )}
+        <div className="flex h-16 shrink-0 items-center justify-between border-b border-[#E4E9F1] px-5">
+          <Link to="/" className="flex w-full flex-col items-start" aria-label="Blussit home">
+            <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[158px] object-contain object-left" />
+          </Link>
           <button className="md:hidden" onClick={() => setSidebarOpen(false)}>
             <X className="h-5 w-5" />
           </button>
         </div>
         <div className="shrink-0 px-6 py-4">
-          <span
-            className={`text-xs font-semibold uppercase tracking-wide ${brand ? "text-gray-400" : "text-[var(--color-text-secondary)]"}`}
-          >
+          <span className="inline-flex items-center rounded-full bg-[#EEF3FA] px-2.5 py-1 text-xs font-semibold text-[#0E1A33]">
             {portalLabel}
           </span>
         </div>
@@ -307,14 +277,8 @@ export function DashboardShell({
               end={item.end}
               onClick={() => setSidebarOpen(false)}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-lg px-3.5 py-2.5 text-[14px] font-medium transition-colors ${
-                  isActive
-                    ? brand
-                      ? "bg-gray-100 font-semibold text-black"
-                      : "bg-[var(--color-primary-light)] text-[var(--color-primary)]"
-                    : brand
-                      ? "text-gray-600 hover:bg-white hover:text-black"
-                      : "text-gray-600 hover:bg-gray-50 hover:text-[var(--color-primary)]"
+                `flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 text-[14px] font-medium transition-colors ${
+                  isActive ? "bg-[#E8F0FE] font-semibold text-[#0A66F0]" : "text-[#5F6878] hover:bg-[#F3F6FA] hover:text-[#0E1A33]"
                 }`
               }
             >
@@ -328,13 +292,13 @@ export function DashboardShell({
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto w-full shrink-0 border-t border-gray-200 p-4">
+        <div className="mt-auto w-full shrink-0 border-t border-[#E4E9F1] p-4">
           <button
             onClick={logout}
-            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-gray-600 hover:bg-red-50 hover:text-[var(--color-error)]"
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-[#5F6878] hover:bg-red-50 hover:text-[var(--color-error)]"
           >
             <LogOut className="h-[18px] w-[18px]" />
-            Log out
+            Log Out
           </button>
         </div>
       </aside>
@@ -349,30 +313,13 @@ export function DashboardShell({
       {/* Main content */}
       <div className="md:pl-[248px]">
         <header
-          className={`sticky top-0 z-20 flex h-16 items-center justify-between border-b border-gray-200 bg-white px-6 md:px-8`}
+          className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-[#E4E9F1] bg-white px-4 sm:px-6 md:px-8"
         >
-          {bottomNav ? (
-            <Link
-              to="/"
-              className="flex flex-col md:hidden"
-              aria-label="Blussit home"
-            >
-              <img
-                src="/img/blussit-logo-480.webp"
-                alt="BLUSSIT"
-                className="h-auto w-[104px] object-contain"
-              />
-              <span className="mt-0.5 whitespace-nowrap text-[5px] font-bold uppercase tracking-[0.08em] text-[#E8A900]">
-                Premium Car Wash At Your Doorstep.
-              </span>
-            </Link>
-          ) : (
-            <button className="md:hidden" onClick={() => setSidebarOpen(true)}>
-              <Menu className="h-5 w-5" />
-            </button>
-          )}
+          <button className="shrink-0 rounded-lg p-1.5 md:hidden" aria-label="Open menu" onClick={() => setSidebarOpen(true)}>
+            <Menu className="h-5 w-5" />
+          </button>
           <div className="hidden md:block" />
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {headerRight}
             {isStaff && notifPermission === "default" && (
               <button
@@ -380,7 +327,7 @@ export function DashboardShell({
                 onClick={requestNotificationPermission}
                 className="hidden items-center gap-1.5 rounded-full border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:border-gray-400 sm:inline-flex"
               >
-                <Bell className="h-3.5 w-3.5" /> Enable alerts
+                <Bell className="h-3.5 w-3.5" /> Enable Alerts
               </button>
             )}
             <div className="group relative">
@@ -411,10 +358,14 @@ export function DashboardShell({
             </div>
             <button
               onClick={() => navigate("profile")}
-              className={`flex items-center gap-2.5 rounded-full border py-1 pl-1 pr-3 ${brand ? "border-gray-200 hover:border-[#E8A900]/50" : "border-gray-200"}`}
+              className={`flex shrink-0 items-center gap-2.5 rounded-full border py-1 pl-1 pr-1 sm:pr-3 ${
+                "border-[#E4E9F1] hover:border-[#C9D6EA]"
+              }`}
             >
               <span
-                className={`flex h-7 w-7 items-center justify-center rounded-full ${brand ? "bg-gray-100 text-black" : "bg-[var(--color-primary-light)] text-[var(--color-primary)]"}`}
+                className={`flex h-7 w-7 items-center justify-center rounded-full ${
+                  "bg-[#E8F0FE] text-[#0A66F0]"
+                }`}
               >
                 <UserIcon className="h-4 w-4" />
               </span>
@@ -425,9 +376,14 @@ export function DashboardShell({
           </div>
         </header>
         <main
-          className={`dashboard-shell-main min-h-[calc(100vh-4rem)] bg-white p-6 md:p-8 ${bottomNav ? "pb-24 md:pb-8" : ""}`}
+          className="dashboard-shell-main min-h-[calc(100vh-4rem)] bg-white px-4 py-5 sm:p-6 md:p-8"
         >
           <style>{`
+            /* Portal form fields get the v2 field look — the same tokens
+               as ui/fieldStyles (Input/Select/DatePicker): #E4E9F1
+               hairline, #C9D6EA hover, blue #0A66F0 focus + soft ring.
+               !important because older call sites carry their own border
+               classes; a field flagged aria-invalid keeps its red border. */
             .dashboard-shell-main :is(
               input[type="text"],
               input[type="email"],
@@ -442,9 +398,9 @@ export function DashboardShell({
               input:not([type]),
               select,
               textarea
-            ) {
-              border: 1px solid #111827 !important;
-              border-color: #111827 !important;
+            ):not([aria-invalid="true"]) {
+              border: 1px solid #E4E9F1 !important;
+              border-color: #E4E9F1 !important;
               outline: none;
               transition: border-color 160ms ease, box-shadow 160ms ease;
             }
@@ -463,7 +419,10 @@ export function DashboardShell({
               input:not([type]),
               select,
               textarea
-            ):hover,
+            ):not([aria-invalid="true"]):not(:disabled):not(:focus):hover {
+              border-color: #C9D6EA !important;
+            }
+
             .dashboard-shell-main :is(
               input[type="text"],
               input[type="email"],
@@ -478,106 +437,17 @@ export function DashboardShell({
               input:not([type]),
               select,
               textarea
-            ):focus {
-              border: 1px solid #E8A900 !important;
-              border-color: #E8A900 !important;
+            ):not([aria-invalid="true"]):focus {
+              border: 1px solid #0A66F0 !important;
+              border-color: #0A66F0 !important;
               outline: none;
-              box-shadow: 0 0 0 1px rgba(232, 169, 0, 0.10) !important;
+              box-shadow: 0 0 0 3px rgba(10, 102, 240, 0.15) !important;
             }
           `}</style>
           <MandatoryGates />
           <div className="mx-auto w-full max-w-[1320px]">{children}</div>
         </main>
       </div>
-
-      {/* Mobile app-style bottom tab bar (customer portal) */}
-      {bottomNav && (
-        <nav
-          className={`fixed inset-x-0 bottom-0 z-40 grid items-center border-t border-gray-200 bg-white px-1 pb-[max(0.6rem,env(safe-area-inset-bottom))] pt-2 md:hidden ${
-            { 3: "grid-cols-3", 4: "grid-cols-4" }[bottomNav.length] ||
-            "grid-cols-5"
-          }`}
-        >
-          {bottomNav.map((item, i) =>
-            // The raised gold center button exists only for portals that
-            // pass a centerMenu (the customer's "Book" sheet) — a plain
-            // 3/4-tab bar (captain) renders every item as a normal tab.
-            i === 2 ? (
-              <div key={item.to} className="flex items-center justify-center">
-                <button
-                  type="button"
-                  aria-label={item.label}
-                  onClick={() => (centerMenu ? setCenterMenuOpen(true) : navigate(item.to))}
-                  className="-mt-7 flex h-[52px] w-[52px] items-center justify-center rounded-full border-4 border-white bg-[#E8A900] text-white shadow-[0_10px_22px_rgba(232,169,0,0.4)]"
-                >
-                  <item.icon className="h-6 w-6" strokeWidth={2.4} />
-                </button>
-              </div>
-            ) : (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  `flex flex-col items-center gap-0.5 py-1 text-[10px] ${
-                    isActive
-                      ? "font-bold text-black"
-                      : "font-medium text-gray-400"
-                  }`
-                }
-              >
-                <item.icon className="h-[21px] w-[21px]" />
-                {item.label}
-              </NavLink>
-            ),
-          )}
-        </nav>
-      )}
-
-      {/* Bottom sheet for the center button's options */}
-      {centerMenu && centerMenuOpen && (
-        <div
-          className="fixed inset-0 z-50 md:hidden"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
-            onClick={() => setCenterMenuOpen(false)}
-          />
-          <div className="absolute inset-x-0 bottom-0 rounded-t-3xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-[0_-12px_40px_rgba(0,0,0,0.18)]">
-            <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-gray-100" />
-            <p className="mb-3 font-display text-lg font-bold text-black">
-              How Do You Want To Book?
-            </p>
-            <div className="space-y-2.5">
-              {centerMenu.map((opt) => (
-                <button
-                  key={opt.to}
-                  type="button"
-                  onClick={() => {
-                    setCenterMenuOpen(false);
-                    navigate(opt.to);
-                  }}
-                  className="flex w-full items-center gap-4 rounded-2xl border border-gray-200 p-4 text-left transition-colors hover:border-[#E8A900]/60 hover:bg-[#FAFAFA]"
-                >
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
-                    <opt.icon className="h-5 w-5" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block text-sm font-bold text-black">
-                      {opt.label}
-                    </span>
-                    <span className="block text-xs text-gray-400">
-                      {opt.description}
-                    </span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

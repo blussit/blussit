@@ -8,9 +8,11 @@ from app.controllers.subscription_controller import SubscriptionPlanController, 
 from app.core.dependencies import (
     CurrentUser,
     PaginationParams,
+    get_catalogue_viewer,
     get_current_user,
     get_db,
     get_optional_user,
+    is_catalogue_editor,
     require_admin,
     require_customer,
     require_manager_or_admin,
@@ -25,6 +27,7 @@ from app.schemas.subscription_schema import (
     PlanEnquiryRequest,
     SubscribeRequest,
     SubscriptionPlanCreateRequest,
+    SubscriptionExtendRequest,
     SubscriptionPlanUpdateRequest,
     UpgradeSubscriptionRequest,
 )
@@ -34,8 +37,12 @@ subscription_router = APIRouter(prefix="/subscriptions", tags=["User Subscriptio
 
 
 @plan_router.get("")
-async def list_plans(active_only: bool = True, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await SubscriptionPlanController(db).list(active_only)
+async def list_plans(
+    active_only: bool = True, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db)
+):
+    # Discontinued plans are for admin/manager screens only — the public
+    # list never shows them, whatever the query string asks for.
+    return await SubscriptionPlanController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
 @plan_router.get("/{plan_id}")
@@ -58,12 +65,12 @@ async def delete_plan(plan_id: str, current_user: CurrentUser = Depends(get_curr
     return await SubscriptionPlanController(db).delete(current_user, plan_id)
 
 
-@plan_router.post("/{plan_id}/discontinue", dependencies=[Depends(require_manager_or_admin)])
+@plan_router.post("/{plan_id}/discontinue", dependencies=[Depends(require_admin)])
 async def discontinue_plan(plan_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Stop selling a plan — is_active only. Unlike the full PUT above
-    (admin-only), a manager can pull a plan without being able to edit its
-    price or contents; existing subscribers keep their plan exactly as
-    bought."""
+    """Stop selling a plan — is_active only, never price or contents;
+    existing subscribers keep their plan exactly as bought. ADMIN-only: a
+    plan is sold platform-wide, so one center's manager pulling it would
+    stop every other center selling it too."""
     return await SubscriptionPlanController(db).discontinue(current_user, plan_id)
 
 
@@ -99,17 +106,20 @@ async def list_my_subscriptions(current_user: CurrentUser = Depends(get_current_
 
 
 @subscription_router.get("/customer/{customer_id}", dependencies=[Depends(require_manager_or_admin)])
-async def list_customer_subscriptions(customer_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def list_customer_subscriptions(
+    customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
     """Manager/admin equivalent of GET /subscriptions/my for an arbitrary
     customer — powers the manager booking flow's subscription picker and
-    the assign-a-plan action."""
-    return await UserSubscriptionController(db).list_for_customer(customer_id)
+    the assign-a-plan action. A manager sees self-serve plans and their own
+    center's grants only (see UserSubscriptionService.list_for_customer)."""
+    return await UserSubscriptionController(db).list_for_customer(customer_id, current_user)
 
 
 @subscription_router.get("/center/{service_center_id}/overview", dependencies=[Depends(require_manager_or_admin)])
 async def center_subscription_overview(
     service_center_id: str,
-    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled | scheduled"),
     plan_id: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     current_user: CurrentUser = Depends(get_current_user),
@@ -129,10 +139,13 @@ async def center_subscription_overview(
 
 
 @subscription_router.get("/{subscription_id}/usage", dependencies=[Depends(require_manager_or_admin)])
-async def subscription_usage_history(subscription_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def subscription_usage_history(
+    subscription_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
+):
     """One plan's spend history — when it was last used, how many are
-    left, and the full list of bookings that drew on it."""
-    return await UserSubscriptionController(db).usage_history(subscription_id)
+    left, and the full list of bookings that drew on it (a manager: their
+    own center's visits only)."""
+    return await UserSubscriptionController(db).usage_history(subscription_id, current_user)
 
 
 @subscription_router.post("", dependencies=[Depends(require_customer)])
@@ -149,20 +162,25 @@ async def subscribe(payload: SubscribeRequest, current_user: CurrentUser = Depen
     raise BadRequestException("Subscriptions are purchased with online payment — please complete the payment step.")
 
 
-@subscription_router.post("/assign", dependencies=[Depends(require_manager_or_admin)])
+@subscription_router.post("/assign", dependencies=[Depends(require_admin)])
 async def assign_subscription(payload: AssignSubscriptionRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Manager/admin grants a subscription to a customer directly — same
+    """Admin grants a subscription to a customer directly, FREE — same
     validation as self-purchase (vehicle ownership, vehicle-type match,
-    one-active-subscription-per-vehicle)."""
+    one-active-subscription-per-vehicle). Admin-only: a manager sells a plan
+    through /subscriptions/manager-offers, whose hand-typed discount is
+    capped (payment_service.manual_plan_discount) — a free grant would be
+    an uncapped 100% discount around that limit. No screen calls this."""
     return await UserSubscriptionController(db).assign(current_user, payload)
 
 
 @subscription_router.post("/manager-offers/preview", dependencies=[Depends(require_manager_or_admin)])
-async def manager_offer_preview(payload: ManagerSubscriptionPreviewRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def manager_offer_preview(
+    payload: ManagerSubscriptionPreviewRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db),
+):
     """Read-only price for the 'sell a plan' form — no customer required
     yet, nothing created. Purely advisory: manager-offers/create below
     recomputes and re-validates everything from scratch."""
-    return await PaymentController(db).manager_offer_preview(payload)
+    return await PaymentController(db).manager_offer_preview(current_user, payload)
 
 
 @subscription_router.post("/manager-offers", dependencies=[Depends(require_manager_or_admin)])
@@ -178,6 +196,19 @@ async def manager_offer_create(payload: ManagerSubscriptionOfferRequest, current
 async def manager_offer_void(order_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Cancels a still-pending manager-issued link or mandate."""
     return await PaymentController(db).manager_offer_void(current_user, order_id)
+
+
+@subscription_router.post("/{subscription_id}/extend", dependencies=[Depends(require_manager_or_admin)])
+async def extend_subscription(
+    subscription_id: str, payload: SubscriptionExtendRequest, current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """A few more days on any pass (monthly, custom or society) that has
+    ended or is in its last 3 days, so its remaining washes can still be
+    booked — at most 10 days per 30-day period. Manager: passes of their own
+    center only (a society pass: their society's center); admin: any.
+    Customers never extend (403). Audited as EXTEND_PASS."""
+    return await UserSubscriptionController(db).extend(current_user, subscription_id, payload)
 
 
 @subscription_router.post("/{subscription_id}/cancel", dependencies=[Depends(require_customer)])
@@ -207,7 +238,7 @@ async def list_all_subscriptions(pagination: PaginationParams = Depends(), db: A
 
 @subscription_router.get("/admin/overview", dependencies=[Depends(require_admin)])
 async def subscriptions_admin_overview(
-    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled"),
+    status: Optional[str] = Query(None, description="active | expiring | expired | cancelled | scheduled"),
     plan_id: Optional[str] = None,
     pagination: PaginationParams = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
@@ -227,17 +258,23 @@ async def subscriptions_admin_plan_purchases(
     period: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    service_center_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    plan_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    service_id: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
+    vehicle_type: Optional[str] = Query(None, pattern=r"^[0-9a-fA-F]{24}$"),
     pagination: PaginationParams = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """`period`/`start`/`end` are the SAME period the admin KPI dashboard
     uses (see KpiService.resolve_period) — the plan-revenue tile's
     drill-down list is built from this exact filter, so the tile's number
-    and the sum of rows here always agree."""
+    and the sum of rows here always agree. The optional center / plan /
+    service / car-type filters are the KPI explorer's plan-chart slice."""
     from app.services.kpi_service import resolve_period
 
     s, e, _ps, _pe = resolve_period(period, start, end)
-    return await UserSubscriptionController(db).plan_purchases(s, e, pagination)
+    extra = {k: v for k, v in {"plan_id": plan_id, "service_id": service_id, "vehicle_type": vehicle_type}.items() if v}
+    return await UserSubscriptionController(db).plan_purchases(s, e, pagination, service_center_id, extra or None)
 
 
 @subscription_router.get("/center/{service_center_id}/plan-purchases", dependencies=[Depends(require_manager_or_admin)])
@@ -259,3 +296,10 @@ async def center_plan_purchases(
     ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
     s, e, _ps, _pe = resolve_period(period, start, end)
     return await UserSubscriptionController(db).plan_purchases(s, e, pagination, service_center_id)
+
+
+# Custom multi-car plans (manager cart) live under /subscriptions/custom-plans
+# — mounted here so main.py needs no extra registration.
+from app.routes.v1.custom_plan_routes import router as _custom_plan_router  # noqa: E402
+
+subscription_router.include_router(_custom_plan_router)

@@ -5,6 +5,7 @@ import { coverageLeadApi, type CoverageLead } from "../../api/admin";
 import { Badge, Card, CardBody, DataTable } from "../../components/ui";
 import { Pager } from "../../components/shared/ListControls";
 import { format } from "../../lib/date";
+import { toTitle } from "../../lib/titleCase";
 
 /**
  * Demand from areas no service center covers yet — captured on the public
@@ -15,7 +16,7 @@ import { format } from "../../lib/date";
  */
 export default function AdminCoverageLeadsPage() {
   const [page, setPage] = useState(1);
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["coverage-leads", page],
     queryFn: () => coverageLeadApi.list({ page, page_size: 50 }),
     placeholderData: keepPreviousData,
@@ -25,7 +26,7 @@ export default function AdminCoverageLeadsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Coverage requests</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Coverage Requests</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           People who tried to book from areas we don't serve yet — where demand is waiting for us.
         </p>
@@ -39,7 +40,7 @@ export default function AdminCoverageLeadsPage() {
             </span>
             <div>
               <p className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{summary?.total_people ?? "—"}</p>
-              <p className="text-xs text-[var(--color-text-secondary)]">People waiting</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">People Waiting</p>
             </div>
           </CardBody>
         </Card>
@@ -52,7 +53,7 @@ export default function AdminCoverageLeadsPage() {
               <div>
                 <p className="font-mono-num text-2xl font-bold text-[var(--color-text-primary)]">{t.pincode}</p>
                 <p className="text-xs text-[var(--color-text-secondary)]">
-                  {t.people} {t.people === 1 ? "person" : "people"} · {t.requests} request{t.requests === 1 ? "" : "s"}
+                  {t.people} {t.people === 1 ? "Person" : "People"} · {t.requests} Request{t.requests === 1 ? "" : "s"}
                 </p>
               </div>
             </CardBody>
@@ -63,19 +64,21 @@ export default function AdminCoverageLeadsPage() {
       <DataTable<CoverageLead>
         isLoading={isLoading}
         data={data?.data || []}
-        emptyTitle="No coverage requests yet"
+        error={error}
+        onRetry={() => void refetch()}
+        emptyTitle="No Coverage Requests Yet"
         emptyDescription="When someone from an unserved area tries to book on the website, their details will appear here."
         columns={[
           { header: "Name", accessor: (l) => l.name },
           { header: "Phone", accessor: (l) => <span className="font-mono-num">{l.phone}</span> },
           { header: "Pincode", accessor: (l) => <span className="font-mono-num">{l.pincode}</span> },
           { header: "Area", accessor: (l) => l.city_area || "—" },
-          { header: "Interested in", accessor: (l) => l.service_interest || "—" },
+          { header: "Interested In", accessor: (l) => toTitle(l.service_interest) || "—" },
           {
-            header: "Times asked",
+            header: "Times Asked",
             accessor: (l) => <Badge tone={l.requests_count > 1 ? "warning" : "neutral"}>{l.requests_count}×</Badge>,
           },
-          { header: "Last asked", accessor: (l) => format(l.last_requested_at) },
+          { header: "Last Asked", accessor: (l) => format(l.last_requested_at) },
         ]}
       />
 

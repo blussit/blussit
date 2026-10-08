@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Search, Star } from "lucide-react";
 import { reviewApi } from "../../api/engagement";
 import { adminServiceCenterApi, adminUserApi, staffDirectoryApi } from "../../api/admin";
@@ -7,8 +7,10 @@ import { vehicleTypeApi } from "../../api/catalog";
 import { bookingApi } from "../../api/booking";
 import { Badge, DataTable, PageLoader, Select } from "../../components/ui";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
+import { Pager } from "../../components/shared/ListControls";
 import { useAuth } from "../../context/AuthContext";
 import { format } from "../../lib/date";
+import { carAndService, toTitle } from "../../lib/titleCase";
 import type { Review } from "../../types";
 
 /**
@@ -31,6 +33,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-for-reviews"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }), enabled: role === "admin" });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
+  const typeNames = useMemo(() => new Map((vehicleTypes || []).map((t) => [t.id, t.name])), [vehicleTypes]);
 
   const effectiveCenterId = role === "admin" ? centerFilter : ownCenterId;
   const { data: captains } = useQuery({
@@ -39,17 +42,33 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
     enabled: role === "admin" || !!ownCenterId,
   });
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["reviews-list", role, ownCenterId],
-    queryFn: () => (role === "admin" ? reviewApi.forAdmin({ page: 1, page_size: 100 }) : reviewApi.forCenter(ownCenterId, { page: 1, page_size: 100 })),
+  // Admin: center / captain / rating filter on the server and page through
+  // everything (it used to fetch the newest 100 once and filter that
+  // page, so older reviews were unreachable). Manager view unchanged.
+  const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [centerFilter, captainFilter, ratingFilter]);
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
+    queryKey: ["reviews-list", role, ownCenterId, ...(role === "admin" ? [centerFilter, captainFilter, ratingFilter, page] : [])],
+    queryFn: () =>
+      role === "admin"
+        ? reviewApi.forAdmin({
+            page,
+            page_size: 50,
+            service_center_id: centerFilter || undefined,
+            captain_id: captainFilter || undefined,
+            min_rating: ratingFilter ? Number(ratingFilter) : undefined,
+          })
+        : reviewApi.forCenter(ownCenterId, { page: 1, page_size: 100 }),
     enabled: role === "admin" || !!ownCenterId,
+    placeholderData: keepPreviousData,
   });
 
-  const { data: selectedBooking } = useQuery({
+  const selectedBookingQuery = useQuery({
     queryKey: ["review-drilldown-booking", selectedBookingId],
     queryFn: () => bookingApi.get(selectedBookingId!),
     enabled: !!selectedBookingId,
   });
+  const selectedBooking = selectedBookingQuery.data;
 
   const filtered = useMemo(() => {
     let items = data?.data || [];
@@ -98,7 +117,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
         {role === "admin" && (
           <div className="w-52">
             <Select value={centerFilter} onChange={(e) => setCenterFilter(e.target.value)}>
-              <option value="">All service centers</option>
+              <option value="">All Service Centers</option>
               {(centers?.data || []).map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -109,7 +128,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
         )}
         <div className="w-48">
           <Select value={captainFilter} onChange={(e) => setCaptainFilter(e.target.value)}>
-            <option value="">All captains</option>
+            <option value="">All Captains</option>
             {(captains?.data || []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.full_name}
@@ -119,42 +138,67 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
         </div>
         <div className="w-44">
           <Select value={vehicleTypeFilter} onChange={(e) => setVehicleTypeFilter(e.target.value)}>
-            <option value="">All vehicle types</option>
+            <option value="">All Vehicle Types</option>
             {(vehicleTypes || []).map((t) => (
               <option key={t.id} value={t.id}>
-                {t.name}
+                {toTitle(t.name)}
               </option>
             ))}
           </Select>
         </div>
         <div className="w-40">
           <Select value={ratingFilter} onChange={(e) => setRatingFilter(e.target.value)}>
-            <option value="">Any rating</option>
-            <option value="5">5 stars</option>
-            <option value="4">4+ stars</option>
-            <option value="3">3+ stars</option>
-            <option value="2">2+ stars</option>
-            <option value="1">1+ stars</option>
+            <option value="">Any Rating</option>
+            <option value="5">5 Stars</option>
+            <option value="4">4+ Stars</option>
+            <option value="3">3+ Stars</option>
+            <option value="2">2+ Stars</option>
+            <option value="1">1+ Stars</option>
           </Select>
         </div>
       </div>
 
+      {/* A row whose booking failed to load would otherwise just do nothing. */}
+      {selectedBookingId && selectedBookingQuery.isError && !selectedBooking && (
+        <p role="alert" className="text-sm text-[var(--color-text-secondary)]">
+          Couldn't open that booking.{" "}
+          <button
+            type="button"
+            className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+            disabled={selectedBookingQuery.isFetching}
+            onClick={() => void selectedBookingQuery.refetch()}
+          >
+            Try Again
+          </button>
+        </p>
+      )}
+
       <DataTable<Review>
         data={filtered}
-        emptyTitle="No reviews match these filters"
+        error={error}
+        onRetry={() => void refetch()}
+        emptyTitle="No Reviews Match These Filters"
         onRowClick={(r) => setSelectedBookingId(r.booking_id)}
         columns={[
           { header: "Booking", accessor: (r) => <span className="font-mono-num">{r.booking_number || "—"}</span> },
           { header: "Customer", accessor: (r) => r.customer_name || "—" },
           { header: "Captain", accessor: (r) => r.captain_name || "—" },
-          { header: "Service", accessor: (r) => r.combo_name || r.service_names?.join(", ") || "—" },
+          {
+            header: "Car & Service",
+            accessor: (r) =>
+              carAndService(typeNames.get(r.vehicle_type_id || ""), r.combo_name || r.service_names?.join(", ")) || "—",
+          },
           ...(role === "admin" ? [{ header: "Center", accessor: (r: Review) => r.service_center_name || "—" }] : []),
-          { header: "Captain rating", accessor: (r) => <RatingCell value={r.captain_rating ?? r.rating} /> },
-          { header: "Service rating", accessor: (r) => <RatingCell value={r.service_rating ?? r.rating} /> },
+          { header: "Captain Rating", accessor: (r) => <RatingCell value={r.captain_rating ?? r.rating} /> },
+          { header: "Service Rating", accessor: (r) => <RatingCell value={r.service_rating ?? r.rating} /> },
           { header: "Date", accessor: (r) => format(r.created_at) },
-          { header: "Status", accessor: (r) => (r.is_deleted ? <Badge tone="neutral">Removed by customer</Badge> : <Badge tone="success">Visible</Badge>) },
+          { header: "Status", accessor: (r) => (r.is_deleted ? <Badge tone="neutral">Removed By Customer</Badge> : <Badge tone="success">Visible</Badge>) },
         ]}
       />
+
+      {role === "admin" && data?.meta && (
+        <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />
+      )}
 
       <BookingDetailDrawer booking={selectedBooking || null} onClose={() => setSelectedBookingId(null)} />
     </div>

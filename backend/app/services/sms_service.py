@@ -24,6 +24,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
 from app.core.http_client import shared_client
+from app.services.whatsapp_service import mask_phone, redact_secret
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,10 @@ class SmsProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_text(self, phone: str, message: str) -> bool:
+    async def send_text(self, phone: str, message: str, kind: str = "text") -> bool:
         """Free-text SMS (temp passwords etc.) — providers whose route is
-        OTP-only return False so the caller falls back to WhatsApp."""
+        OTP-only return False so the caller falls back to WhatsApp. `kind`
+        "temp_password" marks a message that must never be stored in clear."""
         raise NotImplementedError
 
 
@@ -51,7 +53,9 @@ class LogSmsProvider(SmsProvider):
         self.db = db
 
     async def _record(self, phone: str, message: str, kind: str) -> bool:
-        logger.info("SMS [log provider, %s] -> %s: %s", kind, phone, message)
+        # A code/password is never stored or logged in clear (see redact_secret).
+        message = redact_secret(kind, message)
+        logger.info("SMS [log provider, %s] -> %s: %s", kind, mask_phone(phone), message)
         await self.db.sms_outbox.insert_one({
             "phone": phone, "message": message, "kind": kind, "provider": "log",
             "created_at": datetime.now(timezone.utc),
@@ -61,8 +65,8 @@ class LogSmsProvider(SmsProvider):
     async def send_otp(self, phone: str, code: str) -> bool:
         return await self._record(phone, f"{code} is your verification code", "otp")
 
-    async def send_text(self, phone: str, message: str) -> bool:
-        return await self._record(phone, message, "text")
+    async def send_text(self, phone: str, message: str, kind: str = "text") -> bool:
+        return await self._record(phone, message, kind)
 
 
 class Msg91Provider(SmsProvider):
@@ -75,7 +79,7 @@ class Msg91Provider(SmsProvider):
         params = {"mobile": f"91{_digits10(phone)}", "otp": code}
         if self.otp_template_id:
             params["template_id"] = self.otp_template_id
-        outbox = {"phone": phone, "message": f"[msg91 otp] {code}", "kind": "otp", "provider": "msg91",
+        outbox = {"phone": phone, "message": f"[msg91 otp] {redact_secret('otp', code)}", "kind": "otp", "provider": "msg91",
                   "created_at": datetime.now(timezone.utc)}
         try:
             r = await shared_client("msg91_sms", 10).post("https://control.msg91.com/api/v5/otp", params=params, headers={"authkey": self.auth_key})
@@ -87,12 +91,12 @@ class Msg91Provider(SmsProvider):
                 logger.error("MSG91 OTP send failed (%s): %s", r.status_code, r.text[:300])
             return ok
         except (httpx.HTTPError, ValueError, AttributeError) as exc:  # network, or a malformed body
-            logger.error("MSG91 send raised %r for %s", exc, phone)
+            logger.error("MSG91 send raised %r for %s", exc, mask_phone(phone))
             outbox.update({"ok": False, "error": str(exc)})
             await self.db.sms_outbox.insert_one(outbox)
             return False
 
-    async def send_text(self, phone: str, message: str) -> bool:
+    async def send_text(self, phone: str, message: str, kind: str = "text") -> bool:
         # Custom-content SMS needs its own DLT-registered template — not
         # wired until one exists; WhatsApp fallback handles it.
         return False
@@ -125,5 +129,5 @@ class SmsService:
         if not self.provider:
             return False
         return await self.provider.send_text(
-            phone, f"Your Blussit temporary password is {temp_password}. Log in and change it right away."
+            phone, f"Your Blussit temporary password is {temp_password}. Log in and change it right away.", kind="temp_password"
         )

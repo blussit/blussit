@@ -20,6 +20,7 @@ import ipaddress
 import logging
 import time
 from collections import defaultdict
+from contextvars import ContextVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -32,12 +33,15 @@ from app.core.config import settings
 # limit: /api/v1/bookings is both "create a booking" (expensive, floodable)
 # and "show me my bookings" (read, browsed freely), and throttling the
 # second to protect the first would break normal use.
+# A prefix ending in "$" matches that exact path only (trailing slash
+# allowed) — for a create endpoint whose path is also the stem of many
+# staff actions (/bookings/{id}/assign-captain, /before-photo, ...).
 #
 # OTP buckets are sized for carrier-grade NAT: Indian mobile carriers put
 # many customers behind one public IP, so a per-IP cap near one person's
 # usage locks out strangers. Abuse of any single number is stopped per phone
-# instead: auth_service allows 5 sends/hour and 5 guesses per code, and
-# MSG91 caps its own widget OTPs.
+# instead: auth_service allows 5 sends/hour per (phone, requester), 15 per
+# phone in all, and 5 guesses per code; MSG91 caps its own widget OTPs.
 RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/auth/forgot-password", 30, 300, None),
     ("/api/v1/auth/verify-phone/request", 30, 300, None),
@@ -53,7 +57,15 @@ RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/auth/booking-access", 20, 60, None),
     ("/api/v1/bookings/verify-phone/request", 30, 300, None),
     ("/api/v1/auth/login", 15, 60, None),
+    # Token refresh is cheap but is the one endpoint a stolen refresh token
+    # is replayed against; password changes verify a bcrypt hash per call.
+    ("/api/v1/auth/refresh", 60, 60, None),
+    ("/api/v1/auth/change-password", 10, 300, None),
+    ("/api/v1/auth/set-password", 10, 300, None),
     ("/api/v1/auth/register", 10, 300, None),
+    # Release first and roomier: freeing a seat must never be refused
+    # because the same visitor's holds/renewals used up the hold bucket.
+    ("/api/v1/bookings/hold/release", 60, 60, None),
     ("/api/v1/bookings/hold", 30, 60, None),
     # Money-moving and data-creating endpoints. Each create-order call mints
     # a real Razorpay order, and each booking reserves capacity — a flood of
@@ -68,11 +80,32 @@ RULES: list[tuple[str, int, int, str | None]] = [
     # Read-only price quote, re-asked as the customer changes the cart — its
     # own bucket so quoting can never use up the budget for actually booking.
     ("/api/v1/bookings/quote", 120, 60, "POST"),
-    ("/api/v1/bookings", 20, 60, "POST"),
+    # The signed-in customer's own create paths ONLY. A bare
+    # "/api/v1/bookings" prefix also caught every staff write under it —
+    # assign, photos, heading, mark-done — so a busy manager or captain
+    # was throttled at 20 actions a minute.
+    ("/api/v1/bookings/group$", 20, 60, "POST"),
+    ("/api/v1/bookings$", 20, 60, "POST"),
     ("/api/v1/reviews", 15, 60, "POST"),
+    # Public, unauthenticated lookups that cost something per call: the
+    # coverage check can ask Google for a road distance, and the offer
+    # lookup answers "is this code real?" — tight enough to make guessing
+    # codes or burning Maps quota slow, roomy for a shared carrier IP.
+    ("/api/v1/service-zones/coverage-check", 20, 60, None),
+    ("/api/v1/coupons/public", 10, 60, None),
     # Public forms: junk-data buckets, same shape as coverage leads.
     ("/api/v1/subscriptions/enquiries", 6, 60, None),
+    # Public society form: the enroll POST creates a customer + request
+    # (after an OTP); reads are the form itself, re-asked as it reprices.
+    ("/api/v1/society-forms", 30, 60, "POST"),
+    ("/api/v1/society-forms", 60, 60, None),
     ("/api/v1/coverage-leads", 6, 60, None),
+    # Landing-page "bring Blussit to our society" request: a public write
+    # (junk-data bucket, deduped per phone + society for 24 h server-side).
+    ("/api/v1/society-leads", 6, 60, "POST"),
+    # A resident filing society issues — signed in, but each one alerts the
+    # managers, so a tap-happy loop mustn't flood them.
+    ("/api/v1/society-issues", 10, 60, "POST"),
     ("/api/v1/contact", 6, 60, None),
     # Public visitor beacon — one real ping per page load.
     ("/api/v1/analytics/visit", 20, 60, "POST"),
@@ -84,6 +117,20 @@ logger = logging.getLogger(__name__)
 _WINDOWS: dict[tuple, int] = defaultdict(int)
 _last_sweep = 0.0
 _proxy_choice_logged = False
+
+# The calling client's bucket (IP, or IPv6 /64) for the request being
+# handled — set for EVERY request (limits on or off), so request-scoped
+# code can attribute anonymous actions to their caller without threading
+# the Request through: the OTP send caps count per (phone, requester), so a
+# stranger flooding someone else's number uses up only their own share
+# (AuthService._claim_otp_send, AUTH-06).
+_request_client: ContextVar[str | None] = ContextVar("request_client", default=None)
+
+
+def current_requester() -> str | None:
+    """"ip:<bucket>" for the request being handled, None outside one."""
+    client = _request_client.get()
+    return f"ip:{client}" if client else None
 
 
 def _parse_ip(raw: str) -> str | None:
@@ -119,6 +166,27 @@ def _client_ip(request: Request) -> str:
     return chosen
 
 
+def _client_key(request: Request) -> str:
+    """The bucket a request counts against: the client IP, except that an
+    IPv6 client is its /64. One home/mobile connection is handed a whole
+    /64 and may pick any address inside it, so keying on the full address
+    gave a single device ~2^64 fresh buckets."""
+    ip = _client_ip(request)
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if address.version == 6 and not address.ipv4_mapped:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return ip
+
+
+def _rule_matches(prefix: str, path: str) -> bool:
+    if prefix.endswith("$"):
+        return path.rstrip("/") == prefix[:-1]
+    return path.startswith(prefix)
+
+
 def _log_proxy_choice_once(peer: str, xff_entries: int, chosen: str) -> None:
     # One line per process so the setting can be confirmed in Cloud Run logs.
     global _proxy_choice_logged
@@ -143,6 +211,8 @@ def _sweep(now: float) -> None:
 
 
 async def rate_limit_middleware(request: Request, call_next):
+    client = _client_key(request)
+    _request_client.set(client)
     if not settings.RATE_LIMIT_ENABLED:
         return await call_next(request)
     path = request.url.path
@@ -160,11 +230,14 @@ async def rate_limit_middleware(request: Request, call_next):
 
     now = time.time()
     _sweep(now)
-    ip = _client_ip(request)
+    ip = client
     for prefix, limit, window, method in RULES:
-        if path.startswith(prefix) and (method is None or request.method == method):
+        if _rule_matches(prefix, path) and (method is None or request.method == method):
             window_start = int(now // window) * window
-            key = (ip, prefix, window, window_start)
+            # The rule's method is part of the bucket: a POST-only rule and
+            # an any-method rule on the same prefix (/society-forms) must
+            # not share one counter. Indices 2/3 stay window/start (_sweep).
+            key = (ip, prefix, window, window_start, method)
             _WINDOWS[key] += 1
             if _WINDOWS[key] > limit:
                 return JSONResponse(

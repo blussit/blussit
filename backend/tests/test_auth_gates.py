@@ -14,6 +14,7 @@ import pytest
 from bson import ObjectId
 
 from app.core.exceptions import BadRequestException, PhoneNotVerifiedException
+from app.core.security import hash_password
 from app.schemas.user_schema import RegisterRequest
 from app.services.auth_service import AuthService
 
@@ -26,6 +27,24 @@ def _cleanup_user(cleanup, uid, phone=None):
         cleanup.append(("otp_requests", {"identifier": phone}))
 
 
+async def _legacy_unproven_signup(db, phone: str, name: str) -> str:
+    """An account the old /auth/register made: a random password nobody
+    knows, the phone never proven. Registration requires proof now, but
+    rows like this can still exist."""
+    now = datetime.now(timezone.utc)
+    result = await db.users.insert_one({
+        "full_name": name, "phone": phone, "password_hash": hash_password("Random#12345"),
+        "role": "customer", "status": "active", "must_change_password": True,
+        "is_deleted": False, "created_at": now, "updated_at": now,
+    })
+    return str(result.inserted_id)
+
+
+async def _proof(auth, db, phone: str) -> str:
+    await auth.request_phone_otp(phone)
+    return (await db.otp_requests.find_one({"identifier": phone}))["otp"]
+
+
 @pytest.mark.asyncio
 async def test_booking_access_modes(db, cleanup):
     auth = AuthService(db)
@@ -33,8 +52,7 @@ async def test_booking_access_modes(db, cleanup):
     assert (await auth.booking_access_mode("9888877701"))["mode"] == "register"
 
     # Abandoned guest signup: account exists, never verified -> otp.
-    result = await auth.register_customer(RegisterRequest(full_name="Abandoned Guest", phone="9888877702", password="Random#12345", guest=True))
-    uid = result["user"]["id"]
+    uid = await _legacy_unproven_signup(db, "9888877702", "Abandoned Guest")
     _cleanup_user(cleanup, uid, "9888877702")
     assert (await auth.booking_access_mode("9888877702"))["mode"] == "otp"
     user = await db.users.find_one({"_id": ObjectId(uid)})
@@ -58,8 +76,7 @@ async def test_booking_access_modes(db, cleanup):
 async def test_otp_login_recovers_the_abandoned_account(db, cleanup):
     auth = AuthService(db)
     phone = "9888877703"
-    result = await auth.register_customer(RegisterRequest(full_name="Recovery Case", phone=phone, password="Random#12345", guest=True))
-    uid = result["user"]["id"]
+    uid = await _legacy_unproven_signup(db, phone, "Recovery Case")
     _cleanup_user(cleanup, uid, phone)
 
     await auth.request_otp(phone, purpose="verification")
@@ -74,6 +91,8 @@ async def test_otp_login_recovers_the_abandoned_account(db, cleanup):
     fresh = await db.users.find_one({"_id": ObjectId(uid)})
     assert fresh["phone_verified"] is True and fresh["phone_verified_at"] is not None
     assert fresh["must_change_password"] is True  # gate still owed
+    # The first proof drops the password nobody proved ownership for.
+    assert fresh["password_hash"] is None
 
 
 @pytest.mark.asyncio
@@ -111,7 +130,8 @@ async def test_booking_gate_rejects_stale_verification(db, cleanup):
 async def test_set_initial_password_only_under_the_flag(db, cleanup):
     auth = AuthService(db)
     phone = "9888877704"
-    result = await auth.register_customer(RegisterRequest(full_name="Password Setter", phone=phone, password="Random#12345", guest=True))
+    code = await _proof(auth, db, phone)
+    result = await auth.register_customer(RegisterRequest(full_name="Password Setter", phone=phone, password="Random#12345", guest=True, phone_otp=code))
     uid = result["user"]["id"]
     _cleanup_user(cleanup, uid, phone)
 

@@ -1,44 +1,79 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { BadgeCheck, Banknote, CheckCircle2, Copy, CreditCard, Gift, Info, MapPin, Plus, Trash2, ShieldCheck } from "lucide-react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BadgeCheck,
+  Banknote,
+  Bike,
+  CalendarDays,
+  Car,
+  CheckCircle2,
+  Copy,
+  CreditCard,
+  Gift,
+  Info,
+  Lock,
+  MapPin,
+  Plus,
+  ShieldCheck,
+  SprayCan,
+  Trash2,
+  UserRound,
+} from "lucide-react";
 import { bookingPolicyApi, catalogApi, coverageApi, serviceCenterApi, vehicleTypeApi, getSlotHolderKey } from "../../api/catalog";
-import { bookingApi, type BookingQuotePayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { bookingApi, type BookingQuotePayload, type ManagerLogPayload, type PhoneProof, type QuickBookingLine, type QuickBookingPayload } from "../../api/booking";
+import { TIP_METHOD_LABELS, type TipMethod } from "../../api/staffBookings";
 import { addressApi } from "../../api/profile";
 import { adminServiceCenterApi } from "../../api/admin";
-import { Button, DiscountBadge, Input, Modal, OfferTag, Select, Spinner, Switch, discountPercent } from "../ui";
-import { SlotPicker } from "../shared/SlotPicker";
-import { LocationPicker, type LocationValue } from "../shared/LocationPicker";
+import { Button, DiscountBadge, Input, Modal, OfferTag, Spinner, Switch, discountPercent } from "../ui";
+import { LocationPicker, INDORE_CENTER, type LocationValue } from "../shared/LocationPicker";
 import { WizardShell, WizardStepHeader } from "../shared/WizardShell";
 import { ServicePrepNotice } from "../shared/ServicePrepNotice";
 import { QtyStepper } from "../shared/QtyStepper";
 import { CustomerNamePhoneFields } from "../shared/CustomerNamePhoneFields";
+import { TipMethodToggle } from "../shared/TipModal";
 import { BookingOtpModal } from "./BookingOtpModal";
+import { BookHero } from "./BookHero";
+import { PickerField, PickerOption } from "./PickerField";
+import { SlotBoard } from "./SlotBoard";
+import { useSlotHold } from "./useSlotHold";
+import { CARD, CTA, FIELD, dayParts, vehicleLabel, vehicleMeta } from "./bookingTheme";
 import { CoverageLeadInline } from "../public/CoverageLeadInline";
 import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorCode, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { scrollToTopNow } from "../../lib/scroll";
 import { bookingEventId, trackInitiateCheckout, trackPurchase } from "../../lib/metaPixel";
 import { ensureGoogleMaps } from "../../lib/googleMaps";
-import { daysAgoIST, nowTimeIST, todayIST } from "../../lib/date";
+import { daysAgoIST, formatSlot, formatTime12, nowTimeIST, todayIST } from "../../lib/date";
 import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
-import { addonKit, baseGroups, bikeTypeIds, eligibleFor, variantCount, type BaseGroup } from "../../lib/serviceMix";
-import { parseIncludes, priceForType, titleCase } from "../public/landing/shared";
+import { addonKit, baseGroups, bikeTypeIds, eligibleFor, offeredAddons, variantCount, type BaseGroup } from "../../lib/serviceMix";
+import { INR, parseIncludes, priceForType, priceView, titleCase } from "../public/landing/shared";
 import { subscriptionApi } from "../../api/engagement";
+import type { WalletQuoteLines, WalletResultLines } from "../customer/money";
 import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption } from "../../types";
 
 /**
  * THE booking flow (2026-09 quick-booking model) — two steps, no account;
- * anonymous bookings end with a one-time-code popup (BookingOtpModal):
+ * anonymous bookings end with a one-time-code popup (BookingOtpModal).
  *
- *   1. What are we washing?  pick a vehicle type, how many, one service
- *      (+ add-ons); "Add another vehicle" for a different type on the
- *      same visit ("Bike ×2 + SUV ×1").
- *   2. Where & when?         pin the address, pick a slot, name + phone,
- *      how to pay → Book (→ verify the number with an OTP if not signed in).
+ * Customers (public + customer modes) get the v2 page from the approved
+ * mockup (figmav2bookingpage.jpeg):
+ *   1. Book Your Car Wash — Car Type · Service · Date & Time pickers, the
+ *      day strip + slot cards, and a Booking Summary with the server's
+ *      price → Continue. Slots show before any address: they are the slots
+ *      of the center serving central Indore (or the customer's saved
+ *      address), and the seat is held from the moment it's picked.
+ *   2. Confirm — address (saved one preselected, else the pin), name +
+ *      phone for a guest, how to pay when there's a choice → Book
+ *      (→ OTP popup for a guest). The address's own coverage check decides
+ *      the center; if that moves the visit to a center where the picked
+ *      time isn't open, the slots come back on this step to re-pick.
+ * Managers keep the two-step wizard (vehicles → who/where/when/pay).
  *
- * One component, three seats:
+ * One component, four seats:
  *   - "public":   anyone on /book — a profile is created silently from the
  *                 phone; login stays optional (OTP) for viewing history.
  *   - "customer": the same flow on /app/book, with name/phone/saved
@@ -49,7 +84,9 @@ import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption
  *                 addresses and plans.
  *
  * Deep links: ?service=<slug|id> preselects a service, ?subscription=<id>
- * (customer) preselects that plan's vehicle type + service.
+ * (customer) opens the confirm step straight away with that plan's vehicle
+ * type + service and the slots on it, ?repeat=<id> replays a past visit,
+ * ?type=<vehicleTypeId> preselects that car type (active types only).
  *
  * Bikes keep the catalogue's per-bike pricing (base wash + N extra bikes
  * on ONE booking); every car of a type is its own booking on the visit —
@@ -58,6 +95,18 @@ import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption
 /** "manager-log": a job the manager already did himself — same vehicle/service
  *  picker, then who/where/when as it HAPPENED, saved directly as done. */
 type Mode = "public" | "customer" | "manager" | "manager-log";
+
+/** The v2 palette for shared pieces that read theme variables (spinners,
+ *  the OTP popup, the coverage lead form) inside the customer flow. */
+const V2_THEME = {
+  "--color-primary": "#0A66F0",
+  "--color-primary-dark": "#0852C4",
+  "--color-primary-light": "#E8F0FE",
+  "--color-secondary": "#FFD21F",
+  "--color-secondary-light": "#FFF6D6",
+  "--color-text-primary": "#0E1A33",
+  "--color-text-secondary": "#5F6878",
+} as CSSProperties;
 
 /** One vehicle line as the customer builds it: type, how many, which
  *  base service (group key) and which add-ons. */
@@ -69,16 +118,24 @@ interface Draft {
 }
 const EMPTY_DRAFT: Draft = { typeId: "", count: 1, base: null, addons: [] };
 
-type Coverage = "idle" | "checking" | "covered" | "uncovered";
+// "error" = the check itself failed (network/server) — never shown as "not in your area".
+type Coverage = "idle" | "checking" | "covered" | "uncovered" | "error";
 
 const STEPS = ["What Are We Washing?", "Where And When?"];
 const LOG_STEPS = ["What Was Washed?", "Who, Where And When?"];
 
-const SECTION_LABEL = "mb-2 text-sm font-medium text-gray-600";
+// Manager / log wizard only (the customer flows use the v2 page below).
+/** The wizard's one key action — the v2 yellow CTA (navy text). */
+const MGR_CTA =
+  "inline-flex h-11 min-w-[150px] items-center justify-center gap-2 rounded-[12px] bg-[#FFD21F] px-5 text-sm font-bold text-[#0E1A33] shadow-[0_8px_20px_-12px_rgba(232,169,0,0.8)] transition hover:bg-[#F5C400] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none";
+const SECTION_LABEL = "mb-2 text-sm font-semibold text-[#0E1A33]";
 
-/** Every pickable box and chip: light tint + black border when chosen. */
+/** Every pickable box and chip in the manager wizard — the v2 booking look:
+ *  blue border + light blue tint when chosen, a quiet hairline otherwise. */
 function choiceClass(on: boolean): string {
-  return `border-2 transition-colors ${on ? "border-black bg-[#FFF4CD] text-black" : "border-[#F3E5B5] bg-white text-gray-700 hover:border-gray-400"}`;
+  return `border transition-colors ${
+    on ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0E1A33] ring-1 ring-[#0A66F0]" : "border-[#E4E9F1] bg-white text-[#0E1A33] hover:border-[#C9D6EA]"
+  }`;
 }
 
 /** The latest value once it has stopped changing for `ms` — a string, so an
@@ -99,8 +156,34 @@ function firstWashPriceFor(s: Service, vt: string): number | null {
   return s.vehicle_type_discounted_prices?.[vt] ?? s.discounted_price ?? null;
 }
 
-export function QuickBookFlow({ mode }: { mode: Mode }) {
+/** The area check itself failed (network/server) — say so, never "not in your area". */
+function CoverageFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p className="text-[13px] text-[#5F6878]" role="alert">
+      Couldn't check your area —{" "}
+      <button type="button" onClick={onRetry} className="font-semibold text-[#0A66F0] hover:underline">
+        Try Again
+      </button>
+    </p>
+  );
+}
+
+/** A catalogue read that failed — a muted line with a retry, instead of a
+ *  "Loading…" that never ends or an empty list that looks like a fact. */
+function LoadFailed({ what, busy, onRetry, className = "" }: { what: string; busy: boolean; onRetry: () => void; className?: string }) {
+  return (
+    <p className={`text-[13px] text-[#5F6878] ${className}`} role="alert">
+      Couldn't load {what}.{" "}
+      <button type="button" onClick={onRetry} disabled={busy} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+        {busy ? "Trying…" : "Try Again"}
+      </button>
+    </p>
+  );
+}
+
+export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | "app" }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { push: pushToast } = useToast();
@@ -114,13 +197,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [firstWashKnown, setFirstWashKnown] = useState<boolean | null>(null);
   const showFirstWash = firstWashKnown ?? (mode === "public" && !user);
 
-  const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
-  const { data: catalogue, isLoading: servicesLoading } = useQuery({
+  const {
+    data: vehicleTypes,
+    isError: typesFailed,
+    isFetching: typesFetching,
+    refetch: refetchTypes,
+  } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
+  const {
+    data: catalogue,
+    isLoading: servicesLoading,
+    isError: servicesFailed,
+    isFetching: servicesFetching,
+    refetch: refetchServices,
+  } = useQuery({
     queryKey: ["public-services"],
     queryFn: () => catalogApi.services({ page_size: 100 }),
   });
   const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get, staleTime: 5 * 60 * 1000 });
-  const { data: myAddresses } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list, enabled: isCustomer });
+  const { data: myAddresses, isError: addressesFailed } = useQuery({ queryKey: ["addresses"], queryFn: addressApi.list, enabled: isCustomer });
   const { data: myPasses, isError: passesFailed } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions, enabled: isCustomer });
 
   const services = useMemo(() => (catalogue?.data || []).filter((s) => s.is_active !== false), [catalogue]);
@@ -140,6 +234,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // shown as a summary on the address step — or why it couldn't be used.
   const [planIntro, setPlanIntro] = useState<string | null>(null);
   const [planIssue, setPlanIssue] = useState("");
+  // Customer flows: the slots also show on the confirm step — when it was
+  // opened without one (a plan's "Book now") or the address moved the
+  // visit to a center where the picked time isn't open.
+  const [confirmSlots, setConfirmSlots] = useState(false);
 
   // ---- step 2 state ------------------------------------------------------
   const [name, setName] = useState("");
@@ -152,6 +250,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // line list is reshuffled, so an index always means the same line.
   const [subscriptionOverride, setSubscriptionOverride] = useState<Record<number, boolean>>({});
   useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
+  // Whether line i uses the customer's pass. Booking: on unless switched
+  // off. Log A Done Job: OFF unless ticked — a pass is only used when the
+  // manager says so (the server only draws on one when use_subscription is true).
+  const planOn = (i: number) => (isLog ? subscriptionOverride[i] === true : subscriptionOverride[i] !== false);
   // null = nothing chosen yet (a default may be preselected), "" = "New address".
   const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<LocationValue | null>(null);
@@ -176,7 +278,18 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [altPhone, setAltPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // "You already have a booking…" — usually a retry after a lost response.
+  const [duplicateBooking, setDuplicateBooking] = useState<{ id: string; number?: string } | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // A different number: whatever the server said about the old one is stale.
+  useEffect(() => {
+    setFieldErrors((prev) => {
+      if (!prev.phone) return prev;
+      const next = { ...prev };
+      delete next.phone;
+      return next;
+    });
+  }, [phone]);
   const [otpOpen, setOtpOpen] = useState(false);
   // Kept for a retry on the same number: a widget token stays reusable, and
   // the server only spends a classic code once the booking has passed its
@@ -188,6 +301,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [logTime, setLogTime] = useState("");
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const [discount, setDiscount] = useState("");
+  // Log mode: the tip the customer gave — added to the job's total and revenue.
+  const [tip, setTip] = useState("");
+  // How the tip itself was handed over (MONEY-2) — independent of the job's payment.
+  const [tipMethod, setTipMethod] = useState<TipMethod>("cash");
   // Manager booking of a prepaid service: the pay link the customer was sent.
   const [sentLink, setSentLink] = useState<{ numbers: string; link: string } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -197,16 +314,20 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // Back button, a tap on the logo, a refresh — the customer comes back to
   // exactly where they were. sessionStorage on purpose: this tab only,
   // gone when it closes, never days-old state resurfacing.
-  const storageKey = `blussit:quickbook:${mode}`;
+  // Per signed-in person: on a shared device the next login must never see
+  // the previous person's pin, phone or notes (logout also wipes these).
+  const storageKey = `blussit:quickbook:${mode}:${user?.id || "guest"}`;
   const repeatId = searchParams.get("repeat");
   const serviceParam = searchParams.get("service") || searchParams.get("serviceId");
   const subscriptionParam = isCustomer ? searchParams.get("subscription") : null;
+  // ?type=<vehicleTypeId> (garage "Book wash", home "Clean again"): that car type preselected.
+  const typeParam = isManager ? null : searchParams.get("type");
   const [restored, setRestored] = useState(false);
   const restoreAddressRef = useRef<null | { pinned: LocationValue | null; savedAddressId: string | null; pincode: string; typed: boolean; slot: string }>(null);
   const skipAutoDateRef = useRef(false);
   useEffect(() => {
     // A deep link starts a fresh booking instead of resuming the last one.
-    if (repeatId || serviceParam || subscriptionParam) {
+    if (repeatId || serviceParam || subscriptionParam || typeParam) {
       setRestored(true);
       return;
     }
@@ -232,12 +353,15 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setPincode(saved.pincode || "");
         if (saved.date) setDate(saved.date);
         setSlot(saved.slot || "");
+        setConfirmSlots(!!saved.confirmSlots);
         setPaymentMethod(saved.paymentMethod === "online" ? "online" : "cash");
         setCouponCode(saved.couponCode || "");
         setNotes(saved.notes || "");
         setLogTime(typeof saved.logTime === "string" ? saved.logTime : "");
         setSendWhatsApp(saved.sendWhatsApp !== false);
         setDiscount(typeof saved.discount === "string" ? saved.discount : "");
+        setTip(typeof saved.tip === "string" ? saved.tip : "");
+        setTipMethod(saved.tipMethod === "online" ? "online" : "cash");
         setAltName(saved.altName || "");
         setAltPhone(saved.altPhone || "");
         setMoreOpen(!!(saved.notes || saved.altName || saved.altPhone));
@@ -246,7 +370,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           savedAddressId: savedAddr,
           pincode: saved.pincode || "",
           typed: !!saved.typedAddress,
-          slot: saved.slot || "",
+          // Customer flows keep their slot through an address change; the
+          // console wizard clears it with the address and puts it back after.
+          slot: isManager ? saved.slot || "" : "",
         };
         if (saved.slot) skipAutoDateRef.current = true;
       }
@@ -261,12 +387,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount })
+        JSON.stringify({ at: Date.now(), step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip, tipMethod })
       );
     } catch {
       // storage unavailable — nothing to keep
     }
-  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount]);
+  }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip, tipMethod]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -294,14 +420,17 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // customer's — so a repeat customer's visit reuses the address on file.
   const { data: customerAddresses } = useQuery({
     queryKey: ["customer-addresses", pickedCustomerId],
-    queryFn: () => addressApi.forCustomer(pickedCustomerId as string),
-    enabled: mode === "manager" && !!pickedCustomerId,
+    // 404 = a customer new to this center: no saved addresses, not an error.
+    queryFn: () => addressApi.forCustomer(pickedCustomerId as string).catch((e) => (getErrorStatus(e) === 404 ? [] : Promise.reject(e))),
+    enabled: isManager && !!pickedCustomerId,
   });
-  const savedAddresses = isCustomer ? myAddresses : mode === "manager" && pickedCustomerId ? customerAddresses : undefined;
+  const savedAddresses = isCustomer ? myAddresses : isManager && pickedCustomerId ? customerAddresses : undefined;
   useEffect(() => {
     if (!savedAddresses?.length || savedAddressId !== null) return;
     const def = savedAddresses.find((a) => a.is_default) || savedAddresses[0];
-    void chooseSavedAddress(def);
+    // A job already done needs no coverage check — just remember the address.
+    if (isLog) setSavedAddressId(def.id);
+    else void chooseSavedAddress(def);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedAddresses, savedAddressId]);
   /** Manager: a different (or no) customer — their saved address no longer applies. */
@@ -348,8 +477,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       else drafts.push({ typeId: vt, count: bikeIds.has(vt) ? variantCount(base) + extraBikes : 1, base: key, addons });
     }
     if (drafts.length) {
-      setAdded(drafts);
-      setDraft(EMPTY_DRAFT);
+      // The last vehicle sits in the editor (its pickers show it), the rest
+      // as added lines — a one-car repeat looks exactly like a fresh pick.
+      setAdded(drafts.slice(0, -1));
+      setDraft(drafts[drafts.length - 1]);
     }
     }
     // Wins over the default address even when the default's coverage check
@@ -368,7 +499,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const [preferredBase, setPreferredBase] = useState<string | null>(null);
   const deepLinkDone = useRef(false);
   useEffect(() => {
-    if (deepLinkDone.current || (!serviceParam && !subscriptionParam) || !services.length || !types.length) return;
+    if (deepLinkDone.current || (!serviceParam && !subscriptionParam && !typeParam) || !services.length || !types.length) return;
     // A failed plans call must not leave the deep link waiting forever.
     if (subscriptionParam && !myPasses && !passesFailed) return;
     deepLinkDone.current = true;
@@ -378,6 +509,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       // Otherwise say so and let the customer pick; never guess a service
       // (a wrong one would silently skip the pass and charge full price).
       const sub = myPasses?.find((p) => p.id === subscriptionParam);
+      // A pass bought for ONE car is never applied to a by-type booking —
+      // it books on the plans page's car-bound sheet instead.
+      if (sub && sub.vehicle_id && sub.service_id && !sub.society_id) {
+        navigate(`/app/subscriptions?book=${sub.id}`, { replace: true });
+        return;
+      }
       const typeId = sub?.vehicle_type && types.some((t) => t.id === sub.vehicle_type) ? sub.vehicle_type : "";
       const svc = sub?.service_id ? services.find((s) => s.id === sub.service_id && !s.is_addon) : undefined;
       const usable = !!sub && sub.effective_status === "active" && (sub.remaining_service_count ?? 0) > 0;
@@ -390,6 +527,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           setDraft(fromPass);
           setPlanIntro(sub.id);
           setPlanIssue("");
+          setConfirmSlots(true);
           setStep(1);
           resolved = true;
         }
@@ -410,19 +548,24 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     } else {
       const mains = services.filter((s) => !s.is_addon);
       // Slug first; older shared links carry the id.
-      const svc = mains.find((s) => s.slug === serviceParam) || mains.find((s) => s.id === serviceParam);
-      if (svc) {
-        const key = svc.variant_group || svc.id;
-        setPreferredBase(key);
+      const svc = serviceParam ? mains.find((s) => s.slug === serviceParam) || mains.find((s) => s.id === serviceParam) : undefined;
+      const key = svc ? svc.variant_group || svc.id : null;
+      if (key) setPreferredBase(key);
+      // Only an active vehicle type counts (`types` holds just those); anything else is ignored.
+      const linkedType = typeParam && types.some((t) => t.id === typeParam) ? typeParam : "";
+      if (linkedType) {
+        const sold = !!key && baseGroups(services, linkedType).some((g) => g.key === key);
+        setDraft({ typeId: linkedType, count: 1, base: sold ? key : null, addons: [] });
+      } else if (svc && key) {
         const eligible = types.filter((t) => eligibleFor(svc, t.id));
         if (eligible.length === 1) setDraft({ typeId: eligible[0].id, count: 1, base: key, addons: [] });
       }
     }
     const next = new URLSearchParams(searchParams);
-    ["service", "serviceId", "subscription"].forEach((k) => next.delete(k));
+    ["service", "serviceId", "subscription", "type"].forEach((k) => next.delete(k));
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serviceParam, subscriptionParam, services, types, myPasses, passesFailed]);
+  }, [serviceParam, subscriptionParam, typeParam, services, types, myPasses, passesFailed]);
 
   function isBikeLine(s: Service): boolean {
     return !!s.is_addon && /bike|scooter|two.?wheeler/i.test(s.name) && !/polish/i.test(s.name);
@@ -538,14 +681,15 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const lines: Line[] = useMemo(() => drafts.map(lineFor).filter(Boolean) as Line[], [drafts, types, services, bikeIds, showFirstWash]);
 
-  const summary = lines.map((l) => `${l.count} ${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`).join("  +  ");
-  const lineLabel = (l: Line) => `${l.count > 1 ? `${l.count} × ` : ""}${l.type.name}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`;
+  const summary = lines.map((l) => `${l.count} ${titleCase(l.type.name)}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`).join("  +  ");
+  const lineLabel = (l: Line) => `${l.count > 1 ? `${l.count} × ` : ""}${titleCase(l.type.name)}${l.base ? ` · ${titleCase(l.base.name)}` : ""}`;
 
   // The plans that can pay for this visit: the signed-in customer's own, or
   // (manager) the picked customer's.
   const { data: customerPasses } = useQuery({
     queryKey: ["customer-active-passes", pickedCustomerId],
-    queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string),
+    // 404 = a customer new to this center: no plans here, not an error.
+    queryFn: () => subscriptionApi.forCustomer(pickedCustomerId as string).catch((e) => (getErrorStatus(e) === 404 ? [] : Promise.reject(e))),
     enabled: isManager && !!pickedCustomerId,
   });
   const passes = isCustomer ? myPasses : isManager && pickedCustomerId ? customerPasses : undefined;
@@ -571,7 +715,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     const taken = new Set<string>();
     lines.forEach((line, i) => {
       if (!line.payload) return;
-      const on = subscriptionOverride[i] !== false;
+      const on = planOn(i);
       const mine = new Set(taken);
       const subs: UserSubscription[] = [];
       for (let n = 0; n < line.payload.quantity; n++) {
@@ -601,7 +745,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       {lines.map((line, i) => {
         const match = lineMatches[i];
         if (!match) return null;
-        const plan = match.subs[0].plan_name || "plan";
+        const plan = titleCase(match.subs[0].plan_name) || "Plan";
         const left = match.subs[0].remaining_service_count;
         const units = line.payload?.quantity ?? 1;
         return (
@@ -609,7 +753,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             key={i}
             checked={match.on}
             onChange={(next) => setSubscriptionOverride((prev) => ({ ...prev, [i]: next }))}
-            label={`${isCustomer ? "Use my" : "Use their"} ${plan} — ${left} wash${left === 1 ? "" : "es"} left`}
+            label={`${isCustomer ? "Use My" : "Use Their"} ${plan} — ${left} Wash${left === 1 ? "" : "es"} Left`}
             description={`${lineLabel(line)}${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`}
           />
         );
@@ -633,36 +777,19 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const introLine = introIndex >= 0 ? lines[introIndex] : null;
   const introPlanName = introSub ? introSub.plan_name || introPlans?.find((p) => p.id === introSub.plan_id)?.name : undefined;
   const introLeft = introSub?.remaining_service_count ?? 0;
-  const planIntroNode =
-    isCustomer && introSub && introLine ? (
-      <div className="flex items-center gap-3 rounded-xl border border-[#F3E5B5] bg-white p-3.5">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-black">
-          <Gift className="h-5 w-5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-black">Using your {introPlanName ? `${introPlanName} pass` : "pass"}</p>
-          <p className="text-xs text-gray-500">
-            {introLine.type.name}
-            {introLine.base ? ` · ${titleCase(introLine.base.name)}` : ""} · {introLeft} wash{introLeft === 1 ? "" : "es"} left
-          </p>
-        </div>
-        <button type="button" onClick={() => setStep(0)} className="shrink-0 text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black">
-          Change
-        </button>
-      </div>
-    ) : null;
-
   // The editor's own line (may be incomplete — used for the chips/prices).
   const editing = draft.typeId ? lineFor({ ...draft, base: draft.base }) : null;
   const editingGroups = draft.typeId ? baseGroups(services, draft.typeId) : [];
   const editingKit = draft.typeId ? addonKit(services, draft.typeId, bikeIds) : null;
   const editingIsBike = bikeIds.has(draft.typeId);
+  // The add-on chips — the same filter every other add-on picker uses.
+  const editingAddons = draft.typeId ? offeredAddons(services, draft.typeId, bikeIds) : [];
 
   // use_subscription defaults true (server auto-applies a matching pass) —
   // false only for a line whose "use the plan" switch was turned off.
   const linesForPayload = (): QuickBookingLine[] =>
     lines
-      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: subscriptionOverride[i] !== false } : null))
+      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: planOn(i) } : null))
       .filter(Boolean) as QuickBookingLine[];
 
   // ---- the bill, from the server --------------------------------------------
@@ -691,26 +818,54 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         ...(isLog ? { mode: "log" as const, scheduled_date: date, service_time: logTime || undefined } : {}),
       }
     : null;
-  // Step 2 always; step 1 only for a signed-in customer (their first-wash
-  // status and plans are known without typing anything).
-  const quoteWanted = !!quoteRequest && (step === 1 || isCustomer);
+  // Customer flows: as soon as the vehicles are picked (the summary shows
+  // the server's price from the first screen). Console: on step 2.
+  const quoteWanted = !!quoteRequest && (step === 1 || !isManager);
   const settledQuoteKey = useSettled(quoteWanted ? JSON.stringify(quoteRequest) : "", 450);
-  const { data: quote, error: quoteFailure, isFetching: quoting } = useQuery({
+  const {
+    data: quote,
+    error: quoteFailure,
+    isFetching: quoting,
+    refetch: refetchQuote,
+  } = useQuery({
     queryKey: ["booking-quote", mode, settledQuoteKey],
     queryFn: () => bookingApi.quote(JSON.parse(settledQuoteKey) as BookingQuotePayload),
     enabled: !!settledQuoteKey,
-    retry: false,
+    // One quiet retry on a blip; a refusal (4xx) is the answer.
+    retry: retryUnlessClientError(1),
     staleTime: 15_000,
   });
   // Only a quote for exactly what is on screen right now counts.
-  const liveQuote = quoteWanted && settledQuoteKey === JSON.stringify(quoteRequest) ? quote : undefined;
+  const currentQuoteKey = quoteWanted ? JSON.stringify(quoteRequest) : "";
+  const quoteIsCurrent = quoteWanted && settledQuoteKey === currentQuoteKey;
+  const liveQuote = quoteIsCurrent ? quote : undefined;
   useEffect(() => {
     if (quote) setFirstWashKnown(quote.first_time_eligible);
   }, [quote]);
   // A refusal the booking would also hit (e.g. a plan that can't be used)
-  // is shown; a network blip or rate limit just leaves the local estimate.
+  // is shown as such; a network blip, timeout, 5xx or rate limit means the
+  // price simply isn't confirmed — never a local estimate on the Book button.
   const quoteStatus = (quoteFailure as { response?: { status?: number } } | null)?.response?.status;
-  const quoteError = quoteWanted && quoteFailure && quoteStatus && quoteStatus < 500 && quoteStatus !== 429 ? getErrorMessage(quoteFailure) : "";
+  const quoteError = quoteIsCurrent && quoteFailure && quoteStatus && quoteStatus < 500 && quoteStatus !== 429 ? getErrorMessage(quoteFailure) : "";
+  const quoteUnavailable = quoteIsCurrent && !quote && !!quoteFailure && !quoteError;
+  // The server re-priced the booking (409 PRICE_CHANGED — e.g. the first-wash
+  // price doesn't apply to this number): that figure, for exactly this
+  // selection + number, is what the next tap confirms.
+  const [repriced, setRepriced] = useState<{ key: string; total: number; charge?: number } | null>(null);
+  const repriceKey = `${currentQuoteKey}|${validateIndianMobile(phone) || ""}`;
+  const repricedTotal = repriced && repriced.key === repriceKey && liveQuote ? repriced.total : null;
+  // The customer's wallet on this quote (spec 2026-10-07 §1.1) — display
+  // only: a negative balance is carried INTO total_amount ("Previous
+  // Balance Due"), credit is used on it ("Wallet Credit"). Older servers
+  // sent the late-cancellation charge as cancellation_charge instead.
+  const walletQuote = liveQuote as (typeof liveQuote & WalletQuoteLines) | undefined;
+  const walletDueField = walletQuote?.previous_balance_due ?? walletQuote?.wallet_due_carried;
+  /** A previous balance (or, on an older server, a late-cancellation charge) riding on this visit (in the total). */
+  const carriedCharge =
+    repricedTotal != null && repriced?.charge ? repriced.charge : liveQuote && !isLog ? (walletDueField ?? liveQuote.cancellation_charge) || 0 : 0;
+  const carriedLabel = walletDueField != null || (repricedTotal != null && !!repriced?.charge) ? "Previous Balance Due" : "Previous Cancellation Charge";
+  /** Wallet credit the server will use on this booking (never on a re-priced or logged one). */
+  const walletApplied = liveQuote && !isLog && repricedTotal == null ? Math.max(0, walletQuote?.wallet_applied || 0) : 0;
 
   const total = liveQuote ? liveQuote.subtotal : lines.reduce((n, l) => n + l.subtotal, 0);
   const regularTotal = liveQuote ? liveQuote.regular_subtotal : lines.reduce((n, l) => n + l.regularSubtotal, 0);
@@ -722,7 +877,14 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const travelQuote = liveQuote ? liveQuote.travel : travel;
   const travelDue = !isLog && !!travelQuote && (liveQuote ? true : billed.some((s) => s.charges_travel));
   const travelCharge = travelDue && travelQuote ? travelQuote.charge : 0;
-  const payable = liveQuote && !isLog ? liveQuote.total_amount : displayTotal + travelCharge;
+  const payable = liveQuote && !isLog ? (repricedTotal ?? liveQuote.total_amount) : displayTotal + travelCharge;
+  /** What the customer actually pays now — the total less wallet credit (display only; the booking still sends `payable`). */
+  const amountToPay =
+    liveQuote && !isLog && repricedTotal == null && typeof walletQuote?.amount_payable === "number"
+      ? Math.max(0, walletQuote.amount_payable)
+      : Math.max(0, Math.round((payable - walletApplied) * 100) / 100);
+  /** Book is live only with a server price for exactly what is on screen. */
+  const priceConfirmed = isLog || (!!liveQuote && !quoteError);
   // Online only: a billed prepaid service, or (self-serve) extras on a plan
   // wash — the server parks both until paid.
   const prepaidName = isLog ? undefined : liveQuote ? liveQuote.prepaid_service || undefined : billed.find((s) => s.prepaid_only)?.name;
@@ -733,28 +895,35 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     ? `${titleCase(prepaidName)} is prepaid${isManager ? " — the customer gets a payment link on WhatsApp." : "."}`
     : "Extras on a plan wash are paid online.";
   const payOptions = [
-    { id: "cash", icon: Banknote, title: isManager ? "Cash" : "Pay after the wash", sub: isManager ? "Collected at the visit" : "Cash or UPI to the captain" },
-    { id: "online", icon: CreditCard, title: isManager ? "Online" : "Pay online now", sub: isManager ? "Customer pays online" : "UPI, card or netbanking" },
+    { id: "cash", icon: Banknote, title: isManager ? "Cash" : "Pay After The Wash", sub: isManager ? "Collected at the visit" : "Cash or UPI to the captain" },
+    { id: "online", icon: CreditCard, title: isManager ? "Online" : "Pay Online Now", sub: isManager ? "Customer pays online" : "UPI, card or netbanking" },
   ] as const;
   // Log mode only: rupees the manager took off the bill. What the customer
   // actually paid (finalTotal) drives the footer, the payment choice and the save.
   const discountNum = isLog ? Math.round(Number(discount) || 0) : 0;
-  const finalTotal = Math.max(0, displayTotal - discountNum);
+  const tipNum = isLog ? Math.round(Number(tip) || 0) : 0;
+  const afterDiscount = Math.max(0, displayTotal - discountNum);
+  const finalTotal = afterDiscount + tipNum;
   const allServices = lines.flatMap((l) => l.services);
   const step1Ready = lines.length > 0 && lines.every((l) => !!l.base) && (!draft.typeId || draftReady);
 
   const otherVehicles = added.reduce((n, d) => n + d.count, 0);
-  const pickType = (typeId: string) => {
-    // Default the service (a deep-linked one when offered for this type) so
-    // the dropdown pick is already a bookable line.
+  /** A new vehicle type keeps the chosen service when it's sold for that
+   *  type (else the deep-linked one); the console wizard falls back to the
+   *  first service so its dropdown pick is already a bookable line. Returns
+   *  the service it landed on. */
+  const pickType = (typeId: string): string | null => {
     const groups = baseGroups(services, typeId);
-    const first = (groups.find((g) => g.key === preferredBase) || groups[0])?.key ?? null;
-    setDraft({ typeId, count: 1, base: first, addons: [] });
+    const keep = draft.base ?? preferredBase;
+    const base = (groups.find((g) => g.key === keep) || (isManager ? groups[0] : undefined))?.key ?? null;
+    const sameType = draft.typeId === typeId;
+    setDraft({ typeId, count: sameType ? draft.count : 1, base, addons: sameType && base === draft.base ? draft.addons : [] });
+    return base;
   };
   const setCount = (next: number) => {
     const clamped = Math.max(1, Math.min(10, next));
     if (otherVehicles + clamped > maxVehicles) {
-      pushToast({ tone: "error", title: `Up to ${maxVehicles} vehicles on one visit`, message: "Book the rest as a second visit." });
+      pushToast({ tone: "error", title: `Up To ${maxVehicles} Vehicles On One Visit`, message: "Book the rest as a second visit." });
       return;
     }
     setDraft((d) => ({ ...d, count: clamped }));
@@ -766,7 +935,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   const addAnother = () => {
     if (!draftReady) return;
     if (otherVehicles + draft.count >= maxVehicles) {
-      pushToast({ tone: "error", title: `Up to ${maxVehicles} vehicles on one visit`, message: "Book the rest as a second visit." });
+      pushToast({ tone: "error", title: `Up To ${maxVehicles} Vehicles On One Visit`, message: "Book the rest as a second visit." });
       return;
     }
     setAdded((a) => [...a, draft]);
@@ -792,23 +961,33 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // older pick (a default address still checking when "Book again" or the
   // customer picks another) is dropped instead of overwriting the newer one.
   const addressSeq = useRef(0);
+  // The console wizard picks the slot AFTER the address, so a new address
+  // clears it; customer flows pick it first and keep it (the slot hold
+  // re-checks it against whichever center the address resolves to).
+  const clearSlotForAddress = () => {
+    if (isManager) setSlot("");
+  };
   const resetCoverage = () => {
     addressSeq.current += 1;
     setCoverage("idle");
     setCheckedPincode("");
     setCenterId("");
-    setSlot("");
+    clearSlotForAddress();
     setTravel(null);
   };
 
+  // Re-runs the last coverage check after a failed one ("Try Again").
+  const retryCoverage = useRef<(() => void) | null>(null);
+
   async function chooseSavedAddress(a: Address) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void chooseSavedAddress(a);
     setSavedAddressId(a.id);
     setPinned(null);
     setCoverage("checking");
     setCheckedPincode(a.pincode);
     setCenterId("");
-    setSlot("");
+    clearSlotForAddress();
     setTravel(null);
     try {
       const result = await coverageApi.check({ latitude: a.latitude ?? undefined, longitude: a.longitude ?? undefined, pincode: a.pincode });
@@ -823,12 +1002,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setCoverage("uncovered");
       }
     } catch {
-      if (seq === addressSeq.current) setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("error");
     }
   }
 
   async function onPin(v: LocationValue) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void onPin(v);
     setPinned(v);
     if (v.pincode) setPincode(v.pincode);
     setCoverage("checking");
@@ -836,7 +1016,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     // alone decides coverage, so never invent a placeholder here.
     setCheckedPincode(v.pincode || "");
     setCenterId("");
-    setSlot("");
+    clearSlotForAddress();
     setTravel(null);
     try {
       const result = await coverageApi.check({ latitude: v.latitude, longitude: v.longitude, pincode: v.pincode });
@@ -851,19 +1031,43 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setCoverage("uncovered");
       }
     } catch {
-      if (seq === addressSeq.current) setCoverage("uncovered");
+      if (seq === addressSeq.current) setCoverage("error");
     }
   }
 
   const latestPincode = useRef("");
+  // Customer typed a pincode, but the service area is drawn as zones: only
+  // a map pin can be verified (the server refuses a pinless customer
+  // booking — PIN_REQUIRED), so say so instead of a dead-end "covered".
+  const [pinRequired, setPinRequired] = useState(false);
   async function checkPincode(pin: string) {
     const seq = ++addressSeq.current;
+    retryCoverage.current = () => void checkPincode(pin);
     latestPincode.current = pin;
     setCoverage("checking");
     setCheckedPincode(pin);
     setCenterId("");
-    setSlot("");
+    setPinRequired(false);
+    clearSlotForAddress();
     setTravel(null);
+    if (!isManager) {
+      try {
+        const result = (await coverageApi.check({ pincode: pin })) as Awaited<ReturnType<typeof coverageApi.check>> & { pin_required?: boolean };
+        if (latestPincode.current !== pin || seq !== addressSeq.current) return;
+        if (result.covered && result.center) {
+          setCenterId(result.center.id);
+          setCenterCity(result.center.city || "");
+          setCenterState(result.center.state || "");
+          setCoverage("covered");
+        } else {
+          setPinRequired(!!result.pin_required);
+          setCoverage("uncovered");
+        }
+      } catch {
+        if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("error");
+      }
+      return;
+    }
     try {
       const centers = await serviceCenterApi.lookupByPincode(pin);
       // The customer kept typing while this was in flight — a newer check owns the screen.
@@ -877,7 +1081,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setCoverage("uncovered");
       }
     } catch {
-      if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("uncovered");
+      if (latestPincode.current === pin && seq === addressSeq.current) setCoverage("error");
     }
   }
 
@@ -887,7 +1091,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // per center, and leave any date the customer picks themselves alone.
   const [autoDatedFor, setAutoDatedFor] = useState("");
   useEffect(() => {
-    if (coverage !== "covered" || !centerId || autoDatedFor === centerId) return;
+    if (!isManager || coverage !== "covered" || !centerId || autoDatedFor === centerId) return;
     setAutoDatedFor(centerId);
     if (skipAutoDateRef.current) {
       skipAutoDateRef.current = false; // a restored booking keeps its own date/slot
@@ -984,7 +1188,8 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   };
   // The button stays live once the fields are filled; a time that hasn't
   // happened yet (or a date past the limit) is explained inline on tap.
-  const logReady = name.trim().length >= 2 && !!validateIndianMobile(phone) && line1.trim().length >= 3 && !!date && date <= todayIST() && !!logTime;
+  const logAddressOk = savedAddressId ? true : usingPin ? !!pinned : line1.trim().length >= 3;
+  const logReady = name.trim().length >= 2 && !!validateIndianMobile(phone) && logAddressOk && !!date && date <= todayIST() && !!logTime;
   const step2Ready = isLog
     ? logReady
     : coverage === "covered" && !!date && !!slot && addressReady && name.trim().length >= 2 && !!validateIndianMobile(phone);
@@ -994,7 +1199,10 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     if (isLog) {
       if (name.trim().length < 2) next.name = "Enter the customer's name.";
       if (!validateIndianMobile(phone)) next.phone = "Enter a valid 10-digit mobile number.";
-      if (line1.trim().length < 3) next.address = "Enter where the job was done.";
+      if (!logAddressOk) {
+        if (usingPin) next.location = "Drop the pin on where the job was done.";
+        else next.address = "Enter where the job was done.";
+      }
       if (!date) next.date = "Choose the date.";
       else if (date > todayIST()) next.date = "Pick today or an earlier date.";
       else if (date < oldestLogDate) next.date = "Jobs older than 90 days can't be logged.";
@@ -1020,40 +1228,62 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
 
   // Anonymous website bookings prove the phone with an OTP as the last step;
   // signed-in customers already did (OTP login) and managers book on behalf.
-  const needsOtp = !isManager && (!user || user.role !== "customer" || forceOtp);
+  // A signed-in customer with NO phone yet (Google sign-in) proves the number
+  // they type too — the server refuses to attach an unproven number.
+  const needsOtp = !isManager && (!user || user.role !== "customer" || !user.phone || forceOtp);
 
   const submitLog = async () => {
     setError("");
     setSubmitting(true);
     try {
-      const result = await bookingApi.managerLogCompleted({
+      const logPayload: ManagerLogPayload & { tip_method?: TipMethod } = {
         customer_name: name.trim(),
         customer_phone: validateIndianMobile(phone) || phone.trim(),
         lines: linesForPayload(),
         scheduled_date: date,
         service_time: logTime,
-        address_line: line1.trim(),
+        ...(savedAddressId
+          ? { address_id: savedAddressId }
+          : pinned && usingPin
+            ? {
+                address: {
+                  line1: pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ") || "Pinned location",
+                  city: pinned.city || undefined,
+                  state: pinned.state || undefined,
+                  pincode: pinned.pincode || undefined,
+                  latitude: pinned.latitude,
+                  longitude: pinned.longitude,
+                },
+              }
+            : pincode.trim().length >= 4
+              ? { address: { line1: line1.trim(), pincode: pincode.trim() } }
+              : { address_line: line1.trim() }),
         customer_notes: notes.trim() || undefined,
         payment_method: finalTotal > 0 ? paymentMethod : "cash",
         discount_amount: discountNum > 0 ? discountNum : undefined,
+        tip_amount: tipNum || undefined,
+        tip_method: tipNum > 0 ? tipMethod : undefined,
         send_whatsapp: sendWhatsApp,
-      });
+      };
+      const result = await bookingApi.managerLogCompleted(logPayload);
       try {
         sessionStorage.removeItem(storageKey);
       } catch {
         // ignore
       }
       queryClient.invalidateQueries({
-        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|center-captains)/.test(q.queryKey[0]),
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|manager-kpi|manager-dashboard|center-captains)/.test(q.queryKey[0]),
       });
       pushToast({
         tone: "success",
-        title: "Job logged as done",
+        title: "Job Logged As Done",
         message: `${result.booking_numbers.join(" + ")} · ₹${result.total_amount}${sendWhatsApp ? " · customer notified on WhatsApp" : ""}`,
       });
       navigate("/manager/bookings");
     } catch (err) {
-      setError(getErrorMessage(err));
+      const message = getErrorMessage(err);
+      if (getErrorCode(err) === "ACCOUNT_INACTIVE" || getErrorCode(err) === "STAFF_ACCOUNT_PHONE") setFieldErrors((prev) => ({ ...prev, phone: message }));
+      setError(message);
     } finally {
       setSubmitting(false);
     }
@@ -1066,6 +1296,13 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       return;
     }
     const canonicalPhone = validateIndianMobile(phone) || phone.trim();
+    // Never book on a price the customer wasn't shown by the server.
+    if (!liveQuote || quoteError) {
+      setError(quoteError || "Couldn't confirm the price — try again.");
+      if (!quoteError) void refetchQuote();
+      return;
+    }
+    const expectedTotal = repricedTotal ?? liveQuote.total_amount;
     const proof: PhoneProof | undefined = freshProof ?? (verified?.phone === canonicalPhone ? verified.proof : undefined);
     if (needsOtp && !proof) {
       setOtpError("");
@@ -1073,6 +1310,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       return;
     }
     setError("");
+    setDuplicateBooking(null);
     setSubmitting(true);
     try {
       const payload: QuickBookingPayload = {
@@ -1088,6 +1326,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
         hold_key: getSlotHolderKey(),
+        expected_total: expectedTotal,
       };
       if (savedAddressId) payload.address_id = savedAddressId;
       else
@@ -1116,7 +1355,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         const linkMissing = payMethod === "online" && !!prepaidName;
         pushToast({
           tone: linkMissing ? "warning" : "success",
-          title: "Booking created",
+          title: "Booking Created",
           message: linkMissing
             ? `${result.booking_numbers.join(" + ")} · the payment link couldn't be sent.`
             : `${result.booking_numbers.join(" + ")} · service code ${result.service_code || "—"}`,
@@ -1127,6 +1366,9 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       if (isCustomer) {
         queryClient.invalidateQueries({ queryKey: ["my-subscriptions"] });
         queryClient.invalidateQueries({ queryKey: ["addresses"] });
+        queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+        // Wallet credit was used / a previous balance was carried in.
+        queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
       }
       // A pay-online booking isn't real until it's paid — that Purchase
       // comes from the payment instead. A ₹0 visit fully covered by a plan
@@ -1142,6 +1384,7 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
       }
       navigate(`/thank-you?token=${result.confirmation_token}`, {
         state: {
+          token: result.confirmation_token,
           type: "booking",
           booking_number: result.booking_numbers.join(" + "),
           scheduled_date: date,
@@ -1151,10 +1394,52 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
           payment_link: result.payment_link,
           awaiting_payment: result.awaiting_payment,
           total_amount: result.total_amount,
+          payment_method: result.total_amount > 0 ? payload.payment_method : undefined,
+          cancellation_charge: result.cancellation_charge || 0,
+          wallet_applied: (result as typeof result & WalletResultLines).wallet_applied || 0,
+          wallet_due_carried: (result as typeof result & WalletResultLines).wallet_due_carried || 0,
+          amount_due: (result as typeof result & WalletResultLines).amount_due,
         },
       });
     } catch (err) {
       const message = getErrorMessage(err);
+      if (getErrorCode(err) === "PRICE_CHANGED") {
+        // The server's price moved since the quote (or differs for this
+        // number): show the new one and wait for a fresh tap — never book
+        // it silently.
+        const details = ((err as { response?: { data?: { details?: Record<string, unknown> } } }).response?.data?.details || {}) as Record<string, unknown>;
+        const fresh = [details.total_amount, details.new_total, details.current_total, details.total].find((v) => typeof v === "number") as number | undefined;
+        // A late-cancellation charge on the customer's account only shows
+        // up once the number is proven (after the OTP) — say that's why.
+        const carriedRaw = typeof details.previous_balance_due === "number" ? details.previous_balance_due : details.cancellation_charge;
+        const carried = typeof carriedRaw === "number" ? carriedRaw : 0;
+        const chargeCaused = carried > 0 && !((walletDueField ?? liveQuote?.cancellation_charge ?? 0) > 0);
+        if (fresh != null) setRepriced({ key: repriceKey, total: fresh, charge: chargeCaused ? carried : 0 });
+        setError(
+          fresh != null && chargeCaused
+            ? `Your total is now ${INR(fresh)} — it includes ${INR(carried)} previous balance due on your Blussit wallet. Tap the button again to confirm.`
+            : fresh != null
+              ? `The price for this booking is now ${INR(fresh)}. Check the total and tap the button again to confirm.`
+              : "The price for this booking has changed. Check the new total and tap the button again to confirm."
+        );
+        void queryClient.invalidateQueries({ queryKey: ["booking-quote"] });
+        return;
+      }
+      if (getErrorCode(err) === "DUPLICATE_BOOKING" || /already have (a )?booking/i.test(message)) {
+        // Usually a retry after a lost response: the first attempt went
+        // through. Point at it instead of a bare refusal.
+        const details = ((err as { response?: { data?: { details?: Record<string, unknown> } } }).response?.data?.details || {}) as Record<string, unknown>;
+        setDuplicateBooking({ id: typeof details.booking_id === "string" ? details.booking_id : "", number: typeof details.booking_number === "string" ? details.booking_number : "" });
+        setError(message);
+        return;
+      }
+      // A suspended customer, or a staff member's own number: said right
+      // at the phone field, not as a booking failure.
+      if (getErrorCode(err) === "ACCOUNT_INACTIVE" || getErrorCode(err) === "STAFF_ACCOUNT_PHONE") {
+        setFieldErrors((prev) => ({ ...prev, phone: message }));
+        setError(message);
+        return;
+      }
       // The backend rejected the code (wrong/expired) — back to the popup.
       // A signed-in customer whose session lapsed mid-wizard reaches the
       // server as a guest — same answer: verify the number, then retry.
@@ -1162,10 +1447,20 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         setForceOtp(true);
         setVerified(null);
         setError("");
-        setOtpError(message);
+        // A REUSED code (kept from an earlier attempt that the server
+        // refused after spending it — e.g. the slot filled) isn't the
+        // customer's mistake: reopen with no error so a fresh code is sent.
+        setOtpError(!freshProof && /^Invalid or expired code/.test(message) ? "" : message);
         setOtpOpen(true);
       } else {
         setError(message);
+        // The time itself went (filled up, closed, past its cutoff): drop
+        // it and show the slots again right here, fresh from the server.
+        if (/fully booked|no longer available|closed for booking|pick another slot/i.test(message)) {
+          setSlot("");
+          if (!isManager) setConfirmSlots(true);
+          queryClient.invalidateQueries({ queryKey: ["available-slots"] });
+        }
       }
     } finally {
       setSubmitting(false);
@@ -1187,23 +1482,26 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
   // Only what moves the total gets its own row; otherwise the summary alone.
   const travelBeyondKm = travelQuote ? Math.max(0, Math.round((travelQuote.distance_km - travelQuote.free_km) * 10) / 10) : 0;
   const billRows: { label: string; value: string }[] = [];
-  if (planSavings > 0) billRows.push({ label: isCustomer ? "Covered by your plan" : "Covered by plan", value: `−₹${planSavings}` });
+  if (planSavings > 0) billRows.push({ label: isCustomer ? "Covered By Your Plan" : "Covered By Plan", value: `−₹${planSavings}` });
   if (couponSavings > 0) billRows.push({ label: `Coupon ${liveQuote?.coupon_code || ""}`.trim(), value: `−₹${couponSavings}` });
   if (travelDue && travelQuote)
     billRows.push(
       travelQuote.charge > 0
-        ? { label: `Distance charge · ${travelBeyondKm} km`, value: `₹${travelQuote.charge}` }
-        : { label: "Distance charge", value: `Free — within ${travelQuote.free_km} km` }
+        ? { label: `Distance Charge · ${travelBeyondKm} km`, value: `₹${travelQuote.charge}` }
+        : { label: "Distance Charge", value: `Free — within ${travelQuote.free_km} km` }
     );
+  if (carriedCharge > 0) billRows.push({ label: carriedLabel, value: `₹${Math.round(carriedCharge)}` });
+  if (walletApplied > 0) billRows.push({ label: "Wallet Credit", value: `−₹${Math.round(walletApplied)}` });
   if (discountNum > 0 && discountNum <= displayTotal) billRows.push({ label: "Discount", value: `−₹${discountNum}` });
-  const shownTotal = isLog ? finalTotal : payable;
+  if (tipNum > 0) billRows.push({ label: `Tip From Customer (${TIP_METHOD_LABELS[tipMethod]})`, value: `+₹${tipNum}` });
+  const shownTotal = isLog ? finalTotal : amountToPay;
   // The first-wash price struck against what a returning customer pays.
   const struckTotal = showFirstWash && regularTotal > total ? shownTotal + (regularTotal - total) : null;
 
   const footer = (
     <div className="space-y-3">
       {billRows.length > 0 && (
-        <div className="space-y-1 text-sm text-gray-600">
+        <div className="space-y-1 text-sm text-[#5F6878]">
           <div className="flex justify-between gap-3">
             <span className="min-w-0 truncate">{summary}</span>
             <span className="font-mono-num shrink-0">₹{total}</span>
@@ -1217,27 +1515,40 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
         </div>
       )}
       <div className="flex items-end justify-between gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm text-gray-600">{billRows.length ? "Total" : summary || "Pick your vehicle"}</span>
+        <span className="min-w-0 flex-1 truncate text-sm text-[#5F6878]">{billRows.length ? "Total" : summary || "Pick Your Vehicle"}</span>
         <span className="text-right">
-          {struckTotal != null && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{struckTotal}</span>}
-          <span className="font-mono-num text-lg font-bold text-black">₹{shownTotal}</span>
+          {struckTotal != null && <span className="mr-1.5 text-xs text-[#9AA3B2] line-through">₹{struckTotal}</span>}
+          {!isLog && step === 1 && !liveQuote ? (
+            quoteUnavailable ? (
+              <span className="text-sm font-medium text-[#5F6878]">Price Not Confirmed</span>
+            ) : (
+              <span className="inline-block h-6 w-16 animate-pulse rounded-[6px] bg-[#EEF1F5] align-bottom" aria-label="Checking the price" />
+            )
+          ) : (
+            <span className="font-mono-num text-xl font-bold text-[#0E1A33]">₹{shownTotal}</span>
+          )}
         </span>
       </div>
       {!isLog && (
-        <p className="flex items-center gap-1.5 text-xs text-gray-500">
-          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-black" aria-hidden="true" />
-          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoting ? "Checking the price…" : "Price shown is final — no hidden charges."}
+        <p className="flex items-center gap-1.5 text-xs text-[#5F6878]">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#16A34A]" aria-hidden="true" />
+          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoteUnavailable ? "Couldn't confirm the price." : quoting || step === 1 ? "Checking the price…" : "Estimated price — confirmed before you book."}
+          {quoteUnavailable && (
+            <button type="button" onClick={() => void refetchQuote()} disabled={quoting} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+              {quoting ? "Trying…" : "Try Again"}
+            </button>
+          )}
         </p>
       )}
       {(error || quoteError) && <p className="text-right text-xs font-medium text-[var(--color-error)]">{error || quoteError}</p>}
       <div className="flex items-center justify-between gap-3">
-        <Button variant="outline" onClick={() => (step > 0 ? setStep(0) : navigate(-1))}>
+        <Button variant="outline" className="rounded-[12px]" disabled={submitting} onClick={() => (step > 0 ? setStep(0) : navigate(-1))}>
           Back
         </Button>
         {step === 0 ? (
-          <Button
-            variant="info"
-            className="min-w-[150px] font-semibold"
+          <button
+            type="button"
+            className={MGR_CTA}
             disabled={!step1Ready}
             onClick={() => {
               setPlanIssue("");
@@ -1253,11 +1564,12 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
             }}
           >
             Continue
-          </Button>
+          </button>
         ) : (
-          <Button variant="info" className="min-w-[150px] font-semibold" disabled={!step2Ready} isLoading={submitting} onClick={() => void submit()}>
-            {isLog ? "Save As Done" : !isManager && payable > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
-          </Button>
+          <button type="button" className={MGR_CTA} disabled={!step2Ready || submitting || !priceConfirmed} aria-busy={submitting} onClick={() => void submit()}>
+            {submitting && <Spinner className="h-4 w-4" />}
+            {isLog ? "Save As Done" : !isManager && amountToPay > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
+          </button>
         )}
       </div>
       {step === 0 && !step1Ready && (draft.typeId || added.length > 0) && (
@@ -1266,516 +1578,1681 @@ export function QuickBookFlow({ mode }: { mode: Mode }) {
     </div>
   );
 
-  return (
-    <>
-    {needsOtp && (
-      <BookingOtpModal
-        open={otpOpen}
-        phone={validateIndianMobile(phone) || phone.trim()}
-        initialError={otpError}
-        onClose={() => setOtpOpen(false)}
-        onEditNumber={() => {
-          setOtpOpen(false);
-          setTimeout(() => phoneRef.current?.focus(), 0);
-        }}
-        onVerified={(proof) => {
-          setVerified({ phone: validateIndianMobile(phone) || phone.trim(), proof });
-          setOtpOpen(false);
-          void submit(proof);
-        }}
-      />
-    )}
-    <WizardShell
-      title={isLog ? "Log A Completed Job" : isManager ? "New Booking" : "Book Your Doorstep Wash"}
-      steps={isLog ? LOG_STEPS : STEPS}
-      current={step}
-      onStepClick={(i) => i < step && setStep(i)}
-      footer={footer}
-    >
-      {/* ---------------- STEP 1 ---------------- */}
-      {step === 0 && (
-        <div className="space-y-5">
-          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[0]} />
+  // ---- customer flows: the v2 page -------------------------------------------
+  const pageLayout = (layout ?? (mode === "public" ? "page" : "app")) === "page";
+  const [openPicker, setOpenPicker] = useState<"type" | "service" | null>(null);
+  const [slotNotice, setSlotNotice] = useState("");
+  const [slotCenter, setSlotCenter] = useState("");
+  const slotsRef = useRef<HTMLDivElement>(null);
+  const stepRef = useRef(step);
+  stepRef.current = step;
 
-          {planIssue && (
-            <p role="status" className="flex items-start gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-3 text-sm text-gray-700">
-              <Info className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-              <span>{planIssue}</span>
-            </p>
+  // Slots before any address: the center that serves central Indore. A
+  // customer's saved address (or a pin) replaces it with their own center
+  // as soon as its coverage check answers.
+  const { data: previewCenter, isFetched: previewFetched } = useQuery({
+    queryKey: ["preview-center"],
+    queryFn: async () => {
+      const r = await coverageApi.check({ latitude: INDORE_CENTER.lat, longitude: INDORE_CENTER.lng });
+      return r.covered && r.center ? r.center.id : "";
+    },
+    enabled: !isManager,
+    staleTime: 30 * 60 * 1000,
+    retry: 1,
+  });
+  // A signed-in customer's saved address is about to answer — wait for it
+  // instead of flashing another center's slots first.
+  const savedPending =
+    isCustomer &&
+    (myAddresses === undefined ? !addressesFailed : myAddresses.length > 0 && savedAddressId !== "" && (coverage === "idle" || coverage === "checking"));
+  useEffect(() => {
+    if (isManager) return;
+    if (coverage === "covered" && centerId) {
+      setSlotCenter(centerId);
+      return;
+    }
+    // Otherwise keep whatever the slot was picked on while an address is (re)checked.
+    if (!slotCenter && !savedPending && previewCenter) setSlotCenter(previewCenter);
+  }, [isManager, coverage, centerId, slotCenter, savedPending, previewCenter]);
+  const slotsNeedAddress = !isManager && !slotCenter && !savedPending && previewFetched && !previewCenter;
+
+  const hold = useSlotHold({
+    centerId: slotCenter,
+    date,
+    slot,
+    enabled: !isManager,
+    onLost: (message) => {
+      setSlot("");
+      setSlotNotice(message);
+      if (stepRef.current === 1) setConfirmSlots(true);
+    },
+  });
+  // The manager wizard holds its slot the same way (it used to sit inside
+  // the old SlotPicker; the v2 SlotBoard leaves holding to the flow).
+  const [mgrSlotNotice, setMgrSlotNotice] = useState("");
+  const mgrHold = useSlotHold({
+    centerId,
+    date,
+    slot,
+    enabled: mode === "manager" && coverage === "covered" && !!centerId,
+    onLost: (message) => {
+      setSlot("");
+      setMgrSlotNotice(message);
+    },
+  });
+  const pickMgrSlot = (key: string) => {
+    if (key === slot) {
+      mgrHold.reclaim();
+      return;
+    }
+    setSlot(key);
+    setMgrSlotNotice("");
+    setFieldErrors((prev) => {
+      const next = { ...prev };
+      delete next.slot;
+      return next;
+    });
+  };
+  const pickSlot = (key: string) => {
+    if (key === slot) {
+      hold.reclaim();
+      return;
+    }
+    setSlot(key);
+    setSlotNotice("");
+    setFieldErrors((prev) => {
+      const next = { ...prev };
+      delete next.slot;
+      return next;
+    });
+  };
+
+  // The confirm step is its own history entry (#confirm), so a phone's Back
+  // button returns to the slots instead of leaving the page.
+  const CONFIRM_HASH = "#confirm";
+  const pushedConfirm = useRef(false);
+  const prevHash = useRef(location.hash);
+  const canConfirm = useRef(false);
+  canConfirm.current = step1Ready && !!slot;
+  useEffect(() => {
+    const was = prevHash.current;
+    prevHash.current = location.hash;
+    if (isManager || was === location.hash) return;
+    if (was === CONFIRM_HASH && stepRef.current === 1) {
+      // Back
+      pushedConfirm.current = false;
+      setStep(0);
+      setConfirmSlots(false);
+    } else if (location.hash === CONFIRM_HASH && stepRef.current === 0 && canConfirm.current) {
+      // Forward again
+      pushedConfirm.current = true;
+      setStep(1);
+    }
+  }, [location.hash, isManager]);
+
+  const scrollToFirstError = () =>
+    requestAnimationFrame(() => document.querySelector('[data-field-error="true"]')?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  const jumpToSlots = () => slotsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  const goConfirm = () => {
+    if (!draft.typeId && !added.length) return setOpenPicker("type");
+    if (draft.typeId && !draft.base) return setOpenPicker("service");
+    if (!step1Ready) return;
+    if (!slot) {
+      setFieldErrors((prev) => ({ ...prev, slot: slotsNeedAddress ? "Add your location to see the open times." : "Pick a time slot." }));
+      jumpToSlots();
+      return;
+    }
+    setPlanIssue("");
+    setConfirmSlots(false);
+    setFieldErrors({});
+    setStep(1);
+    if (!isManager) {
+      trackInitiateCheckout({
+        value: liveQuote ? payable : undefined,
+        contentType: "booking",
+        contentName: lines.map(lineLabel).join(" + "),
+        numItems: lines.reduce((n, l) => n + l.count, 0),
+      });
+    }
+    if (location.hash !== CONFIRM_HASH) {
+      pushedConfirm.current = true;
+      navigate({ search: location.search, hash: CONFIRM_HASH });
+    }
+  };
+  const goBack = () => {
+    if (pushedConfirm.current && location.hash === CONFIRM_HASH) {
+      navigate(-1);
+      return;
+    }
+    setStep(0);
+    setConfirmSlots(false);
+    if (location.hash === CONFIRM_HASH) navigate({ search: location.search, hash: "" }, { replace: true });
+  };
+  const confirmBooking = () => {
+    if (!validateStep2()) {
+      if (!slot) setConfirmSlots(true);
+      scrollToFirstError();
+      return;
+    }
+    void submit();
+  };
+
+  // Every service sold, variants collapsed — for a service picked before the car type.
+  const allGroups = useMemo(() => {
+    const seen = new Map<string, BaseGroup>();
+    const out: BaseGroup[] = [];
+    for (const s of services) {
+      if (s.is_addon) continue;
+      const key = s.variant_group || s.id;
+      const existing = seen.get(key);
+      if (existing) {
+        existing.variants.push(s);
+        continue;
+      }
+      const g: BaseGroup = { key, label: s.variant_group ? s.name.split("(")[0].trim() : s.name, primary: s, variants: [s] };
+      seen.set(key, g);
+      out.push(g);
+    }
+    for (const g of out) {
+      g.variants.sort((a, b) => variantCount(a) - variantCount(b));
+      g.primary = g.variants[0];
+    }
+    return out;
+  }, [services]);
+
+  const pickService = (key: string) => {
+    setPreferredBase(key);
+    if (draft.typeId) setDraft((d) => ({ ...d, base: key, addons: [] }));
+  };
+
+  // ---- shared bits of the v2 page -------------------------------------------
+  const editingType = types.find((t) => t.id === draft.typeId) || null;
+  const firstType = lines[0]?.type || editingType;
+  const heroVehicle = vehicleMeta(firstType);
+  const serviceGroupLabel = (key: string | null) => {
+    const g = (draft.typeId ? editingGroups : allGroups).find((x) => x.key === key) || allGroups.find((x) => x.key === key);
+    return g ? titleCase(g.label) : "";
+  };
+  const shownServiceKey = draft.base ?? (!draft.typeId ? preferredBase : null);
+  const today = todayIST();
+  const dayText = (() => {
+    const { top, bottom } = dayParts(date, today);
+    return `${top}, ${bottom}`;
+  })();
+  const whenText = slot ? `${dayText} · ${formatSlot(slot)}` : "";
+  const savedAddress = savedAddressId && savedAddresses ? savedAddresses.find((a) => a.id === savedAddressId) : undefined;
+  const addressText = savedAddress
+    ? `${savedAddress.label} · ${savedAddress.line1}`
+    : pinned
+      ? pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")
+      : !mapsUp && line1.trim()
+        ? `${line1.trim()}${pincode.trim() ? `, ${pincode.trim()}` : ""}`
+        : "";
+  // Per-vehicle figures come from the live quote too ("—" until it lands).
+  const lineTotal = (i: number): number | null => (liveQuote ? (liveQuote.lines.find((l) => l.line_index === i)?.total ?? lineCost(i)) : null);
+  const lineTotalText = (i: number) => {
+    const t = lineTotal(i);
+    return t == null ? "—" : coveredUnits[i] > 0 && t === 0 ? "Covered" : INR(t);
+  };
+  const lineService = (l: Line) => (l.base ? `${titleCase(l.isBike ? l.groups.find((g) => g.key === l.draft.base)?.label || l.base.name : l.base.name)}${l.addons.length ? ` + ${l.addons.map((a) => titleCase(a.name)).join(", ")}` : ""}` : "");
+  // Only the server's price is ever shown as THE price: while it loads a
+  // placeholder, when it can't be fetched a retry — never a local estimate.
+  const pricePending = lines.length > 0 && !liveQuote && !quoteUnavailable && !quoteError;
+  // A guest's first-wash price depends on their number: until the quote
+  // was made WITH it, the price isn't final (a returning number pays the
+  // regular price). Signed-in customers are always quoted as themselves.
+  const quotedPhone = !!quoteRequest?.customer_phone;
+  const priceDependsOnNumber =
+    mode === "public" && !!liveQuote && liveQuote.first_time_savings > 0 && (!quotedPhone || liveQuote.first_time_confirmed === false);
+  const priceNote = !lines.length
+    ? "Pick your car type and service to see the price."
+    : liveQuote?.travel_pending
+      ? "Any distance charge shows once you add the address."
+      : repricedTotal != null
+        ? "Updated for your number — this is the price you'll pay."
+        : liveQuote && priceDependsOnNumber
+          ? "First-wash price for new numbers — confirmed for yours before you book."
+          : liveQuote
+            ? "Price shown is final — no hidden charges."
+            : quoteUnavailable || quoteError
+              ? ""
+              : "Checking the price…";
+  const bookLabel = !liveQuote
+    ? quoteUnavailable || quoteError
+      ? "Price Not Confirmed"
+      : "Checking Price…"
+    : amountToPay > 0 && payMethod === "online"
+      ? `Book & Pay ${INR(amountToPay)}`
+      : "Confirm Booking";
+
+  const billBlock = (
+    <div className="space-y-2">
+      {lines.length > 0 && billRows.length > 0 && liveQuote && repricedTotal == null && (
+        <div className="space-y-1.5 text-[13px] text-[#5F6878]">
+          <div className="flex justify-between gap-3">
+            <span>{lines.length > 1 ? "Services" : "Service"}</span>
+            <span className="font-medium text-[#0E1A33]">{INR(total)}</span>
+          </div>
+          {billRows.map((r) => (
+            <div key={r.label} className="flex justify-between gap-3">
+              <span className="min-w-0">{r.label}</span>
+              <span className="shrink-0 font-medium text-[#0E1A33]">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-end justify-between gap-3">
+        <span className="pb-1 text-[14px] font-semibold text-[#0E1A33]">{step === 1 ? "Total" : "Price"}</span>
+        <span className="text-right">
+          {liveQuote && repricedTotal == null && struckTotal != null && <span className="mr-2 text-[14px] text-[#9AA3B2] line-through">{INR(struckTotal)}</span>}
+          {pricePending ? (
+            <span className="inline-block h-8 w-20 animate-pulse rounded-[8px] bg-[#EEF1F5] align-bottom" aria-label="Checking the price" />
+          ) : (
+            <span className={`font-display text-[30px] font-extrabold leading-none tracking-[-0.02em] ${liveQuote ? "text-[#0E1A33]" : "text-[#C3CBD8]"}`}>{liveQuote ? INR(shownTotal) : "—"}</span>
           )}
+        </span>
+      </div>
+      {repricedTotal != null && carriedCharge > 0 && (
+        <p className="text-[12px] text-[#5F6878]" data-testid="carried-charge-note">
+          Includes {INR(carriedCharge)} {carriedLabel === "Previous Balance Due" ? "previous balance due" : "previous cancellation charge"}.
+        </p>
+      )}
+      {quoteUnavailable ? (
+        <p role="alert" className="text-[12px] font-medium text-[#5F6878]">
+          Couldn't confirm the price —{" "}
+          <button type="button" onClick={() => void refetchQuote()} disabled={quoting} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+            {quoting ? "Trying…" : "Try Again"}
+          </button>
+        </p>
+      ) : (
+        priceNote && (
+          <p className="flex items-start gap-1.5 text-[12px] text-[#5F6878]">
+            <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0 text-[#12A150]" aria-hidden="true" />
+            {priceNote}
+          </p>
+        )
+      )}
+      {(error || quoteError) && <p className="text-[12px] font-medium text-[var(--color-error)]">{error || quoteError}</p>}
+      {duplicateBooking && isManager && duplicateBooking.id && (
+        <p className="text-[12px]">
+          <a
+            href={`/manager/bookings?highlight=${duplicateBooking.id}`}
+            onClick={(e) => {
+              e.preventDefault();
+              navigate(`/manager/bookings?highlight=${duplicateBooking.id}`);
+            }}
+            className="font-semibold text-[#0A66F0] hover:underline"
+          >
+            Open {duplicateBooking.number || "The Existing Booking"}
+          </a>
+        </p>
+      )}
+      {duplicateBooking && !isManager && (
+        <p className="text-[12px]">
+          <a
+            href={user?.role === "customer" ? (duplicateBooking.id ? `/app/bookings/${duplicateBooking.id}` : "/app/bookings") : "/login"}
+            onClick={(e) => {
+              e.preventDefault();
+              const target = duplicateBooking.id ? `/app/bookings/${duplicateBooking.id}` : "/app/bookings";
+              if (user?.role === "customer") navigate(target);
+              else navigate("/login", { state: { from: { pathname: target } } });
+            }}
+            className="font-semibold text-[#0A66F0] hover:underline"
+          >
+            {user?.role === "customer" ? (duplicateBooking.id ? `Open ${duplicateBooking.number || "Your Booking"}` : "See My Bookings") : "Log In To See Your Booking"}
+          </a>
+        </p>
+      )}
+    </div>
+  );
 
-          {/* Vehicles already on the visit */}
-          {added.length > 0 && (
-            <div className="rounded-xl border border-[#F3E5B5] p-3.5">
-              <p className="text-sm font-medium text-gray-600">
-                On this visit · {totalVehicles} of {maxVehicles}
-              </p>
-              <div className="mt-2 space-y-1.5">
-                {added.map((d, i) => {
-                  const li = lines.findIndex((x) => x.draft === d);
-                  const l = lines[li];
-                  if (!l) return null;
-                  const cost = lineCost(li);
-                  return (
-                    <div key={`${d.typeId}-${i}`} className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate text-gray-600">
-                        <span className="font-medium text-black">{lineLabel(l)}</span>
-                        {l.addons.length ? ` + ${l.addons.map((x) => titleCase(x.name)).join(", ")}` : ""}
-                      </span>
-                      <span className="font-mono-num shrink-0 text-gray-600">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : `₹${cost}`}</span>
-                      <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-xs font-semibold text-gray-500 underline underline-offset-2 hover:text-black">
-                        Edit
-                      </button>
-                      <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-gray-400 hover:text-black">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+  const ctaButton =
+    step === 0 ? (
+      <button type="button" className={CTA} onClick={goConfirm}>
+        Continue <ArrowRight className="h-5 w-5" />
+      </button>
+    ) : (
+      <button type="button" className={CTA} disabled={submitting || !priceConfirmed} aria-busy={submitting} onClick={confirmBooking}>
+        {submitting ? <Spinner className="h-5 w-5" /> : null}
+        {bookLabel} {!submitting && priceConfirmed && <ArrowRight className="h-5 w-5" />}
+      </button>
+    );
+  const secureNote = (
+    <p className="flex items-center justify-center gap-1.5 text-[12px] text-[#5F6878]">
+      <Lock className="h-3.5 w-3.5" /> Secure &amp; Safe Booking
+    </p>
+  );
+
+  const summaryRow = (icon: ReactNode, label: string, value: ReactNode, muted = false) => (
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-[#EEF3FA] text-[#0A66F0]">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[12px] text-[#5F6878]">{label}</p>
+        <div className={`text-[14px] font-semibold leading-snug ${muted ? "text-[#9AA3B2]" : "text-[#0E1A33]"}`}>{value}</div>
+      </div>
+    </div>
+  );
+
+  const summaryCard = (
+    <aside className={`${CARD} p-5`}>
+      <h2 className="font-display text-[19px] font-bold text-[#0E1A33]">Booking Summary</h2>
+      <div className="mt-4 flex h-[128px] items-center justify-center overflow-hidden rounded-[14px] bg-gradient-to-b from-[#F5F8FF] to-[#E6EEFC]">
+        <img src={heroVehicle.image} alt={firstType?.name || "Your vehicle"} loading="lazy" className={`max-h-[108px] max-w-[84%] object-contain drop-shadow-[0_10px_12px_rgba(14,26,51,0.18)] ${firstType ? "" : "opacity-40 grayscale"}`} />
+      </div>
+      <div className="mt-4 space-y-3.5">
+        {lines.length > 1 ? (
+          summaryRow(
+            <Car className="h-4 w-4" />,
+            `Vehicles · ${totalVehicles}`,
+            <ul className="space-y-1">
+              {lines.map((l, i) => (
+                <li key={i} className="flex justify-between gap-2">
+                  <span className="min-w-0">
+                    {lineLabel(l).split(" · ")[0]}
+                    <span className="block text-[12px] font-normal text-[#5F6878]">{lineService(l)}</span>
+                  </span>
+                  <span className="shrink-0">{lineTotalText(i)}</span>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : (
+          <>
+            {summaryRow(
+              firstType && vehicleMeta(firstType).bike ? <BikeIcon className="h-4 w-4" /> : <Car className="h-4 w-4" />,
+              "Car Type",
+              firstType ? `${lines[0]?.count > 1 ? `${lines[0].count} × ` : ""}${vehicleLabel(firstType)}` : "Not Selected",
+              !firstType
+            )}
+            {summaryRow(<SprayCan className="h-4 w-4" />, "Service", lines[0] ? lineService(lines[0]) : serviceGroupLabel(shownServiceKey) || "Not Selected", !lines[0])}
+          </>
+        )}
+        {summaryRow(<CalendarDays className="h-4 w-4" />, "Date & Time", whenText || "Not Selected", !whenText)}
+        {step === 1 && summaryRow(<MapPin className="h-4 w-4" />, "Address", addressText || "Add Your Address", !addressText)}
+      </div>
+      <div className="my-4 h-px bg-[#EEF1F5]" />
+      {billBlock}
+      <div className="mt-4">{ctaButton}</div>
+      <div className="mt-3">{secureNote}</div>
+    </aside>
+  );
+
+  // Where — saved address chips (preselected), else the pin.
+  const addressBlock = (
+    <div className="space-y-3">
+      {!!savedAddresses?.length && (
+        <div className="grid grid-cols-1 gap-2 @lg:grid-cols-2">
+          {savedAddresses.map((a) => {
+            const on = savedAddressId === a.id;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => void chooseSavedAddress(a)}
+                aria-pressed={on}
+                className={`flex min-w-0 items-start gap-3 rounded-[14px] border p-3 text-left transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] ring-1 ring-[#0A66F0]" : "border-[#E4E9F1] bg-white hover:border-[#0A66F0]/50"}`}
+              >
+                <MapPin className={`mt-0.5 h-4 w-4 shrink-0 ${on ? "text-[#0A66F0]" : "text-[#9AA3B2]"}`} />
+                <span className="min-w-0">
+                  <span className="block text-[14px] font-semibold text-[#0E1A33]">{a.label}</span>
+                  <span className="block truncate text-[12px] text-[#5F6878]">
+                    {a.line1} · {a.pincode}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => {
+              setSavedAddressId("");
+              setPinned(null);
+              resetCoverage();
+            }}
+            aria-pressed={savedAddressId === ""}
+            className={`flex items-center gap-2 rounded-[14px] border border-dashed p-3 text-[14px] font-semibold transition ${savedAddressId === "" ? "border-[#0A66F0] bg-[#F3F7FF] text-[#0A66F0]" : "border-[#C9D3E2] text-[#0A66F0] hover:bg-[#F6F8FC]"}`}
+          >
+            <Plus className="h-4 w-4" /> New Address
+          </button>
+        </div>
+      )}
+      {!savedAddressId && usingPin && <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => void onPin(v)} height="11rem" />}
+      {!savedAddressId && !mapsUp && (
+        <div className="grid grid-cols-1 gap-3 @lg:grid-cols-[1fr_150px]">
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Address</span>
+            <input className={FIELD} value={line1} onChange={(e) => setLine1(e.target.value)} placeholder="House / flat, street, area" />
+            {fieldErrors.address && (
+              <span data-field-error="true" className="mt-1 block text-[12px] font-medium text-[var(--color-error)]">
+                {fieldErrors.address}
+              </span>
+            )}
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Pincode</span>
+            <input
+              className={FIELD}
+              value={pincode}
+              maxLength={6}
+              inputMode="numeric"
+              placeholder="452001"
+              onChange={(e) => {
+                const value = e.target.value.replace(/\D/g, "");
+                setPincode(value);
+                setCoverage("idle");
+                latestPincode.current = "";
+                if (/^\d{6}$/.test(value)) void checkPincode(value);
+              }}
+            />
+            {fieldErrors.pincode && (
+              <span data-field-error="true" className="mt-1 block text-[12px] font-medium text-[var(--color-error)]">
+                {fieldErrors.pincode}
+              </span>
+            )}
+          </label>
+        </div>
+      )}
+      {coverage === "checking" && (
+        <p className="flex items-center gap-2 text-[13px] text-[#5F6878]">
+          <Spinner className="h-4 w-4" /> Checking your area…
+        </p>
+      )}
+      {coverage === "covered" && !savedAddress && (
+        <p className="flex items-start gap-1.5 text-[13px] text-[#12804A]">
+          <BadgeCheck className="mt-px h-4 w-4 shrink-0" />
+          <span>
+            <span className="font-semibold">We come here.</span>
+            {pinned && <span className="text-[#5F6878]"> {pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")}</span>}
+          </span>
+        </p>
+      )}
+      {coverage === "uncovered" && pinRequired && (
+        <p data-field-error="true" className="text-[12px] font-medium text-[var(--color-error)]">
+          Please pin your exact location on the map — we can't confirm the area from a pincode alone.
+        </p>
+      )}
+      {coverage === "uncovered" && !pinRequired && (
+        <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
+      )}
+      {coverage === "error" && <CoverageFailed onRetry={() => retryCoverage.current?.()} />}
+      {fieldErrors.location && (
+        <p data-field-error="true" className="text-[12px] font-medium text-[var(--color-error)]">
+          {fieldErrors.location}
+        </p>
+      )}
+    </div>
+  );
+
+  const slotsBlock = (
+    <>
+      {slotsNeedAddress ? (
+        <div className="rounded-[14px] border border-dashed border-[#C9D3E2] p-4">
+          <p className="text-[14px] font-semibold text-[#0E1A33]">Where Should We Come?</p>
+          <p className="mb-3 text-[13px] text-[#5F6878]">Set your location to see the open times near you.</p>
+          {addressBlock}
+        </div>
+      ) : slotCenter ? (
+        <SlotBoard centerId={slotCenter} date={date} onDateChange={setDate} value={slot} onChange={pickSlot} maxAdvanceDays={policy?.max_advance_days} heldSeconds={hold.secondsLeft} notice={slotNotice} />
+      ) : (
+        <div className="space-y-3">
+          {/* Clipped, never scrolled: five day tiles are wider than a phone. */}
+          <div className="flex gap-2 overflow-hidden">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} className="h-[58px] w-[76px] shrink-0 animate-pulse rounded-[12px] bg-[#F1F4F9]" />
+            ))}
+          </div>
+          <div className="h-[54px] animate-pulse rounded-[14px] bg-[#F1F4F9]" />
+        </div>
+      )}
+      {fieldErrors.slot && (
+        <p data-field-error="true" className="mt-2 text-[12px] font-medium text-[var(--color-error)]">
+          {fieldErrors.slot}
+        </p>
+      )}
+    </>
+  );
+
+  // ---- console wizard (manager + log) -----------------------------------------
+  if (isManager) {
+    return (
+      <>
+        <WizardShell
+          title={isLog ? "Log A Completed Job" : "New Booking"}
+          steps={isLog ? LOG_STEPS : STEPS}
+          current={step}
+          onStepClick={(i) => i < step && setStep(i)}
+          footer={footer}
+        >
+          {/* ---------------- STEP 1 ---------------- */}
+          {step === 0 && (
+            <div className="space-y-5">
+              <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[0]} />
+
+              {/* Vehicles already on the visit */}
+              {added.length > 0 && (
+                <div className="rounded-xl border border-[#E4E9F1] p-3.5">
+                  <p className="text-sm font-medium text-[#5F6878]">
+                    On This Visit · {totalVehicles} Of {maxVehicles}
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {added.map((d, i) => {
+                      const li = lines.findIndex((x) => x.draft === d);
+                      const l = lines[li];
+                      if (!l) return null;
+                      const cost = lineCost(li);
+                      return (
+                        <div key={`${d.typeId}-${i}`} className="flex items-center gap-2 text-sm">
+                          <span className="min-w-0 flex-1 truncate text-[#5F6878]">
+                            <span className="font-medium text-[#0E1A33]">{lineLabel(l)}</span>
+                            {l.addons.length ? ` + ${l.addons.map((x) => titleCase(x.name)).join(", ")}` : ""}
+                          </span>
+                          <span className="font-mono-num shrink-0 text-[#5F6878]">{coveredUnits[li] > 0 && cost === 0 ? "Covered" : `₹${cost}`}</span>
+                          <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0A66F0]">
+                            Edit
+                          </button>
+                          <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-[#9AA3B2] hover:text-[#0A66F0]">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* The editor: one vehicle at a time */}
+              <div className="space-y-5">
+                {added.length > 0 && (
+                  <p className="text-sm font-medium text-[#0E1A33]">
+                    Vehicle {added.length + 1}
+                    {!draft.typeId && <span className="font-normal text-[#5F6878]"> · Optional</span>}
+                  </p>
+                )}
+                <div>
+                  <p className={SECTION_LABEL}>Vehicle Type</p>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {types.map((t) => {
+                      const meta = vehicleMeta(t);
+                      const on = draft.typeId === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => pickType(t.id)}
+                          aria-pressed={on}
+                          className={`flex min-w-0 items-center gap-2.5 rounded-[12px] p-2.5 text-left ${choiceClass(on)}`}
+                        >
+                          <span className="flex h-10 w-[54px] shrink-0 items-center justify-center rounded-[9px] bg-[#EEF3FA]">
+                            <img src={meta.image} alt="" loading="lazy" className="max-h-8 max-w-[48px] object-contain" />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold text-[#0E1A33]">{titleCase(t.name)}</span>
+                            {meta.examples && <span className="block truncate text-[11px] text-[#5F6878]">{meta.examples}</span>}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {draft.typeId && (
+                    <div className="mt-3 flex items-center justify-between gap-3 rounded-[12px] border border-[#E4E9F1] bg-white px-3.5 py-2.5 sm:max-w-xs">
+                      <span className="text-sm text-[#5F6878]">How Many?</span>
+                      <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
                     </div>
-                  );
-                })}
+                  )}
+                </div>
+
+                {draft.typeId &&
+                  editing &&
+                  (servicesLoading ? (
+                    <p className="text-sm text-[#5F6878]">Loading services…</p>
+                  ) : servicesFailed && !catalogue ? (
+                    <LoadFailed what="services" busy={servicesFetching} onRetry={() => void refetchServices()} />
+                  ) : editingGroups.length === 0 ? (
+                    <p className="text-sm text-[#5F6878]">No services for this vehicle yet.</p>
+                  ) : (
+                    <>
+                      <div>
+                        <p className={SECTION_LABEL}>Service</p>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {editingGroups.map((g) => {
+                            const selected = draft.base === g.key;
+                            const shown = unit(g.primary, draft.typeId);
+                            const { price, original } = priceForType(g.primary, draft.typeId);
+                            // A first-wash price is struck against the regular one, else against the MRP.
+                            const struck = shown < price ? price : original;
+                            const pct = discountPercent(shown, struck);
+                            const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag;
+                            const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
+                            const inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
+                            const inc = parseIncludes(g.primary.description);
+                            const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
+                            return (
+                              <button
+                                key={g.key}
+                                type="button"
+                                onClick={() => pickBase(g.key)}
+                                aria-pressed={selected}
+                                className={`rounded-xl px-3.5 py-3 text-left ${choiceClass(selected)}`}
+                              >
+                                <span className="flex items-start justify-between gap-3">
+                                  <span className="text-sm font-semibold text-[#0E1A33]">{titleCase(g.label)}</span>
+                                  <span className="shrink-0 text-right">
+                                    {struck != null && <span className="mr-1 text-xs text-[#9AA3B2] line-through">₹{struck}</span>}
+                                    <span className="font-mono-num text-sm font-bold text-[#0E1A33]">₹{shown}</span>
+                                  </span>
+                                </span>
+                                {(pct != null || offerTag || inPlan || shown < price) && (
+                                  <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    <DiscountBadge percent={pct} />
+                                    <OfferTag label={offerTag} />
+                                    {shown < price && <span className="text-[11px] text-[#5F6878]">First Wash</span>}
+                                    {inPlan && (
+                                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0E1A33]">
+                                        <BadgeCheck className="h-3 w-3" /> In Their Plan
+                                      </span>
+                                    )}
+                                  </span>
+                                )}
+                                {items.length > 0 && (
+                                  <ul className="mt-2 space-y-0.5">
+                                    {items.map((it) => (
+                                      <li key={it} className="flex items-start gap-1.5 text-xs text-[#5F6878]">
+                                        <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-[#0A66F0]" />
+                                        <span>{it}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {editing.base && editingKit && editingAddons.length > 0 && (
+                        <div>
+                          <p className={SECTION_LABEL}>Add-ons</p>
+                          <div className="flex flex-wrap gap-2">
+                            {editingAddons.map((a) => {
+                              const on = draft.addons.includes(a.id);
+                              const per = unit(a, draft.typeId);
+                              const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
+                              return (
+                                <button
+                                  key={a.id}
+                                  type="button"
+                                  onClick={() => toggleAddon(a.id)}
+                                  aria-pressed={on}
+                                  className={`rounded-full px-3 py-1.5 text-xs font-medium ${choiceClass(on)}`}
+                                >
+                                  + {titleCase(a.name)} · ₹{per}
+                                  {perBike ? "/bike" : ""}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ))}
+
+                {/* A different type on the same visit */}
+                {totalVehicles < maxVehicles && (
+                  <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
+                    <Plus className="h-4 w-4" /> Add Another Vehicle
+                  </Button>
+                )}
+                {!types.length &&
+                  (typesFailed && !vehicleTypes ? (
+                    <LoadFailed what="vehicle types" busy={typesFetching} onRetry={() => void refetchTypes()} />
+                  ) : (
+                    <p className="text-sm text-[#5F6878]">Loading vehicle types…</p>
+                  ))}
               </div>
             </div>
           )}
 
-          {/* The editor: one vehicle at a time */}
-          <div className="space-y-5">
-            {added.length > 0 && (
-              <p className="text-sm font-medium text-black">
-                Vehicle {added.length + 1}
-                {!draft.typeId && <span className="font-normal text-gray-500"> · optional</span>}
-              </p>
-            )}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-              <Select label="Vehicle type" value={draft.typeId} onChange={(e) => pickType(e.target.value)}>
-                <option value="">Select vehicle type</option>
-                {types.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </Select>
-              {draft.typeId && (
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-[#F3E5B5] bg-white px-3.5 py-2.5 sm:h-[46px]">
-                  <span className="text-sm text-gray-600">How many?</span>
-                  <QtyStepper value={draft.count} min={1} max={10} onChange={setCount} />
-                </div>
-              )}
-            </div>
+          {/* ---------------- STEP 2 ---------------- */}
+          {step === 1 && (
+            <div className="space-y-6">
+              <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[1]} description={isLog ? "Saved as done — no captain or photos needed." : undefined} />
 
-            {draft.typeId &&
-              editing &&
-              (servicesLoading ? (
-                <p className="text-sm text-gray-500">Loading services…</p>
-              ) : editingGroups.length === 0 ? (
-                <p className="text-sm text-gray-500">No services for this vehicle yet.</p>
-              ) : (
-                <>
-                  <div>
-                    <p className={SECTION_LABEL}>Service</p>
-                    {/* Every option shows what it includes, so the customer
-                        compares before tapping — not after. */}
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {editingGroups.map((g) => {
-                        const selected = draft.base === g.key;
-                        const shown = unit(g.primary, draft.typeId);
-                        const { price, original } = priceForType(g.primary, draft.typeId);
-                        // A first-wash price is struck against the regular one, else against the MRP.
-                        const struck = shown < price ? price : original;
-                        const pct = discountPercent(shown, struck);
-                        const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag;
-                        const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
-                        const inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
-                        const inc = parseIncludes(g.primary.description);
-                        const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
-                        return (
+              <CustomerNamePhoneFields
+                name={name}
+                phone={phone}
+                onChangeName={(v) => {
+                  setName(v);
+                  pickCustomer(null);
+                }}
+                onChangePhone={(v) => {
+                  setPhone(v);
+                  pickCustomer(null);
+                }}
+                onPick={(c) => pickCustomer(c.id)}
+                nameError={fieldErrors.name}
+                phoneError={fieldErrors.phone}
+                phoneInputRef={phoneRef}
+              />
+
+              {isLog && (
+                <div className="space-y-6">
+                  <div className="space-y-3">
+                    <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
+                      <MapPin className="h-3.5 w-3.5" /> Where Was It Done?
+                    </p>
+                    {!!savedAddresses?.length && (
+                      <div className="flex flex-wrap gap-2">
+                        {savedAddresses.map((a) => (
                           <button
-                            key={g.key}
+                            key={a.id}
                             type="button"
-                            onClick={() => pickBase(g.key)}
-                            aria-pressed={selected}
-                            className={`rounded-xl px-3.5 py-3 text-left ${choiceClass(selected)}`}
+                            onClick={() => setSavedAddressId(a.id)}
+                            aria-pressed={savedAddressId === a.id}
+                            className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
                           >
-                            <span className="flex items-start justify-between gap-3">
-                              <span className="text-sm font-semibold text-black">{titleCase(g.label)}</span>
-                              <span className="shrink-0 text-right">
-                                {struck != null && <span className="mr-1 text-xs text-gray-400 line-through">₹{struck}</span>}
-                                <span className="font-mono-num text-sm font-bold text-black">₹{shown}</span>
-                              </span>
+                            <span className="block font-semibold text-[#0E1A33]">{a.label}</span>
+                            <span className="block truncate text-xs text-[#5F6878]">
+                              {a.line1} · {a.pincode}
                             </span>
-                            {(pct != null || offerTag || inPlan || shown < price) && (
-                              <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                <DiscountBadge percent={pct} />
-                                <OfferTag label={offerTag} />
-                                {shown < price && <span className="text-[11px] text-gray-500">First wash</span>}
-                                {inPlan && (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-black">
-                                    <BadgeCheck className="h-3 w-3" /> In {isCustomer ? "your" : "their"} plan
-                                  </span>
-                                )}
-                              </span>
-                            )}
-                            {items.length > 0 && (
-                              <ul className="mt-2 space-y-0.5">
-                                {items.map((it) => (
-                                  <li key={it} className="flex items-start gap-1.5 text-xs text-gray-600">
-                                    <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-black" />
-                                    <span>{it}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
                           </button>
-                        );
-                      })}
-                    </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSavedAddressId("");
+                            setPinned(null);
+                          }}
+                          aria-pressed={savedAddressId === ""}
+                          className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
+                        >
+                          + New Address
+                        </button>
+                      </div>
+                    )}
+                    {!savedAddressId && usingPin && (
+                      <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => setPinned(v)} />
+                    )}
+                    {fieldErrors.location && <p className="text-xs font-medium text-red-600">{fieldErrors.location}</p>}
+                    {!savedAddressId && mapsUp && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTypedAddress((v) => !v);
+                          setPinned(null);
+                        }}
+                        className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0A66F0]"
+                      >
+                        {typedAddress ? "Pin On The Map Instead" : "Type The Address Instead"}
+                      </button>
+                    )}
+                    {!savedAddressId && !usingPin && (
+                      <>
+                        <Input
+                          label="Address"
+                          maxLength={300}
+                          value={line1}
+                          onChange={(e) => setLine1(e.target.value)}
+                          error={fieldErrors.address}
+                          placeholder="House / flat, street, area"
+                          hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
+                        />
+                        <Input label="Pincode (Optional)" value={pincode} maxLength={10} inputMode="numeric" onChange={(e) => setPincode(e.target.value.replace(/\D/g, ""))} placeholder="E.g. 452001" />
+                      </>
+                    )}
                   </div>
 
-                  {editing.base && editingKit && (editingKit.simple.length > 0 || (editingIsBike && editingKit.bikePolish)) && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />
+                    <Input type="time" label="Time" min={logRangeOk ? logOpens : undefined} max={logRangeOk ? logLatest : undefined} value={logTime} onChange={(e) => setLogTime(e.target.value)} error={fieldErrors.time} />
+                  </div>
+
+                  <Input
+                    label="Discount Given (₹, Optional)"
+                    inputMode="numeric"
+                    value={discount}
+                    onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="0"
+                    error={fieldErrors.discount}
+                    hint={discountNum > 0 && discountNum <= displayTotal ? `Bill is ₹${afterDiscount} instead of ₹${displayTotal}.` : undefined}
+                  />
+
+                  <Input
+                    label="Tip Given (₹, Optional)"
+                    inputMode="numeric"
+                    value={tip}
+                    onChange={(e) => setTip(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="0"
+                    hint={tipNum > 0 ? `Added to the total — ₹${finalTotal} with the tip, counted in revenue.` : "If the customer tipped, it's added to the total and revenue. You can also add it later from the booking."}
+                  />
+                  {tipNum > 0 && (
+                    <div className="-mt-3">
+                      <p className={SECTION_LABEL}>Tip Given In</p>
+                      <TipMethodToggle value={tipMethod} onChange={setTipMethod} />
+                    </div>
+                  )}
+
+                  {planTogglesNode}
+
+                  {finalTotal > 0 && (
                     <div>
-                      <p className={SECTION_LABEL}>Add-ons</p>
-                      <div className="flex flex-wrap gap-2">
-                        {[...editingKit.simple, ...(editingIsBike && editingKit.bikePolish ? [editingKit.bikePolish] : [])].map((a) => {
-                          const on = draft.addons.includes(a.id);
-                          const per = unit(a, draft.typeId);
-                          const perBike = editingIsBike && editingKit.bikePolish && a.id === editingKit.bikePolish.id;
-                          return (
-                            <button
-                              key={a.id}
-                              type="button"
-                              onClick={() => toggleAddon(a.id)}
-                              aria-pressed={on}
-                              className={`rounded-full px-3 py-1.5 text-xs font-medium ${choiceClass(on)}`}
-                            >
-                              + {titleCase(a.name)} · ₹{per}
-                              {perBike ? "/bike" : ""}
-                            </button>
-                          );
-                        })}
+                      <p className={SECTION_LABEL}>How Was It Paid?</p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {(
+                          [
+                            { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you" },
+                            { id: "online", icon: CreditCard, title: "Online / UPI", sub: "To the business account" },
+                          ] as const
+                        ).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setPaymentMethod(opt.id)}
+                            aria-pressed={paymentMethod === opt.id}
+                            className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(paymentMethod === opt.id)}`}
+                          >
+                            <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-[#0A66F0]" />
+                            <span>
+                              <span className="block text-sm font-semibold text-[#0E1A33]">{opt.title}</span>
+                              <span className="block text-xs text-[#5F6878]">{opt.sub}</span>
+                            </span>
+                          </button>
+                        ))}
                       </div>
                     </div>
                   )}
-                </>
-              ))}
 
-            {/* A different type on the same visit */}
-            {totalVehicles < maxVehicles && (
-              <Button type="button" variant="outline" className="w-full" disabled={!draftReady} onClick={addAnother}>
-                <Plus className="h-4 w-4" /> Add another vehicle
-              </Button>
-            )}
-            {!types.length && <p className="text-sm text-gray-500">Loading vehicle types…</p>}
-          </div>
-        </div>
-      )}
+                  <Input label="Note (Optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
 
-      {/* ---------------- STEP 2 ---------------- */}
-      {step === 1 && (
-        <div className="space-y-6">
-          {planIntroNode}
-          <WizardStepHeader title={(isLog ? LOG_STEPS : STEPS)[1]} description={isLog ? "Saved as done — no captain or photos needed." : undefined} />
-
-          {/* Who — a signed-in customer books as themselves, unless the
-              account has no phone yet (Google sign-in) and we still need one
-              for the captain and the WhatsApp updates. */}
-          {isCustomer && user && user.phone ? (
-            <p className="text-sm text-gray-600">
-              Booking as <span className="font-semibold text-black">{user.full_name}</span> · {user.phone}
-            </p>
-          ) : isManager ? (
-            <CustomerNamePhoneFields
-              name={name}
-              phone={phone}
-              onChangeName={(v) => {
-                setName(v);
-                pickCustomer(null);
-              }}
-              onChangePhone={(v) => {
-                setPhone(v);
-                pickCustomer(null);
-              }}
-              onPick={(c) => pickCustomer(c.id)}
-              nameError={fieldErrors.name}
-              phoneError={fieldErrors.phone}
-              phoneInputRef={phoneRef}
-            />
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Input label="Your name" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} error={fieldErrors.name} placeholder="E.g. Rahul Sharma" />
-              <Input
-                ref={phoneRef}
-                label="Mobile number"
-                value={phone}
-                inputMode="numeric"
-                onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
-                error={fieldErrors.phone}
-                placeholder="10-digit mobile"
-                hint="Booking updates come on WhatsApp."
-              />
-            </div>
-          )}
-
-          {isLog && (
-            <div className="space-y-6">
-              <Input label="Where was it done?" maxLength={300} value={line1} onChange={(e) => setLine1(e.target.value)} error={fieldErrors.address} placeholder="House / flat, street, area" />
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Input type="date" label="Date" value={date} min={oldestLogDate} max={todayIST()} onChange={(e) => setDate(e.target.value)} error={fieldErrors.date} />
-                <Input type="time" label="Time" min={logRangeOk ? logOpens : undefined} max={logRangeOk ? logLatest : undefined} value={logTime} onChange={(e) => setLogTime(e.target.value)} error={fieldErrors.time} />
-              </div>
-
-              <Input
-                label="Discount given (₹, optional)"
-                inputMode="numeric"
-                value={discount}
-                onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="0"
-                error={fieldErrors.discount}
-                hint={discountNum > 0 && discountNum <= displayTotal ? `Customer pays ₹${finalTotal} instead of ₹${displayTotal}.` : undefined}
-              />
-
-              {planTogglesNode}
-
-              {finalTotal > 0 && (
-                <div>
-                  <p className={SECTION_LABEL}>How was it paid?</p>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {(
-                      [
-                        { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you" },
-                        { id: "online", icon: CreditCard, title: "Online / UPI", sub: "To the business account" },
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setPaymentMethod(opt.id)}
-                        aria-pressed={paymentMethod === opt.id}
-                        className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(paymentMethod === opt.id)}`}
-                      >
-                        <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-                        <span>
-                          <span className="block text-sm font-semibold text-black">{opt.title}</span>
-                          <span className="block text-xs text-gray-500">{opt.sub}</span>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
+                  <Switch checked={sendWhatsApp} onChange={setSendWhatsApp} label="Tell The Customer On WhatsApp" description="One message saying the service is done." />
                 </div>
               )}
 
-              <Input label="Note (optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
+              {!isLog && (
+                <>
+                  {/* Where */}
+                  <div className="space-y-3">
+                    <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
+                      <MapPin className="h-3.5 w-3.5" /> Address
+                    </p>
+                    {!!savedAddresses?.length && (
+                      <div className="flex flex-wrap gap-2">
+                        {savedAddresses.map((a) => (
+                          <button
+                            key={a.id}
+                            type="button"
+                            onClick={() => void chooseSavedAddress(a)}
+                            aria-pressed={savedAddressId === a.id}
+                            className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
+                          >
+                            <span className="block font-semibold text-[#0E1A33]">{a.label}</span>
+                            <span className="block truncate text-xs text-[#5F6878]">
+                              {a.line1} · {a.pincode}
+                            </span>
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSavedAddressId("");
+                            setPinned(null);
+                            resetCoverage();
+                          }}
+                          aria-pressed={savedAddressId === ""}
+                          className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
+                        >
+                          + New Address
+                        </button>
+                      </div>
+                    )}
 
-              <Switch
-                checked={sendWhatsApp}
-                onChange={setSendWhatsApp}
-                label="Tell the customer on WhatsApp"
-                description="One message saying the service is done."
-              />
+                    {!savedAddressId && usingPin && <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => void onPin(v)} />}
+                    {!savedAddressId && (
+                      <div className="space-y-3">
+                        {mapsUp && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTypedAddress((v) => !v);
+                              setPinned(null);
+                              resetCoverage();
+                            }}
+                            className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0A66F0]"
+                          >
+                            {typedAddress ? "Pin On The Map Instead" : "Type The Address Instead"}
+                          </button>
+                        )}
+                        {!usingPin && (
+                          <>
+                            <Input
+                              label="Address"
+                              value={line1}
+                              onChange={(e) => setLine1(e.target.value)}
+                              error={fieldErrors.address}
+                              placeholder="House / flat, street, area"
+                              hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
+                            />
+                            <Input
+                              label="Pincode"
+                              value={pincode}
+                              maxLength={10}
+                              inputMode="numeric"
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setPincode(value);
+                                setCoverage("idle");
+                                latestPincode.current = "";
+                                // A full pincode is checked the moment it is typed — no
+                                // need to tap away first; the slots open right under it.
+                                if (/^\d{6}$/.test(value.trim())) void checkPincode(value.trim());
+                              }}
+                              onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && void checkPincode(pincode.trim())}
+                              error={fieldErrors.pincode}
+                              placeholder="E.g. 452001"
+                            />
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {coverage === "checking" && (
+                      <p className="flex items-center gap-1.5 text-xs text-[#5F6878]">
+                        <Spinner className="h-3.5 w-3.5" /> Checking the area…
+                      </p>
+                    )}
+                    {coverage === "covered" && (
+                      <p className="flex items-start gap-1.5 text-xs text-[#5F6878]">
+                        <BadgeCheck className="mt-px h-3.5 w-3.5 shrink-0 text-[#16A34A]" />
+                        <span>
+                          <span className="font-medium text-[#0E1A33]">We serve this area.</span>
+                          {pinned && <> {pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")} — drag the pin if this isn't the exact gate.</>}
+                        </span>
+                      </p>
+                    )}
+                    {coverage === "uncovered" && pinRequired && (
+                      <p className="text-xs font-medium text-[var(--color-error)]">Please pin your exact location on the map — we can't confirm the area from a pincode alone.</p>
+                    )}
+                    {coverage === "uncovered" && !pinRequired && (
+                      <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
+                    )}
+                    {coverage === "error" && <CoverageFailed onRetry={() => retryCoverage.current?.()} />}
+                    {fieldErrors.location && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.location}</p>}
+                  </div>
+
+                  {/* When */}
+                  {coverage === "covered" && (
+                    <div className="space-y-2">
+                      <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
+                        <CalendarDays className="h-3.5 w-3.5" /> Date &amp; Time
+                      </p>
+                      <SlotBoard
+                        centerId={centerId}
+                        date={date}
+                        onDateChange={setDate}
+                        value={slot}
+                        onChange={pickMgrSlot}
+                        maxAdvanceDays={policy?.max_advance_days}
+                        heldSeconds={mgrHold.secondsLeft}
+                        notice={mgrSlotNotice}
+                      />
+                      {(fieldErrors.date || fieldErrors.slot) && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.date || fieldErrors.slot}</p>}
+                    </div>
+                  )}
+
+                  {planTogglesNode}
+
+                  {/* How to pay */}
+                  {amountToPay > 0 && (
+                    <div>
+                      <p className={SECTION_LABEL}>Payment</p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {payOptions
+                          .filter((opt) => !onlineOnly || opt.id === "online")
+                          .map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setPaymentMethod(opt.id)}
+                              aria-pressed={payMethod === opt.id}
+                              className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(payMethod === opt.id)}`}
+                            >
+                              <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-[#0A66F0]" />
+                              <span>
+                                <span className="block text-sm font-semibold text-[#0E1A33]">{opt.title}</span>
+                                <span className="block text-xs text-[#5F6878]">{opt.sub}</span>
+                              </span>
+                            </button>
+                          ))}
+                      </div>
+                      {onlineOnly && <p className="mt-2 text-xs text-[#5F6878]">{onlineReason}</p>}
+                    </div>
+                  )}
+
+                  {payable > 0 && (
+                    <div className="max-w-sm">
+                      <Input
+                        label="Coupon Code (Optional)"
+                        value={couponCode}
+                        maxLength={20}
+                        onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
+                        error={fieldErrors.couponCode || liveQuote?.coupon_error || undefined}
+                      />
+                    </div>
+                  )}
+
+                  {/* Optional extras */}
+                  <div>
+                    <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0A66F0]">
+                      {moreOpen ? "Hide Note And Second Contact" : "Add A Note Or Second Contact"}
+                    </button>
+                    {moreOpen && (
+                      <div className="mt-3 space-y-3">
+                        <Input label="Note For The Captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. basement parking, gate B" />
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <Input label="Second Contact Name" value={altName} onChange={(e) => setAltName(e.target.value)} />
+                          <Input label="Second Contact Number" value={altPhone} inputMode="numeric" onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))} error={fieldErrors.altPhone} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <ServicePrepNotice services={allServices} />
+                </>
+              )}
+            </div>
+          )}
+        </WizardShell>
+        <Modal open={!!sentLink} onClose={() => navigate("/manager/bookings")} title="Booking Created" maxWidth="max-w-md">
+          {sentLink && (
+            <div className="space-y-4">
+              <p className="text-sm text-[#5F6878]">{sentLink.numbers} · payment link sent to the customer on WhatsApp. It confirms once paid.</p>
+              <div className="flex items-center gap-2 rounded-xl border border-[#E4E9F1] bg-[#F7F9FC] px-3.5 py-2.5">
+                <span className="font-mono-num min-w-0 flex-1 truncate text-sm text-[#0E1A33]">{sentLink.link}</span>
+                <Button size="sm" variant="outline" onClick={() => void copyLink()}>
+                  <Copy className="h-3.5 w-3.5" /> {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+              <Button className="w-full font-semibold" onClick={() => navigate("/manager/bookings")}>
+                Done
+              </Button>
+            </div>
+          )}
+        </Modal>
+      </>
+    );
+  }
+
+  // ---- customer flows: render ---------------------------------------------------
+  const sectionTitle = (icon: ReactNode, title: string, aside?: ReactNode) => (
+    <div className="mb-3 flex items-center justify-between gap-3">
+      <h2 className="flex items-center gap-2 font-display text-[16px] font-bold text-[#0E1A33]">
+        <span className="flex h-7 w-7 items-center justify-center rounded-[9px] bg-[#EEF3FA] text-[#0A66F0]">{icon}</span>
+        {title}
+      </h2>
+      {aside}
+    </div>
+  );
+  const divider = <div className="my-5 h-px bg-[#EEF1F5]" />;
+  // "How would you like to pay?" — shown the moment a plan matches the car
+  // and wash picked, so ₹0 never appears without the reason next to it. Using
+  // the plan stays the default (it's what a plan holder usually wants), and
+  // paying instead is one tap. Same state as the server's use_subscription.
+  const passLabel = (sub: UserSubscription) =>
+    sub.society_id ? "Society Plan" : `${titleCase(sub.plan_name) || "Monthly"} Pass`.replace(/ Pass Pass$/, " Pass");
+  const planChoice = lineMatches.some(Boolean) ? (
+    <div className="mt-5" data-testid="plan-choice">
+      <h3 className="mb-2.5 font-display text-[16px] font-bold text-[#0E1A33]">How Would You Like To Pay?</h3>
+      <div className="space-y-3">
+        {lines.map((line, i) => {
+          const match = lineMatches[i];
+          if (!match) return null;
+          const sub = match.subs[0];
+          const left = sub.remaining_service_count ?? 0;
+          const total = sub.total_service_count ?? 0;
+          const units = line.payload?.quantity ?? 1;
+          const service = line.base ? titleCase(line.base.name) : "Wash";
+          const withPlan = line.subtotal - match.coveredCount * line.baseUnitPrice;
+          const where = sub.society_id && sub.society_name ? `${titleCase(sub.society_name)} · ` : "";
+          const option = (usePlan: boolean, title: string, note: string, price: string) => {
+            const on = match.on === usePlan;
+            return (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={on}
+                onClick={() => setSubscriptionOverride((prev) => ({ ...prev, [i]: usePlan }))}
+                className={`flex w-full items-center gap-3 rounded-[14px] border p-3.5 text-left transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] ring-1 ring-[#0A66F0]" : "border-[#E4E9F1] bg-white hover:border-[#0A66F0]/50"}`}
+              >
+                <span aria-hidden className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 ${on ? "border-[#0A66F0]" : "border-[#C3CBD8]"}`}>
+                  {on && <span className="h-2 w-2 rounded-full bg-[#0A66F0]" />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[14px] font-semibold text-[#0E1A33]">{title}</span>
+                  <span className="block text-[12px] text-[#5F6878]">{note}</span>
+                </span>
+                <span className={`shrink-0 text-[15px] font-bold ${usePlan ? "text-[#0A66F0]" : "text-[#0E1A33]"}`}>{price}</span>
+              </button>
+            );
+          };
+          return (
+            <div key={i} role="radiogroup" aria-label={`How to pay for ${lineLabel(line)}`}>
+              {lines.length > 1 && <p className="mb-1.5 text-[12px] font-semibold text-[#5F6878]">{lineLabel(line)}</p>}
+              <div className="grid gap-2 @lg:grid-cols-2">
+                {option(
+                  true,
+                  `${isCustomer ? "Use My" : "Use Their"} ${passLabel(sub)}`,
+                  `${where}${service} · ${left} of ${total} left${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`,
+                  withPlan > 0 ? `${INR(withPlan)}` : "Covered",
+                )}
+                {option(false, "Pay For This Wash", isCustomer ? "Keep your plan wash for later" : "Keep the plan wash for later", INR(line.subtotal))}
+              </div>
+              {match.on && withPlan > 0 && <p className="mt-1.5 text-[12px] text-[#5F6878]">Extras aren't part of the plan, so they're charged.</p>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
+  const introSummary =
+    isCustomer && introSub && introLine ? (
+      <div className="flex items-center gap-3 rounded-[16px] border border-[#CFE0FD] bg-[#F3F7FF] p-3.5">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-white text-[#0A66F0]">
+          <Gift className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[14px] font-semibold text-[#0E1A33]">Using Your {introPlanName ? `${titleCase(introPlanName)} Pass` : "Pass"}</p>
+          <p className="text-[12px] text-[#5F6878]">
+            {titleCase(introLine.type.name)}
+            {introLine.base ? ` · ${titleCase(introLine.base.name)}` : ""} · {introLeft} wash{introLeft === 1 ? "" : "es"} left
+          </p>
+        </div>
+        <button type="button" onClick={goBack} className="shrink-0 text-[13px] font-semibold text-[#0A66F0] hover:underline">
+          Change
+        </button>
+      </div>
+    ) : null;
+
+  const typePanel = (close: () => void) => (
+    <div className="space-y-1">
+      {!types.length &&
+        (typesFailed && !vehicleTypes ? (
+          <LoadFailed what="vehicle types" busy={typesFetching} onRetry={() => void refetchTypes()} className="px-3 py-4" />
+        ) : (
+          <p className="px-3 py-4 text-[13px] text-[#5F6878]">Loading…</p>
+        ))}
+      {types.map((t) => {
+        const meta = vehicleMeta(t);
+        const on = draft.typeId === t.id;
+        return (
+          <PickerOption
+            key={t.id}
+            selected={on}
+            onSelect={() => {
+              const base = pickType(t.id);
+              close();
+              if (!base) window.setTimeout(() => setOpenPicker("service"), 200);
+            }}
+          >
+            <span className="flex h-11 w-[70px] shrink-0 items-center justify-center rounded-[10px] bg-[#EEF3FA]">
+              <img src={meta.image} alt="" loading="lazy" className="max-h-9 max-w-[62px] object-contain" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[14px] font-semibold text-[#0E1A33]">{titleCase(t.name)}</span>
+              {meta.examples && <span className="block text-[12px] text-[#5F6878]">{meta.examples}</span>}
+            </span>
+            {on && <CheckCircle2 className="h-5 w-5 shrink-0 text-[#0A66F0]" />}
+          </PickerOption>
+        );
+      })}
+    </div>
+  );
+
+  const servicePanel = (close: () => void) => {
+    const groups = draft.typeId ? editingGroups : allGroups;
+    return (
+      <div className="space-y-1">
+        {servicesLoading && <p className="px-3 py-4 text-[13px] text-[#5F6878]">Loading services…</p>}
+        {!servicesLoading && servicesFailed && !catalogue && (
+          <LoadFailed what="services" busy={servicesFetching} onRetry={() => void refetchServices()} className="px-3 py-4" />
+        )}
+        {!servicesLoading && !(servicesFailed && !catalogue) && !groups.length && (
+          <p className="px-3 py-4 text-[13px] text-[#5F6878]">No services for this vehicle yet.</p>
+        )}
+        {groups.map((g) => {
+          const on = shownServiceKey === g.key;
+          const offerTag = g.variants.find((v) => v.offer_tag?.trim())?.offer_tag?.trim();
+          const inc = parseIncludes(g.primary.description);
+          const items = inc.items.length ? inc.items.map(titleCase) : inc.summary ? [inc.summary] : [];
+          let shown: number;
+          let struck: number | null;
+          let from = false;
+          let inPlan = false;
+          if (draft.typeId) {
+            shown = unit(g.primary, draft.typeId);
+            const { price, original } = priceForType(g.primary, draft.typeId);
+            struck = shown < price ? price : original;
+            const cardLine = lineFor({ ...draft, base: g.key, addons: [] });
+            inPlan = !!cardLine?.payload && !!passFor(draft.typeId, cardLine.payload.service_ids, new Set());
+          } else {
+            const pv = priceView(g.primary);
+            shown = pv.final;
+            struck = pv.original;
+            from = pv.varies;
+          }
+          return (
+            <PickerOption
+              key={g.key}
+              selected={on}
+              onSelect={() => {
+                pickService(g.key);
+                close();
+                if (!draft.typeId) window.setTimeout(() => setOpenPicker("type"), 200);
+              }}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[14px] font-semibold text-[#0E1A33]">{titleCase(g.label)}</span>
+                  {offerTag && <span className="rounded-full bg-[#FFD21F] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#0E1A33]">{offerTag}</span>}
+                  {inPlan && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[#E8F0FE] px-2 py-0.5 text-[10px] font-bold text-[#0A66F0]">
+                      <BadgeCheck className="h-3 w-3" /> In Your Plan
+                    </span>
+                  )}
+                </span>
+                {items.length > 0 && <span className="mt-0.5 block truncate text-[12px] text-[#5F6878]">{items.slice(0, 3).join(" · ")}</span>}
+                <span className="mt-0.5 block text-[11px] text-[#8A93A3]">
+                  {g.primary.duration_minutes ? `${g.primary.duration_minutes} mins` : ""}
+                  {g.variants.some((v) => v.prepaid_only) ? `${g.primary.duration_minutes ? " · " : ""}Pay Online` : ""}
+                </span>
+              </span>
+              <span className="shrink-0 text-right">
+                {struck != null && struck > shown && <span className="block text-[11px] text-[#9AA3B2] line-through">{INR(struck)}</span>}
+                <span className="font-display text-[15px] font-bold text-[#0E1A33]">
+                  {from ? <span className="mr-0.5 text-[11px] font-medium text-[#5F6878]">from</span> : null}
+                  {INR(shown)}
+                </span>
+              </span>
+            </PickerOption>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const addonList = editingAddons;
+  const extrasRow =
+    editing?.base ? (
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="inline-flex h-9 items-center gap-2 rounded-full border border-[#E4E9F1] bg-white pl-3 pr-1">
+          <span className="text-[13px] text-[#5F6878]">{editingIsBike ? "Bikes" : "Cars"}</span>
+          <button type="button" aria-label="One less" disabled={draft.count <= 1} onClick={() => setCount(draft.count - 1)} className="flex h-7 w-7 items-center justify-center rounded-full bg-[#F1F4F9] text-[15px] font-bold text-[#0E1A33] disabled:opacity-35">
+            −
+          </button>
+          <span className="w-4 text-center text-[14px] font-semibold text-[#0E1A33]">{draft.count}</span>
+          <button type="button" aria-label="One more" disabled={draft.count >= 10} onClick={() => setCount(draft.count + 1)} className="flex h-7 w-7 items-center justify-center rounded-full bg-[#F1F4F9] text-[15px] font-bold text-[#0E1A33] disabled:opacity-35">
+            +
+          </button>
+        </span>
+        {totalVehicles < maxVehicles && (
+          <button type="button" onClick={addAnother} className="inline-flex h-9 items-center gap-1 px-1 text-[13px] font-semibold text-[#0A66F0] hover:underline">
+            <Plus className="h-3.5 w-3.5" /> Add Another Vehicle
+          </button>
+        )}
+      </div>
+    ) : null;
+
+  // Extras sit under the time slots (founder call): pick the wash, then the
+  // time, then anything extra.
+  const addonsRow =
+    editing?.base && addonList.length > 0 ? (
+      <div className="mt-5">
+        <p className="mb-2 text-[13px] font-semibold text-[#0E1A33]">
+          Add Extras <span className="font-normal text-[#5F6878]">· Optional</span>
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {addonList.map((a) => {
+            const on = draft.addons.includes(a.id);
+            const perBike = editingIsBike && editingKit?.bikePolish && a.id === editingKit.bikePolish.id;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => toggleAddon(a.id)}
+                aria-pressed={on}
+                className={`inline-flex h-9 items-center gap-1 rounded-full border px-3 text-[13px] font-medium transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] text-[#0A66F0]" : "border-[#E4E9F1] bg-white text-[#0E1A33] hover:border-[#0A66F0]/50"}`}
+              >
+                {on ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                {titleCase(a.name)} · {INR(unit(a, draft.typeId))}
+                {perBike ? "/bike" : ""}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    ) : null;
+
+  const addedList =
+    added.length > 0 ? (
+      <div className="mb-4 space-y-2">
+        {added.map((d, i) => {
+          const li = lines.findIndex((x) => x.draft === d);
+          const l = lines[li];
+          if (!l) return null;
+          return (
+            <div key={`${d.typeId}-${i}`} className="flex items-center gap-3 rounded-[14px] border border-[#E4E9F1] bg-[#FAFBFD] p-2.5">
+              <span className="flex h-9 w-[54px] shrink-0 items-center justify-center rounded-[10px] bg-[#EEF3FA]">
+                <img src={vehicleMeta(l.type).image} alt="" className="max-h-7 max-w-[48px] object-contain" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[14px] font-semibold text-[#0E1A33]">{lineLabel(l).split(" · ")[0]}</span>
+                <span className="block truncate text-[12px] text-[#5F6878]">{lineService(l)}</span>
+              </span>
+              <span className="shrink-0 text-[14px] font-semibold text-[#0E1A33]">{lineTotalText(li)}</span>
+              <button type="button" onClick={() => editAdded(i)} className="shrink-0 text-[13px] font-semibold text-[#0A66F0] hover:underline">
+                Edit
+              </button>
+              <button type="button" onClick={() => removeAdded(i)} aria-label="Remove this vehicle" className="shrink-0 text-[#9AA3B2] hover:text-[var(--color-error)]">
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    ) : null;
+
+  return (
+    <>
+      {needsOtp && (
+        <BookingOtpModal
+          open={otpOpen}
+          phone={validateIndianMobile(phone) || phone.trim()}
+          initialError={otpError}
+          onClose={() => setOtpOpen(false)}
+          onEditNumber={() => {
+            setOtpOpen(false);
+            setTimeout(() => phoneRef.current?.focus(), 0);
+          }}
+          onVerified={(proof) => {
+            setVerified({ phone: validateIndianMobile(phone) || phone.trim(), proof });
+            setOtpOpen(false);
+            void submit(proof);
+          }}
+        />
+      )}
+
+      <div className={pageLayout ? "min-h-screen bg-[#F6F8FC] pb-16 font-sans" : "font-sans"} style={V2_THEME}>
+        {step === 0 && <BookHero variant={pageLayout ? "page" : "app"} />}
+
+        <div className={pageLayout ? `relative mx-auto w-full max-w-[1200px] px-4 sm:px-6 ${step === 0 ? "-mt-6 sm:-mt-12" : "pt-5 sm:pt-8"}` : ""}>
+          {step === 1 && (
+            <div className="mb-4 flex items-center gap-3">
+              <button type="button" onClick={goBack} aria-label="Back to the slots" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#E4E9F1] bg-white text-[#0E1A33] transition hover:border-[#0A66F0]">
+                <ArrowLeft className="h-5 w-5" />
+              </button>
+              <div className="min-w-0">
+                <p className="text-[12px] font-semibold uppercase tracking-[0.14em] text-[#0A66F0]">Step 2 of 2</p>
+                <h1 className="font-display text-[24px] font-extrabold leading-tight tracking-[-0.02em] text-[#0E1A33] sm:text-[30px]">Confirm &amp; Book</h1>
+              </div>
             </div>
           )}
 
-          {!isLog && (
-          <>
-          {/* Where */}
-          <div className="space-y-3">
-            <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
-              <MapPin className="h-3.5 w-3.5" /> Address
-            </p>
-            {!!savedAddresses?.length && (
-              <div className="flex flex-wrap gap-2">
-                {savedAddresses.map((a) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={() => void chooseSavedAddress(a)}
-                    aria-pressed={savedAddressId === a.id}
-                    className={`max-w-full rounded-xl px-3.5 py-2 text-left text-sm ${choiceClass(savedAddressId === a.id)}`}
-                  >
-                    <span className="block font-semibold text-black">{a.label}</span>
-                    <span className="block truncate text-xs text-gray-500">
-                      {a.line1} · {a.pincode}
-                    </span>
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSavedAddressId("");
-                    setPinned(null);
-                    resetCoverage();
-                  }}
-                  aria-pressed={savedAddressId === ""}
-                  className={`rounded-xl px-3.5 py-2 text-sm font-medium ${choiceClass(savedAddressId === "")}`}
-                >
-                  + New address
-                </button>
-              </div>
-            )}
-
-            {!savedAddressId && usingPin && <LocationPicker value={pinned} onUnavailable={() => setMapsUp(false)} onChange={(v) => void onPin(v)} />}
-            {!savedAddressId && (isManager || !mapsUp) && (
-              <div className="space-y-3">
-                {isManager && mapsUp && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTypedAddress((v) => !v);
-                      setPinned(null);
-                      resetCoverage();
-                    }}
-                    className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black"
-                  >
-                    {typedAddress ? "Pin on the map instead" : "Type the address instead"}
-                  </button>
-                )}
-                {!usingPin && (
+          <div className="@container/book">
+            <div className="grid grid-cols-1 items-start gap-5 @4xl/book:grid-cols-[minmax(0,1fr)_340px]">
+              {/* LEFT */}
+              <div className="min-w-0 space-y-4">
+                {step === 0 ? (
                   <>
-                    <Input
-                      label="Address"
-                      value={line1}
-                      onChange={(e) => setLine1(e.target.value)}
-                      error={fieldErrors.address}
-                      placeholder="House / flat, street, area"
-                      hint={!mapsUp ? "Maps are unavailable — type the address." : undefined}
-                    />
-                    <Input
-                      label="Pincode"
-                      value={pincode}
-                      maxLength={10}
-                      inputMode="numeric"
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        setPincode(value);
-                        setCoverage("idle");
-                        latestPincode.current = "";
-                        // A full pincode is checked the moment it is typed — no
-                        // need to tap away first; the slots open right under it.
-                        if (/^\d{6}$/.test(value.trim())) void checkPincode(value.trim());
-                      }}
-                      onBlur={() => pincode.trim().length >= 6 && checkedPincode !== pincode.trim() && void checkPincode(pincode.trim())}
-                      error={fieldErrors.pincode}
-                      placeholder="E.g. 452001"
-                    />
+                    <div className={`${CARD} @container p-4 sm:p-5`}>
+                      {planIssue && (
+                        <p role="status" className="mb-4 flex items-start gap-2 rounded-[12px] bg-[#F3F7FF] px-3 py-2.5 text-[13px] text-[#0E1A33]">
+                          <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#0A66F0]" />
+                          <span>{planIssue}</span>
+                        </p>
+                      )}
+                      {addedList}
+                      {added.length > 0 && (
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <p className="text-[13px] font-semibold text-[#0E1A33]">
+                            Vehicle {added.length + 1}
+                            {!draftReady && <span className="font-normal text-[#5F6878]"> · Optional</span>}
+                          </p>
+                          {draft.typeId && !draftReady && (
+                            <button type="button" onClick={() => setDraft(EMPTY_DRAFT)} className="text-[12px] font-semibold text-[#5F6878] hover:text-[#0E1A33]">
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 gap-3 @2xl:grid-cols-3">
+                        <PickerField
+                          icon={editingIsBike ? <BikeIcon /> : <Car className="h-5 w-5" />}
+                          label="Car Type"
+                          value={editingType ? keepTogether(vehicleLabel(editingType), "(") : ""}
+                          placeholder="Select Car Type"
+                          sheetTitle="Choose Your Vehicle"
+                          open={openPicker === "type"}
+                          onOpenChange={(o) => setOpenPicker(o ? "type" : null)}
+                        >
+                          {typePanel}
+                        </PickerField>
+                        <PickerField
+                          icon={<SprayCan className="h-5 w-5" />}
+                          label="Service"
+                          value={serviceGroupLabel(shownServiceKey)}
+                          placeholder="Select Service"
+                          sheetTitle={editingType ? `Services For ${titleCase(editingType.name)}` : "Choose A Service"}
+                          open={openPicker === "service"}
+                          onOpenChange={(o) => setOpenPicker(o ? "service" : null)}
+                        >
+                          {servicePanel}
+                        </PickerField>
+                        <PickerField
+                          icon={<CalendarDays className="h-5 w-5" />}
+                          label="Date & Time"
+                          value={slot ? `${dayText.replace(/ /g, NBSP)} · ${formatTime12(slot.split("-")[0]).replace(" ", NBSP)}` : ""}
+                          placeholder="Pick A Slot Below"
+                          open={false}
+                          onOpenChange={() => undefined}
+                          onClick={jumpToSlots}
+                          invalid={!!fieldErrors.slot}
+                        />
+                      </div>
+                      {extrasRow}
+
+                      <div ref={slotsRef} className="mt-6 scroll-mt-24">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <h2 className="font-display text-[18px] font-bold text-[#0E1A33]">Available Slots</h2>
+                        </div>
+                        {slotsBlock}
+                      </div>
+                      {addonsRow}
+                      {isCustomer && planChoice}
+                    </div>
+
+                    {/* Phone / narrow: price + Continue right under the slots */}
+                    <div className="space-y-3 @4xl/book:hidden">
+                      {lines.length > 0 && <div className={`${CARD} p-4`}>{billBlock}</div>}
+                      {ctaButton}
+                      {secureNote}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* Phone / narrow: what's being booked, with a way back */}
+                    <div className={`${CARD} flex items-center gap-3 p-3 @4xl/book:hidden`}>
+                      <span className="flex h-12 w-[72px] shrink-0 items-center justify-center rounded-[12px] bg-[#EEF3FA]">
+                        <img src={heroVehicle.image} alt="" loading="lazy" className="max-h-10 max-w-[64px] object-contain" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[14px] font-semibold text-[#0E1A33]">{lines.map((l) => `${lineLabel(l).split(" · ")[0]} · ${lineService(l)}`).join(" + ")}</p>
+                        <p className="truncate text-[12px] text-[#5F6878]">{whenText || "Pick A Time Below"}</p>
+                      </div>
+                      <button type="button" onClick={goBack} className="shrink-0 text-[13px] font-semibold text-[#0A66F0]">
+                        Edit
+                      </button>
+                    </div>
+
+                    {introSummary}
+
+                    <div className={`${CARD} @container p-4 sm:p-5`}>
+                      {confirmSlots && (
+                        <>
+                          {sectionTitle(<CalendarDays className="h-4 w-4" />, "When Should We Come?")}
+                          {slotsBlock}
+                          {divider}
+                        </>
+                      )}
+
+                      {sectionTitle(<MapPin className="h-4 w-4" />, "Where Should We Come?")}
+                      {addressBlock}
+
+                      {divider}
+                      {sectionTitle(<UserRound className="h-4 w-4" />, "Your Details")}
+                      {isCustomer && user && user.phone ? (
+                        <p className="text-[14px] text-[#5F6878]">
+                          Booking as <span className="font-semibold text-[#0E1A33]">{user.full_name}</span> · +91 {user.phone}
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2">
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Your Name</span>
+                            <input className={FIELD} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} placeholder="E.g. Rahul Sharma" autoComplete="name" />
+                            {fieldErrors.name && (
+                              <span data-field-error="true" className="mt-1 block text-[12px] font-medium text-[var(--color-error)]">
+                                {fieldErrors.name}
+                              </span>
+                            )}
+                          </label>
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Mobile Number</span>
+                            <span className="relative block">
+                              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[15px] text-[#5F6878]">+91</span>
+                              <input
+                                ref={phoneRef}
+                                className={`${FIELD} pl-12`}
+                                value={phone}
+                                inputMode="numeric"
+                                autoComplete="tel-national"
+                                onChange={(e) => setPhone(cleanMobileInput(e.target.value))}
+                                placeholder="10-digit mobile"
+                              />
+                            </span>
+                            {fieldErrors.phone ? (
+                              <span data-field-error="true" className="mt-1 block text-[12px] font-medium text-[var(--color-error)]">
+                                {fieldErrors.phone}
+                              </span>
+                            ) : (
+                              <span className="mt-1 block text-[12px] text-[#8A93A3]">Booking updates come on WhatsApp.</span>
+                            )}
+                          </label>
+                        </div>
+                      )}
+
+                      {!(introSummary && lines.length === 1) && planChoice}
+
+                      {amountToPay > 0 && (
+                        <>
+                          {divider}
+                          {sectionTitle(<CreditCard className="h-4 w-4" />, "How Would You Like To Pay?")}
+                          <div className="grid grid-cols-1 gap-2 @lg:grid-cols-2">
+                            {payOptions
+                              .filter((opt) => !onlineOnly || opt.id === "online")
+                              .map((opt) => {
+                                const on = payMethod === opt.id;
+                                return (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => setPaymentMethod(opt.id)}
+                                    aria-pressed={on}
+                                    className={`flex items-center gap-3 rounded-[14px] border p-3 text-left transition ${on ? "border-[#0A66F0] bg-[#F3F7FF] ring-1 ring-[#0A66F0]" : "border-[#E4E9F1] bg-white hover:border-[#0A66F0]/50"}`}
+                                  >
+                                    <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${on ? "bg-[#0A66F0] text-white" : "bg-[#EEF3FA] text-[#0A66F0]"}`}>
+                                      <opt.icon className="h-4 w-4" />
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block text-[14px] font-semibold text-[#0E1A33]">{opt.title}</span>
+                                      <span className="block text-[12px] text-[#5F6878]">{opt.sub}</span>
+                                    </span>
+                                    <span aria-hidden className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 ${on ? "border-[#0A66F0]" : "border-[#C3CBD8]"}`}>
+                                      {on && <span className="h-2 w-2 rounded-full bg-[#0A66F0]" />}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                          </div>
+                          {onlineOnly && <p className="mt-2 text-[12px] text-[#5F6878]">{onlineReason}</p>}
+                        </>
+                      )}
+
+                      <div className="mt-5">
+                        <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-[13px] font-semibold text-[#0A66F0] hover:underline">
+                          {moreOpen ? "Hide Note And Second Contact" : "+ Add A Note Or Second Contact"}
+                        </button>
+                        {moreOpen && (
+                          <div className="mt-3 grid grid-cols-1 gap-3 @lg:grid-cols-2">
+                            <label className="block @lg:col-span-2">
+                              <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Note For The Captain</span>
+                              <input className={FIELD} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. flat 302, basement parking, gate B" />
+                            </label>
+                            <label className="block">
+                              <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Second Contact Name</span>
+                              <input className={FIELD} maxLength={100} value={altName} onChange={(e) => setAltName(e.target.value)} />
+                            </label>
+                            <label className="block">
+                              <span className="mb-1.5 block text-[12px] font-medium text-[#5F6878]">Second Contact Number</span>
+                              <input className={FIELD} value={altPhone} inputMode="numeric" onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))} />
+                              {fieldErrors.altPhone && (
+                                <span data-field-error="true" className="mt-1 block text-[12px] font-medium text-[var(--color-error)]">
+                                  {fieldErrors.altPhone}
+                                </span>
+                              )}
+                            </label>
+                          </div>
+                        )}
+                      </div>
+
+                      {allServices.some((s) => !s.is_addon) && (
+                        <p className="mt-4 flex items-start gap-2 rounded-[12px] bg-[#F6F8FC] p-3 text-[12px] leading-relaxed text-[#5F6878]">
+                          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0A66F0]" aria-hidden="true" />
+                          <span>
+                            Please keep water and a power point near the vehicle.{" "}
+                            <a href="/service-policy" target="_blank" rel="noreferrer" className="font-semibold text-[#0A66F0] hover:underline">
+                              Read More
+                            </a>
+                          </span>
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Phone / narrow: the bill and Book */}
+                    <div className="space-y-3 @4xl/book:hidden">
+                      <div className={`${CARD} p-4`}>{billBlock}</div>
+                      {ctaButton}
+                      {secureNote}
+                    </div>
                   </>
                 )}
               </div>
-            )}
 
-            {coverage === "checking" && (
-              <p className="flex items-center gap-1.5 text-xs text-gray-500">
-                <Spinner className="h-3.5 w-3.5" /> Checking your area…
-              </p>
-            )}
-            {coverage === "covered" && (
-              <p className="flex items-start gap-1.5 text-xs text-gray-600">
-                <BadgeCheck className="mt-px h-3.5 w-3.5 shrink-0 text-black" />
-                <span>
-                  <span className="font-medium text-black">We serve this area.</span>
-                  {pinned && <> {pinned.formatted || [pinned.area, pinned.city].filter(Boolean).join(", ")} — drag the pin if this isn't your exact gate.</>}
-                </span>
-              </p>
-            )}
-            {coverage === "uncovered" && (
-              <CoverageLeadInline pincode={checkedPincode} prefillName={name} prefillPhone={phone} serviceInterest={allServices.map((s) => s.name).join(", ") || undefined} />
-            )}
-            {fieldErrors.location && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.location}</p>}
+              {/* RIGHT: Booking Summary (wide screens) */}
+              <div className="hidden @4xl/book:sticky @4xl/book:top-24 @4xl/book:block">{summaryCard}</div>
+            </div>
           </div>
-
-          {/* When */}
-          {coverage === "covered" && (
-            <div className="space-y-2">
-              <SlotPicker serviceCenterId={centerId} date={date} onDateChange={setDate} value={slot} onChange={setSlot} enableHold />
-              {(fieldErrors.date || fieldErrors.slot) && <p className="text-xs font-medium text-[var(--color-error)]">{fieldErrors.date || fieldErrors.slot}</p>}
-            </div>
-          )}
-
-          {/* The pass summary on top already says the pass is used. */}
-          {!(planIntroNode && lines.length === 1) && planTogglesNode}
-
-          {/* How to pay */}
-          {payable > 0 && (
-            <div>
-              <p className={SECTION_LABEL}>Payment</p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {payOptions
-                  .filter((opt) => !onlineOnly || opt.id === "online")
-                  .map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setPaymentMethod(opt.id)}
-                      aria-pressed={payMethod === opt.id}
-                      className={`flex items-start gap-3 rounded-xl p-3 text-left ${choiceClass(payMethod === opt.id)}`}
-                    >
-                      <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
-                      <span>
-                        <span className="block text-sm font-semibold text-black">{opt.title}</span>
-                        <span className="block text-xs text-gray-500">{opt.sub}</span>
-                      </span>
-                    </button>
-                  ))}
-              </div>
-              {onlineOnly && <p className="mt-2 text-xs text-gray-500">{onlineReason}</p>}
-            </div>
-          )}
-
-          {isManager && payable > 0 && (
-            <div className="max-w-sm">
-              <Input
-                label="Coupon code (optional)"
-                value={couponCode}
-                maxLength={20}
-                onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                error={fieldErrors.couponCode || liveQuote?.coupon_error || undefined}
-              />
-            </div>
-          )}
-
-          {/* Optional extras */}
-          <div>
-            <button type="button" onClick={() => setMoreOpen((v) => !v)} className="text-xs font-semibold text-gray-600 underline underline-offset-2 hover:text-black">
-              {moreOpen ? "Hide note and second contact" : "Add a note or second contact"}
-            </button>
-            {moreOpen && (
-              <div className="mt-3 space-y-3">
-                <Input label="Note for the captain" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="E.g. basement parking, gate B" />
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Input label="Second contact name" value={altName} onChange={(e) => setAltName(e.target.value)} />
-                  <Input
-                    label="Second contact number"
-                    value={altPhone}
-                    inputMode="numeric"
-                    onChange={(e) => setAltPhone(cleanMobileInput(e.target.value))}
-                    error={fieldErrors.altPhone}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <ServicePrepNotice services={allServices} />
-          </>
-          )}
         </div>
-      )}
-    </WizardShell>
-    <Modal open={!!sentLink} onClose={() => navigate("/manager/bookings")} title="Booking created" maxWidth="max-w-md">
-      {sentLink && (
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600">
-            {sentLink.numbers} · payment link sent to the customer on WhatsApp. It confirms once paid.
-          </p>
-          <div className="flex items-center gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-2.5">
-            <span className="font-mono-num min-w-0 flex-1 truncate text-sm text-black">{sentLink.link}</span>
-            <Button size="sm" variant="outline" onClick={() => void copyLink()}>
-              <Copy className="h-3.5 w-3.5" /> {copied ? "Copied" : "Copy"}
-            </Button>
-          </div>
-          <Button variant="info" className="w-full font-semibold" onClick={() => navigate("/manager/bookings")}>
-            Done
-          </Button>
-        </div>
-      )}
-    </Modal>
+      </div>
     </>
   );
+}
+
+const NBSP = "\u00A0";
+/** Glues the part from `from` on into one unbreakable phrase ("(i10, Swift etc.)"). */
+function keepTogether(text: string, from: string): string {
+  const i = text.indexOf(from);
+  return i < 0 ? text : text.slice(0, i) + text.slice(i).replace(/ /g, NBSP);
+}
+
+function BikeIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return <Bike className={className} />;
 }

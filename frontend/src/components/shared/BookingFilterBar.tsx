@@ -32,8 +32,8 @@ export function BookingFilterBar({
       </div>
       <div className="sm:w-40">
         <Select label="Sort" value={sortOrder} onChange={(e) => onSortOrderChange(e.target.value as SortOrder)}>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
+          <option value="newest">Newest First</option>
+          <option value="oldest">Oldest First</option>
         </Select>
       </div>
       <div className="sm:w-40">
@@ -57,7 +57,7 @@ export function BookingFilterBar({
           }}
           className="pb-2.5 text-xs font-medium text-[var(--color-primary)] hover:underline"
         >
-          Clear dates
+          Clear Dates
         </button>
       )}
     </div>

@@ -27,13 +27,16 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_database
+from app.core.dependencies import resolve_access_token
+from app.core.exceptions import UnauthorizedException
 from app.core.security import decode_token
 from app.core.ws_manager import manager
-from app.models.enums import UserRole
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Realtime"])
+
+MAX_CHANNELS_PER_SOCKET = 50
 
 
 class _WsUser:
@@ -60,7 +63,7 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
         center_id = parts[1]
         if user.role == "admin":
             return True
-        return user.role == "manager" and user.service_center_id == center_id
+        return user.role == "manager" and bool(user.service_center_id) and user.service_center_id == center_id
 
     if kind == "user" and len(parts) == 2:
         return parts[1] == user.id  # only ever your own personal channel
@@ -76,7 +79,7 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
         if user.role == "captain":
             return booking.get("captain_id") == user.id
         if user.role == "manager":
-            return booking.get("service_center_id") == user.service_center_id
+            return bool(user.service_center_id) and booking.get("service_center_id") == user.service_center_id
         return False
 
     if kind == "captain-location" and len(parts) == 2:
@@ -85,7 +88,7 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
             return True
         if user.role == "manager":
             captain = await db.users.find_one({"_id": _safe_object_id(captain_id)})
-            return bool(captain and captain.get("service_center_id") == user.service_center_id)
+            return bool(user.service_center_id and captain and captain.get("service_center_id") == user.service_center_id)
         return False
 
     return False
@@ -101,6 +104,18 @@ def _safe_object_id(value: str):
         return None
 
 
+async def _ws_user(token: str) -> _WsUser | None:
+    """The socket's user from the DB record (same checks as every REST
+    route — see resolve_access_token), or None if the token is no longer
+    good: expired, logged out, password changed, suspended/deleted, or the
+    role/center changed since it was minted."""
+    try:
+        current = await resolve_access_token(token)
+    except UnauthorizedException:
+        return None
+    return _WsUser(id=current.id, role=current.role, service_center_id=current.service_center_id)
+
+
 @router.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket, token: str = ""):
     try:
@@ -108,17 +123,15 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
         if payload.get("type") != "access":
             raise ValueError("Invalid token type")
     except ValueError:
+        payload = None
+    user = await _ws_user(token) if payload else None
+    if user is None:
         # Accept first: a close before accept reaches the browser as a bare
         # 1006, and the client can only refresh its token if it sees 4401.
         await websocket.accept()
         await websocket.close(code=4401)
         return
 
-    user = _WsUser(
-        id=payload["sub"],
-        role=payload.get("role", UserRole.CUSTOMER.value),
-        service_center_id=payload.get("service_center_id"),
-    )
     db = get_database()
 
     await websocket.accept()
@@ -156,6 +169,19 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
             if action == "subscribe":
                 if channel in subscribed:
                     continue
+                if len(subscribed) >= MAX_CHANNELS_PER_SOCKET or len(channel) > 200:
+                    # Real screens watch a handful; `slots:*` accepts any
+                    # name, so one socket must not grow without bound.
+                    await websocket.send_json({"type": "error", "message": "Too many channels on this connection"})
+                    continue
+                # Re-read the account on every subscribe: a manager suspended
+                # or moved to another center mid-connection must not keep
+                # opening that center's channels until the token expires.
+                fresh = await _ws_user(token)
+                if fresh is None:
+                    await websocket.close(code=4401)
+                    break
+                user = fresh
                 if not await _authorize_channel(channel, user, db):
                     await websocket.send_json({"type": "error", "message": f"Not authorized for channel: {channel}"})
                     continue

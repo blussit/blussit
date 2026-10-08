@@ -7,6 +7,8 @@ import { adminServiceCenterApi } from "../../api/admin";
 import { uploadApi } from "../../api/upload";
 import { Badge, Button, Card, CardBody, CardHeader, Input } from "../../components/ui";
 import { PhoneVerificationModal } from "../../components/shared/PhoneVerificationModal";
+import { StaffPhoneVerify } from "../../components/shared/StaffPhoneVerify";
+import { WhatsAppAlertsCard } from "../../components/manager/WhatsAppAlertsSwitch";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { getErrorMessage } from "../../lib/api-client";
@@ -72,7 +74,7 @@ export default function ProfilePage() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Profile & security</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Profile & Security</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Manage your account information.</p>
       </div>
 
@@ -80,7 +82,7 @@ export default function ProfilePage() {
         <div className="flex items-start gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
           <div>
-            <p className="font-semibold text-[var(--color-text-primary)]">Set a new password to continue</p>
+            <p className="font-semibold text-[var(--color-text-primary)]">Set A New Password To Continue</p>
             <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
               This account was created with a temporary password. Please set your own below before using the rest of the app.
             </p>
@@ -138,13 +140,13 @@ export default function ProfilePage() {
             <div className="mt-1 space-y-0.5 text-sm text-[var(--color-text-secondary)]">
               {center && (
                 <p className="flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5" /> {center.name}
+                  <Building2 className="h-3.5 w-3.5 shrink-0" /> {center.name}
                   {center.location?.city ? `, ${center.location.city}` : ""}
                 </p>
               )}
               {user?.email && (
-                <p className="flex items-center gap-1.5">
-                  <Mail className="h-3.5 w-3.5" /> {user.email}
+                <p className="flex min-w-0 items-center gap-1.5">
+                  <Mail className="h-3.5 w-3.5 shrink-0" /> <span className="min-w-0 break-all">{user.email}</span>
                 </p>
               )}
               {user?.phone && (
@@ -158,13 +160,15 @@ export default function ProfilePage() {
         </div>
       </Card>
 
+      <StaffPhoneVerify onVerified={() => setProfileMsg("Phone verified.")} />
+
       <Card>
         <CardHeader className="flex items-center gap-2">
           <User className="h-4 w-4 text-[var(--color-primary)]" />
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Personal information</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Personal Information</h2>
         </CardHeader>
         <CardBody className="space-y-4">
-          <Input label="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} />
+          <Input label="Full Name" value={fullName} onChange={(e) => setFullName(e.target.value)} />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input label="Email" value={user?.email || "—"} disabled hint="Contact an admin to change login details." />
             <div>
@@ -198,27 +202,29 @@ export default function ProfilePage() {
             disabled={!fullName.trim() || fullName === user?.full_name}
             onClick={() => updateProfileMutation.mutate({ full_name: fullName })}
           >
-            Save changes
+            Save Changes
           </Button>
         </CardBody>
       </Card>
 
+      {user?.role === "manager" && <WhatsAppAlertsCard />}
+
       <Card>
         <CardHeader className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-[var(--color-primary)]" />
-          <h2 className="font-semibold text-[var(--color-text-primary)]">Change password</h2>
+          <h2 className="font-semibold text-[var(--color-text-primary)]">Change Password</h2>
         </CardHeader>
         <CardBody className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input
-              label="Current password"
+              label="Current Password"
               type={showPasswords ? "text" : "password"}
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               autoComplete="current-password"
             />
             <Input
-              label="New password"
+              label="New Password"
               type={showPasswords ? "text" : "password"}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
@@ -232,7 +238,7 @@ export default function ProfilePage() {
             onClick={() => setShowPasswords((s) => !s)}
           >
             {showPasswords ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            {showPasswords ? "Hide passwords" : "Show passwords"}
+            {showPasswords ? "Hide Passwords" : "Show Passwords"}
           </button>
           {passwordMsg && <p className="text-sm text-[var(--color-success)]">{passwordMsg}</p>}
           {passwordError && <p className="text-sm text-[var(--color-error)]">{passwordError}</p>}
@@ -241,7 +247,7 @@ export default function ProfilePage() {
             disabled={!currentPassword || newPassword.length < 8}
             onClick={() => changePasswordMutation.mutate()}
           >
-            Update password
+            Update Password
           </Button>
         </CardBody>
       </Card>

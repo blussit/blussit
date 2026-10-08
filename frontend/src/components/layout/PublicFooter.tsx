@@ -1,9 +1,5 @@
-import {
-  Mail,
-  MapPin,
-  Phone,
-  MessageCircle,
-} from "lucide-react";
+import { Building2, Mail, MapPin, Phone, MessageCircle } from "lucide-react";
+import { BUSINESS } from "../../seo/content";
 
 // Brand marks aren't in lucide (they were removed upstream) — two tiny
 // inline glyphs, sized like the lucide icons beside them.
@@ -26,31 +22,34 @@ const SOCIALS = [
   { label: "BLUSSIT on Facebook", href: "https://www.facebook.com/people/Blussit/61593594339671/", icon: FacebookIcon },
 ];
 
+// Real pages, not /#section anchors: search engines ignore the part after
+// "#", so these links are how they find (and rank) each service page.
 const COLUMNS = [
   {
     title: "Services",
     links: [
       { label: "All Services", href: "/services" },
-      { label: "Exterior Clean", href: "/services" },
-      { label: "Interior Clean", href: "/services" },
-      { label: "Other Services", href: "/services" },
+      { label: "Jet Wash", href: "/services/jet-wash" },
+      { label: "Star Wash", href: "/services/star-wash" },
+      { label: "Waterless Car Wash", href: "/services/waterless-car-wash" },
+      { label: "Car Deep Cleaning", href: "/services/car-deep-cleaning" },
+      { label: "Bike Wash", href: "/services/bike-wash" },
     ],
   },
   {
     title: "Plans",
     links: [
-      // Three links all pointing at /plans, two of them naming products we
-      // don't sell (yearly plans are retired; "corporate" was never a
-      // thing). Two honest links instead.
-      { label: "Monthly Passes", href: "/plans" },
-      { label: "Custom Plan", href: "/plans" },
+      { label: "Monthly Plans", href: "/plans" },
+      { label: "Society Plans", href: "/plans#society" },
+      { label: "Custom Plan", href: "/plans#custom-plan" },
     ],
   },
   {
     title: "Company",
     links: [
-      { label: "About Us", href: "/#how-it-works" },
+      { label: "Car Wash In Indore", href: "/doorstep-car-wash-indore" },
       { label: "How It Works", href: "/#how-it-works" },
+      { label: "Book A Wash", href: "/book" },
     ],
   },
   {
@@ -64,42 +63,37 @@ const COLUMNS = [
   },
 ];
 
+const CONTACT = [
+  { icon: Phone, label: BUSINESS.phoneDisplay, href: BUSINESS.phoneHref },
+  { icon: Mail, label: BUSINESS.email, href: `mailto:${BUSINESS.email}` },
+  { icon: MapPin, label: BUSINESS.address, href: BUSINESS.mapsHref, external: true },
+];
+
 export function PublicFooter() {
   return (
-    <footer className="border-t border-black/[0.07] bg-white text-[#111111]">
-
+    <footer className="border-t border-[#E4EBF5] bg-[#F7F9FC] text-[#0E1A33]">
       <div className="container-page">
-
-        {/* Main footer. Phones get a compact 2×2 table of link columns
-            under the brand block instead of five stacked sections — the
-            old single column ran longer than most pages it sat under. */}
-        <div className="grid grid-cols-2 gap-x-6 gap-y-8 py-10 sm:py-12 lg:grid-cols-[1.8fr_1fr_1fr_1fr_1fr] lg:gap-8">
-
+        {/* Phones get a 2×2 table of link columns under the brand block
+            instead of five stacked sections. */}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-9 py-10 sm:py-14 lg:grid-cols-[1.6fr_1fr_1fr_1fr_1fr] lg:gap-8">
           {/* Brand */}
-          <div className="col-span-2 lg:col-span-1 lg:pr-12">
-
-            <a
-              href="/"
-              className="inline-flex items-center"
-              aria-label="BLUSSIT Home"
-            >
-              <img
-                src="/img/blussit-logo-480.webp"
-                alt="BLUSSIT"
-                className="h-[23px] w-auto object-contain"
-              />
+          <div className="col-span-2 lg:col-span-1 lg:pr-10">
+            <a href="/" className="inline-flex items-center" aria-label="BLUSSIT Home">
+              <img src="/img/blussit-logo-480.webp" width={480} height={63} alt="Blussit" className="h-[24px] w-auto object-contain" />
             </a>
 
-            <p className="mt-4 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#777777]">
-              Premium Car Wash At Doorstep
+            <p className="mt-4 max-w-[320px] text-[14px] leading-[1.6] text-[#5F6878]">
+              Doorstep car and bike wash in every colony of Indore.
+              <span className="block whitespace-nowrap">Open {BUSINESS.hours}.</span>
             </p>
 
-            <p className="mt-2.5 max-w-[340px] text-[12px] leading-[1.7] text-[#707070]">
-              <span className="block whitespace-nowrap">Your car. Our care. Anywhere.</span>
-              <span className="block">Premium car wash at your doorstep.</span>
-            </p>
+            <a
+              href="/plans#society"
+              className="mt-5 inline-flex h-11 items-center gap-2 rounded-full bg-[#0A66F0] px-5 text-[14px] font-bold text-white shadow-[0_8px_20px_-6px_rgba(10,102,240,0.45)] transition-colors hover:bg-[#0857CF]"
+            >
+              <Building2 className="h-4 w-4" aria-hidden="true" /> Society Plans
+            </a>
 
-            {/* Social icons — only channels that actually exist. */}
             <div className="mt-5 flex items-center gap-2.5">
               {SOCIALS.map((social) => (
                 <a
@@ -108,18 +102,9 @@ export function PublicFooter() {
                   target="_blank"
                   rel="noreferrer"
                   aria-label={social.label}
-                  className="
-                    flex h-8 w-8 items-center justify-center
-                    rounded-full
-                    border border-[#DDDDDD]
-                    text-[#555555]
-                    transition-all duration-200
-                    hover:border-[#E8A900]
-                    hover:bg-[#E8A900]
-                    hover:text-[#111111]
-                  "
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[#D6DEEA] bg-white text-[#0E1A33] transition-colors hover:border-[#0A66F0] hover:bg-[#0A66F0] hover:text-white"
                 >
-                  <social.icon className="h-[14px] w-[14px]" />
+                  <social.icon className="h-4 w-4" />
                 </a>
               ))}
             </div>
@@ -128,113 +113,53 @@ export function PublicFooter() {
           {/* Columns */}
           {COLUMNS.map((column) => (
             <div key={column.title}>
-
-              <h3
-                className="
-                  mb-3 sm:mb-5
-                  text-[11px]
-                  font-bold
-                  text-[#171717]
-                "
-              >
-                {column.title}
-              </h3>
-
-              <ul className="space-y-2 sm:space-y-3">
-
+              <h3 className="mb-3 font-display text-[14px] font-bold sm:mb-4">{column.title}</h3>
+              <ul className="space-y-2.5">
                 {column.links.map((link) => (
                   <li key={link.label}>
-                    <a
-                      href={link.href}
-                      className="
-                        text-[12px]
-                        font-medium
-                        leading-5
-                        text-[#737373]
-                        transition-colors
-                        duration-200
-                        hover:text-[#E8A900]
-                      "
-                    >
+                    <a href={link.href} className="text-[14px] leading-5 text-[#5F6878] transition-colors hover:text-[#0A66F0]">
                       {link.label}
                     </a>
                   </li>
                 ))}
-
               </ul>
-
             </div>
           ))}
-
         </div>
 
         {/* Bottom */}
-        <div className="border-t border-black/[0.08] py-5">
-
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-
-            {/* Contact information */}
-            <div className="flex flex-wrap items-center gap-x-7 gap-y-2.5">
-
-              <a
-                href="tel:8962288774"
-                className="
-                  flex items-center gap-2
-                  text-[11px]
-                  font-medium
-                  text-[#333333]
-                  transition-colors
-                  hover:text-[#E8A900]
-                "
-              >
-                <Phone className="h-[14px] w-[14px] text-[#666666]" />
-                89622 88774
-              </a>
-
-              <a
-                href="mailto:contact.blussit@gmail.com"
-                className="
-                  flex items-center gap-2
-                  text-[11px]
-                  font-medium
-                  text-[#333333]
-                  transition-colors
-                  hover:text-[#E8A900]
-                "
-              >
-                <Mail className="h-[14px] w-[14px] text-[#666666]" />
-                contact.blussit@gmail.com
-              </a>
-
-              <span className="flex items-center gap-2 text-[11px] font-medium text-[#333333]">
-                <MapPin className="h-[14px] w-[14px] text-[#666666]" />
-                88 Shivampuri Colony, Bhawarkuwa, Indore 452001
-              </span>
-
-            </div>
-
-            {/* Copyright + build credit — the quietest line on the page, so
-                it never competes with the contact details above it.
-                rel="noopener noreferrer" because it opens in a new tab. */}
-            <p className="text-[10px] font-medium text-[#999999]">
-              © {new Date().getFullYear()} BLUSSIT. All rights reserved.{" "}
-              <span className="whitespace-nowrap">
-                Developed by{" "}
+        <div className="flex flex-col gap-4 border-t border-[#E4EBF5] py-6 md:flex-row md:items-center md:justify-between">
+          <ul className="flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7">
+            {CONTACT.map(({ icon: Icon, label, href, external }) => (
+              <li key={label}>
                 <a
-                  href="https://kalakartechcrew.online"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline underline-offset-2 transition-colors hover:text-[#333333]"
+                  href={href}
+                  {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                  className="flex items-center gap-2 text-[13.5px] font-medium transition-colors hover:text-[#0A66F0]"
                 >
-                  Kalakartechcrew
+                  <Icon className="h-4 w-4 shrink-0 text-[#0A66F0]" aria-hidden="true" />
+                  {label}
                 </a>
-              </span>
-            </p>
+              </li>
+            ))}
+          </ul>
 
-          </div>
-
+          {/* rel="noopener noreferrer" because the credit opens in a new tab. */}
+          <p className="text-[12.5px] text-[#8A94A6]">
+            © {new Date().getFullYear()} BLUSSIT. All rights reserved.{" "}
+            <span className="whitespace-nowrap">
+              Developed by{" "}
+              <a
+                href="https://kalakartechcrew.online"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2 transition-colors hover:text-[#0E1A33]"
+              >
+                Kalakartechcrew
+              </a>
+            </span>
+          </p>
         </div>
-
       </div>
     </footer>
   );

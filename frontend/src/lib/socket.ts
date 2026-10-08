@@ -1,6 +1,5 @@
-import axios from "axios";
 import { useEffect, useRef } from "react";
-import { API_BASE_URL, tokenStorage } from "./api-client";
+import { API_BASE_URL, isSessionRejection, refreshSession, tokenExpiresWithin, tokenStorage } from "./api-client";
 
 /**
  * One shared WebSocket connection for the whole authenticated app —
@@ -31,6 +30,9 @@ type Handler = (message: Message) => void;
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+// A connection that has stayed open this long counts as healthy: the
+// reconnect backoff starts over only then (or on a subscription ack).
+const STABLE_AFTER_MS = 15_000;
 // ws_routes.py closes with this when the token is bad or has expired.
 const AUTH_CLOSE_CODE = 4401;
 // Past this many auth closes in a row, stop until the tab is shown again
@@ -38,15 +40,6 @@ const AUTH_CLOSE_CODE = 4401;
 const MAX_AUTH_FAILURES = 3;
 const IDLE_CLOSE_MS = 10_000;
 const HIDDEN_CLOSE_MS = 2 * 60_000;
-
-function tokenExpiresWithin(token: string, seconds: number): boolean {
-  try {
-    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    return typeof payload.exp === "number" && payload.exp * 1000 - Date.now() < seconds * 1000;
-  } catch {
-    return false;
-  }
-}
 
 const tabHidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
 
@@ -58,6 +51,9 @@ class LiveSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+  // Fires once a connection has stayed up a while — only then is the
+  // reconnect backoff reset (see onopen / "subscribed").
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshing = false;
   // The token a refresh just handed us: open with it even if the local
   // clock calls it expired (a skewed clock must not refresh in a loop).
@@ -96,7 +92,7 @@ class LiveSocket {
     });
   }
 
-  private clearTimer(name: "reconnectTimer" | "idleTimer" | "hiddenTimer") {
+  private clearTimer(name: "reconnectTimer" | "idleTimer" | "hiddenTimer" | "stableTimer") {
     const timer = this[name];
     if (timer) clearTimeout(timer);
     this[name] = null;
@@ -128,6 +124,13 @@ class LiveSocket {
       for (const channel of this.channelHandlers.keys()) {
         this.send({ action: "subscribe", channel });
       }
+      // A socket that stays up this long is healthy even if no
+      // subscription was acknowledged (e.g. only refused channels).
+      this.clearTimer("stableTimer");
+      this.stableTimer = setTimeout(() => {
+        this.stableTimer = null;
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) this.reconnectAttempt = 0;
+      }, STABLE_AFTER_MS);
     };
 
     ws.onmessage = (event) => {
@@ -139,10 +142,15 @@ class LiveSocket {
       }
       if (message.type === "connected") {
         // Only an authenticated socket gets this — a refused token is
-        // accepted and closed with 4401 without it.
-        this.reconnectAttempt = 0;
+        // accepted and closed with 4401 without it. NOT a reason to reset
+        // the backoff: a server that accepts, says hello and then drops
+        // the connection would otherwise be hammered at the base delay.
         this.authFailures = 0;
         return;
+      }
+      if (message.type === "subscribed") {
+        // A subscription went through end to end — the connection works.
+        this.reconnectAttempt = 0;
       }
       const channel = message.channel;
       if (!channel) return;
@@ -154,6 +162,7 @@ class LiveSocket {
     ws.onclose = (event) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.clearTimer("stableTimer");
       // Hidden: leave it closed (no refresh, no retries) — the
       // visibilitychange listener reconnects when the tab is shown.
       if (tabHidden()) return;
@@ -173,23 +182,20 @@ class LiveSocket {
     };
   }
 
-  /** Same refresh call as api-client's 401 interceptor. Called directly
-   * rather than provoked through a 401: the REST layer still accepts a
-   * token for up to a second past the `exp` the socket was closed at, so
-   * a probe request there can come back 200 and refresh nothing. Refresh
-   * tokens aren't single-use, so racing the interceptor is harmless. */
+  /** The same single-flight refresh the REST layer uses (api-client's
+   * refreshSession). Called directly rather than provoked through a 401:
+   * the REST layer still accepts a token for up to a second past the `exp`
+   * the socket was closed at, so a probe request there can come back 200
+   * and refresh nothing. A refused refresh ends the session there (the
+   * user is signed out by AuthContext); offline/5xx keeps it and retries. */
   private async refreshThenReconnect() {
-    const refreshToken = tokenStorage.getRefresh();
-    if (this.refreshing || !refreshToken) return;
+    if (this.refreshing || !tokenStorage.getRefresh()) return;
     this.refreshing = true;
     try {
-      const { data } = await axios.post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken });
-      tokenStorage.set(data.data.access_token, data.data.refresh_token);
-      this.refreshedTo = data.data.access_token;
+      this.refreshedTo = await refreshSession();
     } catch (error) {
-      // Refused (not just offline): the session is over. Stop here — the
-      // next API call's 401 handling sends the user to log in.
-      if (axios.isAxiosError(error) && error.response && error.response.status < 500) {
+      // Refused (not just offline): the session is over. Stop here.
+      if (isSessionRejection(error)) {
         this.authFailures = MAX_AUTH_FAILURES;
       }
     } finally {
@@ -216,6 +222,7 @@ class LiveSocket {
     const ws = this.ws;
     this.ws = null;
     this.clearTimer("reconnectTimer");
+    this.clearTimer("stableTimer");
     if (ws) {
       ws.onclose = null;
       ws.onmessage = null;

@@ -347,8 +347,11 @@ async def test_a_refused_anonymous_booking_leaves_the_code_usable(rig, cleanup, 
     db = rig["db"]
     phone, code = "9555510077", "246810"
     now = datetime.now(timezone.utc)
+    # The purpose the booking popup really stores (/bookings/verify-phone/
+    # request) — codes are bound to their purpose (AUTH-04), and a made-up
+    # one is accepted nowhere.
     await db.otp_requests.insert_one({
-        "_id": f"otp:{phone}", "identifier": phone, "otp": code, "purpose": "booking",
+        "_id": f"otp:{phone}", "identifier": phone, "otp": code, "purpose": "booking_confirmation",
         "expires_at": now + timedelta(minutes=10), "last_sent_at": now, "attempts": 0, "verified": False,
     })
     for coll, flt in (("otp_requests", {"identifier": phone}), ("bookings", {"customer_phone": phone}), ("users", {"phone": phone})):

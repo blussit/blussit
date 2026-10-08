@@ -69,8 +69,8 @@ export function Pager({
         Previous
       </Button>
       <span className="font-mono-num">
-        Page {page} of {totalPages}
-        {total != null ? ` · ${total} total` : ""}
+        Page {page} Of {totalPages}
+        {total != null ? ` · ${total} Total` : ""}
       </span>
       <Button size="sm" variant="outline" disabled={page >= totalPages || busy} onClick={() => onPage(page + 1)}>
         Next

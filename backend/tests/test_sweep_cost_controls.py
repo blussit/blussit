@@ -39,6 +39,8 @@ from tests.factories import (
     make_customer_with_vehicle,
     make_manager,
     make_service_center,
+    make_recorded_photo_url,
+    own_upload_url,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -427,12 +429,16 @@ async def test_old_pending_mandate_backs_off_until_the_webhook_nudges_it(db, cle
 
 
 async def test_captain_qr_poll_asks_razorpay_at_most_every_ten_seconds(db, cleanup, rzp):
-    captain_id = await make_captain(db)
+    # The captain works for the booking's center (CAP-01: collecting is a
+    # captain job step and re-checks it).
+    center_id = await make_service_center(db)
+    cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
+    captain_id = await make_captain(db, center_id)
     cleanup.append(("users", {"_id": ObjectId(captain_id)}))
     cleanup.append(("captain_wallets", {"captain_id": captain_id}))
     booking = await db.bookings.insert_one({
         "status": "completed", "captain_id": captain_id, "customer_id": f"cust-{ObjectId()}", "booking_number": f"QR-{ObjectId()}",
-        "payment_status": "pending", "total_amount": 499.0, "is_deleted": False,
+        "payment_status": "pending", "total_amount": 499.0, "is_deleted": False, "service_center_id": center_id,
     })
     booking_id = str(booking.inserted_id)
     cleanup.append(("bookings", {"_id": booking.inserted_id}))
@@ -557,7 +563,7 @@ async def test_after_photo_completion_returns_without_waiting_on_whatsapp(db, jo
         {"_id": ObjectId(job["id"])},
         {"$set": {"status": "service_started", "vehicle_verified": True, "heading_at": now, "service_started_at": now}},
     )
-    photo = PhotoCaptureRequest(image_url="https://example.com/after.jpg", latitude=22.7, longitude=75.8)
+    photo = PhotoCaptureRequest(image_url=await make_recorded_photo_url(db, job["captain_id"], "after"), latitude=22.7, longitude=75.8)
     result = await asyncio.wait_for(
         BookingService(db).capture_after_photo_and_complete(job["id"], photo, job["captain_id"]), timeout=5
     )

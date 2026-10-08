@@ -50,11 +50,13 @@ _seq = itertools.count(1)
 class _Orders:
     def __init__(self):
         self.by_order: dict[str, list[dict]] = {}
+        self.amounts: dict[str, int] = {}
         self.lookups: list[str] = []
 
     def create(self, payload):
         order_id = f"order_rc_{next(_seq):06d}"
         self.by_order[order_id] = []
+        self.amounts[order_id] = payload["amount"]
         return {"id": order_id, **payload}
 
     def payments(self, order_id):
@@ -62,9 +64,12 @@ class _Orders:
         return {"entity": "collection", "items": list(self.by_order.get(order_id, []))}
 
     def pay(self, order_id, status="captured", amount=None, **extra) -> str:
+        # Razorpay records every payment with its amount — the order's own
+        # unless a test says otherwise (settlement now checks it, PAY-09).
         payment_id = f"pay_rc_{next(_seq):06d}"
         self.by_order.setdefault(order_id, []).append(
-            {"id": payment_id, "status": status, "order_id": order_id, "amount": amount, "created_at": next(_seq), **extra}
+            {"id": payment_id, "status": status, "order_id": order_id, "amount": self.amounts.get(order_id) if amount is None else amount,
+             "currency": "INR", "created_at": next(_seq), **extra}
         )
         return payment_id
 
@@ -73,6 +78,14 @@ class _Payments:
     def __init__(self, orders: _Orders):
         self.orders = orders
         self.captured: list[str] = []
+
+    def fetch(self, payment_id):
+        """verify asks Razorpay what the signed payment is (PAY-09)."""
+        for items in self.orders.by_order.values():
+            for p in items:
+                if p["id"] == payment_id:
+                    return dict(p)
+        raise RuntimeError(f"The id provided does not exist: {payment_id}")
 
     def capture(self, payment_id, amount, data):
         for items in self.orders.by_order.values():
@@ -322,45 +335,44 @@ async def test_a_second_order_is_refused_when_an_earlier_one_was_paid_unverified
     assert await db.payment_orders.count_documents({"customer_id": rig["customer_id"], "kind": None}) == 1
 
 
-async def test_two_orders_paid_for_one_booking_confirm_once_and_park_the_second(rig, db, rzp, cleanup):
+async def test_two_orders_paid_for_one_booking_confirm_once_and_credit_the_second(rig, db, rzp, cleanup):
+    # Founder 2026-10-07 (wallet model, spec 1.5): the second payment is no
+    # longer parked for a refund — it is the customer's wallet credit.
+    from app.services.customer_wallet_service import CustomerWalletService
+
     booking = await _parked_booking(rig)
     svc = PaymentService(db)
     first = await svc.create_order(rig["customer_id"], CreateOrderRequest(purpose="booking", booking_id=booking["id"]))
+    # create-order now hands back the still-open order instead of minting a
+    # second one (FE-04); two orders for one booking can still exist (one
+    # minted before that, or for an amount that changed back), which is the
+    # safety net this test covers — so the first is made un-reusable.
+    await db.payment_orders.update_one({"razorpay_order_id": first["order_id"]}, {"$unset": {"open_key": ""}})
     second = await svc.create_order(rig["customer_id"], CreateOrderRequest(purpose="booking", booking_id=booking["id"]))
+    assert second["order_id"] != first["order_id"]
     p1, p2 = rzp.order.pay(first["order_id"]), rzp.order.pay(second["order_id"])
 
     await svc.verify_payment(rig["customer_id"], VerifyPaymentRequest(
         razorpay_order_id=first["order_id"], razorpay_payment_id=p1, razorpay_signature=_expected_signature(first["order_id"], p1)))
-    with pytest.raises(BadRequestException, match="don't pay again"):
-        await svc.verify_payment(rig["customer_id"], VerifyPaymentRequest(
-            razorpay_order_id=second["order_id"], razorpay_payment_id=p2, razorpay_signature=_expected_signature(second["order_id"], p2)))
-    # A replay of the parked one must not suddenly read as "paid".
-    with pytest.raises(BadRequestException):
-        await svc.verify_payment(rig["customer_id"], VerifyPaymentRequest(
-            razorpay_order_id=second["order_id"], razorpay_payment_id=p2, razorpay_signature=_expected_signature(second["order_id"], p2)))
+    out = await svc.verify_payment(rig["customer_id"], VerifyPaymentRequest(
+        razorpay_order_id=second["order_id"], razorpay_payment_id=p2, razorpay_signature=_expected_signature(second["order_id"], p2)))
+    assert out["status"] == "paid"
+    # A replay changes nothing.
+    await svc.verify_payment(rig["customer_id"], VerifyPaymentRequest(
+        razorpay_order_id=second["order_id"], razorpay_payment_id=p2, razorpay_signature=_expected_signature(second["order_id"], p2)))
 
     doc = await _booking(db, booking["id"])
     assert doc["razorpay_payment_id"] == p1 and doc["status"] == BookingStatus.PENDING.value
-    parked = await db.payment_orders.find_one({"razorpay_order_id": second["order_id"]})
-    assert parked["status"] == "paid_attention" and "already settled" in parked["attention_reason"]
-
-    state = await svc.booking_payment_state(rig["customer_id"], booking["id"])
-    assert state["attention"]["amount"] == second["amount"] / 100
-    report = await svc.admin_collections(None, None)
-    assert any(a["id"] == str(parked["_id"]) and a["payment_id"] == p2 for a in report["attention"])
-    customer_notes = await db.notifications.count_documents({"user_id": rig["customer_id"], "title": "Payment received — under review"})
-    assert customer_notes == 1
-
-    # An admin refunds it: off the open queue, still money-attached.
-    await svc.resolve_attention(str(parked["_id"]), "admin-1", "Refunded in Razorpay")
-    report = await svc.admin_collections(None, None)
-    assert not any(a["id"] == str(parked["_id"]) for a in report["attention"])
+    assert doc["amount_paid"] == first["amount"] / 100
+    assert await CustomerWalletService(db).balance(rig["customer_id"]) == second["amount"] / 100
+    assert (await db.payment_orders.find_one({"razorpay_order_id": second["order_id"]}))["status"] == "paid"
     assert (await svc.booking_payment_state(rig["customer_id"], booking["id"]))["attention"] is None
-    with pytest.raises(NotFoundException):
-        await svc.resolve_attention(str(parked["_id"]), "admin-1", "again")
+    assert await db.notifications.count_documents({"user_id": rig["customer_id"], "title": "Wallet Credited"}) == 1
 
 
 async def test_one_order_paid_twice_records_the_extra_payment_once(rig, db, rzp):
+    from app.services.customer_wallet_service import CustomerWalletService
+
     booking = await _parked_booking(rig)
     svc = PaymentService(db)
     order = await svc.create_order(rig["customer_id"], CreateOrderRequest(purpose="booking", booking_id=booking["id"]))
@@ -371,14 +383,18 @@ async def test_one_order_paid_twice_records_the_extra_payment_once(rig, db, rzp)
     await svc.sync_pending_orders()
     assert (await _booking(db, booking["id"]))["razorpay_payment_id"] == p1
     dup = await db.payment_orders.find_one({"_id": f"dup_{p2}"})
-    assert dup["status"] == "paid_attention" and dup["booking_id"] == booking["id"]
+    # Booking money paid twice: recorded once, credited to the wallet (spec 1.5).
+    assert dup["booking_id"] == booking["id"] and dup["credited_to_wallet"] is True and dup["resolved_at"]
 
-    # Seen again (webhook, another pass): still one record, no re-alert.
+    # Seen again (webhook, another pass): still one record, one credit.
     await svc._apply_order_paid(await db.payment_orders.find_one({"razorpay_order_id": order["order_id"]}), p2, via="webhook")
     assert await db.payment_orders.count_documents({"kind": "duplicate_payment", "customer_id": rig["customer_id"]}) == 1
+    assert await CustomerWalletService(db).balance(rig["customer_id"]) == order["amount"] / 100
 
 
-async def test_paying_after_a_cancellation_is_parked_not_applied(rig, db, rzp):
+async def test_paying_after_a_cancellation_is_wallet_credit_not_applied(rig, db, rzp):
+    from app.services.customer_wallet_service import CustomerWalletService
+
     booking = await _parked_booking(rig)
     svc = PaymentService(db)
     order = await svc.create_order(rig["customer_id"], CreateOrderRequest(purpose="booking", booking_id=booking["id"]))
@@ -391,8 +407,9 @@ async def test_paying_after_a_cancellation_is_parked_not_applied(rig, db, rzp):
 
     doc = await _booking(db, booking["id"])
     assert doc["status"] == BookingStatus.CANCELLED.value and doc["payment_status"] != "paid"
-    parked = await db.payment_orders.find_one({"razorpay_order_id": order["order_id"]})
-    assert parked["status"] == "paid_attention" and "cancelled" in parked["attention_reason"]
+    settled = await db.payment_orders.find_one({"razorpay_order_id": order["order_id"]})
+    assert settled["status"] == "paid" and settled["wallet_credit"] == order["amount"] / 100
+    assert await CustomerWalletService(db).balance(rig["customer_id"]) == order["amount"] / 100
 
 
 async def test_an_open_link_for_a_cancelled_booking_is_closed_by_the_sweep(rig, db, rzp):
@@ -473,6 +490,10 @@ async def test_paying_one_car_of_an_unpaid_visit_charges_the_whole_visit(rig, db
     await db.bookings.update_one({"_id": ObjectId(first["id"])}, {"$set": {"booking_group_id": group_id}})
     twin = dict(await _booking(db, first["id"]))
     twin.pop("_id")
+    # A visit's later cars ride on the first car's seat (only the seat
+    # holder carries seat_key / holds_seat — uniq_visit_seat_v1).
+    twin.pop("seat_key", None)
+    twin.pop("holds_seat", None)
     twin["booking_number"] = twin["booking_number"] + "-2"
     twin["visit_line_key"] = str(ObjectId())  # a second car, not a duplicate of the first
     twin_id = str((await db.bookings.insert_one(twin)).inserted_id)
@@ -593,6 +614,9 @@ async def test_a_visit_with_a_car_cancelled_before_checkout_settles_cleanly(rig,
     await db.bookings.update_one({"_id": ObjectId(first["id"])}, {"$set": {"booking_group_id": group_id}})
     base = dict(await _booking(db, first["id"]))
     base.pop("_id")
+    # Later cars ride on the first car's seat (see uniq_visit_seat_v1).
+    base.pop("seat_key", None)
+    base.pop("holds_seat", None)
     ids = []
     for suffix, status in (("-2", "awaiting_payment"), ("-3", "cancelled")):
         car = {**base, "booking_number": base["booking_number"] + suffix, "visit_line_key": str(ObjectId()), "status": status}

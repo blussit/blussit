@@ -216,7 +216,9 @@ async def test_pin_outside_radius_matched_by_pincode_still_gets_its_real_distanc
         )
     data = res.json()["data"]
     assert data["covered"] is True and data["center"]["id"] == rig["center_id"]
-    assert data["distance_km"] == 8.0
+    # Both ends are snapped to 3 decimals (~110 m) before the distance is
+    # computed (route_service.charge_road_km), so ~8 km, not exactly 8.
+    assert abs(data["distance_km"] - 8.0) <= 0.15
     assert data["travel"]["charge"] == 6
 
 
@@ -470,6 +472,18 @@ async def test_staff_can_list_a_customers_saved_addresses(rig, cleanup):
     customer, address_id = await _customer(rig, cleanup)
     customer_id = str(customer["_id"])
     async with _client() as client:
+        # AZ-01: a manager reads a customer's saved addresses (map pins) only
+        # once THEIR center knows the customer — a booking, a plan or a
+        # society enrolment there (core/authz.ensure_customer_in_scope).
+        # Before that, the id is a 404 like any unknown one.
+        unknown = await client.get(f"/api/v1/addresses/customer/{customer_id}", headers=_auth(rig["manager_id"], "manager", rig["center_id"]))
+        assert unknown.status_code == 404
+        now = now_ist()
+        await rig["db"].bookings.insert_one({
+            "booking_number": f"BK-OFFER-ADDR-{customer_id[-6:]}", "customer_id": customer_id, "service_center_id": rig["center_id"],
+            "status": "completed", "scheduled_date": now, "scheduled_slot": "09:00-12:00", "service_ids": [], "total_amount": 100,
+            "is_deleted": False, "created_at": now, "updated_at": now,
+        })
         ok = await client.get(f"/api/v1/addresses/customer/{customer_id}", headers=_auth(rig["manager_id"], "manager", rig["center_id"]))
         assert ok.status_code == 200 and [a["id"] for a in ok.json()["data"]] == [address_id]
 

@@ -204,22 +204,22 @@ export function PhoneVerificationModal({
             <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)]">
               {needsPhone ? (
                 <button type="button" className="font-semibold text-black hover:underline" onClick={() => { setStep("send"); setError(""); setOtp(""); }}>
-                  Change number
+                  Change Number
                 </button>
               ) : (
                 <span />
               )}
               {cooldown > 0 ? (
-                <span>Resend in {cooldown}s</span>
+                <span>Resend In {cooldown}s</span>
               ) : (
                 <span className="flex items-center gap-3">
                   {channel === "backend" && smsAvailable && (
                     <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(["widget"])}>
-                      Get it by SMS
+                      Get It By SMS
                     </button>
                   )}
                   <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(resendOrder)}>
-                    Resend code
+                    Resend Code
                   </button>
                 </span>
               )}

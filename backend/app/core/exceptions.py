@@ -72,3 +72,31 @@ class PhoneNotVerifiedException(ForbiddenException):
 
     def __init__(self, message: str = "Please verify your phone number with an OTP before booking.", details: dict | None = None):
         super().__init__(message, details)
+
+
+class StaffResetRefusedException(BadRequestException):
+    """A staff account asked to reset its password by code (OTP / MSG91
+    widget) but hasn't proved its phone itself — its admin resets it
+    instead (AuthService._ensure_code_reset_allowed). A stable error_code
+    so the login screen can say "ask your admin" instead of a generic
+    error."""
+    error_code = "STAFF_RESET_REFUSED"
+
+
+class TooManyRequestsException(AppException):
+    status_code = 429
+    error_code = "RATE_LIMITED"
+
+    def __init__(self, message: str = "Too many requests — please wait a moment and try again.", details: dict | None = None):
+        super().__init__(message, details)
+
+
+class StorageUnavailableException(AppException):
+    """Photo/document storage (R2) is unreachable or failing on its side —
+    a temporary outage, not the caller's fault. 503 so clients retry instead
+    of treating it as a bad request (FAIL-03)."""
+    status_code = 503
+    error_code = "STORAGE_UNAVAILABLE"
+
+    def __init__(self, message: str = "Photo storage is unreachable right now — please try again in a minute.", details: dict | None = None):
+        super().__init__(message, details)

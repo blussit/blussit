@@ -12,6 +12,7 @@ from app.core.exceptions import BadRequestException
 from app.core.responses import success
 from app.services import report_cache
 from app.services.audit_service import AuditService
+from app.schemas.notification_schema import WhatsAppSettingsUpdate
 from app.services.whatsapp_crm_service import DEFAULT_TAGS, WhatsAppCrmService, bootstrap_blussit_templates
 
 router = APIRouter(prefix="/whatsapp/crm", tags=["WhatsApp CRM"], dependencies=[Depends(require_admin)])
@@ -181,6 +182,39 @@ async def analytics(days: int = Query(30, ge=1, le=365), db: AsyncIOMotorDatabas
     return success(await report_cache.cached(("wa_analytics", days), 60, lambda: WhatsAppCrmService(db).analytics(days)))
 
 
+@router.get("/delivery-health")
+async def delivery_health(days: int = Query(7, ge=1, le=90), fresh: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """What did NOT reach people on WhatsApp: queued sends by status
+    (incl. "undelivered" — accepted by Meta, then reported failed),
+    failures by reason (no_template, transport, rejected, opted_out, auth,
+    no_recipient, business_number, undelivered…), free text refused
+    outside the 24-hour window, latest failures, and config_warnings
+    (managers who can't get alerts, unapproved/unknown templates, Meta
+    refusing our credentials, templates re-filed as MARKETING).
+
+    Cached 15 s per instance; `?fresh=1` (the card's Refresh) recomputes."""
+    from app.services.notification_service import NotificationService
+
+    if fresh:
+        report_cache.invalidate("wa_delivery_health")
+    return success(await report_cache.cached(("wa_delivery_health", days), 15, lambda: NotificationService(db).delivery_health(days)))
+
+
+@router.get("/settings")
+async def get_settings(db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Admin WhatsApp settings: google_review_url (the review template's
+    button and the review-request sweep's on/off)."""
+    return success(await WhatsAppCrmService(db).get_settings())
+
+
+@router.put("/settings")
+async def update_settings(payload: WhatsAppSettingsUpdate, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    changes = payload.model_dump(exclude_unset=True)
+    result = await WhatsAppCrmService(db).update_settings(changes, actor_id=current_user.id)
+    await AuditService(db).log_action(current_user.id, current_user.role, "UPDATE_WHATSAPP_SETTINGS", "whatsapp", "settings", {"fields": sorted(changes)})
+    return success(result, message="WhatsApp settings saved")
+
+
 # ---- media -----------------------------------------------------------------
 
 @router.post("/media")
@@ -210,19 +244,42 @@ async def fetch_media(media_id: str, db: AsyncIOMotorDatabase = Depends(get_db))
 # ---- templates -------------------------------------------------------------
 
 @router.get("/templates")
-async def list_templates(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).list_local_templates())
+async def list_templates(sendable: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
+    """sendable=true: only what the inbox's agent picker can really send
+    (see WhatsAppCrmService.agent_sendable_templates)."""
+    service = WhatsAppCrmService(db)
+    return success(await (service.agent_sendable_templates() if sendable else service.list_local_templates()))
 
 
 @router.post("/templates/sync")
-async def sync_templates(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await WhatsAppCrmService(db).sync_templates())
+async def sync_templates(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    result = await WhatsAppCrmService(db).sync_templates()
+    # ADM-12: a manual sync can flip which templates the app uses — audited.
+    summary = {k: result.get(k) for k in ("synced", "count", "updated", "added") if isinstance(result, dict) and k in result}
+    await AuditService(db).log_action(current_user.id, current_user.role, "WHATSAPP_SYNC_TEMPLATES", "whatsapp", "all", summary)
+    return success(result)
 
 
 @router.post("/templates")
 async def create_template(payload: CreateTemplateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     result = await WhatsAppCrmService(db).create_template(payload.name, payload.category, payload.language, payload.body, payload.button_text, payload.button_url)
     await AuditService(db).log_action(current_user.id, current_user.role, "WHATSAPP_CREATE_TEMPLATE", "whatsapp", payload.name, {"category": payload.category})
+    return success(result, message="Template submitted to WhatsApp for review")
+
+
+@router.get("/templates/catalogue")
+async def template_catalogue(db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Every template the app uses today: copy, examples, button, which
+    events use it, and its status on Meta — what Submit would send."""
+    return success(await WhatsAppCrmService(db).template_catalogue())
+
+
+@router.post("/templates/catalogue/{key}/submit")
+async def submit_catalogue_template(key: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Submit one catalogue template to Meta (a rejected one as its next
+    version name). Audited."""
+    result = await WhatsAppCrmService(db).submit_catalogue_template(key)
+    await AuditService(db).log_action(current_user.id, current_user.role, "WHATSAPP_CREATE_TEMPLATE", "whatsapp", result.get("name"), {"key": key, "status": result.get("status")})
     return success(result, message="Template submitted to WhatsApp for review")
 
 

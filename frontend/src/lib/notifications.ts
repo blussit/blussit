@@ -13,9 +13,8 @@ export function notificationTargetPath(n: Notification, role: UserRole): string 
   const base = ROLE_BASE_PATH[role] ?? "/app";
 
   if (n.notification_type === "booking") {
-    // Captains have no standalone booking-detail route — everything happens
-    // on the jobs list itself, so send them there instead.
-    if (role === "captain") return base;
+    // Captains open the job itself (its step-by-step screen).
+    if (role === "captain") return n.reference_id ? `${base}/jobs/${n.reference_id}` : base;
     return n.reference_id ? `${base}/bookings/${n.reference_id}` : null;
   }
 

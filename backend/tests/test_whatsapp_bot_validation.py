@@ -14,7 +14,7 @@ from app.utils.timezone import now_ist
 from app.utils.vehicle_reg import validate_indian_registration
 
 from tests.factories import get_star_wash_service_id, get_hatchback_type_id
-from tests.test_whatsapp_bot import last_out, make_default_hours_center, wa_payload
+from tests.test_whatsapp_bot import BOT_PIN, last_out, make_default_hours_center, park_competing_centers, unpark_centers, wa_payload
 
 
 def test_registration_validator_accepts_real_indian_formats():
@@ -38,7 +38,9 @@ async def rig(db, cleanup):
     cleanup.append(("slot_capacity", {"service_center_id": center_id}))
     cleanup.append(("daily_capacity", {"service_center_id": center_id}))
     cleanup.append(("whatsapp_message_dedup", {"wamid": {"$regex": "^wamid.TEST"}}))
-    return {"db": db, "center_id": center_id, "hatchback": hatchback, "foam": foam}
+    parked = await park_competing_centers(db, center_id)
+    yield {"db": db, "center_id": center_id, "hatchback": hatchback, "foam": foam}
+    await unpark_centers(db, parked)
 
 
 def _register_wa_cleanup(cleanup, wa_id, phone):
@@ -175,10 +177,15 @@ async def test_my_bookings_readable_list_and_reschedule_flow(rig, db, cleanup):
     cleanup.append(("purchase_confirmations", {"customer_id": str(user["_id"])}))
     await bot.handle_webhook(wa_payload(wa_id, reply=f"svc:{rig['foam']}"))
     out = await last_out(db, phone)
-    when_id = out["options"][0]["id"]
-    assert when_id.startswith("when:")
+    # Book at least two days out: a customer can't move a booking within
+    # 4 hours of its slot (the same lock as cancelling), and the reschedule
+    # below moves it to tomorrow.
+    later = (now_ist().date() + timedelta(days=2)).isoformat()
+    when_id = next((o["id"] for o in out["options"] if o["id"].startswith("when:") and o["id"][5:15] >= later), None)
+    if when_id is None:
+        pytest.skip("the bot offered no slot two or more days out")
     await bot.handle_webhook(wa_payload(wa_id, reply=when_id))
-    await bot.handle_webhook(wa_payload(wa_id, location=(22.701, 75.801)))
+    await bot.handle_webhook(wa_payload(wa_id, location=BOT_PIN))
     await bot.handle_webhook(wa_payload(wa_id, reply="confirm:yes"))
     booking = await db.bookings.find_one({"customer_id": str(user["_id"])})
     assert booking is not None

@@ -170,8 +170,14 @@ async def test_reminder_and_late_start_finders_ignore_stale_days(db, cleanup):
     now = now_ist()
     base = {"status": "assigned", "captain_id": "cap-x", "service_center_id": "ctr-x", "scheduled_slot": "00:00-03:00", "is_deleted": False}
 
-    # Captain "starting soon" ping: today's is due, last week's never is.
-    today = await db.bookings.insert_one({**base, "customer_id": f"{tag}-1", "booking_number": f"R-{tag}-T", "scheduled_date": _midnight(0)})
+    # Captain "starting soon" ping: one starting in 20 minutes is due, last
+    # week's never is. (NTF-06: neither is today's 00:00 slot by afternoon —
+    # a slot that began over half an hour ago gets no "starting soon".)
+    soon = now + timedelta(minutes=20)
+    today = await db.bookings.insert_one({
+        **base, "customer_id": f"{tag}-1", "booking_number": f"R-{tag}-T",
+        "scheduled_date": datetime(soon.year, soon.month, soon.day), "scheduled_slot": f"{soon:%H:%M}-{soon + timedelta(hours=3):%H:%M}",
+    })
     stale = await db.bookings.insert_one({**base, "customer_id": f"{tag}-2", "booking_number": f"R-{tag}-S", "scheduled_date": _midnight(-6)})
     due = {str(b["_id"]) for b in await BookingService(db).find_bookings_needing_reminder()}
     assert str(today.inserted_id) in due

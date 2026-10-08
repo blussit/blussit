@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pydantic import BaseModel, ValidationError
 
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.repositories.content_repository import ContactMessageRepository, FaqRepository, SettingRepository, TestimonialRepository
 from app.schemas.content_schema import (
     ContactMessageCreateRequest,
@@ -61,9 +62,44 @@ class TestimonialService:
             raise NotFoundException("Testimonial not found")
 
 
+# Settings with their own validated, audited endpoint. The generic PUT
+# /settings never writes them (ADM-01): it used to upsert ANY key unchecked —
+# a bad booking_policy value took booking down, and pricing_config
+# {"per_km_rate": "abc"} made every booking 500.
+DEDICATED_SETTING_ENDPOINTS = {
+    "booking_policy": "PUT /booking-policy",
+    "pricing_config": "PUT /pricing-config",
+    "homepage_config": "PUT /homepage-config",
+}
+
+# The ONLY keys PUT /settings may write, each with the schema its value must
+# satisfy (use extra="forbid"). Empty on purpose: every setting the app
+# reads has a dedicated endpoint above, and no admin screen calls PUT
+# /settings. A future key that nothing else edits gets a strict schema here.
+GENERIC_SETTINGS: dict[str, type[BaseModel]] = {}
+
+
 class SettingService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = SettingRepository(db)
+
+    @staticmethod
+    def validated_value(key: str, value: dict) -> dict:
+        """Fail closed: a dedicated key is sent to its endpoint, an unknown
+        key is refused, a whitelisted key's value must pass its schema."""
+        if key in DEDICATED_SETTING_ENDPOINTS:
+            raise BadRequestException(
+                f"'{key}' can't be changed here — use the dedicated endpoint ({DEDICATED_SETTING_ENDPOINTS[key]}), which validates it."
+            )
+        schema = GENERIC_SETTINGS.get(key)
+        if schema is None:
+            raise BadRequestException(f"'{key}' isn't a setting that can be changed here.")
+        try:
+            return schema.model_validate(value).model_dump()
+        except ValidationError as exc:
+            first = exc.errors()[0] if exc.errors() else {}
+            where = ".".join(str(p) for p in first.get("loc", ()))
+            raise BadRequestException(f"Invalid value for '{key}'{f' ({where})' if where else ''}: {first.get('msg', 'not allowed')}.") from exc
 
     async def get(self, key: str) -> dict:
         setting = await self.repo.get_by_key(key)
@@ -71,9 +107,16 @@ class SettingService:
             raise NotFoundException("Setting not found")
         return serialize_doc(setting)
 
-    async def upsert(self, payload: SettingUpsertRequest) -> dict:
-        result = await self.repo.upsert(payload.key, payload.value, payload.description)
-        return serialize_doc(result)
+    async def upsert(self, payload: SettingUpsertRequest, updated_by: str | None = None) -> tuple[dict, dict]:
+        """(saved setting, {field: {before, after}}) — the caller audits the
+        changes. Only whitelisted keys with a valid value get this far."""
+        value = self.validated_value(payload.key, payload.value)
+        existing = await self.repo.get_by_key(payload.key)
+        from app.services.audit_service import field_changes
+
+        changes = field_changes((existing or {}).get("value") or {}, value)
+        result = await self.repo.upsert(payload.key, value, payload.description, updated_by=updated_by)
+        return serialize_doc(result), changes
 
     async def list_all(self):
         items = await self.repo.find_all_no_paginate()

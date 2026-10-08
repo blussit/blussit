@@ -274,8 +274,16 @@ async def test_the_customers_own_turn_off_is_not_announced(db, rig, mandate):
     mandate["stub"].remote = {"status": "cancelled", "paid_count": 1, "current_end": None}
     await _due_now(db, mandate["id"])
     await PaymentService(db).sync_autopay_renewals()
-    assert mandate["id"] not in mandate["stub"].fetched
+    # It IS still checked until Razorpay confirms it ended (a gateway cancel
+    # can fail and the mandate keep charging) — but the customer's own
+    # turn-off is never announced back to them, and once Razorpay says it's
+    # over, it's never polled again.
     assert await db.notifications.count_documents({"title": "Auto-pay stopped", "user_id": {"$in": [rig["customer_id"], mandate["manager_id"]]}}) == 0
+    assert (await db.payment_orders.find_one({"razorpay_subscription_id": mandate["id"]}))["mandate_final"] is True
+    mandate["stub"].fetched.clear()
+    await _due_now(db, mandate["id"])
+    await PaymentService(db).sync_autopay_renewals()
+    assert mandate["id"] not in mandate["stub"].fetched
 
 
 async def test_a_retrying_charge_is_recorded_quietly_and_cleared_when_it_settles(db, rig, mandate):

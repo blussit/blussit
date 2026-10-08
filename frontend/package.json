@@ -6,11 +6,15 @@
   "scripts": {
     "dev": "vite",
     "sitemap": "node scripts/generate-sitemap.mjs",
-    "build": "npm run sitemap && tsc -b && vite build",
+    "build": "npm run sitemap && tsc -b && vite build && npm run prerender",
+    "prerender": "vite build --ssr src/prerender/entry.tsx --outDir node_modules/.prerender --emptyOutDir && node scripts/prerender.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fortawesome/free-brands-svg-icons": "^7.3.1",
+    "@fortawesome/free-solid-svg-icons": "^7.3.1",
+    "@fortawesome/react-fontawesome": "^3.5.0",
     "@hookform/resolvers": "^5.7.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@tanstack/react-query": "^5.101.4",

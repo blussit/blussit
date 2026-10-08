@@ -3,13 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import { whatsappCrmApi } from "../../api/admin";
 import {
   AlertTriangle,
+  Building,
   Building2,
+  CalendarDays,
+  CalendarX2,
   Car,
   ClipboardList,
   CreditCard,
   FileClock,
   Gift,
   IndianRupee,
+  Layers,
   LayoutDashboard,
   ListChecks,
   Mail,
@@ -29,24 +33,29 @@ import { CustomerLookup } from "../../components/shared/CustomerLookup";
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/admin", icon: LayoutDashboard, end: true },
   { label: "Bookings", to: "/admin/bookings", icon: ListChecks },
+  { label: "Cancellation Charges", to: "/admin/charges", icon: CalendarX2 },
   { label: "WhatsApp", to: "/admin/whatsapp", icon: MessageCircle },
-  { label: "Purchased plans", to: "/admin/purchased-plans", icon: CreditCard },
+  { label: "Purchased Plans", to: "/admin/purchased-plans", icon: CreditCard },
+  { label: "Custom Plans", to: "/admin/custom-plans", icon: Layers },
+  { label: "Societies", to: "/admin/societies", icon: Building },
+  { label: "Society Planner", to: "/admin/society-planner", icon: CalendarDays },
   { label: "Users", to: "/admin/users", icon: Users },
-  { label: "Service centers", to: "/admin/service-centers", icon: Building2 },
-  { label: "Service zones", to: "/admin/service-zones", icon: MapPin },
+  { label: "Service Centers", to: "/admin/service-centers", icon: Building2 },
+  { label: "Service Zones", to: "/admin/service-zones", icon: MapPin },
   { label: "Services", to: "/admin/services", icon: Wrench },
-  { label: "Subscription plans", to: "/admin/subscription-plans", icon: Gift },
-  { label: "Vehicle types", to: "/admin/vehicle-types", icon: Car },
-  { label: "Combo offers", to: "/admin/combo-offers", icon: Package },
+  { label: "Subscription Plans", to: "/admin/subscription-plans", icon: Gift },
+  { label: "Society Plans", to: "/admin/society-plans", icon: Layers },
+  { label: "Vehicle Types", to: "/admin/vehicle-types", icon: Car },
+  { label: "Combo Offers", to: "/admin/combo-offers", icon: Package },
   { label: "Homepage", to: "/admin/homepage", icon: Megaphone },
-  { label: "Settings & pricing", to: "/admin/pricing", icon: IndianRupee },
+  { label: "Settings & Pricing", to: "/admin/pricing", icon: IndianRupee },
   { label: "Coupons", to: "/admin/coupons", icon: Ticket },
   { label: "Complaints", to: "/admin/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/admin/reviews", icon: Star },
-  { label: "Contact messages", to: "/admin/contact-messages", icon: Mail },
-  { label: "Custom plan requests", to: "/admin/plan-enquiries", icon: ClipboardList },
-  { label: "Coverage requests", to: "/admin/coverage-requests", icon: MapPin },
-  { label: "Audit logs", to: "/admin/audit-logs", icon: FileClock },
+  { label: "Contact Messages", to: "/admin/contact-messages", icon: Mail },
+  { label: "Custom Plan Requests", to: "/admin/plan-enquiries", icon: ClipboardList },
+  { label: "Coverage Requests", to: "/admin/coverage-requests", icon: MapPin },
+  { label: "Audit Logs", to: "/admin/audit-logs", icon: FileClock },
   { label: "Profile", to: "/admin/profile", icon: User },
 ];
 
@@ -63,7 +72,7 @@ export default function AdminLayout() {
     item.to === "/admin/whatsapp" ? { ...item, badge: waBadge?.unread_conversations || 0 } : item,
   );
   return (
-    <DashboardShell navItems={items} portalLabel="Super Admin" brand headerRight={<CustomerLookup />}>
+    <DashboardShell navItems={items} portalLabel="Super Admin" headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

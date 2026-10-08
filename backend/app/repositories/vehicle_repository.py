@@ -1,3 +1,5 @@
+from bson import ObjectId
+
 from app.repositories.base_repository import BaseRepository
 
 
@@ -18,6 +20,14 @@ class VehicleRepository(BaseRepository):
 
     async def clear_default(self, owner_id: str) -> None:
         await self.collection.update_many({"owner_id": owner_id}, {"$set": {"is_default": False}})
+
+    async def find_owner_plate(self, owner_id: str, normalized: str, exclude_id: str | None = None) -> dict | None:
+        """This owner's live vehicle with this normalized plate, if any
+        (indexed: registration_number_normalized)."""
+        query: dict = {"owner_id": owner_id, "registration_number_normalized": normalized, "is_deleted": {"$ne": True}}
+        if exclude_id and ObjectId.is_valid(exclude_id):
+            query["_id"] = {"$ne": ObjectId(exclude_id)}
+        return await self.collection.find_one(query, {"_id": 1})
 
     async def distinct_owners_for_registration(self, normalized: str, exclude_owner_id: str | None = None) -> list[str]:
         """Every DISTINCT owner_id currently holding this normalized plate

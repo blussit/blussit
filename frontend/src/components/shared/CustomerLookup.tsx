@@ -4,6 +4,7 @@ import { Search, UserRound } from "lucide-react";
 import { crmApi } from "../../api/crm";
 import { CustomerDetailDrawer } from "./CustomerDetailDrawer";
 import { normalisePhoneSearch, useDebouncedValue } from "./ListControls";
+import { MENU_PANEL } from "../ui/fieldStyles";
 
 /**
  * Header search for managers and admins: type a name or number, pick the
@@ -33,11 +34,25 @@ export function CustomerLookup() {
   }, []);
 
   const showList = open && query.length >= 2;
+  // Narrow phones: the results hang off the right edge of a small header box
+  // and ran off the left of the screen — pin them to the screen's width
+  // instead, just under the box.
+  const [phonePanel, setPhonePanel] = useState<{ top: number } | null>(null);
+  useEffect(() => {
+    if (!showList) return;
+    const place = () => {
+      const rect = boxRef.current?.getBoundingClientRect();
+      setPhonePanel(rect && window.innerWidth < 640 ? { top: rect.bottom + 6 } : null);
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [showList]);
 
   return (
     <>
       <div ref={boxRef} className="relative w-36 sm:w-64">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5F6878]" />
         <input
           type="search"
           value={text}
@@ -48,12 +63,15 @@ export function CustomerLookup() {
           onFocus={() => setOpen(true)}
           placeholder="Find customer"
           aria-label="Find a customer by name or phone"
-          className="w-full rounded-full border border-[#F3E5B5] bg-white py-1.5 pl-9 pr-3 text-sm text-black placeholder:text-gray-400 focus:border-black focus:outline-none"
+          className="w-full rounded-full border border-[#E4E9F1] bg-white py-1.5 pl-9 pr-3 text-sm text-[#0E1A33] placeholder:text-[#9AA3B2] transition-[border-color,box-shadow] hover:border-[#C9D6EA] focus:border-[#0A66F0] focus:outline-none focus:ring-[3px] focus:ring-[#0A66F0]/15 focus-visible:outline-none"
         />
         {showList && (
-          <div className="absolute right-0 top-full z-40 mt-1.5 w-[min(18rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-[#F3E5B5] bg-white shadow-[0_16px_40px_-12px_rgba(0,0,0,0.25)]">
+          <div
+            className={`z-40 overflow-hidden ${phonePanel ? "fixed left-4 right-4" : "absolute right-0 top-full mt-1.5 w-[min(18rem,calc(100vw-2rem))]"} ${MENU_PANEL}`}
+            style={phonePanel ? { top: phonePanel.top } : undefined}
+          >
             {results.length === 0 ? (
-              <p className="px-3.5 py-3 text-sm text-gray-500">{isFetching ? "Searching…" : "No customer matches."}</p>
+              <p className="px-3.5 py-3 text-sm text-[#5F6878]">{isFetching ? "Searching…" : "No customer matches."}</p>
             ) : (
               results.map((u) => (
                 <button
@@ -62,12 +80,12 @@ export function CustomerLookup() {
                     setCustomerId(u.id);
                     setOpen(false);
                   }}
-                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-[#FFFCF0]"
+                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-[#F3F6FA] focus-visible:bg-[#F3F6FA] focus-visible:outline-none"
                 >
-                  <UserRound className="h-4 w-4 shrink-0 text-gray-400" />
+                  <UserRound className="h-4 w-4 shrink-0 text-[#5F6878]" />
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-black">{u.full_name || "Customer"}</span>
-                    <span className="block truncate text-xs text-gray-500">{u.phone || u.email || "—"}</span>
+                    <span className="block truncate text-sm font-medium text-[#0E1A33]">{u.full_name || "Customer"}</span>
+                    <span className="block truncate text-xs text-[#5F6878]">{u.phone || u.email || "—"}</span>
                   </span>
                 </button>
               ))

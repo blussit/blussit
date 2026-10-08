@@ -92,15 +92,33 @@ async def test_every_booking_sweep_finder_is_sorted_and_capped(db, monkeypatch):
             seen.append((sort_by, sort_order, limit))
         return await real(self, filters, sort_by, sort_order, session, limit)
 
+    scanned: list[str] = []
+    real_scan = BookingService._sweep_scan
+
+    async def scan_spy(self, query, is_due):
+        scanned.append("scan")
+        return await real_scan(self, query, is_due)
+
     monkeypatch.setattr(BaseRepository, "find_all_no_paginate", spy)
+    monkeypatch.setattr(BookingService, "_sweep_scan", scan_spy)
     bs = BookingService(db)
+    # The time-window finders read EVERY candidate, earliest slot first, and
+    # cap only what's due — a cut before the "is it due" check hid due
+    # bookings behind the first 500 rows of a busy day.
     for finder in (
         bs.find_bookings_needing_reminder, bs.find_bookings_captain_not_reached, bs.find_bookings_late_to_start,
-        bs.find_bookings_unassigned_too_long, bs.find_bookings_stuck_on_the_way, bs.find_bookings_service_overrunning,
+        bs.find_bookings_unassigned_too_long,
+    ):
+        await finder()
+    assert scanned == ["scan"] * 4
+    assert BookingService._SWEEP_ORDER == [("scheduled_date", 1), ("scheduled_slot", 1), ("_id", 1)]
+    # The status-bounded ones stay sorted and capped.
+    for finder in (
+        bs.find_bookings_stuck_on_the_way, bs.find_bookings_service_overrunning,
         bs.find_bookings_idle_after_arrival, bs.find_bookings_captain_left_site,
     ):
         await finder()
-    assert seen == [("scheduled_date", 1, BookingService.SWEEP_MAX_ROWS)] * 8
+    assert seen == [("scheduled_date", 1, BookingService.SWEEP_MAX_ROWS)] * 4
     assert BookingService.SWEEP_MAX_ROWS == 500
 
 

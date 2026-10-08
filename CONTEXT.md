@@ -160,7 +160,7 @@ pending/assigned -> rescheduled -> back to pending/assigned
 4. **Captain verifies the vehicle.** A required step between heading-out and the
    before-photo — the captain types the registration number they actually see on the
    car. Mismatch blocks progress (they must release the job instead of forcing through).
-   This is the "washed the wrong car" fraud prevention.
+   This is the "wash the wrong car" fraud prevention.
 
 5. **Captain captures before-photo, service starts.** Camera-only (no gallery picker —
    enforced via `capture="environment"` on the file input), GPS-tagged. If the GPS is
@@ -259,10 +259,11 @@ cp .env.example .env   # point VITE_API_URL at the backend
 npm run dev
 ```
 
-Demo accounts created by `seed.py` (check the script for current values, but as of this
-session): `admin@doorstepvehiclecare.in` / `Admin@12345`,
-`manager.indore@doorstepvehiclecare.in` / `Manager@12345`,
-`captain.indore@doorstepvehiclecare.in` / `Captain@12345`.
+Demo accounts created by `seed.py` — LOCAL databases only (it refuses to create
+staff on a remote/production database): `admin@doorstepvehiclecare.in`,
+`manager.indore@doorstepvehiclecare.in`, `captain.indore@doorstepvehiclecare.in`.
+Passwords: `SEED_ADMIN_PASSWORD` / `SEED_MANAGER_PASSWORD` / `SEED_CAPTAIN_PASSWORD`
+if set, otherwise the local-only dev defaults in `backend/app/seed.py`.
 
 ---
 

@@ -79,6 +79,14 @@ async def _outbox(db, phone: str) -> list[dict]:
     return await db.whatsapp_outbox.find({"phone": phone}).to_list(None)
 
 
+@pytest.fixture(autouse=True)
+def _marked_done_on_the_bookings_day(monkeypatch):
+    """MGR-06: a booking is marked done on (or after) its own day, never
+    before — these bookings are for tomorrow, so the manager's mark-done
+    happens "on the day"."""
+    monkeypatch.setattr("app.services.booking_service._ist_today", lambda: "2999-12-31")
+
+
 async def _create_open_booking(rig, cleanup, phone: str, quantity: int = 1, day: int = 1) -> dict:
     """An ordinary website/phone booking waiting in the manager's queue."""
     _track(cleanup, phone)
@@ -713,8 +721,12 @@ async def test_customer_and_manager_messages_use_12_hour_slots(rig, cleanup):
     cleanup.append(("notifications", {"user_id": booking["customer_id"]}))
     _, _, _, wa_slot, _, _ = await BookingService(db)._wa_details(await db.bookings.find_one({"_id": ObjectId(booking["id"])}))
     assert wa_slot == "9:00 AM – 12:00 PM"
-    confirmation = await db.notifications.find_one({"user_id": booking["customer_id"], "title": {"$regex": "booked$"}})
+    # Title is "Booking confirmed" since NTF-07 (it was "<service> booked").
+    confirmation = await db.notifications.find_one({"user_id": booking["customer_id"], "title": "Booking confirmed"})
     assert confirmation and "9:00 AM – 12:00 PM" in confirmation["message"] and "09:00" not in confirmation["message"]
+    import re
+
+    assert not re.search(r"\b\d{4}-\d{2}-\d{2}\b", confirmation["message"]), "no ISO date in a customer message"
 
 
 # ------------------------------------------------ reconciliation / safety
@@ -953,3 +965,69 @@ async def test_restore_tells_the_customer_the_booking_is_back(rig, cleanup):
     assert restored_note is not None
     restored = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
     assert restored["is_deleted"] is False
+
+
+# --------------------------------------------------------------------- tips
+
+
+@pytest.mark.asyncio
+async def test_tip_on_manager_jobs_is_part_of_total_and_revenue(rig, cleanup):
+    """Founder: on a job the manager did, the tip the customer gave is added
+    to the job's total and revenue — entered on Log A Done Job, editable
+    later. One tip per visit. Captain jobs never carry a tip."""
+    db = rig["db"]
+    bs = BookingService(db)
+    mid, cid = rig["manager_id"], rig["center_id"]
+    cleanup.append(("audit_logs", {"action": "SET_BOOKING_TIP"}))
+
+    # 1. Logged job with a tip (whole rupees): total and earning include it.
+    phone = "9666600091"
+    _track(cleanup, phone)
+    plain = await bs.create_manager_logged_visit(_log(rig, "9666600094"), manager_id=mid, manager_center_id=cid)
+    _track(cleanup, "9666600094")
+    bill = float(plain["bookings"][0]["total_amount"])
+    logged = await bs.create_manager_logged_visit(_log(rig, phone, tip_amount=49.6), manager_id=mid, manager_center_id=cid)
+    b = logged["bookings"][0]
+    raw = await db.bookings.find_one({"_id": ObjectId(b["id"])})
+    assert raw["tip_amount"] == 50 and raw["tip_updated_by"] == mid
+    assert float(raw["total_amount"]) == bill + 50 == float(raw["platform_earning"])
+    assert logged["total_amount"] == bill + 50
+
+    # 2. Edit later: the total moves by the difference; 0 takes it back out.
+    await bs.set_tip(b["id"], 80, mid, "manager", cid)
+    raw = await db.bookings.find_one({"_id": ObjectId(b["id"])})
+    assert float(raw["total_amount"]) == bill + 80 == float(raw["platform_earning"])
+    await bs.set_tip(b["id"], 0, mid, "manager", cid)
+    raw = await db.bookings.find_one({"_id": ObjectId(b["id"])})
+    assert float(raw["total_amount"]) == bill and float(raw["tip_amount"]) == 0
+    await bs.set_tip(b["id"], 50, mid, "manager", cid)
+
+    # 3. A two-car visit the manager marked done: ONE tip, from either car.
+    phone2 = "9666600092"
+    open_visit = await _create_open_booking(rig, cleanup, phone2, quantity=2)
+    first_id = open_visit["bookings"][0]["id"]
+    await bs.manager_mark_done(first_id, mid, "manager", cid, send_whatsapp=False)
+    before = sum(float(c["total_amount"]) for c in await db.bookings.find({"customer_phone": phone2}).to_list(None))
+    await bs.set_tip(first_id, 100, mid, "manager", cid)
+    other_id = next(str(c["_id"]) for c in await db.bookings.find({"customer_phone": phone2}).to_list(None) if str(c["_id"]) != first_id)
+    await bs.set_tip(other_id, 150, mid, "manager", cid)
+    cars = await db.bookings.find({"customer_phone": phone2}).to_list(None)
+    assert sorted(float(c.get("tip_amount") or 0) for c in cars) == [0, 150]
+    assert sum(float(c["total_amount"]) for c in cars) == before + 150
+
+    # 4. Never on a job that isn't done, a captain's job, or another center's.
+    phone3 = "9666600093"
+    pending = await _create_open_booking(rig, cleanup, phone3)
+    pending_id = pending["bookings"][0]["id"]
+    with pytest.raises(BadRequestException):
+        await bs.set_tip(pending_id, 20, mid, "manager", cid)
+    await db.bookings.update_one({"_id": ObjectId(pending_id)}, {"$set": {"status": "completed", "completed_by_role": "captain"}})
+    with pytest.raises(BadRequestException):
+        await bs.set_tip(pending_id, 20, mid, "manager", cid)
+    with pytest.raises(ForbiddenException):
+        await bs.set_tip(b["id"], 20, mid, "manager", str(ObjectId()))
+
+    # 5. Revenue: the cash the manager collected includes the tip.
+    report = await PaymentService(db).center_collections(cid, "manager", cid, _day(-3), _day(3))
+    manager_row = next(r for r in report["rows"] if r["captain_id"] == "manager")
+    assert manager_row["cash_amount"] >= bill * 2 + 50

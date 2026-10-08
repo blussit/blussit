@@ -34,6 +34,12 @@ class WalletController:
 
     async def update_bank_details(self, current_user: CurrentUser, payload: BankDetailsRequest):
         result = await self.service.update_bank_details(current_user.id, payload.model_dump())
+        # Where payouts go is the classic target of an account takeover —
+        # every change leaves a trail (last 4 digits only, never the number).
+        await self.audit.log_action(
+            current_user.id, current_user.role, "UPDATE_BANK_DETAILS", "captain_wallets", result.get("id"),
+            {"account_last4": payload.bank_account_number[-4:], "ifsc": payload.bank_ifsc},
+        )
         return success(result, "Bank details saved")
 
     async def my_transactions(self, current_user: CurrentUser, pagination: PaginationParams):
@@ -48,16 +54,32 @@ class WalletController:
         items, total = await self.service.list_my_withdrawals(current_user.id, pagination.page, pagination.page_size)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def pending_withdrawals(self, pagination: PaginationParams):
-        items, total = await self.service.list_pending_withdrawals(pagination.page, pagination.page_size)
+    async def pending_withdrawals(self, pagination: PaginationParams, status: str = "pending"):
+        items, total = await self.service.list_pending_withdrawals(pagination.page, pagination.page_size, status)
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def review_withdrawal(self, current_user: CurrentUser, withdrawal_id: str, payload: WithdrawalReviewRequest):
+        before = await self.service.withdrawal_repo.find_by_id(withdrawal_id)
         result = await self.service.review_withdrawal(withdrawal_id, payload.status, current_user.id, payload.review_note)
-        await self.audit.log_action(current_user.id, current_user.role, "REVIEW_WITHDRAWAL", "withdrawals", withdrawal_id, {"status": payload.status})
-        return success(result, "Withdrawal request reviewed")
+        await self.audit.log_action(
+            current_user.id, current_user.role, "REVIEW_WITHDRAWAL", "withdrawals", withdrawal_id,
+            {
+                "status": payload.status, "amount": result.get("amount"), "captain_id": result.get("captain_id"),
+                "changes": {"status": {"before": (before or {}).get("status"), "after": result.get("status")}},
+            },
+        )
+        return success(result, "Withdrawal marked paid" if payload.status == "paid" else "Withdrawal request reviewed")
 
     async def admin_adjust(self, current_user: CurrentUser, captain_id: str, payload: WalletAdjustmentRequest):
+        # 404 for anything but an existing captain (ADM-09) — checked in the
+        # service before any wallet is read or created.
         result = await self.service.admin_adjust(captain_id, payload.amount, payload.description)
-        await self.audit.log_action(current_user.id, current_user.role, "ADJUST_WALLET", "captain_wallets", captain_id, {"amount": payload.amount, "description": payload.description})
+        after = float(result.get("balance") or 0)
+        await self.audit.log_action(
+            current_user.id, current_user.role, "ADJUST_WALLET", "captain_wallets", captain_id,
+            {
+                "amount": payload.amount, "description": payload.description,
+                "balance_before": round(after - payload.amount, 2), "balance_after": after,
+            },
+        )
         return success(result, "Wallet adjusted successfully")

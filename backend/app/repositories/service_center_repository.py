@@ -5,17 +5,22 @@ from app.repositories.base_repository import BaseRepository, build_search_filter
 from app.utils.geo import haversine_km
 
 
+# A center is active unless switched off on purpose: centers created before
+# `is_active` was stored on create (QA 2026-10-07) have no field at all.
+ACTIVE_CENTER = {"is_active": {"$ne": False}}
+
+
 class ServiceCenterRepository(BaseRepository):
     collection_name = "service_centers"
 
     async def search(self, search: str | None, page: int, page_size: int, active_only: bool = False):
-        filters: dict = {"is_active": True} if active_only else {}
+        filters: dict = dict(ACTIVE_CENTER) if active_only else {}
         if search:
             filters.update(build_search_filter(search, ["name", "code", "location.city", "location.pincode"]))
         return await self.find_many(filters, page=page, page_size=page_size)
 
     async def find_by_pincode(self, pincode: str) -> list[dict]:
-        return await self.find_all_no_paginate({"location.service_pincodes": pincode, "is_active": True})
+        return await self.find_all_no_paginate({"location.service_pincodes": pincode, **ACTIVE_CENTER})
 
     async def find_nearest(self, latitude: float, longitude: float) -> tuple[dict, float] | None:
         """
@@ -26,7 +31,7 @@ class ServiceCenterRepository(BaseRepository):
         centers) an in-memory scan is simpler and fast enough; this can be
         swapped for a MongoDB $geoNear query later without touching callers.
         """
-        centers = await self.find_all_no_paginate({"is_active": True})
+        centers = await self.find_all_no_paginate(dict(ACTIVE_CENTER))
         candidates: list[tuple[dict, float]] = []
         for center in centers:
             loc = center.get("location", {})

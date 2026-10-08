@@ -122,3 +122,65 @@ async def test_expired_hold_is_swept_and_seat_returns(rig, db):
     doc = await db.slot_capacity.find_one({"service_center_id": cid, "date": date, "slot_key": slot})
     assert doc["held_count"] == 0
     assert await db.slot_holds.count_documents({"service_center_id": cid}) == 0
+
+
+@pytest.mark.asyncio
+async def test_holds_can_never_empty_a_slot_or_pile_up(db, cleanup):
+    """/bookings/hold is public: holds may take at most half a slot's
+    seats (the rest stay bookable), one browser holds one seat at a time,
+    one connection only a few, and a slot past its cutoff can't be held."""
+    from app.core.exceptions import TooManyRequestsException
+
+    center_id = await make_service_center(
+        db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=4
+    )
+    for coll in ("slot_capacity", "daily_capacity", "slot_holds"):
+        cleanup.append((coll, {"service_center_id": center_id}))
+    cleanup.append(("service_centers", {"_id": ObjectId(center_id)}))
+    svc = BookingService(db)
+    date = (now_ist().date() + timedelta(days=2)).isoformat()
+    keys = [s["key"] for s in await svc.available_slots(center_id, date)]
+    slot = keys[0]
+
+    # Half of 4 seats can be held; the third holder gets "no hold" (429),
+    # and the slot still shows open for an actual booking.
+    await svc.hold_slot("cap-holder-1", center_id, date, slot, client_ip="10.0.0.1")
+    await svc.hold_slot("cap-holder-2", center_id, date, slot, client_ip="10.0.0.2")
+    with pytest.raises(TooManyRequestsException):
+        await svc.hold_slot("cap-holder-3", center_id, date, slot, client_ip="10.0.0.3")
+    assert next(x for x in await svc.available_slots(center_id, date) if x["key"] == slot)["status"] != "full"
+
+    # One seat per browser: holding another slot gives the first one back.
+    await svc.hold_slot("cap-holder-1", center_id, date, keys[1], client_ip="10.0.0.1")
+    assert await db.slot_holds.count_documents({"holder_id": "cap-holder-1"}) == 1
+    doc = await db.slot_capacity.find_one({"service_center_id": center_id, "date": date, "slot_key": slot})
+    assert doc["held_count"] == 1
+
+    # One connection can't mint holders without limit (a roomy center, so
+    # only the per-connection cap can refuse).
+    big = await make_service_center(
+        db, working_hours_start="09:00", working_hours_end="21:00", slot_duration_minutes=180, default_slot_capacity=40
+    )
+    for coll in ("slot_capacity", "daily_capacity", "slot_holds"):
+        cleanup.append((coll, {"service_center_id": big}))
+    cleanup.append(("service_centers", {"_id": ObjectId(big)}))
+    for i in range(BookingService.MAX_HOLDS_PER_IP):
+        await svc.hold_slot(f"ip-holder-{i}", big, date, slot, client_ip="10.9.9.9")
+    with pytest.raises(TooManyRequestsException):
+        await svc.hold_slot("ip-holder-extra", big, date, slot, client_ip="10.9.9.9")
+    # Another connection is unaffected.
+    await svc.hold_slot("ip-holder-other", big, date, slot, client_ip="10.9.9.10")
+
+
+@pytest.mark.asyncio
+async def test_a_slot_past_its_cutoff_cannot_be_held(rig, monkeypatch):
+    """Late in the day (clock pinned to 20:30 IST), this morning's slot is
+    past its cutoff — it can't be held (it used to show "Held for you")."""
+    from app.services import booking_service as bs
+
+    late = now_ist().replace(hour=20, minute=30, second=0, microsecond=0)
+    monkeypatch.setattr(bs, "now_ist", lambda: late)
+    svc, cid = rig["svc"], rig["center_id"]
+    with pytest.raises(BadRequestException, match="no longer available"):
+        await svc.hold_slot("late-holder", cid, late.date().isoformat(), "09:00-12:00")
+    assert await rig["db"].slot_holds.count_documents({"holder_id": "late-holder"}) == 0

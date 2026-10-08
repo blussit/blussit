@@ -1,5 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.authz import customers_known_to_center, ensure_customer_in_scope
 from app.core.exceptions import NotFoundException
 from app.models.enums import UserRole
 from app.repositories.address_repository import AddressRepository
@@ -31,19 +32,50 @@ class CRMService:
         self.service_repo = ServiceRepository(db)
         self.vehicle_type_repo = VehicleTypeRepository(db)
 
-    async def find_customer_by_phone(self, phone: str) -> dict | None:
+    async def find_customer_by_phone(
+        self, phone: str, actor_role: str = "admin", actor_center_id: str | None = None,
+    ) -> dict | None:
         """Used by the manager 'book on behalf of a customer' flow. Never
-        leaks a staff account via a phone search — customers only."""
-        user = await self.user_repo.find_by_phone(phone)
-        if not user or user.get("role") != UserRole.CUSTOMER.value:
+        leaks a staff account via a phone search — customers only. Same
+        shape rule as search_customers' full-number match: a manager gets
+        only what booking needs (id, name, phone), never the email or
+        account flags of a customer their center may never have served;
+        an unlinked manager gets nothing."""
+        if actor_role != "admin" and not actor_center_id:
             return None
+        user = await self.user_repo.find_by_phone(phone)
+        if not user or user.get("role") != UserRole.CUSTOMER.value or user.get("is_deleted"):
+            return None
+        if actor_role != "admin":
+            return self._lookup_row(user)
         return UserPublic.from_doc(user).model_dump()
 
-    async def search_customers(self, q: str, limit: int = 8) -> list[dict]:
+    # How many name matches a manager's typeahead looks through before
+    # keeping only their own center's customers — bounds the work per
+    # keystroke (a common name can match thousands platform-wide).
+    _MANAGER_TYPEAHEAD_CANDIDATES = 200
+
+    async def search_customers(
+        self, q: str, limit: int = 8, actor_role: str = "admin", actor_center_id: str | None = None,
+    ) -> list[dict]:
         """Typeahead for the manager's 'add a booking' / 'sell a plan' forms
-        — matching by name OR phone as they type, so an existing customer
-        is picked directly instead of accidentally re-created. Customers
-        only, same rule as find_customer_by_phone above."""
+        and the header "Find customer" box — matching by name OR phone as
+        they type, so an existing customer is picked directly instead of
+        accidentally re-created. Customers only, same rule as
+        find_customer_by_phone above.
+
+        Scope (decided 2026-10, final security pass): customers aren't
+        owned by a center, but a manager has no business BROWSING the whole
+        platform's customer list by name. So for a manager:
+          - a full 10-digit number is matched platform-wide — the caller is
+            on the phone with that number in hand, and finding the existing
+            account (not creating a duplicate) is the whole point;
+          - a name or a partial number only matches customers already
+            known to THEIR center: a booking there, a plan granted there, or
+            a society enrolment in one of its societies;
+          - either way only what booking needs comes back (id, name, phone)
+            — no email, no account flags.
+        An admin searches everything and sees the full public profile."""
         from app.repositories.base_repository import build_search_filter
 
         q = (q or "").strip()
@@ -54,11 +86,39 @@ class CRMService:
                 q = q[2:]
         if len(q) < 2:
             return []
-        # No count_documents here (find_many would run one over every
-        # customer per keystroke) — a typeahead only needs the first few.
-        query = {"role": UserRole.CUSTOMER.value, "is_deleted": {"$ne": True}, **build_search_filter(q, ["full_name", "email", "phone"])}
-        items = await self.user_repo.collection.find(query).sort("created_at", -1).limit(limit).to_list(length=limit)
-        return [UserPublic.from_doc(u).model_dump() for u in items]
+        base = {"role": UserRole.CUSTOMER.value, "is_deleted": {"$ne": True}}
+        if actor_role == "admin":
+            # No count_documents here (find_many would run one over every
+            # customer per keystroke) — a typeahead only needs the first few.
+            query = {**base, **build_search_filter(q, ["full_name", "email", "phone"])}
+            items = await self.user_repo.collection.find(query).sort("created_at", -1).limit(limit).to_list(length=limit)
+            return [UserPublic.from_doc(u).model_dump() for u in items]
+
+        if not actor_center_id:
+            return []  # fail closed — an unlinked manager has no customers
+        if len(q) == 10 and q.isdigit():
+            items = await self.user_repo.collection.find({**base, "phone": q}).limit(1).to_list(length=1)
+            return [self._lookup_row(u) for u in items]
+        query = {**base, **build_search_filter(q, ["full_name", "phone"])}
+        candidates = await self.user_repo.collection.find(query, {"full_name": 1, "phone": 1, "created_at": 1}).sort(
+            "created_at", -1
+        ).limit(self._MANAGER_TYPEAHEAD_CANDIDATES).to_list(length=self._MANAGER_TYPEAHEAD_CANDIDATES)
+        if not candidates:
+            return []
+        known = await self._known_to_center([str(u["_id"]) for u in candidates], actor_center_id)
+        return [self._lookup_row(u) for u in candidates if str(u["_id"]) in known][:limit]
+
+    @staticmethod
+    def _lookup_row(user: dict) -> dict:
+        return {
+            "id": str(user["_id"]), "full_name": user.get("full_name") or "", "phone": user.get("phone"),
+            "role": UserRole.CUSTOMER.value,
+        }
+
+    async def _known_to_center(self, customer_ids: list[str], center_id: str) -> set[str]:
+        """Which of these customers this center has dealt with — the shared
+        rule in core/authz (customers_known_to_center)."""
+        return await customers_known_to_center(self.user_repo.collection.database, customer_ids, center_id)
 
     async def get_customer_360(self, customer_id: str, actor_role: str | None = None, actor_center_id: str | None = None) -> dict:
         user = await self.user_repo.find_by_id(customer_id)
@@ -67,6 +127,13 @@ class CRMService:
         # profile through a customer-CRM endpoint.
         if not user or user.get("role") != UserRole.CUSTOMER.value:
             raise NotFoundException("Customer not found")
+        # A manager may open only a customer THEIR center has dealt with
+        # (same relationship rule as the typeahead's name search). The
+        # narrowing further down scopes bookings/plans/complaints, but the
+        # profile, every saved address and every vehicle went out for ANY
+        # customer id — and an unlinked manager fell open to all of them.
+        # 404, not 403: an id outside the center must not confirm it exists.
+        await ensure_customer_in_scope(self.user_repo.collection.database, actor_role or "", actor_center_id, customer_id)
 
         # High page_size, not the usual UI-page 20/50 — lifetime_spend,
         # total_bookings and same_day_repeat_dates below all need the
@@ -91,8 +158,11 @@ class CRMService:
         # narrows the SOURCE lists so every figure derived below (lifetime
         # spend, same-day-repeat, preferred center) is naturally correct
         # for the scoped view too, not just the raw lists.
-        if actor_role == "manager" and actor_center_id:
-            bookings = [b for b in bookings if b.get("service_center_id") == actor_center_id]
+        # Any non-admin is narrowed — a manager with NO center linked sees
+        # nothing center-owned (None matches no booking), never the full
+        # platform-wide history an `and actor_center_id` guard fell open to.
+        if actor_role != "admin":
+            bookings = [b for b in bookings if actor_center_id and b.get("service_center_id") == actor_center_id]
             # A self-serve plan has no service_center_id at all (no center
             # owns it) — still shown, since a manager legitimately needs to
             # know a customer's own active pass regardless of who sold it.
@@ -141,9 +211,14 @@ class CRMService:
         # scoped to that service) — same "resolve locally" call as
         # ReviewService._enrich makes, for the same reason.
         service_ids = {sid for b in bookings for sid in (b.get("service_ids") or [])}
-        booking_address_ids = {b.get("address_id") for b in bookings if b.get("address_id")}
+        # A monthly pass names one car type + one wash — shown on each plan row.
+        service_ids.update(s.get("service_id") for s in subscriptions if s.get("service_id"))
+        # A booking shows its own address_snapshot (spec 1.3); only rows from
+        # before snapshots fall back to the saved address.
+        booking_address_ids = {b.get("address_id") for b in bookings if b.get("address_id") and not b.get("address_snapshot")}
         vehicle_type_ids = {b.get("vehicle_type") for b in bookings if b.get("vehicle_type")}
         vehicle_type_ids.update(v.get("vehicle_type") for v in vehicles if v.get("vehicle_type"))
+        vehicle_type_ids.update(s.get("vehicle_type") for s in subscriptions if s.get("vehicle_type"))
         center_ids = {b.get("service_center_id") for b in bookings if b.get("service_center_id")}
         plan_ids = {s.get("plan_id") for s in subscriptions if s.get("plan_id")}
 
@@ -155,16 +230,25 @@ class CRMService:
 
         enriched_bookings = []
         for b in bookings:
-            addr = booking_addresses.get(b.get("address_id") or "")
+            addr = b.get("address_snapshot") or booking_addresses.get(b.get("address_id") or "")
             enriched_bookings.append({
                 **b,
                 "vehicle_label": b.get("vehicle_label") or vehicle_type_names.get(b.get("vehicle_type") or "") or "Vehicle",
+                "vehicle_type_name": vehicle_type_names.get(b.get("vehicle_type") or "") or b.get("vehicle_label"),
                 "service_names": [services.get(sid, "Service") for sid in (b.get("service_ids") or [])],
                 "address_text": f"{addr.get('line1')}, {addr.get('city')}" if addr else None,
                 "service_center_name": centers.get(b.get("service_center_id") or ""),
             })
         enriched_vehicles = [{**v, "vehicle_type_name": vehicle_type_names.get(v.get("vehicle_type") or "")} for v in vehicles]
-        enriched_subscriptions = [{**s, "plan_name": plans.get(s.get("plan_id") or "", "Unknown plan")} for s in subscriptions]
+        enriched_subscriptions = [
+            {
+                **s,
+                "plan_name": plans.get(s.get("plan_id") or "", "Unknown plan"),
+                "vehicle_type_name": vehicle_type_names.get(s.get("vehicle_type") or ""),
+                "service_name": services.get(s.get("service_id") or ""),
+            }
+            for s in subscriptions
+        ]
 
         return {
             "profile": UserPublic.from_doc(user).model_dump(),

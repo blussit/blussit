@@ -15,9 +15,10 @@ capacity SHOULD a date+slot for this center resolve to" — and
 BookingService consults it (via get_effective_policy) at lazy-init time.
 Because that init is a one-time $setOnInsert, a date's docs can already
 exist by the time a NEW policy is scheduled for that same date (most
-commonly: today, under "Apply immediately") — _resync_touched_date pushes
-the new numbers into any already-existing docs for that date right when
-the change is scheduled/cancelled, so Overview and the customer-facing
+commonly: today, under "Apply immediately") — _resync_from pushes the
+new numbers into every already-existing doc the change governs (its date
+up to the next scheduled change) right when the change is
+scheduled/cancelled, so Overview and the customer-facing
 availability view (which both read those same docs) never go stale. An
 admin's per-date/per-slot override (BookingService.set_slot_capacity)
 still always wins over the baseline policy for whatever date it was set
@@ -26,6 +27,8 @@ deliberately skips any doc carrying that flag — that's the "Capacity
 overrides" the spec calls out as a distinct concept from the day's
 baseline policy.
 """
+from datetime import datetime, timezone
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.authz import ensure_own_center
@@ -33,28 +36,33 @@ from app.core.exceptions import BadRequestException, ForbiddenException, NotFoun
 from app.repositories.capacity_policy_repository import CapacityPolicyRepository
 from app.repositories.service_center_repository import ServiceCenterRepository
 from app.repositories.slot_capacity_repository import DailyCapacityRepository, SlotCapacityRepository
-from app.utils.slots import generate_slots
 from app.utils.timezone import now_ist
 from app.utils.serializers import serialize_doc, serialize_list
 
 
 class CapacityPolicyService:
     def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
         self.repo = CapacityPolicyRepository(db)
         self.center_repo = ServiceCenterRepository(db)
         # Only used to re-sync ALREADY-INITIALIZED slot_capacity/daily_capacity
-        # docs when the policy targeting their exact date changes — see
-        # _resync_touched_date below. Reservation/release itself stays owned
+        # docs when the policy governing their date changes — see
+        # _resync_from below. Reservation/release itself stays owned
         # by BookingService; this service never reserves/releases a spot.
         self.slot_capacity_repo = SlotCapacityRepository(db)
         self.daily_capacity_repo = DailyCapacityRepository(db)
 
     async def _resolve_slots(self, center: dict) -> list[str]:
-        duration = center.get("slot_duration_minutes") or 180
-        raw = generate_slots(center.get("working_hours_start", "08:00"), center.get("working_hours_end", "20:00"), duration)
-        return [s["key"] for s in raw]
+        # THE center slot list the booking side uses (center_slots: its own
+        # hours and length, or the platform "Slot length") — a hard-coded
+        # 180 / 08:00-20:00 here saved per-slot numbers under keys that
+        # matched no real slot once those changed.
+        from app.services.booking_policy_service import BookingPolicyService
+        from app.services.booking_service import center_slots
 
-    def _auto_distribute(self, max_bookings_per_day: int, slot_keys: list[str]) -> dict[str, int]:
+        return [s["key"] for s in center_slots(center, await BookingPolicyService(self.db).get_policy())]
+
+    def auto_distribute(self, max_bookings_per_day: int, slot_keys: list[str]) -> dict[str, int]:
         """Even split with the remainder absorbed by the LAST slot — same
         "remainder goes last" convention already used by generate_slots
         for the slot windows themselves, so the two stay visually
@@ -68,29 +76,41 @@ class CapacityPolicyService:
         distribution[slot_keys[-1]] += remainder
         return distribution
 
-    async def _resync_touched_date(self, service_center_id: str, date_str: str, max_bookings_per_day: int, distribution: dict[str, int]) -> None:
+    async def _resync_from(self, service_center_id: str, effective_date: str, max_bookings_per_day: int | None, distribution: dict[str, int]) -> None:
         """A slot/day's capacity doc (owned by BookingService) is created
-        lazily the FIRST time anyone touches that exact date — an admin
-        viewing the Overview page, or a real booking. From that moment on,
-        get_or_init's $setOnInsert means its `capacity` field is frozen at
-        whatever it started as; a policy change made afterwards for that
-        SAME date never reaches back to update it on its own, which is
-        exactly what produced "I changed the number on the policy page but
-        Overview still shows the old one." Whenever a policy is scheduled
-        for a date whose docs already exist (almost always "today", for
-        Apply Immediately — but also a not-yet-active future date someone
-        already previewed or already has a real booking against), resync
-        those docs' capacity right now: never booked_count (no existing
-        reservation is ever invalidated), and never a slot/day an admin has
-        explicitly overridden via set_slot_capacity — that override always
-        wins over the baseline policy, by design."""
+        lazily the FIRST time anyone touches that exact date — a booking, a
+        public slot hold, an admin viewing the Overview page. From that
+        moment on, get_or_init's $setOnInsert means its `capacity` field is
+        frozen at whatever it started as; a policy change made afterwards
+        never reaches back to update it on its own ("I changed the number on
+        the policy page but Overview still shows the old one").
+
+        A policy governs every date from its effective_date up to the next
+        scheduled change, so every doc that already exists in THAT range is
+        resynced right now — not just effective_date's own (the original
+        resync left later dates on the old numbers: a cut from 4 to 1 still
+        sold 4 tomorrow). Capacity only, never booked_count: no existing
+        reservation is ever invalidated, a cut below what's already booked
+        just stops new sales. And never a slot/day an admin explicitly
+        overrode via set_slot_capacity — that override always wins over the
+        baseline policy, by design."""
+        following = await self.repo.find_next_scheduled(service_center_id, effective_date)
+        window: dict = {"$gte": effective_date}
+        if following:
+            window["$lt"] = following["effective_date"]
+        now = datetime.now(timezone.utc)
         for slot_key, capacity in distribution.items():
-            doc = await self.slot_capacity_repo.find_one({"service_center_id": service_center_id, "date": date_str, "slot_key": slot_key})
-            if doc and not doc.get("is_override") and doc.get("capacity") != capacity:
-                await self.slot_capacity_repo.update_by_id(str(doc["_id"]), {"capacity": capacity})
-        day_doc = await self.daily_capacity_repo.find_one({"service_center_id": service_center_id, "date": date_str})
-        if day_doc and not day_doc.get("is_override") and day_doc.get("capacity") != max_bookings_per_day:
-            await self.daily_capacity_repo.update_by_id(str(day_doc["_id"]), {"capacity": max_bookings_per_day})
+            await self.slot_capacity_repo.collection.update_many(
+                {"service_center_id": service_center_id, "date": window, "slot_key": slot_key,
+                 "is_override": {"$ne": True}, "capacity": {"$ne": capacity}},
+                {"$set": {"capacity": capacity, "updated_at": now}},
+            )
+        if max_bookings_per_day is not None:
+            await self.daily_capacity_repo.collection.update_many(
+                {"service_center_id": service_center_id, "date": window,
+                 "is_override": {"$ne": True}, "capacity": {"$ne": max_bookings_per_day}},
+                {"$set": {"capacity": max_bookings_per_day, "updated_at": now}},
+            )
 
     async def get_effective_policy(self, service_center_id: str, date_str: str) -> dict:
         """What SHOULD a not-yet-touched date+slot for this center start
@@ -165,11 +185,17 @@ class CapacityPolicyService:
         if effective_date < today:
             raise BadRequestException("Effective date can't be in the past")
 
+        # A cancelled change used to stay behind as a soft-deleted row that
+        # the unique (center, effective_date) index still counts — scheduling
+        # that date again was a 500. Clear any such tombstone first.
+        await self.repo.collection.delete_many(
+            {"service_center_id": service_center_id, "effective_date": effective_date, "is_deleted": True}
+        )
         existing = await self.repo.find_for_date(service_center_id, effective_date)
         slot_keys = await self._resolve_slots(center)
         distribution = dict(slot_distribution or {})
         if not distribution:
-            distribution = self._auto_distribute(max_bookings_per_day, slot_keys)
+            distribution = self.auto_distribute(max_bookings_per_day, slot_keys)
         else:
             unknown = set(distribution.keys()) - set(slot_keys)
             if unknown:
@@ -217,7 +243,7 @@ class CapacityPolicyService:
         # it rather than assuming this one always does).
         current_for_date = await self.get_effective_policy(service_center_id, effective_date)
         if current_for_date["max_bookings_per_day"] == max_bookings_per_day:
-            await self._resync_touched_date(service_center_id, effective_date, max_bookings_per_day, distribution)
+            await self._resync_from(service_center_id, effective_date, max_bookings_per_day, distribution)
         return result
 
     async def cancel_scheduled_change(self, service_center_id: str, change_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> None:
@@ -236,11 +262,52 @@ class CapacityPolicyService:
         # whatever now resolves as effective now that this change is gone —
         # otherwise a cancelled change's numbers would keep "sticking" the
         # same way an applied one used to before this fix.
+        # Every date the cancelled change would have governed (up to the
+        # next scheduled one) reverts, not just its first day.
         center = await self.center_repo.find_by_id(service_center_id)
         reverted = await self.get_effective_policy(service_center_id, change["effective_date"])
-        if reverted["max_bookings_per_day"] is not None and center:
+        if center:
             distribution = reverted["slot_distribution"]
-            if not distribution:
-                slot_keys = await self._resolve_slots(center)
-                distribution = self._auto_distribute(reverted["max_bookings_per_day"], slot_keys)
-            await self._resync_touched_date(service_center_id, change["effective_date"], reverted["max_bookings_per_day"], distribution)
+            if not distribution and reverted["max_bookings_per_day"] is not None:
+                distribution = self.auto_distribute(reverted["max_bookings_per_day"], await self._resolve_slots(center))
+            elif not distribution:
+                # No policy before it at all: back to the center's own
+                # flat per-slot default (what BookingService falls back to) —
+                # and none configured means none (fail closed, never 999).
+                default = int(center.get("default_slot_capacity") or 0)
+                distribution = {key: default for key in await self._resolve_slots(center)}
+            await self._resync_from(service_center_id, change["effective_date"], reverted["max_bookings_per_day"], distribution)
+
+    # Kept for older callers.
+    _auto_distribute = auto_distribute
+
+    async def rekey_for_current_slots(self, service_center_id: str) -> dict | None:
+        """After an allowed change to a center's slot length or hours
+        (ServiceCenterService.update / the platform slot length — only
+        possible while nothing live sits in the old slots, see
+        BookingService.slot_change_blockers), the policy in effect today
+        still names the OLD slot keys. Re-split its same daily maximum over
+        the new slots, as today's change (edited in place if one exists),
+        and push it into any counter docs already created. None when there
+        was nothing to re-split."""
+        center = await self.center_repo.find_by_id(service_center_id)
+        if not center:
+            return None
+        today = now_ist().strftime("%Y-%m-%d")
+        active = await self.repo.find_latest_effective(service_center_id, today)
+        keys = await self._resolve_slots(center)
+        if not active or not active.get("slot_distribution") or set(active["slot_distribution"]) == set(keys):
+            return None
+        maximum = int(active.get("max_bookings_per_day") or 0)
+        doc = {
+            "service_center_id": service_center_id,
+            "effective_date": today,
+            "max_bookings_per_day": maximum,
+            "slot_distribution": self.auto_distribute(maximum, keys),
+            "note": "Re-split over the new slots after a slot length / opening hours change",
+            "created_by": "system",
+        }
+        existing = await self.repo.find_for_date(service_center_id, today)
+        saved = await self.repo.update_by_id(str(existing["_id"]), doc) if existing else await self.repo.create(doc)
+        await self._resync_from(service_center_id, today, maximum, doc["slot_distribution"])
+        return serialize_doc(saved)

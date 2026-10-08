@@ -4,7 +4,15 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.catalog_controller import CategoryController, ComboOfferController, ServiceController
-from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_admin
+from app.core.dependencies import (
+    CurrentUser,
+    PaginationParams,
+    get_catalogue_viewer,
+    get_current_user,
+    get_db,
+    is_catalogue_editor,
+    require_admin,
+)
 from app.schemas.catalog_schema import (
     CategoryCreateRequest,
     CategoryUpdateRequest,
@@ -19,9 +27,14 @@ service_router = APIRouter(prefix="/services", tags=["Services"])
 combo_router = APIRouter(prefix="/combo-offers", tags=["Combo Offers"])
 
 
+# Public catalogue reads: switched-off rows (active_only=false) and internal
+# fields (a service's captain_fee) are for admins/managers only — anyone
+# else asking for them gets the public, active-only view.
 @category_router.get("")
-async def list_categories(active_only: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await CategoryController(db).list(active_only)
+async def list_categories(
+    active_only: bool = False, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return await CategoryController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
 @category_router.post("", dependencies=[Depends(require_admin)])
@@ -45,14 +58,16 @@ async def list_services(
     vehicle_type: Optional[str] = None,
     active_only: bool = True,
     pagination: PaginationParams = Depends(),
+    viewer: CurrentUser | None = Depends(get_catalogue_viewer),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return await ServiceController(db).list(pagination, category_id, vehicle_type, active_only)
+    editor = is_catalogue_editor(viewer)
+    return await ServiceController(db).list(pagination, category_id, vehicle_type, active_only or not editor, public=not editor)
 
 
 @service_router.get("/{service_id}")
-async def get_service(service_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await ServiceController(db).get(service_id)
+async def get_service(service_id: str, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await ServiceController(db).get(service_id, public=not is_catalogue_editor(viewer))
 
 
 @service_router.post("", dependencies=[Depends(require_admin)])
@@ -71,8 +86,10 @@ async def delete_service(service_id: str, current_user: CurrentUser = Depends(ge
 
 
 @combo_router.get("")
-async def list_combo_offers(active_only: bool = False, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await ComboOfferController(db).list(active_only)
+async def list_combo_offers(
+    active_only: bool = False, viewer: CurrentUser | None = Depends(get_catalogue_viewer), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return await ComboOfferController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
 @combo_router.get("/{combo_id}")

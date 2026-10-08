@@ -14,16 +14,18 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Globe, IndianRupee, Percent, Repeat, ShoppingBag, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
 import { analyticsApi, kpiApi, adminUserApi } from "../../api/admin";
 import { bookingApi } from "../../api/booking";
-import { Card, CardBody, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
+import { Card, CardBody, ErrorState, PageLoader, Panel, StatCard, StatusBadge } from "../../components/ui";
 import { DatePicker } from "../../components/ui/DatePicker";
 import { DeltaPill, InfoTip, TargetChip, formatINR } from "../../components/admin/kpi/charts";
 import { AreasTab, BusinessTab, CaptainsTab, CustomersTab, FinancialTab, MarketingTab, OperationsTab } from "../../components/admin/kpi/sections";
 import { KpiListModal } from "../../components/admin/kpi/KpiListModal";
 import { KpiBriefModal } from "../../components/admin/kpi/KpiBriefModal";
 import { RevenueDrillModal } from "../../components/admin/kpi/RevenueDrillModal";
+import { KpiExplorer } from "../../components/admin/kpi/KpiExplorer";
 import { BookingDetailDrawer } from "../../components/shared/BookingDetailDrawer";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { format, formatSlot } from "../../lib/date";
+import { bookingCarAndService } from "../../lib/titleCase";
 import { PERIODS, REVENUE_SCOPES, type RevenueScope } from "../../lib/kpiPeriods";
 import type { Booking, User } from "../../types";
 
@@ -77,7 +79,7 @@ export default function AdminDashboardPage() {
     [periodKey, custom],
   );
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["kpi", "overview", params],
     queryFn: () => kpiApi.section<OverviewData>("overview", params),
   });
@@ -87,6 +89,9 @@ export default function AdminDashboardPage() {
   });
 
   if (isLoading && !data) return <PageLoader />;
+  // A failed overview read left no tiles and "No exceptions need attention"
+  // — which reads as a quiet, healthy period. Say it failed instead.
+  const overviewFailed = isError && !data;
 
   const periodNoun = periodKey === "today" ? "yesterday" : "previous period";
   const cur = data?.current;
@@ -96,8 +101,8 @@ export default function AdminDashboardPage() {
   const revenueFor = (block?: OverviewBlock) =>
     !block ? 0 : revenueScope === "bookings" ? block.revenue : revenueScope === "plans" ? block.plan_revenue : block.combined_revenue;
   const revenueLabel =
-    (periodKey === "today" ? "Today's revenue" : "Revenue") +
-    (revenueScope === "bookings" ? " — bookings" : revenueScope === "plans" ? " — plans" : "");
+    (periodKey === "today" ? "Today's Revenue" : "Revenue") +
+    (revenueScope === "bookings" ? " — Bookings" : revenueScope === "plans" ? " — Plans" : "");
   const revenueTip =
     revenueScope === "bookings"
       ? "Completed-wash revenue in the period"
@@ -107,12 +112,12 @@ export default function AdminDashboardPage() {
 
   const primary = cur && prev ? [
     {
-      label: periodKey === "today" ? "Today's bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag,
+      label: periodKey === "today" ? "Today's Bookings" : "Bookings", value: String(cur.bookings), icon: ShoppingBag,
       delta: <DeltaPill current={cur.bookings} previous={prev.bookings} />, tip: "Bookings created in the selected period",
       onClick: () => setListDrill("bookings-created"),
     },
     {
-      label: "Completed washes", value: String(cur.completed), icon: CheckCircle2,
+      label: "Completed Washes", value: String(cur.completed), icon: CheckCircle2,
       delta: <DeltaPill current={cur.completed} previous={prev.completed} />, tip: "Washes finished in the selected period",
       onClick: () => setListDrill("bookings-completed"),
     },
@@ -122,36 +127,36 @@ export default function AdminDashboardPage() {
       onClick: () => setRevenueDrillOpen(true),
     },
     {
-      label: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
+      label: "Completion Rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, icon: Percent,
       delta: <DeltaPill current={cur.completion_rate} previous={prev.completion_rate} />, tip: "Completed ÷ all bookings",
       onClick: () =>
         setBriefDrill({
-          title: "Completion rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, tip: "Completed ÷ all bookings in the period",
+          title: "Completion Rate", value: cur.completion_rate == null ? "—" : `${cur.completion_rate}%`, tip: "Completed ÷ all bookings in the period",
           breakdown: [
-            { label: "Bookings created", value: cur.bookings },
+            { label: "Bookings Created", value: cur.bookings },
             { label: "Completed", value: cur.completed },
           ],
         }),
     },
     {
-      label: "New customers", value: String(cur.new_customers), icon: UserPlus,
+      label: "New Customers", value: String(cur.new_customers), icon: UserPlus,
       delta: <DeltaPill current={cur.new_customers} previous={prev.new_customers} />, tip: "Customer accounts created in the period",
       onClick: () => setListDrill("new-customers"),
     },
     {
-      label: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`, icon: Repeat,
+      label: "Repeat Customer Rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`, icon: Repeat,
       delta: <DeltaPill current={cur.repeat_customer_rate} previous={prev.repeat_customer_rate} />, tip: "Share of this period's customers who had booked before it",
       target: <TargetChip actual={cur.repeat_customer_rate} target={data?.targets?.repeat_rate_pct} unit="%" />,
       onClick: () =>
         setBriefDrill({
-          title: "Repeat customer rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`,
+          title: "Repeat Customer Rate", value: cur.repeat_customer_rate == null ? "—" : `${cur.repeat_customer_rate}%`,
           tip: "Share of this period's customers who had booked before it started — a rising rate means BLUSSIT is becoming a habit, not a one-time purchase.",
         }),
     },
   ] : [];
 
   // Revenue leads (it is THE business number); the rest support it.
-  const hero = primary.find((p) => p.label.startsWith(periodKey === "today" ? "Today's revenue" : "Revenue"));
+  const hero = primary.find((p) => p.label.startsWith(periodKey === "today" ? "Today's Revenue" : "Revenue"));
   const rest = primary.filter((p) => p !== hero);
 
   return (
@@ -167,7 +172,7 @@ export default function AdminDashboardPage() {
               key={p.key}
               type="button"
               onClick={() => { setPeriodKey(p.key); setShowCustom(false); }}
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === p.key ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-600 hover:border-[#C9D6EA]"}`}
             >
               {p.label}
             </button>
@@ -175,7 +180,7 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             onClick={() => { setShowCustom((v) => !v); if (custom.start && custom.end) setPeriodKey("custom"); }}
-            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-600 hover:border-black"}`}
+            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${periodKey === "custom" ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-600 hover:border-[#C9D6EA]"}`}
           >
             <SlidersHorizontal className="h-3 w-3" /> Custom
           </button>
@@ -201,6 +206,7 @@ export default function AdminDashboardPage() {
 
       {/* PRIMARY — revenue is the headline, the rest are supporting tiles.
           Same console shape as every other panel in the product. */}
+      {overviewFailed && <ErrorState message="Couldn't load the business overview." onRetry={() => void refetch()} busy={isFetching} />}
       {hero && (
         <div>
           <div className="mb-1.5 flex gap-1.5">
@@ -209,7 +215,7 @@ export default function AdminDashboardPage() {
                 key={s.key}
                 type="button"
                 onClick={() => setRevenueScope(s.key)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "bg-black text-white" : "border border-[#F3E5B5] bg-white text-gray-500 hover:border-black"}`}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${revenueScope === s.key ? "border border-[#0A66F0] bg-[#E8F0FE] text-[#0A66F0]" : "border border-[#E4E9F1] bg-white text-gray-500 hover:border-[#C9D6EA]"}`}
               >
                 {s.label}
               </button>
@@ -230,7 +236,7 @@ export default function AdminDashboardPage() {
           />
         </div>
       )}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-1 gap-4 min-[480px]:grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
         {rest.map((s) => (
           <StatCard
             key={s.label}
@@ -249,7 +255,7 @@ export default function AdminDashboardPage() {
           />
         ))}
         <StatCard
-          label="Website visitors"
+          label="Website Visitors"
           labelAfter={<InfoTip text={VISITORS_TIP} />}
           value={visitors ? visitors.total.toLocaleString("en-IN") : "—"}
           icon={Globe}
@@ -263,7 +269,7 @@ export default function AdminDashboardPage() {
             visitors
               ? () =>
                   setBriefDrill({
-                    title: "Website visitors",
+                    title: "Website Visitors",
                     value: visitors.total.toLocaleString("en-IN"),
                     tip: VISITORS_TIP,
                     breakdown: [...visitors.daily].reverse().map((d) => ({ label: format(d.date), value: d.visitors })),
@@ -275,8 +281,8 @@ export default function AdminDashboardPage() {
       </div>
 
       {/* Action required — only triggered exceptions, invisible when healthy. */}
-      {alerts.length > 0 ? (
-        <Panel title="Action required">
+      {overviewFailed ? null : alerts.length > 0 ? (
+        <Panel title="Action Required">
           <ul className="space-y-1.5">
             {alerts.map((a) => (
               <li key={a.text} className="flex items-start gap-2 text-sm text-gray-700">
@@ -292,6 +298,10 @@ export default function AdminDashboardPage() {
         </p>
       )}
 
+      {/* Interactive trends: its own filter row (period, center, service,
+          car type, channel) scopes every chart in it; every bar drills in. */}
+      <KpiExplorer />
+
       {/* SECONDARY — one focus area at a time. */}
       <div className="overflow-x-auto">
         <div className="flex min-w-max gap-1 rounded-xl border border-[#F3E5B5] bg-white p-1">
@@ -300,7 +310,7 @@ export default function AdminDashboardPage() {
               key={t.key}
               type="button"
               onClick={() => setTab(t.key)}
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-black text-white" : "text-gray-600 hover:bg-[#FFF4CD]"}`}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${tab === t.key ? "bg-[#E8F0FE] text-[#0A66F0]" : "text-gray-600 hover:bg-[#EEF3FA]"}`}
             >
               {t.label}
             </button>
@@ -319,7 +329,7 @@ export default function AdminDashboardPage() {
       <KpiListModal<Booking>
         open={listDrill === "bookings-created" || listDrill === "bookings-completed"}
         onClose={() => setListDrill(null)}
-        title={listDrill === "bookings-completed" ? "Completed washes" : "Bookings"}
+        title={listDrill === "bookings-completed" ? "Completed Washes" : "Bookings"}
         queryKey={["kpi-drill", listDrill, params]}
         fetchFn={(page) =>
           bookingApi.all({
@@ -333,6 +343,7 @@ export default function AdminDashboardPage() {
           <button type="button" onClick={() => setOpenBooking(b)} className="flex w-full items-center justify-between gap-3 text-left">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-black">{b.customer_name || "—"} · {b.booking_number}</p>
+              <p className="truncate text-xs text-gray-600">{bookingCarAndService(b)}</p>
               <p className="text-xs text-gray-500">{format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -346,7 +357,7 @@ export default function AdminDashboardPage() {
       <KpiListModal<User>
         open={listDrill === "new-customers"}
         onClose={() => setListDrill(null)}
-        title="New customers"
+        title="New Customers"
         queryKey={["kpi-drill-new-customers", params]}
         fetchFn={(page) => adminUserApi.list({ ...params, role: "customer", page, page_size: 50 })}
         getRowKey={(u) => u.id}

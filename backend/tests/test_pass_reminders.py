@@ -278,7 +278,8 @@ async def test_last_pass_wash_logged_by_a_manager_sends_the_note_and_stamps_last
     result = await BookingService(db).create_manager_logged_visit(
         ManagerLogBookingRequest(
             customer_name="Pooja Pass", customer_phone=holder["phone"],
-            lines=[QuickBookingLine(vehicle_type=hatchback, quantity=1, service_ids=[star])],
+            # A logged job spends the pass only when asked (MGR-01).
+            lines=[QuickBookingLine(vehicle_type=hatchback, quantity=1, service_ids=[star], use_subscription=True)],
             scheduled_date=yesterday, service_time="10:30", address_line="Pass Lane 1, Indore", send_whatsapp=True,
         ),
         manager_id=manager_id, manager_center_id=center_id,

@@ -57,11 +57,18 @@ export default function LoginPage() {
     if (otpStep === "code" && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
   }, [otpStep, channel]);
 
+  const routeState = location.state as { from?: { pathname?: string; search?: string; hash?: string }; notice?: string | null } | null;
+  // Why the last session ended, when the server said (e.g. a suspended
+  // account) — instead of a silent bounce to this page.
+  const sessionNotice = routeState?.notice || "";
+
   const landAfterLogin = (role: UserRole) => {
     // Honor the deep-link ProtectedRoute captured (state.from) — but only
-    // for the customer portal; staff always land on their own home.
-    const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
-    navigate(from && role === "customer" ? from : roleHomePath(role), { replace: true });
+    // for the customer portal; staff always land on their own home. The
+    // query and hash ride along (e.g. /app/book?repeat=…).
+    const from = routeState?.from;
+    const target = from?.pathname ? `${from.pathname}${from.search || ""}${from.hash || ""}` : "";
+    navigate(target && role === "customer" ? target : roleHomePath(role), { replace: true });
   };
 
   // order: the first send tries the backend first — its answer doubles as
@@ -136,7 +143,7 @@ export default function LoginPage() {
     setError("");
     setIsLoading(true);
     try {
-      const user = await login(identifier, password);
+      const user = await login(identifier.trim().toLowerCase(), password);
       landAfterLogin(user.role);
     } catch (err) {
       const message = getErrorMessage(err);
@@ -147,32 +154,37 @@ export default function LoginPage() {
   };
 
   const inputClass =
-    "h-[44px] w-full rounded-[9px] border border-[#D9DDE3] bg-white px-4 text-[13px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#E9AA00] focus:ring-4 focus:ring-[#F5B400]/10";
+    "h-[44px] w-full rounded-[9px] border border-[#D8E6F7] bg-white px-4 text-[13px] text-[#111111] outline-none transition-all placeholder:text-[#9AA1AD] focus:border-[#1677FF] focus:ring-4 focus:ring-[#1677FF]/10";
   const ctaClass =
-    "group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#F5B400] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(245,180,0,0.18)] transition-all hover:bg-[#EAAA00] disabled:cursor-not-allowed disabled:opacity-60";
+    "group relative mt-4 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#1677FF] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(22,119,255,0.18)] transition-all hover:bg-[#1268E8] disabled:cursor-not-allowed disabled:opacity-60";
 
   return (
     <motion.main
       initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: "easeOut" }}
-      className="flex min-h-dvh flex-col bg-[#FDF9EE] text-[#111111]"
+      className="flex min-h-dvh flex-col bg-[#F6FAFF] text-[#0B1F4B]"
     >
       <PublicNavbar />
 
       <section className="flex flex-1 items-center justify-center px-4 py-10">
-        <div className="w-full max-w-[420px] rounded-[20px] border border-[#ECE7D8] bg-white px-6 py-8 shadow-[0_16px_46px_rgba(39,33,20,0.08)] sm:px-8 sm:py-9">
+        <div className="w-full max-w-[420px] rounded-[20px] border border-[#DCEBFF] bg-white px-6 py-8 shadow-[0_16px_46px_rgba(20,92,160,0.10)] sm:px-8 sm:py-9">
           <Link to="/" aria-label="Blussit home" className="mb-6 flex w-full flex-col items-center">
             <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[142px] object-contain" />
-            <span className="mt-0.5 whitespace-nowrap text-[7px] font-bold uppercase tracking-[0.12em] text-[#E8A900]">
+            <span className="mt-1 text-center text-[11px] font-bold uppercase leading-tight tracking-[0.06em] text-[#0A66F0]">
               Premium Car Wash At Your Doorstep.
             </span>
           </Link>
+          {sessionNotice && (
+            <p role="status" className="mb-5 rounded-lg border border-[#DCEBFF] bg-[#F4F8FF] px-3 py-2 text-center text-[12.5px] font-medium text-[#0E1A33]">
+              {sessionNotice}
+            </p>
+          )}
 
           {!staff ? (
             <>
               <div className="mb-6 text-center">
-                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">
+                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0B1F4B]">
                   {otpStep === "phone" ? "Welcome Back!" : "Enter Your Code"}
                 </h1>
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
@@ -185,7 +197,7 @@ export default function LoginPage() {
               {otpStep === "phone" ? (
                 <form onSubmit={sendCode}>
                   <label className="block">
-                    <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Mobile number</span>
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Mobile Number</span>
                     <input
                       type="tel"
                       inputMode="numeric"
@@ -199,7 +211,7 @@ export default function LoginPage() {
                   </label>
                   {error && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">{error}</div>}
                   <button type="submit" disabled={isLoading} className={ctaClass}>
-                    <span>{isLoading ? "Sending code..." : "Send Code"}</span>
+                    <span>{isLoading ? "Sending Code…" : "Send Code"}</span>
                     {!isLoading && <span className="absolute right-5 text-[18px] font-normal transition-transform duration-200 group-hover:translate-x-1">→</span>}
                   </button>
                 </form>
@@ -208,7 +220,7 @@ export default function LoginPage() {
                   <OtpInput value={otp} onChange={setOtp} autoFocus disabled={isLoading} onComplete={(code) => void verifyCode(code)} />
                   {error && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">{error}</div>}
                   <button type="button" disabled={isLoading || otp.trim().length < 6} onClick={() => void verifyCode()} className={ctaClass}>
-                    <span>{isLoading ? "Verifying..." : "Log In"}</span>
+                    <span>{isLoading ? "Verifying…" : "Log In"}</span>
                   </button>
                   <div className="mt-3 flex items-center justify-between text-[12px]">
                     {cooldown > 0 ? (
@@ -217,21 +229,21 @@ export default function LoginPage() {
                       <span className="flex items-center gap-3">
                         <button
                           type="button"
-                          className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50"
+                          className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50"
                           onClick={() => void sendCode(undefined, channel === "widget" ? ["widget", "backend"] : ["backend", "widget"])}
                           disabled={isLoading}
                         >
-                          Resend code
+                          Resend Code
                         </button>
                         {channel === "backend" && smsAvailable && (
-                          <button type="button" className="font-semibold text-[#D99400] hover:text-[#B87800] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
-                            Get it by SMS
+                          <button type="button" className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
+                            Get It By SMS
                           </button>
                         )}
                       </span>
                     )}
                     <button type="button" className="font-medium text-[#737B88] hover:text-[#111]" onClick={changeNumber} disabled={isLoading}>
-                      Change number
+                      Change Number
                     </button>
                   </div>
                 </div>
@@ -243,30 +255,30 @@ export default function LoginPage() {
 
               <p className="mt-4 text-center text-[12px] text-[#737B88]">
                 New here? No sign-up needed —{" "}
-                <Link to="/book" className="font-semibold text-[#D99700] hover:text-[#B87900]">
+                <Link to="/book" className="font-semibold text-[#1677FF] hover:text-[#0F5FD1]">
                   just book a wash
                 </Link>{" "}
                 and your account is created for you.
               </p>
               <p className="mt-2 text-center text-[11px] text-[#9AA1AD]">
-                <button type="button" onClick={() => setStaff(true)} className="underline underline-offset-2 hover:text-[#111]">
-                  Staff login
+                <button type="button" onClick={() => setStaff(true)} className="underline underline-offset-2 hover:text-[#1677FF]">
+                  Staff Login
                 </button>
               </p>
             </>
           ) : (
             <>
               <div className="mb-6 text-center">
-                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#111111]">Staff Login</h1>
+                <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0B1F4B]">Staff Login</h1>
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">Admin, manager and captain accounts.</p>
               </div>
               <form onSubmit={staffSubmit}>
                 <label className="block">
-                  <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Email or phone</span>
-                  <input type="text" value={identifier} onChange={(e) => setIdentifier(e.target.value)} required autoComplete="username" placeholder="Enter email or phone number" className={inputClass} />
+                  <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Email Or Phone</span>
+                  <input type="text" value={identifier} onChange={(e) => setIdentifier(e.target.value.toLowerCase())} required autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} placeholder="Enter email or phone number" className={inputClass} />
                 </label>
                 <label className="mt-3 block">
-                  <span className="mb-1 block text-[12.5px] font-semibold text-[#171717]">Password</span>
+                  <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Password</span>
                   <div className="relative">
                     <input
                       type={showPassword ? "text" : "password"}
@@ -283,18 +295,18 @@ export default function LoginPage() {
                   </div>
                 </label>
                 <div className="mt-3 text-right">
-                  <Link to="/forgot-password" className="text-[12.5px] font-semibold text-[#D99400] transition-colors hover:text-[#B87800]">
+                  <Link to="/forgot-password" className="text-[12.5px] font-semibold text-[#1677FF] transition-colors hover:text-[#0F5FD1]">
                     Forgot Password?
                   </Link>
                 </div>
                 {error && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">{error}</div>}
                 <button type="submit" disabled={isLoading} className={ctaClass}>
-                  <span>{isLoading ? "Logging in..." : "Login"}</span>
+                  <span>{isLoading ? "Logging In…" : "Login"}</span>
                 </button>
               </form>
               <p className="mt-4 text-center text-[11px] text-[#9AA1AD]">
-                <button type="button" onClick={() => setStaff(false)} className="underline underline-offset-2 hover:text-[#111]">
-                  Customer login (OTP)
+                <button type="button" onClick={() => setStaff(false)} className="underline underline-offset-2 hover:text-[#1677FF]">
+                  Customer Login (OTP)
                 </button>
               </p>
             </>

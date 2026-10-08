@@ -1,61 +1,103 @@
 {
   "siteUrl": "https://blussit.com",
-  "defaultTitle": "Blussit — Premium Doorstep Car & Bike Wash in Indore",
-  "defaultDescription": "Book a premium car or bike wash at your doorstep in Indore. Verified captains, waterless & foam wash options, transparent pricing — no queues, no driving anywhere.",
+  "defaultTitle": "Blussit: Doorstep Car Wash in Indore | Car Wash at Home",
+  "defaultDescription": "Car wash at your doorstep in Indore by Blussit — Jet Wash, foam Star Wash, waterless wash, car deep cleaning and bike wash. Verified captains. Book in a minute.",
   "pages": [
     {
       "path": "/",
-      "title": "Blussit — Premium Doorstep Car & Bike Wash in Indore",
-      "description": "Book a premium car or bike wash at your doorstep in Indore. Verified captains, waterless & foam wash options, transparent pricing — no queues, no driving anywhere.",
+      "title": "Blussit: Doorstep Car Wash in Indore | Car Wash at Home",
+      "description": "Car wash at your doorstep in Indore by Blussit — Jet Wash, foam Star Wash, waterless wash, car deep cleaning and bike wash. Verified captains. Book in a minute.",
       "changefreq": "daily",
       "priority": "1.0"
     },
     {
-      "path": "/services",
-      "title": "Car Wash & Bike Wash Services in Indore | Blussit",
-      "description": "All doorstep car wash, bike wash and detailing services in Indore, with transparent pricing for every vehicle type. Book online in minutes — we come to you.",
+      "path": "/doorstep-car-wash-indore",
+      "title": "Doorstep Car Wash in Indore | Car Wash Near Me | Blussit",
+      "description": "Car wash near you in Indore — Blussit washes your car at home, at the office or in your society parking, in any colony of Indore. Book a slot in a minute.",
       "changefreq": "weekly",
       "priority": "0.9"
+    },
+    {
+      "path": "/services",
+      "title": "Car Wash Services & Prices in Indore | Blussit",
+      "description": "Doorstep car and bike wash in Indore: Jet Wash, Star Wash foam wash, waterless car wash, car deep cleaning and bike wash. See what's included and prices.",
+      "changefreq": "weekly",
+      "priority": "0.9"
+    },
+    {
+      "path": "/services/jet-wash",
+      "title": "Jet Wash at Home in Indore | Doorstep Car Wash | Blussit",
+      "description": "Quick exterior car wash at your doorstep in Indore — foam wash and tyre polish in about 30 minutes. Book a Blussit Jet Wash online in a minute.",
+      "changefreq": "weekly",
+      "priority": "0.8"
+    },
+    {
+      "path": "/services/star-wash",
+      "title": "Star Wash: Foam Car Wash at Home in Indore | Blussit",
+      "description": "Foam car wash at home in Indore with interior vacuum and dashboard polish. Blussit Star Wash is done at your doorstep in about 45 minutes.",
+      "changefreq": "weekly",
+      "priority": "0.8"
+    },
+    {
+      "path": "/services/waterless-car-wash",
+      "title": "Waterless Car Wash in Indore | Blussit",
+      "description": "Waterless car wash at your doorstep in Indore — no water connection needed. Exterior clean, interior vacuum and dashboard polish in about 45 minutes.",
+      "changefreq": "weekly",
+      "priority": "0.8"
+    },
+    {
+      "path": "/services/car-deep-cleaning",
+      "title": "Car Deep Cleaning at Home in Indore | Blussit",
+      "description": "Car interior deep cleaning at your doorstep in Indore — seats, floor, mats, pedals and door gates plus a full foam wash, in about 90 minutes.",
+      "changefreq": "weekly",
+      "priority": "0.8"
+    },
+    {
+      "path": "/services/bike-wash",
+      "title": "Bike & Scooty Wash at Home in Indore | Blussit",
+      "description": "Bike and scooty foam wash at your doorstep in Indore. Book one or two bikes, or add a bike wash to your car wash — Blussit comes to you.",
+      "changefreq": "weekly",
+      "priority": "0.8"
     },
     {
       "path": "/plans",
-      "title": "Car Wash Subscription Plans in Indore | Blussit",
-      "description": "Monthly, quarterly and yearly doorstep car wash plans in Indore. Fixed washes, fixed price, zero hassle — save more with a Blussit subscription.",
+      "title": "Monthly Car Wash Plans in Indore | Blussit",
+      "description": "Monthly car wash plans in Indore: a Monthly Pass for regular doorstep washes, Society Plans with daily car cleaning, and custom plans for fleets.",
       "changefreq": "weekly",
-      "priority": "0.9"
+      "priority": "0.8"
     },
     {
       "path": "/book",
-      "title": "Book a Doorstep Car Wash Online | Blussit",
-      "description": "Book a professional car or bike wash at your doorstep in Indore in under two minutes. Pick a slot, choose your service, and relax while we do the rest.",
+      "title": "Book a Car Wash at Home in Indore | Blussit",
+      "description": "Book a doorstep car or bike wash in Indore in under two minutes. Pick your wash and a time slot — a verified Blussit captain comes to you.",
       "changefreq": "weekly",
       "priority": "0.9"
     },
     {
       "path": "/service-policy",
       "title": "Service Policy | Blussit",
-      "description": "How Blussit's doorstep car and bike wash service works, what's included, and what to expect at every visit.",
+      "description": "What each Blussit doorstep wash includes, what to keep ready (parking, water, power) and what a car wash can't fix, like scratches or dents.",
       "changefreq": "monthly",
       "priority": "0.3"
     },
     {
       "path": "/cancellation-policy",
       "title": "Cancellation Policy | Blussit",
-      "description": "Blussit's booking cancellation and rescheduling policy for doorstep car and bike wash services.",
+      "description": "Cancel a Blussit booking free up to 4 hours before your slot. Later cancellations have a small deduction of ₹50 to ₹100 — see the simple table.",
       "changefreq": "monthly",
       "priority": "0.3"
     },
     {
       "path": "/privacy-policy",
       "title": "Privacy Policy | Blussit",
-      "description": "How Blussit collects, uses and protects your personal information.",
+      "description": "What Blussit collects, why we use it and who we share it with. We use your details only to run your bookings and support you, and never sell them.",
       "changefreq": "yearly",
       "priority": "0.2"
     },
     {
       "path": "/terms",
       "title": "Terms & Conditions | Blussit",
-      "description": "Terms and conditions for using Blussit's doorstep vehicle care platform and booking services.",
+      "description": "The simple rules for booking a Blussit doorstep car or bike wash in Indore: booking, payment, cancellation, monthly plans and service concerns.",
       "changefreq": "yearly",
       "priority": "0.2"
     }

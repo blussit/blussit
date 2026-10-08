@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Banknote, Check, Copy, CreditCard, Gauge, Power, RefreshCw } from "lucide-react";
@@ -13,9 +13,49 @@ import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { baseGroups } from "../../lib/serviceMix";
 import { validateIndianMobile } from "../../lib/validators";
+import { carAndService, toTitle } from "../../lib/titleCase";
 import type { SubscriptionPlan } from "../../types";
 
 type DiscountMode = "none" | "amount" | "coupon";
+
+// The link just created survives a refresh (this tab): losing it sent the
+// manager back to the form, and a second submit made a second payable link.
+const OFFER_KEY = "blussit:manager-sell-plan-offer";
+const OFFER_KEEP_MS = 12 * 60 * 60 * 1000;
+interface KeptOffer {
+  result: ManagerOfferResult;
+  soldWhat: string;
+  name: string;
+  sentOnWhatsApp: boolean;
+  at: number;
+}
+function readKeptOffer(): KeptOffer | null {
+  try {
+    const kept = JSON.parse(sessionStorage.getItem(OFFER_KEY) || "null") as KeptOffer | null;
+    return kept && kept.result && Date.now() - kept.at < OFFER_KEEP_MS ? kept : null;
+  } catch {
+    return null;
+  }
+}
+function keepOffer(kept: KeptOffer | null) {
+  try {
+    if (kept) sessionStorage.setItem(OFFER_KEY, JSON.stringify(kept));
+    else sessionStorage.removeItem(OFFER_KEY);
+  } catch {
+    // storage blocked — the card still shows until the page is left
+  }
+}
+/** An unpaid link the server already holds for this customer + plan, if the
+ *  preview reports one (the server reuses it instead of minting another). */
+/** The server sends the offer's id as `id` (older responses: `order_id`). */
+type OpenOffer = { id?: string; order_id?: string; short_url?: string; amount?: number; kind?: ManagerOfferResult["kind"]; recurring?: boolean; coupon_code?: string | null; created_at?: string | null };
+function openOfferOf(preview: unknown): OpenOffer | null {
+  const p = preview as { open_offer?: OpenOffer | null; existing_offer?: OpenOffer | null } | undefined;
+  const raw = p?.open_offer || p?.existing_offer || null;
+  if (!raw) return null;
+  const offer = { ...raw, order_id: raw.id || raw.order_id };
+  return offer.short_url || offer.order_id ? offer : null;
+}
 
 /**
  * Manager sells a plan over the phone or at the door: name + phone find or
@@ -32,7 +72,12 @@ export default function ManagerSellPlanPage() {
   const confirm = useConfirm();
   const { user } = useAuth();
 
-  const { data: plans } = useQuery({ queryKey: ["subscription-plans-for-sale"], queryFn: () => subscriptionApi.plans(true) });
+  const {
+    data: plans,
+    isError: plansFailed,
+    isFetching: plansFetching,
+    refetch: refetchPlans,
+  } = useQuery({ queryKey: ["subscription-plans-for-sale"], queryFn: () => subscriptionApi.plans(true) });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const { data: servicesData } = useQuery({ queryKey: ["services-for-manager-offer"], queryFn: () => catalogApi.services({ page_size: 100 }) });
 
@@ -52,7 +97,13 @@ export default function ManagerSellPlanPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<ManagerOfferResult | null>(null);
+  const [kept] = useState(readKeptOffer);
+  const [result, setResult] = useState<ManagerOfferResult | null>(kept?.result ?? null);
+  // Restored after a refresh: the plan/type/service pickers are empty, so
+  // the card shows what was saved with the link.
+  const [keptLabel, setKeptLabel] = useState<{ soldWhat: string; name: string; sentOnWhatsApp: boolean } | null>(
+    kept ? { soldWhat: kept.soldWhat, name: kept.name, sentOnWhatsApp: kept.sentOnWhatsApp } : null
+  );
   const [copied, setCopied] = useState(false);
 
   const plan = plans?.find((p) => p.id === planId) || null;
@@ -74,8 +125,12 @@ export default function ManagerSellPlanPage() {
     return baseGroups(onMenu, vehicleType).map((g) => g.primary);
   }, [servicesData, plan, vehicleType]);
 
-  // A clean form whenever a different plan is picked.
+  // A clean form whenever a different plan is picked (not on the first
+  // render — that would drop a link restored after a refresh).
+  const lastPlanId = useRef(planId);
   useEffect(() => {
+    if (lastPlanId.current === planId) return;
+    lastPlanId.current = planId;
     setVehicleType(null);
     setServiceId(null);
     setResult(null);
@@ -92,7 +147,7 @@ export default function ManagerSellPlanPage() {
 
   const cleanPhone = validateIndianMobile(phone);
 
-  const { data: preview, isFetching: previewing } = useQuery({
+  const { data: preview, isFetching: previewing, error: previewError } = useQuery({
     queryKey: ["manager-offer-preview", planId, vehicleType, serviceId, cleanPhone, recurring, discountMode, discountAmount, couponCode],
     queryFn: () =>
       subscriptionApi.managerOfferPreview({
@@ -109,9 +164,38 @@ export default function ManagerSellPlanPage() {
     staleTime: 5_000,
   });
 
+  // A whole-rupee discount is capped server-side (managers: half the plan's
+  // price) — the preview reports the cap; the server refuses anything over.
+  // What was sold, for the confirmation card: "Monthly Shine · Hatchback · Star Wash".
+  const soldWhat = [
+    toTitle(plan?.name),
+    carAndService(types.find((t) => t.id === vehicleType)?.name, menu.find((sv) => sv.id === serviceId)?.name),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const discountNum = discountMode === "amount" ? Number(discountAmount) || 0 : 0;
+  const maxDiscount = preview ? preview.max_discount ?? preview.base_price : null;
+  const discountTooBig = discountNum > 0 && maxDiscount !== null && discountNum > maxDiscount;
   const canSubmit =
     name.trim().length >= 2 && !!cleanPhone && !!planId && !!vehicleType && !!serviceId && !preview?.already_has_pass &&
+    !previewError && !discountTooBig &&
     (discountMode !== "coupon" || preview?.coupon_valid !== false);
+  const [voiding, setVoiding] = useState(false);
+  const openOffer = openOfferOf(preview);
+
+  const showOpenOffer = () => {
+    if (!openOffer) return;
+    const shown: ManagerOfferResult = {
+      kind: openOffer.kind || (openOffer.recurring ? "autopay" : "link"),
+      recurring: !!openOffer.recurring,
+      amount: openOffer.amount ?? preview?.final_price ?? 0,
+      short_url: openOffer.short_url,
+      order_id: openOffer.order_id,
+    };
+    setResult(shown);
+    setKeptLabel({ soldWhat, name: name.trim(), sentOnWhatsApp: true });
+    keepOffer({ result: shown, soldWhat, name: name.trim(), sentOnWhatsApp: true, at: Date.now() });
+  };
 
   const submit = async () => {
     setError("");
@@ -123,6 +207,17 @@ export default function ManagerSellPlanPage() {
     if (!serviceId) next.service = "Pick a service.";
     setFieldErrors(next);
     if (Object.keys(next).length) return;
+    if (submitting) return;
+    // Cash activates the plan and books the money at once — confirm it.
+    if (!recurring && paymentMethod === "cash") {
+      const amount = preview?.final_price;
+      const ok = await confirm({
+        title: "Mark As Paid In Cash?",
+        message: `${amount != null ? `₹${amount} ` : ""}collected in cash from ${name.trim() || "the customer"} — the plan starts now and the cash is recorded against you. This can't be undone here.`,
+        confirmLabel: "Yes, Activate Plan",
+      });
+      if (!ok) return;
+    }
 
     setSubmitting(true);
     try {
@@ -139,6 +234,10 @@ export default function ManagerSellPlanPage() {
         send_whatsapp: sendWhatsApp,
       });
       setResult(out);
+      if (out.kind !== "cash") {
+        setKeptLabel({ soldWhat, name: name.trim(), sentOnWhatsApp: sendWhatsApp });
+        keepOffer({ result: out, soldWhat, name: name.trim(), sentOnWhatsApp: sendWhatsApp, at: Date.now() });
+      }
       queryClient.invalidateQueries({ queryKey: ["center-subscription-overview"] });
       if (out.kind === "cash") {
         pushToast({ tone: "success", title: "Plan activated", message: `₹${out.amount} collected in cash.` });
@@ -159,13 +258,19 @@ export default function ManagerSellPlanPage() {
 
   const cancelOffer = async () => {
     if (!result?.order_id) return;
-    if (!(await confirm({ title: "Cancel this offer?", message: "The link stops working. The customer can no longer pay it.", tone: "danger" }))) return;
+    if (voiding) return;
+    if (!(await confirm({ title: "Cancel This Offer?", message: "The link stops working. The customer can no longer pay it.", tone: "danger" }))) return;
+    setVoiding(true);
     try {
       await subscriptionApi.managerOfferVoid(result.order_id);
       pushToast({ tone: "success", title: "Offer cancelled" });
+      keepOffer(null);
+      setKeptLabel(null);
       setResult(null);
     } catch (err) {
       pushToast({ tone: "error", title: "Couldn't cancel", message: getErrorMessage(err) });
+    } finally {
+      setVoiding(false);
     }
   };
 
@@ -181,6 +286,8 @@ export default function ManagerSellPlanPage() {
   };
 
   const startAnother = () => {
+    keepOffer(null);
+    setKeptLabel(null);
     setResult(null);
     setName("");
     setPhone("");
@@ -198,7 +305,7 @@ export default function ManagerSellPlanPage() {
     return (
       <EmptyState
         icon={Gauge}
-        title="No service center linked"
+        title="No Service Center Linked"
         description="Your manager account isn't linked to a service center yet — ask an admin to assign one before selling or assigning a plan."
       />
     );
@@ -207,31 +314,36 @@ export default function ManagerSellPlanPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Sell a plan</h1>
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Sell A Plan</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
           A customer over the phone or at the door — send a payment link on WhatsApp, set up auto-pay, or mark it paid in cash.
         </p>
       </div>
 
       {result ? (
-        <div className="max-w-xl rounded-2xl border border-[#F3E5B5] bg-white p-5">
+        <div className="max-w-xl rounded-2xl border border-[#E4E9F1] bg-white p-5">
+          {(() => {
+            const what = soldWhat || keptLabel?.soldWhat || "";
+            const who = name.trim() || keptLabel?.name || "";
+            return what ? <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">{what}{who ? ` · ${who}` : ""}</p> : null;
+          })()}
           {result.kind === "cash" ? (
             <>
-              <p className="flex items-center gap-2 text-sm font-semibold text-black">
+              <p className="flex items-center gap-2 text-sm font-semibold text-[#0E1A33]">
                 <Check className="h-4 w-4 text-[var(--color-success)]" /> Plan activated — ₹{result.amount} recorded as cash.
               </p>
             </>
           ) : (
             <>
-              <p className="text-sm font-semibold text-black">
-                {result.kind === "autopay" ? "Auto-pay link ready" : "Payment link ready"} — ₹{result.amount}
+              <p className="text-sm font-semibold text-[#0E1A33]">
+                {result.kind === "autopay" ? "Auto-Pay Link Ready" : "Payment Link Ready"} — ₹{result.amount}
                 {result.kind === "autopay" ? "/month" : ""}
               </p>
               <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-                {sendWhatsApp ? "Already sent to the customer on WhatsApp." : "Not sent — copy it and share it yourself."}
+                {(keptLabel ? keptLabel.sentOnWhatsApp : sendWhatsApp) ? "Already sent to the customer on WhatsApp." : "Not sent — copy it and share it yourself."}
               </p>
-              <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] px-3.5 py-2.5">
-                <span className="min-w-0 flex-1 truncate font-mono-num text-sm text-black">{result.short_url}</span>
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-[#E4E9F1] bg-[#F7F9FC] px-3.5 py-2.5">
+                <span className="min-w-0 flex-1 truncate font-mono-num text-sm text-[#0E1A33]">{result.short_url}</span>
                 <Button size="sm" variant="outline" onClick={copyLink}>
                   <Copy className="h-3.5 w-3.5" /> {copied ? "Copied" : "Copy"}
                 </Button>
@@ -239,22 +351,22 @@ export default function ManagerSellPlanPage() {
               <p className="mt-3 text-xs text-[var(--color-text-secondary)]">
                 The plan activates the moment it's paid — nothing to do here. You can cancel this offer if the customer changed their mind.
               </p>
-              <Button size="sm" variant="ghost" className="mt-2" onClick={cancelOffer}>
-                Cancel this offer
+              <Button size="sm" variant="ghost" className="mt-2" isLoading={voiding} onClick={cancelOffer}>
+                Cancel This Offer
               </Button>
             </>
           )}
           <div className="mt-4 flex gap-2">
             <Button variant="outline" onClick={startAnother}>
-              Sell another plan
+              Sell Another Plan
             </Button>
             <Button variant="outline" onClick={() => navigate("/manager/subscribers")}>
-              Go to Subscriptions
+              Go To Subscriptions
             </Button>
           </div>
         </div>
       ) : (
-        <div className="max-w-xl space-y-6 rounded-2xl border border-[#F3E5B5] bg-white p-5">
+        <div className="max-w-xl space-y-6 rounded-2xl border border-[#E4E9F1] bg-white p-5">
           <CustomerNamePhoneFields
             name={name}
             phone={phone}
@@ -265,18 +377,26 @@ export default function ManagerSellPlanPage() {
           />
 
           <Select label="Plan" value={planId} onChange={(e) => setPlanId(e.target.value)} error={fieldErrors.plan}>
-            <option value="">Select a plan</option>
+            <option value="">Select A Plan</option>
             {(plans || []).map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name}
+                {toTitle(p.name)}
               </option>
             ))}
           </Select>
+          {plansFailed && !plans && (
+            <p role="alert" className="-mt-4 text-sm text-[var(--color-text-secondary)]">
+              Couldn't load the plans.{" "}
+              <button type="button" disabled={plansFetching} onClick={() => void refetchPlans()} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
+                {plansFetching ? "Trying…" : "Try Again"}
+              </button>
+            </p>
+          )}
 
           {plan && (
             <>
               <div>
-                <p className="mb-1.5 text-sm font-medium text-black">Vehicle type</p>
+                <p className="mb-1.5 text-sm font-medium text-[#0E1A33]">Vehicle Type</p>
                 <div className="flex flex-wrap gap-2">
                   {types.map((t) => (
                     <button
@@ -285,11 +405,11 @@ export default function ManagerSellPlanPage() {
                       onClick={() => setVehicleType(t.id)}
                       aria-pressed={vehicleType === t.id}
                       className={`flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors ${
-                        vehicleType === t.id ? "border-black bg-[#FFF4CD] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                        vehicleType === t.id ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0E1A33]" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                       }`}
                     >
                       <VehicleIcon vehicleTypeId={t.id} className="h-4 w-4 text-gray-500" />
-                      {t.name}
+                      {toTitle(t.name)}
                     </button>
                   ))}
                   {!types.length && <p className="text-xs text-gray-500">This plan has no vehicle types configured.</p>}
@@ -298,7 +418,7 @@ export default function ManagerSellPlanPage() {
               </div>
 
               <div>
-                <p className="mb-1.5 text-sm font-medium text-black">Service</p>
+                <p className="mb-1.5 text-sm font-medium text-[#0E1A33]">Service</p>
                 <div className="flex flex-wrap gap-2">
                   {menu.map((s) => (
                     <button
@@ -307,10 +427,10 @@ export default function ManagerSellPlanPage() {
                       onClick={() => setServiceId(s.id)}
                       aria-pressed={serviceId === s.id}
                       className={`rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors ${
-                        serviceId === s.id ? "border-black bg-[#FFF4CD] text-black" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
+                        serviceId === s.id ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0E1A33]" : "border-[#E5E7EB] text-gray-700 hover:border-gray-400"
                       }`}
                     >
-                      {s.name}
+                      {toTitle(s.name)}
                     </button>
                   ))}
                   {!menu.length && <p className="text-xs text-gray-500">{vehicleType ? "No service on this pass fits that vehicle type." : "Pick a vehicle type first."}</p>}
@@ -321,19 +441,19 @@ export default function ManagerSellPlanPage() {
               <Switch
                 checked={recurring}
                 onChange={setRecurring}
-                label="Auto-pay"
+                label="Auto-Pay"
                 description="Renews itself every month at the full price — no discount or coupon. Off = a one-time link for this month only."
               />
 
               {!recurring && (
                 <div>
-                  <p className="mb-2 text-sm font-medium text-black">Give a discount?</p>
+                  <p className="mb-2 text-sm font-medium text-[#0E1A33]">Give A Discount?</p>
                   <div className="grid grid-cols-3 gap-2">
                     {(
                       [
-                        { id: "none", label: "No discount" },
-                        { id: "amount", label: "₹ off" },
-                        { id: "coupon", label: "Coupon code" },
+                        { id: "none", label: "No Discount" },
+                        { id: "amount", label: "₹ Off" },
+                        { id: "coupon", label: "Coupon Code" },
                       ] as const
                     ).map((opt) => (
                       <button
@@ -341,7 +461,7 @@ export default function ManagerSellPlanPage() {
                         type="button"
                         onClick={() => setDiscountMode(opt.id)}
                         className={`rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
-                          discountMode === opt.id ? "border-black bg-[#FFF4CD] text-black" : "border-gray-200 text-gray-600 hover:border-gray-400"
+                          discountMode === opt.id ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0E1A33]" : "border-gray-200 text-gray-600 hover:border-gray-400"
                         }`}
                       >
                         {opt.label}
@@ -356,12 +476,14 @@ export default function ManagerSellPlanPage() {
                       value={discountAmount}
                       onChange={(e) => setDiscountAmount(e.target.value.replace(/\D/g, "").slice(0, 6))}
                       placeholder="0"
+                      error={discountTooBig ? `You can give at most ₹${maxDiscount} off this plan.` : undefined}
+                      hint={!discountTooBig && maxDiscount !== null ? `Up to ₹${maxDiscount}.` : undefined}
                     />
                   )}
                   {discountMode === "coupon" && (
                     <Input
                       className="mt-2.5"
-                      label="Coupon code"
+                      label="Coupon Code"
                       value={couponCode}
                       onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
                       placeholder="E.g. SAVE100"
@@ -373,11 +495,11 @@ export default function ManagerSellPlanPage() {
 
               {!recurring && (
                 <div>
-                  <p className="mb-2 text-sm font-medium text-black">How will it be paid?</p>
+                  <p className="mb-2 text-sm font-medium text-[#0E1A33]">How Will It Be Paid?</p>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {(
                       [
-                        { id: "link", icon: CreditCard, title: "WhatsApp link", sub: "Customer pays online" },
+                        { id: "link", icon: CreditCard, title: "WhatsApp Link", sub: "Customer pays online" },
                         { id: "cash", icon: Banknote, title: "Cash", sub: "Collected by you, right now" },
                       ] as const
                     ).map((opt) => (
@@ -386,12 +508,12 @@ export default function ManagerSellPlanPage() {
                         type="button"
                         onClick={() => setPaymentMethod(opt.id)}
                         className={`flex items-start gap-3 rounded-xl border-2 p-3 text-left ${
-                          paymentMethod === opt.id ? "border-black bg-[#FFF4CD]" : "border-gray-200 bg-white"
+                          paymentMethod === opt.id ? "border-[#0A66F0] bg-[#E8F0FE]" : "border-gray-200 bg-white"
                         }`}
                       >
-                        <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-black" />
+                        <opt.icon className="mt-0.5 h-4 w-4 shrink-0 text-[#0E1A33]" />
                         <span>
-                          <span className="block text-sm font-semibold text-black">{opt.title}</span>
+                          <span className="block text-sm font-semibold text-[#0E1A33]">{opt.title}</span>
                           <span className="block text-xs text-gray-500">{opt.sub}</span>
                         </span>
                       </button>
@@ -400,8 +522,10 @@ export default function ManagerSellPlanPage() {
                 </div>
               )}
 
-              <div className="rounded-xl border border-[#F3E5B5] bg-[#FAFAFA] p-4">
-                {previewing ? (
+              <div className="rounded-xl border border-[#E4E9F1] bg-[#F7F9FC] p-4">
+                {previewError && !previewing ? (
+                  <p className="text-sm text-[var(--color-error)]">{getErrorMessage(previewError)}</p>
+                ) : previewing ? (
                   <p className="flex items-center gap-2 text-sm text-gray-500">
                     <Spinner className="h-4 w-4" /> Working out the price…
                   </p>
@@ -409,16 +533,24 @@ export default function ManagerSellPlanPage() {
                   <>
                     <div className="flex items-baseline justify-between gap-3">
                       <span className="text-sm text-gray-600">
-                        {preview.visits} × {preview.service_name}
+                        {preview.visits} × {toTitle(preview.service_name)}
                       </span>
                       <span className="text-right">
                         {preview.discount > 0 && <span className="mr-1.5 text-xs text-gray-400 line-through">₹{preview.base_price}</span>}
-                        <span className="font-mono-num text-xl font-bold text-black">₹{preview.final_price}</span>
+                        <span className="font-mono-num text-xl font-bold text-[#0E1A33]">₹{preview.final_price}</span>
                         {recurring && <span className="text-xs text-gray-500">/mo</span>}
                       </span>
                     </div>
                     {preview.already_has_pass && (
                       <p className="mt-2 text-sm text-[var(--color-error)]">This number already has an active pass for that vehicle type and service.</p>
+                    )}
+                    {openOffer && !preview.already_has_pass && (
+                      <p className="mt-2 text-sm text-[#0E1A33]">
+                        An unpaid link for this plan was already sent{openOffer.amount != null ? ` (₹${openOffer.amount})` : ""} — use it instead of sending another.{" "}
+                        <button type="button" onClick={showOpenOffer} className="font-semibold text-[#0A66F0] hover:underline">
+                          Show Link
+                        </button>
+                      </p>
                     )}
                   </>
                 ) : (
@@ -429,7 +561,7 @@ export default function ManagerSellPlanPage() {
               <Switch
                 checked={sendWhatsApp}
                 onChange={setSendWhatsApp}
-                label="Tell the customer on WhatsApp"
+                label="Tell The Customer On WhatsApp"
                 description={
                   recurring || paymentMethod === "link"
                     ? "Sends the link the moment it's ready. Off = you copy it and share it yourself."
@@ -439,29 +571,30 @@ export default function ManagerSellPlanPage() {
 
               {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
 
-              <Button className="w-full" disabled={!canSubmit} isLoading={submitting} onClick={submit}>
-                {recurring ? "Send auto-pay link" : paymentMethod === "cash" ? "Mark as paid — activate plan" : "Send payment link"}
+              <Button className="w-full" disabled={!canSubmit || submitting} isLoading={submitting} onClick={submit}>
+                {recurring ? "Send Auto-Pay Link" : paymentMethod === "cash" ? "Mark As Paid — Activate Plan" : "Send Payment Link"}
               </Button>
             </>
           )}
         </div>
       )}
 
-      <ActivePlansList plans={plans} />
+      <ActivePlansList plans={plans} canDiscontinue={user?.role === "admin"} />
     </div>
   );
 }
 
-/** A compact "stop selling a plan" list — the manager-safe half of the
- * admin catalogue page: is_active only, never price or contents. */
-function ActivePlansList({ plans }: { plans: SubscriptionPlan[] | undefined }) {
+/** The plans on sale right now. "Stop selling" is ADMIN-only (a plan is sold
+ * by every center, so the server refuses a manager) — managers just see the
+ * list. */
+function ActivePlansList({ plans, canDiscontinue }: { plans: SubscriptionPlan[] | undefined; canDiscontinue: boolean }) {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const discontinue = async (planId: string, name: string) => {
-    if (!(await confirm({ title: `Stop selling "${name}"?`, message: "New purchases are refused. Customers who already hold it are unaffected.", tone: "danger" }))) return;
+    if (!(await confirm({ title: `Stop Selling "${toTitle(name)}"?`, message: "New purchases are refused. Customers who already hold it are unaffected.", tone: "danger" }))) return;
     setBusyId(planId);
     try {
       await subscriptionApi.discontinuePlan(planId);
@@ -477,26 +610,32 @@ function ActivePlansList({ plans }: { plans: SubscriptionPlan[] | undefined }) {
   if (!plans?.length) return null;
   return (
     <div className="max-w-xl">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">Active plans</p>
-      <div className="divide-y divide-gray-100 rounded-2xl border border-[#F3E5B5] bg-white">
+      <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">Active Plans</p>
+      <div className="divide-y divide-gray-100 rounded-2xl border border-[#E4E9F1] bg-white">
         {plans.map((p) => (
           <div key={p.id} className="flex items-center justify-between gap-3 px-4 py-3">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-black">{p.name}</p>
-              <p className="text-xs text-[var(--color-text-secondary)]">₹{p.discounted_price ?? p.price} · {p.billing_cycle}</p>
+              <p className="truncate text-sm font-medium text-[#0E1A33]">{toTitle(p.name)}</p>
+              <p className="text-xs text-[var(--color-text-secondary)]">₹{p.discounted_price ?? p.price} · {toTitle(p.billing_cycle)}</p>
             </div>
             <div className="flex items-center gap-2">
               <Badge tone="success">Active</Badge>
-              <Button size="sm" variant="ghost" isLoading={busyId === p.id} onClick={() => discontinue(p.id, p.name)}>
-                <Power className="h-3.5 w-3.5" /> Stop selling
-              </Button>
+              {canDiscontinue && (
+                <Button size="sm" variant="ghost" isLoading={busyId === p.id} onClick={() => discontinue(p.id, p.name)}>
+                  <Power className="h-3.5 w-3.5" /> Stop Selling
+                </Button>
+              )}
             </div>
           </div>
         ))}
       </div>
-      <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-        <RefreshCw className="h-3 w-3" /> A discontinued plan disappears from this list once you refresh.
-      </p>
+      {canDiscontinue ? (
+        <p className="mt-1.5 flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
+          <RefreshCw className="h-3 w-3" /> A discontinued plan disappears from this list once you refresh.
+        </p>
+      ) : (
+        <p className="mt-1.5 text-xs text-[var(--color-text-secondary)]">To stop selling a plan, ask an admin.</p>
+      )}
     </div>
   );
 }

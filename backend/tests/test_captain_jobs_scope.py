@@ -126,6 +126,22 @@ def test_my_jobs_rejects_unknown_scope():
 
 def _ws_app(monkeypatch) -> TestClient:
     monkeypatch.setattr(ws_routes, "get_database", lambda: object())
+
+    # The socket resolves its user from the DB (ws_routes._ws_user ->
+    # resolve_access_token); stand in an always-active account so these
+    # tests stay about token decoding / expiry, not account standing.
+    async def _active_user(token: str):
+        from app.core.dependencies import CurrentUser
+        from app.core.exceptions import UnauthorizedException
+        from app.core.security import decode_token
+
+        try:
+            payload = decode_token(token)
+        except ValueError as exc:
+            raise UnauthorizedException(str(exc)) from exc
+        return CurrentUser(id=payload["sub"], role=payload.get("role", "customer"))
+
+    monkeypatch.setattr(ws_routes, "resolve_access_token", _active_user)
     app = FastAPI()
     app.include_router(ws_routes.router, prefix="/api/v1")
     return TestClient(app)
@@ -152,9 +168,47 @@ def test_ws_bad_token_is_accepted_then_closed_4401(monkeypatch):
 
 
 def test_ws_closes_4401_at_token_expiry(monkeypatch):
+    """The socket schedules its own close at the token's `exp`.
+
+    Deterministic: the token is valid for 10 minutes (so the handshake can
+    never race its expiry — JWT `exp` is whole seconds, so a "1.5 s" token
+    used to have as little as 0.5 s left, and a loaded test run sometimes
+    saw it expire before "connected"), while the socket's clock is pinned to
+    half a second before that `exp` — the server must still close it, with
+    4401, once the token runs out."""
     client = _ws_app(monkeypatch)
-    with client.websocket_connect(f"/api/v1/ws?token={_token(1.5)}") as ws:
+    token = _token(600)
+    exp = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])["exp"]
+
+    class _NearExpiry(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(exp - 0.5, tz)
+
+    monkeypatch.setattr(ws_routes, "datetime", _NearExpiry)
+    with client.websocket_connect(f"/api/v1/ws?token={token}") as ws:
         assert ws.receive_json() == {"type": "connected"}
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
         assert closed.value.code == 4401
+
+
+def test_ws_stays_open_while_the_token_is_valid(monkeypatch):
+    """The other half: a socket whose token has plenty of time left is not
+    closed early — it keeps answering."""
+    client = _ws_app(monkeypatch)
+    with client.websocket_connect(f"/api/v1/ws?token={_token(600)}") as ws:
+        assert ws.receive_json() == {"type": "connected"}
+        ws.send_json({"action": "ping", "channel": "x"})
+        assert ws.receive_json() == {"type": "error", "message": "Unknown action: ping"}
+
+
+def test_ws_caps_channels_per_socket(monkeypatch):
+    client = _ws_app(monkeypatch)
+    with client.websocket_connect(f"/api/v1/ws?token={_token(600)}") as ws:
+        assert ws.receive_json() == {"type": "connected"}
+        for i in range(ws_routes.MAX_CHANNELS_PER_SOCKET):
+            ws.send_json({"action": "subscribe", "channel": f"slots:c{i}:2026-01-01"})
+            assert ws.receive_json()["type"] == "subscribed"
+        ws.send_json({"action": "subscribe", "channel": "slots:one-too-many:2026-01-01"})
+        assert ws.receive_json() == {"type": "error", "message": "Too many channels on this connection"}

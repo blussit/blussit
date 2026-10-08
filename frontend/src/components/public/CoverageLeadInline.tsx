@@ -53,7 +53,7 @@ export function CoverageLeadInline({
       <div className="flex items-start gap-3 rounded-2xl bg-[var(--color-accent-light)] p-5">
         <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0 text-[var(--color-success)]" />
         <div>
-          <p className="font-semibold text-[var(--color-text-primary)]">You're on the list!</p>
+          <p className="font-semibold text-[var(--color-text-primary)]">You're On The List!</p>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             We'll message you on WhatsApp the moment we launch in {area.trim() || `pincode ${pin}`}.
           </p>
@@ -68,7 +68,7 @@ export function CoverageLeadInline({
         <div className="mb-4 flex items-start gap-3">
           <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-[var(--color-secondary)]" />
           <div>
-            <p className="font-semibold text-[var(--color-text-primary)]">We're not in your area yet — but we're expanding fast</p>
+            <p className="font-semibold text-[var(--color-text-primary)]">We're Not In Your Area Yet — But We're Expanding Fast</p>
             <p className="mt-0.5 text-sm text-[var(--color-text-secondary)]">
               Leave your details and you'll be the first to know (and get the launch offer) when we arrive.
             </p>
@@ -76,10 +76,10 @@ export function CoverageLeadInline({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Input label="Your name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" />
-        <Input label="WhatsApp number" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-digit mobile" maxLength={10} />
+        <Input label="Your Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Full Name" />
+        <Input label="WhatsApp Number" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-Digit Mobile" maxLength={10} />
         <Input label="Pincode" value={pin} onChange={(e) => setPin(e.target.value)} maxLength={10} />
-        <Input label="Area / city (optional)" value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Vijay Nagar, Indore" />
+        <Input label="Area / City (Optional)" value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Vijay Nagar, Indore" />
       </div>
       {error && <p className="mt-2 text-sm text-[var(--color-error)]">{error}</p>}
       <Button
@@ -91,7 +91,7 @@ export function CoverageLeadInline({
           mutation.mutate();
         }}
       >
-        Notify me when you launch
+        Notify Me When You Launch
       </Button>
     </div>
   );

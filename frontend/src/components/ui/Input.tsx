@@ -1,5 +1,6 @@
 import { forwardRef, type ChangeEvent, type InputHTMLAttributes } from "react";
 import { cn } from "../../lib/cn";
+import { FIELD_ERROR, FIELD_HINT, FIELD_LABEL, fieldBox } from "./fieldStyles";
 import { DatePicker } from "./DatePicker";
 import { TimePicker } from "./TimePicker";
 
@@ -64,10 +65,14 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, labe
     );
   }
 
+  // Same v2 field box as Select/DatePicker/TimePicker (ui/fieldStyles), so a
+  // text field and a dropdown side by side line up and look like one set.
+  // min-w-0: a text box in a flex row may shrink instead of pushing the
+  // row past a 320 px screen (an <input>'s intrinsic width is ~170 px).
   return (
-    <div className="w-full">
+    <div className="w-full min-w-0">
       {label && (
-        <label htmlFor={inputId} className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
+        <label htmlFor={inputId} className={FIELD_LABEL}>
           {label}
         </label>
       )}
@@ -75,16 +80,12 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, labe
         ref={ref}
         id={inputId}
         type={type}
-        className={cn(
-          "w-full rounded-xl border bg-white px-3.5 py-2.5 text-sm text-[var(--color-text-primary)] placeholder:text-gray-400 transition-colors",
-          "focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)]",
-          error ? "border-[var(--color-error)]" : "border-[#F3E5B5] hover:border-gray-400",
-          className
-        )}
+        aria-invalid={error ? true : undefined}
+        className={cn(fieldBox({ error, disabled: props.disabled }), "placeholder:text-[#9AA3B2]", className)}
         {...props}
       />
-      {hint && !error && <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{hint}</p>}
-      {error && <p className="mt-1 text-xs text-[var(--color-error)]">{error}</p>}
+      {hint && !error && <p className={FIELD_HINT}>{hint}</p>}
+      {error && <p className={FIELD_ERROR}>{error}</p>}
     </div>
   );
 });

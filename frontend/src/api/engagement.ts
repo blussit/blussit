@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Complaint, Coupon, Notification, Review, SubscriptionPlan, UserSubscription } from "../types";
+import type { Complaint, Coupon, Notification, PassExtension, Review, SubscriptionPlan, UserSubscription } from "../types";
 
 /** One subscription row on the manager's center overview. */
 export interface CenterSubscriptionRow {
@@ -12,6 +12,9 @@ export interface CenterSubscriptionRow {
   status?: string | null;
   vehicle_type?: string | null;
   vehicle_type_name?: string | null;
+  /** The one wash a monthly pass covers — null on a legacy tier plan. */
+  service_id?: string | null;
+  service_name?: string | null;
   /** The plan's list price — NOT what this customer necessarily paid, see amount_paid. */
   purchased_price?: number | null;
   /** What was actually charged (after any discount/coupon) — always prefer this for display. */
@@ -24,6 +27,11 @@ export interface CenterSubscriptionRow {
   start_date?: string | null;
   end_date?: string | null;
   days_left?: number | null;
+  /** Society pass: days added after the plan month (max 10). */
+  extension_days?: number;
+  extended_until?: string | null;
+  extensions?: PassExtension[];
+  in_extension?: boolean;
 }
 
 /** Paging for the overview endpoints: KPIs/breakdowns cover everything,
@@ -55,6 +63,11 @@ export interface AdminSubscriptionRow {
   plan_id?: string | null;
   plan_name: string;
   status?: string | null;
+  /** Car type the plan was bought for + the one wash it covers. */
+  vehicle_type?: string | null;
+  vehicle_type_name?: string | null;
+  service_id?: string | null;
+  service_name?: string | null;
   amount_paid?: number | null;
   discount_amount?: number | null;
   coupon_code?: string | null;
@@ -66,6 +79,11 @@ export interface AdminSubscriptionRow {
   total_service_count?: number | null;
   start_date?: string | null;
   end_date?: string | null;
+  /** Society pass: days a manager/admin added after the plan month (max 10). */
+  extension_days?: number;
+  extended_until?: string | null;
+  extensions?: PassExtension[];
+  in_extension?: boolean;
 }
 
 export interface AdminSubscriptionOverview {
@@ -97,6 +115,11 @@ export interface PlanPurchaseRow {
   customer_phone?: string | null;
   plan_id?: string | null;
   plan_name: string;
+  /** Car type + the one wash the pass covers ("Hatchback · Star Wash"). */
+  vehicle_type?: string | null;
+  vehicle_type_name?: string | null;
+  service_id?: string | null;
+  service_name?: string | null;
   amount: number;
   discount?: number | null;
   coupon_code?: string | null;
@@ -146,6 +169,8 @@ export interface ManagerOfferPreview {
   customer_exists: boolean;
   /** This phone already holds a live pass for this vehicle type + service. */
   already_has_pass: boolean;
+  /** The most "₹ off" this user may give (managers: 50% of the price). */
+  max_discount?: number;
 }
 
 export interface ManagerOfferPayload {
@@ -200,7 +225,10 @@ export const subscriptionApi = {
   /** Admin-only: individual plan payments settled in a period — the
    *  plan-revenue tile's drill-down. Same `period`/`start`/`end` shape as
    *  bookingApi.all(), so a dashboard tile's number and this list agree. */
-  planPurchases: (params: { period?: string; start?: string; end?: string; page?: number; page_size?: number }) =>
+  planPurchases: (params: {
+    period?: string; start?: string; end?: string; page?: number; page_size?: number;
+    service_center_id?: string; plan_id?: string; service_id?: string; vehicle_type?: string;
+  }) =>
     apiClient.get<ApiPaginated<PlanPurchaseRow>>("/subscriptions/admin/plan-purchases", { params }).then((r) => r.data),
   /** Same shape, scoped to one center — a manager's own Plans tab. */
   centerPlanPurchases: (centerId: string, params: { period?: string; start?: string; end?: string; page?: number; page_size?: number }) =>
@@ -274,7 +302,10 @@ export const reviewApi = {
   // center only, backend-enforced).
   forCenter: (serviceCenterId: string, params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Review>>(`/reviews/center/${serviceCenterId}`, { params }).then((r) => r.data),
-  forAdmin: (params?: { page?: number; page_size?: number; include_deleted?: boolean }) =>
+  forAdmin: (params?: {
+    page?: number; page_size?: number; include_deleted?: boolean;
+    service_center_id?: string; captain_id?: string; min_rating?: number;
+  }) =>
     apiClient.get<ApiPaginated<Review>>("/reviews/admin/all", { params }).then((r) => r.data),
 };
 
@@ -291,12 +322,15 @@ export const complaintApi = {
   mine: (params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Complaint>>("/complaints/my", { params }).then((r) => r.data),
   /** `search`: subject, booking number, or the customer's name/phone. */
-  forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number; search?: string }) =>
+  /** `category`: "society" = society residents' issues, "booking" = the rest. */
+  forCenter: (serviceCenterId: string, params?: { status?: string; page?: number; page_size?: number; search?: string; category?: "society" | "booking"; society_id?: string }) =>
     apiClient.get<ApiPaginated<Complaint>>(`/complaints/center/${serviceCenterId}`, { params }).then((r) => r.data),
   all: (params?: {
     status?: string; page?: number; page_size?: number; period?: string; start?: string; end?: string;
-    search?: string; service_center_id?: string;
+    search?: string; service_center_id?: string; category?: "society" | "booking"; society_id?: string;
   }) => apiClient.get<ApiPaginated<Complaint>>("/complaints", { params }).then((r) => r.data),
+  /** One ticket with its current thread (customer owner, own-center manager, admin). */
+  get: (id: string) => apiClient.get<ApiSuccess<Complaint>>(`/complaints/${id}`).then((r) => r.data.data),
   update: (id: string, payload: { status?: string; priority?: string; resolution_note?: string }) =>
     apiClient.put<ApiSuccess<Complaint>>(`/complaints/${id}`, payload).then((r) => r.data.data),
   reply: (id: string, payload: { message: string; status?: string }) =>

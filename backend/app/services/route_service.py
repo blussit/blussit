@@ -84,7 +84,13 @@ async def charge_road_km(db, origin_lat, origin_lng, dest_lat, dest_lng) -> dict
     missing."""
     if None in (origin_lat, origin_lng, dest_lat, dest_lng):
         return None
-    key = f"{float(origin_lat):.5f},{float(origin_lng):.5f}>{float(dest_lat):.5f},{float(dest_lng):.5f}"
+    # Both ends snapped to 3 decimals (~110 m): the public coverage check
+    # takes any coordinates, and a 5-decimal key let every 1 m nudge of a
+    # pin cost a fresh paid Google call. The charge is per km, so 110 m is
+    # well inside its precision — and the distance is computed FROM the
+    # snapped points, so every caller in one cell sees the same number.
+    origin_lat, origin_lng, dest_lat, dest_lng = (round(float(v), 3) for v in (origin_lat, origin_lng, dest_lat, dest_lng))
+    key = f"{origin_lat:.3f},{origin_lng:.3f}>{dest_lat:.3f},{dest_lng:.3f}"
     now = datetime.now(timezone.utc)
     cached = await db.road_distance_cache.find_one({"_id": key, "expires_at": {"$gt": now}})
     if cached:

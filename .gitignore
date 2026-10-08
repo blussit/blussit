@@ -8,10 +8,26 @@ venv
 .env.*
 !.env.example
 !*/.env.example
+# Local-dev templates (no real keys) — see SETUP_WINDOWS.md
+!*/.env.development.example
 backend/.env
 backend/app/__pycache__
 __pycache__
 frontend/node_modules
 blussit-prelaunch/frontend/node_modules
 .claude
-backend/uploads/photos
+backend/uploads/
+
+# Local dev runner state (pids, logs) — scripts/dev.sh
+.dev/
+*.log
+*.pid
+
+# Local test-database snapshot to share with teammates (see SETUP_WINDOWS.md) — not committed.
+# These hold real phone numbers, emails and password hashes: never commit a
+# database dump anywhere in the tree (P0-1, docs/SECURITY_REPO_CLEANUP.md).
+devdata/
+*.archive
+*.archive.gz
+*.bson
+*.bson.gz

@@ -3,7 +3,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { AlertCircle, MapPin, Star } from "lucide-react";
 import { staffDirectoryApi } from "../../api/admin";
 import { bookingApi } from "../../api/booking";
-import { Badge } from "../ui";
+import { Badge, ErrorState } from "../ui";
 import { cn } from "../../lib/cn";
 import { LiveCaptainMap } from "./LiveCaptainMap";
 import type { Booking, User } from "../../types";
@@ -21,6 +21,7 @@ export function CaptainPicker({
   scheduledDate,
   selectedId,
   onSelect,
+  captainsError,
 }: {
   bookingId: string;
   captains: User[];
@@ -28,15 +29,19 @@ export function CaptainPicker({
   scheduledDate: string;
   selectedId: string;
   onSelect: (id: string) => void;
+  /** The captains read failed (nothing cached): say so with a retry,
+   *  instead of "No captains available at this center". */
+  captainsError?: { onRetry: () => void; busy?: boolean } | null;
 }) {
   // Server-computed eligibility for THIS booking's exact time window — reuses
   // the real conflict-check logic so the manager sees why a captain can't
   // take it (busy until X, wallet balance) instead of only finding out via a
   // failed submit.
-  const { data: eligibility } = useQuery({
+  const eligibilityQuery = useQuery({
     queryKey: ["eligible-captains", bookingId],
     queryFn: () => bookingApi.eligibleCaptains(bookingId),
   });
+  const eligibility = eligibilityQuery.data;
   const eligibilityById = new Map((eligibility || []).map((e) => [e.captain_id, e]));
   const [expandedMapId, setExpandedMapId] = useState<string | null>(null);
 
@@ -47,8 +52,25 @@ export function CaptainPicker({
     })),
   });
 
+  if (captainsError)
+    return <ErrorState message="Couldn't load captains." onRetry={captainsError.onRetry} busy={captainsError.busy} className="p-4" />;
+
   return (
     <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+      {/* Without eligibility every captain looks free — say the check failed. */}
+      {eligibilityQuery.isError && !eligibility && captains.length > 0 && (
+        <p role="alert" className="text-xs text-[var(--color-text-secondary)]">
+          Couldn't check who's free for this slot.{" "}
+          <button
+            type="button"
+            className="font-semibold text-[var(--color-primary)] hover:underline disabled:opacity-60"
+            disabled={eligibilityQuery.isFetching}
+            onClick={() => void eligibilityQuery.refetch()}
+          >
+            Try Again
+          </button>
+        </p>
+      )}
       {captains.map((c, i) => {
         const perf = performanceQueries[i]?.data;
         const eligible = eligibilityById.get(c.id);
@@ -73,8 +95,8 @@ export function CaptainPicker({
               <div className="flex items-center justify-between">
                 <span className="font-medium text-[var(--color-text-primary)]">{c.full_name}</span>
                 <div className="flex items-center gap-1.5">
-                  {eligible?.is_on_job && <Badge tone="neutral">On a job</Badge>}
-                  {depth > 0 && <Badge tone={depth < 3 ? "warning" : "error"}>{depth} job{depth > 1 ? "s" : ""} today</Badge>}
+                  {eligible?.is_on_job && <Badge tone="neutral">On A Job</Badge>}
+                  {depth > 0 && <Badge tone={depth < 3 ? "warning" : "error"}>{depth} Job{depth > 1 ? "s" : ""} Today</Badge>}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)]">
@@ -112,7 +134,7 @@ export function CaptainPicker({
                 onClick={() => setExpandedMapId(mapExpanded ? null : c.id)}
                 className="pl-1 text-xs font-medium text-[var(--color-primary)] hover:underline"
               >
-                {mapExpanded ? "Hide live location" : "View live location"}
+                {mapExpanded ? "Hide Live Location" : "View Live Location"}
               </button>
             )}
             {mapExpanded && (

@@ -63,6 +63,28 @@ async def test_valid_token_for_a_DIFFERENT_phone_is_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "identifier",
+    ["9876543210@attacker.example", "x91-98765-43210y@attacker.example", "phone:9876543210", "98765x43210"],
+)
+async def test_identifier_that_only_CONTAINS_the_phone_is_rejected(monkeypatch, identifier):
+    # MSG91 also verifies emails: a genuine token for an attacker-owned
+    # address whose digits spell the victim's number is not proof of that
+    # number (it used to pass — and reset the victim's password).
+    patch_msg91(monkeypatch)
+    token = fake_jwt({"identifier": identifier})
+    assert await Msg91WidgetService().verify_access_token(token, "9876543210") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identifier", ["+91 98765 43210", "+91-98765-43210", "09876543210", "9876543210"])
+async def test_phone_written_with_prefix_or_separators_still_binds(monkeypatch, identifier):
+    patch_msg91(monkeypatch)
+    token = fake_jwt({"identifier": identifier})
+    assert await Msg91WidgetService().verify_access_token(token, "9876543210") is True
+
+
+@pytest.mark.asyncio
 async def test_token_with_no_identifier_anywhere_fails_closed(monkeypatch):
     patch_msg91(monkeypatch, body={"type": "success"})
     token = fake_jwt({"foo": "bar"})
