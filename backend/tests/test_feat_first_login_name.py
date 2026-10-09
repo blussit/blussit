@@ -101,3 +101,28 @@ async def test_staff_phone_still_refused(db):
     async with h.client() as c:
         r = await c.post("/api/v1/auth/otp/request", json={"identifier": user["phone"]})
     assert r.status_code == 400 and "staff" in r.text.lower()
+
+
+async def test_code_login_clears_the_set_a_password_gate(db):
+    """A guest sign-up / manager-created customer carries must_change_password;
+    after proving the phone by code they sign in without a password screen,
+    and the old temporary password stops working."""
+    from app.core.security import hash_password
+
+    cid, pin = await h.center(db)
+    cu = await h.customer(db, pin)
+    uid = h.oid(cu["id"])
+    user = await db.users.find_one({"_id": uid})
+    phone = user["phone"]
+    await db.users.update_one({"_id": uid}, {"$set": {"must_change_password": True, "password_hash": hash_password("Temp@12345"), "token_version": 3}})
+    async with h.client() as c:
+        await c.post("/api/v1/auth/otp/request", json={"identifier": phone})
+        code = await _code(db, phone)
+        r = await c.post("/api/v1/auth/otp-login", json={"phone": phone, "otp": code})
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["user"]["must_change_password"] is False
+        old = await c.post("/api/v1/auth/login", json={"identifier": phone, "password": "Temp@12345"})
+        assert old.status_code == 401
+    after = await db.users.find_one({"_id": uid})
+    assert after["must_change_password"] is False and after["password_hash"] is None and after["token_version"] > 3
+    await db["otp_requests"].delete_many({"identifier": phone})

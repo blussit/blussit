@@ -107,7 +107,8 @@ function CountUp({ to, decimals = 0, duration = 1800, group = true }: { to: numb
   );
 }
 
-const scrollToHowItWorks = () => document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
+// The "Watch How It Works" button opens the Blussit YouTube channel.
+const YOUTUBE_URL = "https://www.youtube.com/@Blussit";
 
 /** `offer` (phones/tablets only) floats over the bottom of the photo, just
  *  above the features row; the desktop strip is placed by the page. */
@@ -327,9 +328,10 @@ function BookButton({ onClick, className = "" }: { onClick: () => void; classNam
 
 function WatchButton({ className = "" }: { className?: string }) {
   return (
-    <button
-      type="button"
-      onClick={scrollToHowItWorks}
+    <a
+      href={YOUTUBE_URL}
+      target="_blank"
+      rel="noopener noreferrer"
       className={`flex items-center justify-center gap-3 whitespace-nowrap rounded-2xl border border-[#E4E9F1] bg-white font-semibold shadow-[0_6px_18px_rgba(15,30,60,0.06)] transition-transform hover:-translate-y-0.5 active:translate-y-0 ${className}`}
       style={{ color: NAVY }}
     >
@@ -337,7 +339,7 @@ function WatchButton({ className = "" }: { className?: string }) {
         <Play className="ml-0.5 h-3 w-3 text-white sm:h-4 sm:w-4 lg:h-3 lg:w-3" fill="currentColor" strokeWidth={0} />
       </span>
       Watch How It Works
-    </button>
+    </a>
   );
 }
 

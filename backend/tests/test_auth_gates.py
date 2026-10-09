@@ -90,8 +90,10 @@ async def test_otp_login_recovers_the_abandoned_account(db, cleanup):
     assert login["access_token"]
     fresh = await db.users.find_one({"_id": ObjectId(uid)})
     assert fresh["phone_verified"] is True and fresh["phone_verified_at"] is not None
-    assert fresh["must_change_password"] is True  # gate still owed
-    # The first proof drops the password nobody proved ownership for.
+    # Signing in by code needs no password (2026-10-09): the "set a
+    # password" gate used to be owed here — customers log in by code only —
+    # and the password nobody proved ownership for is dropped.
+    assert fresh["must_change_password"] is False
     assert fresh["password_hash"] is None
 
 

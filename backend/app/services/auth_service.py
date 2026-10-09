@@ -1157,6 +1157,17 @@ class AuthService:
         if not await self.verify_phone_proof(normalized, otp, widget_access_token, OTP_ACCEPTS["login"]):
             raise BadRequestException(self._OTP_INVALID)
 
+        if user.get("must_change_password"):
+            # A customer who has just proven their phone signs in by code —
+            # they never need a password. Drop the temporary / unknown one
+            # (a guest sign-up's random password, a password a manager typed
+            # when creating the account) instead of forcing a "set a
+            # password" screen, and sign out any session that knew it.
+            await self.users.collection.update_one(
+                {"_id": user["_id"], "must_change_password": True},
+                {"$set": {"password_hash": None, "must_change_password": False}, "$inc": {"token_version": 1}},
+            )
+            user = await self.users.find_by_id(str(user["_id"])) or user
         fresh = await self.mark_phone_proven(user, last_login_at=datetime.now(timezone.utc))
         return self._issue_tokens(fresh)
 
