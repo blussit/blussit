@@ -205,8 +205,31 @@
         fbq('track', 'PageView');
       }
     </script>
+    <!-- Google Tag Manager (container GTM-NP986HT3) — the standard snippet,
+         except it loads once the page has finished (like GA4 and the Meta
+         Pixel above) and only on the live site, so it never competes with
+         the hero or the booking code and test traffic stays out. The
+         container is EMPTY on purpose: GA4 and the Meta Pixel stay in this
+         file, so adding tags inside GTM for them would count every event
+         twice. -->
+    <script>
+      if (/(^|\.)blussit\.com$/.test(location.hostname)) {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({ "gtm.start": new Date().getTime(), event: "gtm.js" });
+        window.addEventListener("load", function () {
+          setTimeout(function () {
+            var s = document.createElement("script");
+            s.async = true;
+            s.src = "https://www.googletagmanager.com/gtm.js?id=GTM-NP986HT3";
+            document.head.appendChild(s);
+          }, 2500);
+        });
+      }
+    </script>
   </head>
   <body>
+    <!-- Google Tag Manager (noscript) -->
+    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-NP986HT3" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
     <noscript><img height="1" width="1" style="display:none" alt="Blussit"
       src="https://www.facebook.com/tr?id=1153209444066340&ev=PageView&noscript=1"
     /></noscript>

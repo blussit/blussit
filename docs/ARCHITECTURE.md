@@ -1218,6 +1218,7 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-09 | Google Tag Manager container `GTM-NP986HT3` added to `frontend/index.html` (loaded after page load, live host only; noscript iframe after `<body>`). The container is empty — GA4 (`G-HLQLRBBC24`) and the Meta Pixel stay in index.html, so never recreate them as GTM tags (double counting). |
 | 2026-10-09 | SEO scan fixes: the home page has ONE `<h1>` (the phone layout's duplicate headline is a `<p>`); the decorative plan/society card images and the noscript Meta Pixel image got descriptive `alt` text. |
 | 2026-10-09 | No "set a password" screen for customers anywhere: the route guard, the mandatory-gates modal and the profile banner ignore `must_change_password` for the customer role (staff keep it), and boot task `clear_customer_password_gates` clears leftover flags and drops the temp/unknown password on customer accounts (sessions end via `token_version`). WhatsApp-created customers never carried the flag. |
 | 2026-10-09 | Customer code login (`otp_login`) no longer leaves the mandatory "set a password" gate: an account carrying `must_change_password` (guest sign-up, manager-created with a temp password) has the temp/unknown password dropped and the flag cleared once the phone is proven; sessions that knew it are signed out (`token_version`). Landing "Watch How It Works" now opens https://www.youtube.com/@Blussit (also in the JSON-LD `sameAs`). |
