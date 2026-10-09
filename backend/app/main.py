@@ -1308,6 +1308,11 @@ _OPTIONAL_BOOT_TASKS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ),
     ),
     (
+        # Customers sign in by code: drop any leftover "set a password" gate.
+        "customer password gates",
+        (("app.services.auth_service", "clear_customer_password_gates"),),
+    ),
+    (
         # Account emails stored lower-case (login is case-insensitive).
         "lower-case account emails",
         (("app.repositories.user_repository", "lowercase_user_emails"),),

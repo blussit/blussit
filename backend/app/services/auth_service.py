@@ -1276,3 +1276,16 @@ class AuthService:
         prefix = "".join(ch for ch in full_name.upper() if ch.isalpha())[:4] or "USER"
         suffix = "".join(random.choices(string.digits, k=4))
         return f"{prefix}{suffix}"
+
+
+async def clear_customer_password_gates(db) -> int:
+    """Boot task (2026-10-09): customers sign in by code, so a customer still
+    flagged must_change_password (guest sign-up, created by a manager with a
+    temp password) has that temporary / unknown password dropped and the flag
+    cleared — no "set a password" screen, and a password a manager typed
+    stops working. Their sessions end (token_version). Idempotent."""
+    res = await db.users.update_many(
+        {"role": UserRole.CUSTOMER.value, "must_change_password": True},
+        {"$set": {"password_hash": None, "must_change_password": False}, "$inc": {"token_version": 1}},
+    )
+    return res.modified_count

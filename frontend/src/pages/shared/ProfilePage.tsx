@@ -78,7 +78,7 @@ export default function ProfilePage() {
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Manage your account information.</p>
       </div>
 
-      {user?.must_change_password && (
+      {user?.must_change_password && user.role !== "customer" && (
         <div className="flex items-start gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
           <div>

@@ -126,3 +126,21 @@ async def test_code_login_clears_the_set_a_password_gate(db):
     after = await db.users.find_one({"_id": uid})
     assert after["must_change_password"] is False and after["password_hash"] is None and after["token_version"] > 3
     await db["otp_requests"].delete_many({"identifier": phone})
+
+
+async def test_boot_task_clears_customer_gates_but_never_staff(db):
+    from app.core.security import hash_password
+    from app.services.auth_service import clear_customer_password_gates
+    from tests.factories import make_manager
+
+    cid, pin = await h.center(db)
+    cu = await h.customer(db, pin)
+    mid = await make_manager(db, cid)
+    await db.users.update_one({"_id": h.oid(cu["id"])}, {"$set": {"must_change_password": True, "password_hash": hash_password("Temp@12345")}})
+    await db.users.update_one({"_id": h.oid(mid)}, {"$set": {"must_change_password": True}})
+    assert await clear_customer_password_gates(db) >= 1
+    c_after = await db.users.find_one({"_id": h.oid(cu["id"])})
+    m_after = await db.users.find_one({"_id": h.oid(mid)})
+    assert c_after["must_change_password"] is False and c_after["password_hash"] is None
+    assert m_after["must_change_password"] is True and m_after["password_hash"], "staff keep their temp-password gate"
+    assert await clear_customer_password_gates(db) == 0

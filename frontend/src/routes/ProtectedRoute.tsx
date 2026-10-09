@@ -43,7 +43,8 @@ export function ProtectedRoute({ allowedRoles }: { allowedRoles: UserRole[] }) {
   // A staff-created account (temp password) must set a real one before
   // going anywhere else — the profile page surfaces the change-password
   // form prominently for this. See User.must_change_password.
-  if (user?.must_change_password) {
+  // Customers sign in by code and never need a password (2026-10-09).
+  if (user?.must_change_password && user.role !== "customer") {
     const profilePath = `${ROLE_BASE_PATH[user.role] ?? "/app"}/profile`;
     if (location.pathname !== profilePath) {
       return <Navigate to={profilePath} replace />;

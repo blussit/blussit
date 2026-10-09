@@ -50,7 +50,7 @@ export function MandatoryGates() {
 
   if (!user) return null;
 
-  if (user.must_change_password) {
+  if (user.must_change_password && user.role !== "customer") {
     const valid = password.length >= 8 && password === confirm;
     return (
       <Modal open onClose={() => undefined} dismissible={false} title="Set Your Password">
