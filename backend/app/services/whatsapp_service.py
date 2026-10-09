@@ -457,7 +457,11 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             # different component shape than a URL button (Meta's own
             # design for AUTHENTICATION templates), filled with the same
             # code as the body.
-            components.append({"type": "button", "sub_type": "copy_code", "index": "0", "parameters": [{"type": "coupon_code", "coupon_code": params[0]}]})
+            # Meta (v25) wants this button as a URL-type component carrying the
+            # code as text — the old copy_code/coupon_code shape is refused
+            # with 132018 "Button at index 0 must be of type Url" (every OTP
+            # send failed on it, so logins fell back to SMS).
+            components.append({"type": "button", "sub_type": "url", "index": "0", "parameters": [{"type": "text", "text": params[0]}]})
         body = {
             "messaging_product": "whatsapp",
             "to": _to_e164_digits(phone),
