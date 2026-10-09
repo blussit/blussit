@@ -76,7 +76,7 @@ export function SocietyRequestCard() {
       >
         <img
           src="/img/plans-card3-800.webp"
-          alt=""
+          alt="Society car wash plan for apartment residents"
           width={800}
           height={450}
           loading="lazy"

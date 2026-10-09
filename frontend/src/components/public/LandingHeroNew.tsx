@@ -224,7 +224,8 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
             >
               Premium doorstep car care
             </span>
-            <h1
+            {/* The phone layout's copy of the headline is a <p>: the page has ONE <h1> (the desktop block above), however the layouts swap. */}
+            <p
               className="font-display font-extrabold leading-[1.05] tracking-[-0.03em]"
               style={{ color: NAVY, fontSize: "6.8vw", marginTop: "2.6vw" }}
             >
@@ -235,7 +236,7 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
               <span className="whitespace-nowrap" style={{ color: BLUE }}>
                 Your Doorstep.
               </span>
-            </h1>
+            </p>
             <p className="leading-[1.4]" style={{ color: "#4B5466", fontSize: "3.05vw", marginTop: "2vw", maxWidth: "41vw" }}>
               Professional car wash at your location in Indore.
             </p>
