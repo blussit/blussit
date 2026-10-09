@@ -617,6 +617,14 @@ class AuthService:
         account may reset by code at all — _ensure_code_reset_allowed."""
         user = await self._find_user_by_identifier(identifier)
         if not user:
+            new_phone = validate_indian_mobile((identifier or "").strip()) if "@" not in (identifier or "") else None
+            if customer_only and new_phone and purpose == OTP_LOGIN:
+                # First visit by phone: the code goes out like any other and
+                # the account is created (after asking the name) once it is
+                # proven — see otp_login.
+                if is_business_whatsapp_number(new_phone):
+                    raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
+                return await self._issue_otp(new_phone, purpose, requester)
             raise NotFoundException("No account found with this phone number or email.")
         if customer_only:
             if user.get("role") != UserRole.CUSTOMER.value:
@@ -813,6 +821,7 @@ class AuthService:
 
     async def verify_phone_proof(
         self, phone: str, otp: str | None, widget_access_token: str | None, accept: frozenset[str] = OTP_ACCEPTS["phone_proof"],
+        consume: bool = True,
     ) -> bool:
         """Proof of phone ownership, exactly as login checks it: the MSG91
         widget's access token (verified server-side, bound to this phone,
@@ -827,9 +836,9 @@ class AuthService:
 
             if not await Msg91WidgetService().verify_access_token(widget_access_token, normalized):
                 return False
-            return await self._spend_widget_token(widget_access_token)
+            return await self._spend_widget_token(widget_access_token) if consume else True
         if otp:
-            return await self.verify_otp(normalized, otp, accept=accept)
+            return await self.verify_otp(normalized, otp, accept=accept, consume=consume)
         return False
 
     async def _spend_widget_token(self, access_token: str) -> bool:
@@ -865,7 +874,7 @@ class AuthService:
         if not await self.verify_phone_proof(phone, otp, widget_access_token, accept):
             raise BadRequestException(self._OTP_INVALID)
 
-    async def verify_otp(self, identifier: str, otp: str, accept: frozenset[str] | None = None) -> bool:
+    async def verify_otp(self, identifier: str, otp: str, accept: frozenset[str] | None = None, consume: bool = True) -> bool:
         """Single-use: a match deletes the code, so it can never be replayed
         (it used to stay valid for its full 10 minutes: one observed code
         could reset the password, then log in, then re-verify the phone).
@@ -890,6 +899,11 @@ class AuthService:
         record = await self.otp_store.find_one_and_update(guard, {"$inc": {"attempts": 1}}, return_document=ReturnDocument.AFTER)
         if not record or not secrets.compare_digest(str(record.get("otp", "")), code):
             return False
+        if not consume:
+            # A peek (new-account login asks the name AFTER the code checks
+            # out, then presents the same code again): the guess still spent
+            # an attempt above, but the code stays for the real use.
+            return True
         consumed = await self.otp_store.delete_one({"_id": record["_id"], "otp": record["otp"]})
         return consumed.deleted_count == 1
 
@@ -1101,7 +1115,9 @@ class AuthService:
             return {"mode": "otp"}
         return {"mode": "password" if self.phone_verification_fresh(user) else "otp"}
 
-    async def otp_login(self, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:
+    async def otp_login(
+        self, phone: str, otp: str | None = None, widget_access_token: str | None = None, full_name: str | None = None
+    ) -> dict:
         """Logs a CUSTOMER in by proving phone ownership (classic OTP or
         MSG91 widget token) — the recovery path for accounts whose
         password was never really set (abandoned guest signup, WhatsApp
@@ -1115,7 +1131,24 @@ class AuthService:
         if not normalized:
             raise BadRequestException("Enter a valid 10-digit mobile number")
         user = await self.users.find_by_phone(normalized)
-        if not user or user.get("is_deleted") or user.get("role") != UserRole.CUSTOMER.value:
+        if not user:
+            # A number with no account yet: prove it, ask the name, then
+            # create the account. The first call (no name) only CHECKS the
+            # code — it stays valid — and answers needs_name; the second
+            # presents the same code with the name and signs them up.
+            if is_business_whatsapp_number(normalized):
+                raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
+            name = " ".join((full_name or "").split())[:100]
+            if len(name) < 2:
+                if not await self.verify_phone_proof(normalized, otp, widget_access_token, OTP_ACCEPTS["login"], consume=False):
+                    raise BadRequestException(self._OTP_INVALID)
+                return {"needs_name": True}
+            if not await self.verify_phone_proof(normalized, otp, widget_access_token, OTP_ACCEPTS["login"]):
+                raise BadRequestException(self._OTP_INVALID)
+            created = await self.ensure_customer_by_phone(normalized, name)
+            fresh = await self.mark_phone_proven(created, last_login_at=datetime.now(timezone.utc))
+            return self._issue_tokens(fresh)
+        if user.get("is_deleted") or user.get("role") != UserRole.CUSTOMER.value:
             raise BadRequestException("No customer account found for this phone number")
         standing = account_switched_off(user)
         if standing:

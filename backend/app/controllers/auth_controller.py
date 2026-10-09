@@ -66,8 +66,9 @@ class AuthController:
         # Earlier Phase 1 code echoed it back as "debug_otp" for testing
         # before any real delivery existed, which made the whole
         # verification step trivially bypassable.
+        known = await self.auth_service._find_user_by_identifier(payload.identifier)
         channel = await self.auth_service.request_otp(payload.identifier, customer_only=True)
-        return success({"otp_sent": True, "channel": channel}, "Verification code sent")
+        return success({"otp_sent": True, "channel": channel, "new_account": known is None}, "Verification code sent")
 
     async def verify_otp(self, payload: VerifyOtpRequest):
         verified = await self.auth_service.verify_otp(payload.identifier, payload.otp)

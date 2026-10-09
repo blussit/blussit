@@ -189,7 +189,12 @@ async def test_otp_login_request_refuses_staff_and_unknown_numbers(db, cleanup):
 
     async with _client() as client:
         staff = await client.post("/api/v1/auth/otp/request", json={"identifier": manager_phone})
-        unknown = await client.post("/api/v1/auth/otp/request", json={"identifier": "9722200099"})
+        # A phone with no account is no longer refused (2026-10-09): the code
+        # goes out and the account is created, after asking the name, once it
+        # is proven (test_feat_first_login_name). An unknown EMAIL has no
+        # phone to send to, so it still gets "No account found".
+        unknown = await client.post("/api/v1/auth/otp/request", json={"identifier": "nobody.here@gmail.com"})
+        new_number = await client.post("/api/v1/auth/otp/request", json={"identifier": "9722200099"})
         assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 0
         # Staff reset a password by code only once they've verified the
         # phone themselves while signed in (AUTH-01 / P0-2: a staff phone is
@@ -204,6 +209,8 @@ async def test_otp_login_request_refuses_staff_and_unknown_numbers(db, cleanup):
         reset = await client.post("/api/v1/auth/forgot-password", json={"identifier": manager_phone})
     assert staff.status_code == 400 and "Staff login" in staff.json()["message"]
     assert unknown.status_code == 404 and "No account found" in unknown.json()["message"]
+    assert new_number.status_code == 200 and new_number.json()["data"]["new_account"] is True
+    _track(cleanup, "9722200099")
     assert refused.status_code == 400 and "ask your admin" in refused.json()["message"], refused.text
     assert reset.status_code == 200, reset.text
     assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 1

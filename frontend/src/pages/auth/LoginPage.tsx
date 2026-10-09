@@ -29,7 +29,10 @@ export default function LoginPage() {
   // -- customer (OTP) --
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
-  const [otpStep, setOtpStep] = useState<"phone" | "code">("phone");
+  const [otpStep, setOtpStep] = useState<"phone" | "code" | "name">("phone");
+  // A first visit: the proven code/token is kept while the name is asked.
+  const [fullName, setFullName] = useState("");
+  const proof = useRef<{ phone: string; otp?: string; access_token?: string } | null>(null);
   const [channel, setChannel] = useState<OtpChannel | null>(null);
   const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
   const [cooldown, setCooldown] = useState(0);
@@ -118,6 +121,12 @@ export default function LoginPage() {
     try {
       const payload = channel === "widget" ? { phone: normalized, access_token: await widgetVerifyOtp(clean) } : { phone: normalized, otp: clean };
       const result = await guestAuthApi.otpLogin(payload);
+      if ("needs_name" in result) {
+        // Code is right but there's no account yet — ask the name next.
+        proof.current = payload;
+        setOtpStep("name");
+        return;
+      }
       tokenStorage.set(result.access_token, result.refresh_token);
       const user = await refreshUser();
       landAfterLogin(user?.role || result.user.role);
@@ -130,7 +139,32 @@ export default function LoginPage() {
     }
   };
 
+  const createAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = fullName.trim().replace(/\s+/g, " ");
+    if (name.length < 2) {
+      setError("Enter your name.");
+      return;
+    }
+    if (!proof.current || isLoading) return;
+    setError("");
+    setIsLoading(true);
+    try {
+      const result = await guestAuthApi.otpLogin({ ...proof.current, full_name: name });
+      if ("needs_name" in result) throw new Error("Please try again.");
+      tokenStorage.set(result.access_token, result.refresh_token);
+      const user = await refreshUser();
+      landAfterLogin(user?.role || result.user.role);
+    } catch (err) {
+      setError(otpErrorMessage(err));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const changeNumber = () => {
+    proof.current = null;
+    setFullName("");
     setOtpStep("phone");
     setOtp("");
     setChannel(null);
@@ -185,12 +219,14 @@ export default function LoginPage() {
             <>
               <div className="mb-6 text-center">
                 <h1 className="text-[26px] font-bold leading-[1.08] tracking-[-0.03em] text-[#0B1F4B]">
-                  {otpStep === "phone" ? "Welcome Back!" : "Enter Your Code"}
+                  {otpStep === "phone" ? "Welcome Back!" : otpStep === "name" ? "Almost There!" : "Enter Your Code"}
                 </h1>
                 <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
                   {otpStep === "phone"
                     ? "Log in with your mobile number to see your bookings and passes."
-                    : `We sent a 6-digit code to +91 ${phone}${delivered === "sms" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : ""}.`}
+                    : otpStep === "name"
+                      ? "Your number is verified. Tell us your name to finish creating your account."
+                      : `We sent a 6-digit code to +91 ${phone}${delivered === "sms" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : ""}.`}
                 </p>
               </div>
 
@@ -213,6 +249,30 @@ export default function LoginPage() {
                   <button type="submit" disabled={isLoading} className={ctaClass}>
                     <span>{isLoading ? "Sending Code…" : "Send Code"}</span>
                     {!isLoading && <span className="absolute right-5 text-[18px] font-normal transition-transform duration-200 group-hover:translate-x-1">→</span>}
+                  </button>
+                </form>
+              ) : otpStep === "name" ? (
+                <form onSubmit={createAccount}>
+                  <label className="block">
+                    <span className="mb-1 block text-[12.5px] font-semibold text-[#0B1F4B]">Your Name</span>
+                    <input
+                      type="text"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      required
+                      autoFocus
+                      maxLength={100}
+                      autoComplete="name"
+                      placeholder="Full name"
+                      className={inputClass}
+                    />
+                  </label>
+                  {error && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">{error}</div>}
+                  <button type="submit" disabled={isLoading} className={ctaClass}>
+                    <span>{isLoading ? "Creating Account…" : "Continue"}</span>
+                  </button>
+                  <button type="button" className="mt-3 block w-full text-center text-[12px] font-medium text-[#737B88] hover:text-[#111]" onClick={changeNumber} disabled={isLoading}>
+                    Change Number
                   </button>
                 </form>
               ) : (

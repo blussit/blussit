@@ -80,8 +80,10 @@ export const otpWidgetApi = {
 export const guestAuthApi = {
   bookingAccess: (phone: string) =>
     apiClient.post<ApiSuccess<{ mode: "register" | "otp" | "password" }>>("/auth/booking-access", { phone }).then((r) => r.data.data),
-  otpLogin: (payload: { phone: string; otp?: string; access_token?: string }) =>
-    apiClient.post<ApiSuccess<AuthResult>>("/auth/otp-login", payload).then((r) => r.data.data),
+  // A number with no account yet answers { needs_name } until the same
+  // proof comes back with full_name — then the account is created.
+  otpLogin: (payload: { phone: string; otp?: string; access_token?: string; full_name?: string }) =>
+    apiClient.post<ApiSuccess<AuthResult | { needs_name: true }>>("/auth/otp-login", payload).then((r) => r.data.data),
   // Signs out every other session (e.g. whoever knew the temporary
   // password) and hands THIS one a fresh pair — store it, or the next
   // request 401s.

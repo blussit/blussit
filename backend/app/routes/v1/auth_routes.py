@@ -198,6 +198,8 @@ class OtpLoginRequest(_BaseModel):
     phone: str = _WField(min_length=10, max_length=15)
     otp: str | None = _WField(default=None, min_length=4, max_length=8)
     access_token: str | None = _WField(default=None, min_length=10, max_length=4096)
+    # A first visit: sent with the proven code to create the account.
+    full_name: str | None = _WField(default=None, max_length=100)
 
 
 class SetPasswordRequest(_BaseModel):
@@ -215,7 +217,7 @@ async def booking_access(payload: BookingAccessRequest, db: AsyncIOMotorDatabase
 async def otp_login(payload: OtpLoginRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
     """Customer login by phone-ownership proof (classic OTP or MSG91 widget
     token) — the abandoned-signup recovery and 90-day re-verification path."""
-    return success(await AuthService(db).otp_login(payload.phone, payload.otp, payload.access_token))
+    return success(await AuthService(db).otp_login(payload.phone, payload.otp, payload.access_token, payload.full_name))
 
 
 @router.post("/set-password")
