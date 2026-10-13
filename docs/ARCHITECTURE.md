@@ -15,6 +15,7 @@ Related documents (more depth on one topic each):
 [DEPLOYMENT.md](../DEPLOYMENT.md) (operator runbook) ·
 [docs/FEATURE_PLAN_WALLET_EDITS_PLANS_2026-10-07.md](FEATURE_PLAN_WALLET_EDITS_PLANS_2026-10-07.md) (current build spec) ·
 [docs/SOCIETY_PLANS.md](SOCIETY_PLANS.md) (society plans in detail) ·
+[docs/CONTACT_CARD_ARCHITECTURE.md](CONTACT_CARD_ARCHITECTURE.md) (Blussit Contact Card — design, not built) ·
 [docs/SEO_AUDIT_2026-10-06.md](SEO_AUDIT_2026-10-06.md), [docs/SEO_KEYWORDS.md](SEO_KEYWORDS.md) (SEO) ·
 [docs/PRE_PRODUCTION_AUDIT_2026-10-07.md](PRE_PRODUCTION_AUDIT_2026-10-07.md) and
 [docs/PRODUCTION_REMEDIATION_REPORT_2026-10-07.md](PRODUCTION_REMEDIATION_REPORT_2026-10-07.md) (audit + fixes, IDs like PAY-02 used in code comments) ·
@@ -1180,6 +1181,11 @@ the worker fails.
   universal message, book now, payment failed, wallet lines, edited,
   cancelled v5, plan expiring v2, manager new booking v2), review-request
   sweep. Spec: [FEATURE_PLAN_WALLET_EDITS_PLANS_2026-10-07.md](FEATURE_PLAN_WALLET_EDITS_PLANS_2026-10-07.md).
+- **Planned (2026-10-13): Blussit Contact Card** — V1 Indore only: QR card
+  delivered by our team (per-km delivery charge), activated by the customer's
+  scan in the app; masked calls through Exotel, WhatsApp alerts, admin print
+  designer. Pan-India + Shiprocket is V2. Build spec:
+  [CONTACT_CARD_ARCHITECTURE.md](CONTACT_CARD_ARCHITECTURE.md). Nothing built yet.
 - Rate limits are per instance (no shared store).
 - CSP is Report-Only; switch to enforcing after reviewing reports.
 - No push notifications / PWA; WhatsApp + in-app only.
@@ -1218,6 +1224,11 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-13 | Contact Card: activity/logs/reports spec — anonymous callers (hash only, per-card owner labels), owner activity log, admin overview + per-user table (purchased, activated, last used, daily calls/alerts/scans/notifications), daily roll-ups, managers see no logs. |
+| 2026-10-13 | Contact Card: quiet hours owner-managed (default 10 PM–7 AM), mandatory admin-managed call limits, ExoPhone number as an admin setting (changeable, read live). |
+| 2026-10-13 | Contact Card V1 decisions: admin-set price/discount/max per order/delivery fees; online-only customer orders; admin card templates (sample card + marked QR and ID places) and a sheet designer; one 8-character letters-and-digits Card ID in the QR and printed. |
+| 2026-10-13 | Contact Card spec cut to V1: Indore only, hand delivery by the center's team with a per-km charge, scan-to-activate; pan-India + Shiprocket moved to V2. |
+| 2026-10-12 | Design document for the Blussit Contact Card added ([CONTACT_CARD_ARCHITECTURE.md](CONTACT_CARD_ARCHITECTURE.md)); no code yet. |
 | 2026-10-09 | Google Tag Manager container `GTM-NP986HT3` added to `frontend/index.html` (loaded after page load, live host only; noscript iframe after `<body>`). The container is empty — GA4 (`G-HLQLRBBC24`) and the Meta Pixel stay in index.html, so never recreate them as GTM tags (double counting). |
 | 2026-10-09 | SEO scan fixes: the home page has ONE `<h1>` (the phone layout's duplicate headline is a `<p>`); the decorative plan/society card images and the noscript Meta Pixel image got descriptive `alt` text. |
 | 2026-10-09 | No "set a password" screen for customers anywhere: the route guard, the mandatory-gates modal and the profile banner ignore `must_change_password` for the customer role (staff keep it), and boot task `clear_customer_password_gates` clears leftover flags and drops the temp/unknown password on customer accounts (sessions end via `token_version`). WhatsApp-created customers never carried the flag. |
