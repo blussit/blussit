@@ -772,6 +772,14 @@ async def create_indexes() -> None:
     except Exception as exc:  # degrade, don't die — same rule as the scale pack
         logger.warning("WhatsApp queue indexes skipped: %s", exc)
 
+    # Holidays (HolidayService): the live-list cache read + per-center lookups.
+    try:
+        from app.repositories.holiday_repository import ensure_holiday_indexes
+
+        await ensure_holiday_indexes(db)
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("Holiday indexes skipped: %s", exc)
+
     # Society plans (docs/SOCIETY_PLANS.md) keep their own index list.
     from app.repositories.society_repository import ensure_society_indexes
 

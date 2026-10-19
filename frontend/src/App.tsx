@@ -14,6 +14,7 @@ import { ProtectedRoute, GuestOnlyRoute } from "./routes/ProtectedRoute";
 import { StaffBookingRedirect } from "./routes/StaffBookingRedirect";
 import { ScrollRestoration } from "./components/shared/ScrollRestoration";
 import { VisitBeacon } from "./components/shared/VisitBeacon";
+import { HolidayGate } from "./components/public/HolidayGate";
 
 import LandingPage from "./pages/public/LandingPage";
 // The search-landing pages are pre-rendered to HTML at build time, so they
@@ -108,6 +109,7 @@ const AdminSocietyPlansPage = lazy(() => import("./pages/admin/AdminSocietyPlans
 const AdminSocietyPlannerPage = lazy(() => import("./pages/admin/AdminSocietyPlannerPage"));
 const AdminChargesPage = lazy(() => import("./pages/admin/AdminChargesPage"));
 const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPage"));
+const AdminHolidaysPage = lazy(() => import("./pages/admin/AdminHolidaysPage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
 const CustomerProfilePage = lazy(() => import("./pages/customer/CustomerProfilePage"));
@@ -150,6 +152,8 @@ export default function App() {
         <ConfirmProvider>
           <ScrollRestoration />
           <VisitBeacon />
+          {/* Holiday popup (public site + customer app); renders nothing until the browser runs. */}
+          <HolidayGate />
           {LocalEnvBadge && (
             <Suspense fallback={null}>
               <LocalEnvBadge />
@@ -282,6 +286,7 @@ export default function App() {
                 <Route path="society-plans" element={<AdminSocietyPlansPage />} />
                 <Route path="society-planner" element={<AdminSocietyPlannerPage />} />
                 <Route path="charges" element={<AdminChargesPage />} />
+                <Route path="holidays" element={<AdminHolidaysPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>

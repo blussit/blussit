@@ -1204,6 +1204,20 @@ class WhatsAppBotService:
             if len(rows) >= 10:
                 break
         if not rows:
+            # A holiday says so (and when to come back) instead of "booked".
+            from app.services.holiday_service import HolidayService
+
+            try:
+                holidays = HolidayService(self.db)
+                soon = datetime.now(timezone.utc) + timedelta(days=3)
+                breaks = [h for h in await holidays.center_holidays(center_id) if h["start_at"] < soon]
+                note = (await holidays.refusal(breaks[0], center_id)).message if breaks else None
+            except Exception:  # noqa: BLE001 — the plain message still works
+                note = None
+            if note:
+                await self.wa.send_text(phone, f"{note} 😊 Type *hi* for the menu.")
+                await self._set_state(wa_id, None, {})
+                return
             await self.wa.send_text(phone, "Everything's booked for the next 3 days 😔 — please try again tomorrow, or type *hi* for the menu.")
             await self._set_state(wa_id, None, {})
             return

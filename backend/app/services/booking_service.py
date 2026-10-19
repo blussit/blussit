@@ -51,6 +51,7 @@ from app.services.capacity_policy_service import CapacityPolicyService
 from app.services import booking_money as bm
 from app.services.coupon_service import CouponService
 from app.services.customer_charge_service import CustomerChargeService, late_cancellation_quote
+from app.services.holiday_service import HolidayService, overlaps as holiday_overlaps
 from app.services.money_service import MoneyService
 from app.services.notification_service import NotificationService
 from app.services.pricing_service import PricingService
@@ -2275,9 +2276,11 @@ class BookingService:
         except ValueError:
             raise BadRequestException("Pick a valid date.")
         _ensure_within_advance_window(scheduled_date, policy)
-        _, slot_end = _resolve_slot_window(center, scheduled_date, payload.scheduled_slot, policy)
+        slot_start, slot_end = _resolve_slot_window(center, scheduled_date, payload.scheduled_slot, policy)
         if _slot_cutoff_passed(slot_end, policy):
             raise BadRequestException("This slot is no longer available to book — please pick another slot.")
+        # Before the code is spent: a holiday refuses the booking anyway.
+        await HolidayService(self.db).ensure_bookable(str(center["_id"]), slot_start=slot_start, slot_end=slot_end)
         # Read-only mirror of _reserve_slot_capacity's guard: the booker's own
         # hold (by hold_key) is theirs to convert; anyone else's counts.
         slot_filter = {"service_center_id": str(center["_id"]), "date": to_ist(scheduled_date).strftime("%Y-%m-%d"), "slot_key": payload.scheduled_slot}
@@ -3839,9 +3842,22 @@ class BookingService:
         cap_policy = await self.capacity_policy_service.get_effective_policy(service_center_id, date_str)
         defaults = await self._slot_capacity_defaults(center, date_str, [s["key"] for s in raw_slots], policy=policy, cap_policy=cap_policy)
         day_left = await self._day_seats_left(center, date_str, cap_policy=cap_policy)
+        # Holidays (HolidayService): from the in-process cache — no extra
+        # round trip on this polled endpoint. A holiday slot reads "full"
+        # (old clients keep working) plus holiday/holiday_message/resume_label.
+        holidays = HolidayService(self.db)
+        center_holidays = await holidays.center_holidays(service_center_id)
+        holiday_pool = await holidays.live_holidays() if center_holidays else []
         results = []
         for slot in raw_slots:
             slot_start, slot_end = _resolve_slot_window(center, scheduled_date, slot["key"], policy)
+            blocked = next((h for h in center_holidays if holiday_overlaps(h, slot_start, slot_end)), None) if center_holidays else None
+            if blocked is not None:
+                results.append({
+                    "key": slot["key"], "start": slot["start"], "end": slot["end"], "status": "full", "remaining": 0,
+                    **holidays.slot_marker(blocked, holiday_pool, service_center_id),
+                })
+                continue
             cutoff_passed = _slot_cutoff_passed(slot_end, policy)
             doc = day_docs.get(slot["key"])
             capacity = int(doc["capacity"]) if doc else int(defaults.get(slot["key"]) or 0)
@@ -4120,6 +4136,7 @@ class BookingService:
         _slot_start, slot_end = _resolve_slot_window(center, parsed_date, slot_key, policy)  # raises on an invented key
         if _slot_cutoff_passed(slot_end, policy):
             raise BadRequestException("This slot is no longer available to book — please pick another slot.")
+        await HolidayService(self.db).ensure_bookable(service_center_id, slot_start=_slot_start, slot_end=slot_end)
         slot_filter = self._hold_filter(service_center_id, date_str, slot_key)
         await self._sweep_holds(slot_filter)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.HOLD_MINUTES)
@@ -4189,6 +4206,7 @@ class BookingService:
 
     async def _reserve_slot_capacity(
         self, session, service_center: dict, date_str: str, slot_key: str, holder_ids: list[str] | None = None, day: bool = True,
+        holiday_check: bool = True,
     ) -> None:
         """Atomically reserves one spot in this slot (and, if the center
         has a daily cap configured, one spot in the day too) — single
@@ -4201,8 +4219,16 @@ class BookingService:
         This is ONLY the counter half of taking a seat: callers record the
         ownership (holds_seat/seat_key) on the booking in the same
         transaction — see _take_seat. `day=False` skips the daily counter
-        (a move within the same day keeps its place in the day)."""
+        (a move within the same day keeps its place in the day).
+
+        Holidays: a slot inside one is refused first (HolidayException,
+        error_code HOLIDAY) — this is the one place every seat-taking path
+        passes (create, quick, group, staff, reschedule, edit, WhatsApp
+        bot). `holiday_check=False` only for the recycle-bin restore, which
+        puts back a booking that already existed."""
         center_id = str(service_center["_id"])
+        if holiday_check:
+            await HolidayService(self.db).ensure_bookable(center_id, date_str, slot_key)
         slot_key_filter = {"service_center_id": center_id, "date": date_str, "slot_key": slot_key}
         default_capacity = await self._default_slot_capacity(service_center, date_str, slot_key)
         if default_capacity is None and not await self.slot_capacity_repo.collection.find_one(slot_key_filter, session=session):
@@ -6263,11 +6289,11 @@ class BookingService:
             )
             car["holds_seat"], car["seat_key"] = holds, key
 
-    async def _take_seat(self, session, center: dict, booking_id, date_str: str, slot_key: str, *, day: bool = True) -> dict:
+    async def _take_seat(self, session, center: dict, booking_id, date_str: str, slot_key: str, *, day: bool = True, holiday_check: bool = True) -> dict:
         """Reserve the counter AND record the booking as its holder — one
         unit of work, inside the caller's transaction. Raises (and the
         transaction aborts) when the slot is full, closed or unconfigured."""
-        await self._reserve_slot_capacity(session, center, date_str, slot_key, day=day)
+        await self._reserve_slot_capacity(session, center, date_str, slot_key, day=day, holiday_check=holiday_check)
         key = self._seat_key(str(center["_id"]), date_str, slot_key)
         claimed = await self.repo.collection.update_one(
             {"_id": ObjectId(str(booking_id)), "holds_seat": {"$ne": True}},
@@ -8331,7 +8357,9 @@ class BookingService:
                     if not center:
                         raise BadRequestException(f"{live[0].get('booking_number')} can't be restored — its service center no longer exists.")
                     try:
-                        await self._take_seat(session, center, live[0]["_id"], key["date"], key["slot_key"])
+                        # A restore puts back a booking that already existed —
+                        # never refused for a holiday declared since.
+                        await self._take_seat(session, center, live[0]["_id"], key["date"], key["slot_key"], holiday_check=False)
                     except BadRequestException:
                         raise BadRequestException(
                             f"{live[0].get('booking_number')} can't be restored — its slot ({format_slot_12h(key['slot_key'])} on "

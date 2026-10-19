@@ -54,6 +54,7 @@ from app.routes.v1 import (
     wallet_routes,
     whatsapp_crm_routes,
     zone_routes,
+    holiday_routes,
     whatsapp_webhook_routes,
     ws_routes,
 )
@@ -1746,6 +1747,9 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(society_schedule_routes.router, prefix=api_prefix)
     target.include_router(society_support_routes.issue_router, prefix=api_prefix)
     target.include_router(society_support_routes.lead_router, prefix=api_prefix)
+    target.include_router(holiday_routes.admin_router, prefix=api_prefix)
+    target.include_router(holiday_routes.public_router, prefix=api_prefix)
+    target.include_router(holiday_routes.customer_router, prefix=api_prefix)
 
 
 if _serves_public_routes():

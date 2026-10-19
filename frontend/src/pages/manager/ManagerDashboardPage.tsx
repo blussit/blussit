@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CalendarClock,
+  CalendarOff,
   CalendarPlus,
   Car,
   CheckCircle2,
@@ -19,6 +20,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import { useCenterHolidays } from "../../hooks/useCenterHolidays";
 import { analyticsApi, kpiApi, type ManagerDashboard } from "../../api/admin";
 import { paymentApi } from "../../api/payment";
 import { EmptyState, ErrorState } from "../../components/ui";
@@ -79,6 +81,8 @@ export default function ManagerDashboardPage() {
     refetchInterval: 60000,
   });
 
+  const { data: holidays } = useCenterHolidays(centerId);
+
   // Service quality averages (all-time, center) — the small strip at the end.
   const { data: quality } = useQuery({
     queryKey: ["manager-kpi", centerId],
@@ -131,6 +135,19 @@ export default function ManagerDashboardPage() {
           </button>
         </div>
       </div>
+
+      {/* Holidays announced for this center: no new bookings in those hours. */}
+      {holidays && holidays.length > 0 && (
+        <div className="space-y-2" role="status">
+          {holidays.map((h) => (
+            <div key={h.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-[12px] border border-[#F3E5B5] bg-[#FFFCF0] px-4 py-2.5 text-sm text-[#0E1A33]">
+              <CalendarOff className="h-4 w-4 shrink-0" />
+              <span className="font-semibold">Holiday: {h.dates_label}</span>
+              <span className="text-[#5F6878]">{h.is_active_now ? "Running Now" : "No New Bookings"} · Reopens {h.resume_label}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {failed ? <ErrorState message="Couldn't load the dashboard." onRetry={() => void refetch()} busy={isFetching} /> : null}
 

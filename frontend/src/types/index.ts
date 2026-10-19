@@ -228,6 +228,11 @@ export interface SlotAvailability {
   end: string;
   status: "available" | "low" | "full";
   remaining: number | null;
+  /** Present (true) only on a slot inside an admin holiday — status is "full". */
+  holiday?: boolean;
+  holiday_message?: string;
+  /** "3 Oct 2026" — when booking reopens after that holiday. */
+  resume_label?: string;
 }
 
 // Staff-facing — unlike SlotAvailability, this carries the real numbers.

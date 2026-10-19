@@ -474,6 +474,7 @@ Recurring patterns (look for them before inventing new ones):
 | `booking_locks` | short insert-first lock around a booking's multi-step change | TTL |
 | `captain_locations` | GPS breadcrumbs | TTL 30 days |
 | `migrations` | one-time boot migration markers | |
+| `holidays` | admin-declared breaks when nobody can book (see §7.8) | `scope` all / centers + `service_center_ids`; `start_at` / `end_at` / `notice_from` UTC instants (typed IST `start_date`/`start_time`/`end_date`/`end_time` kept beside them); `message`, `title`; `active`; `cancelled_at` / `cancelled_by`, `ended_early` + `original_end_at` (End Now); indexes (active, end_at), (service_center_ids, end_at) via `ensure_holiday_indexes` |
 
 **Seat ownership (BOOK-02/03).** A visit holds exactly one seat. The booking
 records `holds_seat` + `seat_key {service_center_id, date, slot_key}` in the
@@ -932,6 +933,75 @@ wallet (2026-10-07; previously parked for refund). Refunds themselves are
 issued by an admin in Razorpay; the app tracks `refund_due` → `refunded`.
 
 
+### 7.8 Holidays (no bookings for a day or a period)
+
+Admin → **Holidays** (`/admin/holidays`) declares a break for **all
+centers** or **selected centers**, for a day or a period (IST start date +
+optional start time, end date + optional end time; no end time = to the end
+of that day). Rules (`HolidayService._validated`): message 1–300 chars, end
+after start, at most 60 days long, start at most 365 days ahead, end not in
+the past, centers must exist and be active. "Show Popup From" = days before
+the start (default 2) → `notice_from`.
+
+- **One check** (`services/holiday_service.py`): `HolidayService.ensure_bookable`
+  / `blocking_holiday(center, slot_start, slot_end)` — a slot overlapping a
+  live holiday (scope all, or the center listed) is refused with **400
+  `error_code: HOLIDAY`** ("We're on a holiday break on 1 Oct – 2 Oct. You
+  can book from 3 Oct 2026."; `details` carries `resume_date`). Hooked into
+  `BookingService._reserve_slot_capacity` (every seat-taking path: create,
+  quick, group, staff create / manager-quick, reschedule, customer edit incl.
+  `dry_run`, the WhatsApp bot, society premium washes), `hold_slot` and
+  `precheck_quick_booking` (refused before an OTP is spent).
+  `available_slots` marks holiday slots `status: "full"` (old clients keep
+  working) **plus** `holiday: true`, `holiday_message`, `resume_label` (only
+  on those slots). The live holiday list is cached **30 s per process** and
+  dropped on every write, so the hot path adds no database round trip; other
+  API instances see a change within 30 s.
+- **Not blocked:** a manager's Log A Done Job (never takes a seat), the
+  recycle-bin restore of an existing booking (`holiday_check=False`), edits
+  that don't move the date/slot. **Existing bookings inside a new holiday are
+  NOT cancelled** — create / update / preview return `affected_bookings
+  {count, sample[≤10]: booking_number, date, slot, center_name,
+  customer_name}` so the admin can act. Society scheduled visits: rows already
+  generated stay as they are; generating a visit for a holiday day fails per
+  resident with the HOLIDAY message (recorded on the visit as
+  `generation_error`, status failed/partial) — no special
+  handling was added. Daily society washes (attendance) aren't bookings and
+  are unaffected.
+- **Reopening:** `resume_at` = 00:00 IST the next day when the holiday ran to
+  day end, else its end time — skipping past any other live holiday that
+  touches or overlaps it. Labels are 12-hour IST: `dates_label` ("1 Oct – 2
+  Oct", "1 Oct", "1 Oct, 2:00 PM – 6:00 PM"), `resume_label` ("3 Oct 2026",
+  "3 Oct 2026, 2:00 PM").
+- **Routes:** admin (`require_admin`, audited `HOLIDAY_CREATE` / `_UPDATE` /
+  `_END`): `GET /admin/holidays?status=upcoming|active|past|all` (paginated),
+  `POST /admin/holidays`, `PATCH /admin/holidays/{id}`, `POST
+  /admin/holidays/{id}/end` (a running holiday ends now; an upcoming one is
+  cancelled), `POST /admin/holidays/preview[?holiday_id=]` (validation +
+  labels + popup + affected bookings, nothing written). Public: `GET
+  /public/holidays[?center_id=]` — holidays whose notice window is open
+  (`notice_from ≤ now < end_at`); without a center only scope=all, with one
+  also that center's; `Cache-Control: public, max-age=60`. Customer: `GET
+  /holidays/mine` — same list for the center of their default address (else
+  last booking). Items: `{id, scope, message, title, starts_at, ends_at,
+  is_active_now, dates_label, resume_at, resume_label, resume_date,
+  resume_day}`.
+- **Website:** `components/public/HolidayGate.tsx` (mounted once in App.tsx;
+  nothing during prerender) fetches the public list (or `/holidays/mine` in
+  the customer app; never in staff consoles) and lazy-loads
+  `HolidayPopup.tsx` (😊, the admin's message, "Thank You For Choosing
+  Blussit!", "We're Not Able To Serve On …", "You Can Book From …", **Book For
+  {day}** → `/book?date=YYYY-MM-DD`, which QuickBookFlow now honours). Once
+  per holiday per browser session (`sessionStorage` `blussit:holidaySeen:{id}`);
+  a holiday popup takes the visit — `LaunchOfferPopup` waits for the check
+  (`lib/holidayGate.ts`, ≤ 2.5 s) and is skipped that session. The slot
+  picker (`SlotBoard`) shows an inline notice for the center's holidays,
+  "Holiday" chips and day pills, and the popup once the address resolves to
+  the center. The WhatsApp bot answers with the holiday message when every
+  offered day is closed. Manager dashboard: a "Holiday: {dates}" banner for
+  their center.
+
+
 ---
 
 ## 8. Frontend (blussit.com)
@@ -975,7 +1045,7 @@ route; authenticated pages are lazy-loaded.
 | Customer app | `/app/*` (home, book, bookings + detail (Edit Booking sheet → PATCH /bookings/{id} or /group/{gid} with expected_total; cancel shows the cancellation-charge-preview wallet effect first; amount due + Pay Now), garage, addresses, subscriptions — incl. custom-plan carts; car-bound passes (custom-plan cars and monthly passes bought for one car) book through the "Book A Plan Wash" sheet with vehicle_id + subscription_id on the quick-booking line, since the server never auto-applies a car-bound pass to a by-type booking; the edit sheet previews with PATCH dry_run, `/app/wallet` (balance + ledger; WhatsApp wallet messages link here), offers, support, profile, settings, `/app/society/:token`) | customer |
 | Captain | `/captain/*` (today, jobs, job, societies, attendance, earnings, profile; English/Hindi) | captain |
 | Manager | `/manager/*` (dashboard, queue, new booking, log job, captains, sell plan, custom plans, subscribers, charges, societies + planner, complaints, reviews, inventory) | manager |
-| Admin | `/admin/*` (dashboard, bookings, users, services, vehicle types, combos, plans, purchased plans, custom plans (view + Renew Plan / Refund Car, and finishing a renewal), society plans/societies/planner, coupons, pricing, slot capacity, centers, zones, homepage, charges + wallet payouts, complaints, reviews, contact messages, coverage leads, plan enquiries, WhatsApp, audit logs) | admin |
+| Admin | `/admin/*` (dashboard, bookings, users, services, vehicle types, combos, plans, purchased plans, custom plans (view + Renew Plan / Refund Car, and finishing a renewal), society plans/societies/planner, coupons, pricing, slot capacity, centers, zones, holidays, homepage, charges + wallet payouts, complaints, reviews, contact messages, coverage leads, plan enquiries, WhatsApp, audit logs) | admin |
 
 This round's staff/customer screens (2026-10-07/08): custom plan Renew Plan /
 Refund Car (manager + admin, `components/manager/CustomPlanCard` +
@@ -1224,6 +1294,7 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-19 | Holiday system: `holidays` collection + `HolidayService` (30 s in-process cache), one HOLIDAY check in `_reserve_slot_capacity` / `hold_slot` / `precheck_quick_booking`, holiday-marked `available_slots`, admin `/admin/holidays` (list/create/edit/end/preview, audited, affected bookings — never auto-cancelled), public `/public/holidays` (60 s cache) and `/holidays/mine`; website popup (lazy, once per session, beats the offer popup), slot-picker notice + Holiday chips, `/book?date=`, bot holiday reply, manager banner (§7.8). Tests: `tests/test_feat_holidays_*.py`. |
 | 2026-10-13 | Contact Card: activity/logs/reports spec — anonymous callers (hash only, per-card owner labels), owner activity log, admin overview + per-user table (purchased, activated, last used, daily calls/alerts/scans/notifications), daily roll-ups, managers see no logs. |
 | 2026-10-13 | Contact Card: quiet hours owner-managed (default 10 PM–7 AM), mandatory admin-managed call limits, ExoPhone number as an admin setting (changeable, read live). |
 | 2026-10-13 | Contact Card V1 decisions: admin-set price/discount/max per order/delivery fees; online-only customer orders; admin card templates (sample card + marked QR and ID places) and a sheet designer; one 8-character letters-and-digits Card ID in the QR and printed. |

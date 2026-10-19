@@ -7,6 +7,9 @@ import { getErrorMessage, getErrorStatus } from "../../lib/api-client";
 import { useLiveChannel } from "../../lib/socket";
 import { bookingDays, dayParts } from "./bookingTheme";
 import type { SlotAvailability } from "../../types";
+import { HolidayPopupHost } from "../public/HolidayGate";
+import { useCenterHolidays } from "../../hooks/useCenterHolidays";
+import { toTitle } from "../../lib/titleCase";
 
 /**
  * "Available Slots" from the approved booking mockup: a strip of day pills,
@@ -28,6 +31,8 @@ export function SlotBoard({
   maxAdvanceDays,
   heldSeconds,
   notice,
+  holidayPopup,
+  bookPath = "/book",
 }: {
   centerId: string;
   date: string;
@@ -38,8 +43,16 @@ export function SlotBoard({
   heldSeconds?: number | null;
   /** A message above the slots (e.g. the slot was lost). */
   notice?: string;
+  /** Also open the holiday popup (once per holiday per session) — the
+   *  customer/public flow once the address has resolved to this center. */
+  holidayPopup?: boolean;
+  /** Where the popup's "Book For …" button goes. */
+  bookPath?: string;
 }) {
   const queryClient = useQueryClient();
+  // Holidays announced for this center (all-centers ones included): an
+  // inline notice above the picker, always; the popup when asked.
+  const { data: holidays } = useCenterHolidays(centerId);
   const today = todayIST();
   const days = useMemo(() => bookingDays(today, maxAdvanceDays), [today, maxAdvanceDays]);
   const results = useQueries({
@@ -62,6 +75,10 @@ export function SlotBoard({
     const r = results[i];
     if (!r || !r.data) return null;
     return r.data.some((s) => s.status !== "full");
+  };
+  const holidayOn = (i: number): boolean => {
+    const r = results[i];
+    return !!r?.data?.length && r.data.every((s) => s.holiday);
   };
 
   // The customer's own day pick sticks; until then, skip closed days.
@@ -116,6 +133,21 @@ export function SlotBoard({
 
   return (
     <div className="@container min-w-0">
+      {holidayPopup && holidays && holidays.length > 0 && <HolidayPopupHost key={centerId} holidays={holidays} bookPath={bookPath} />}
+      {holidays && holidays.length > 0 && (
+        <div className="mb-3 space-y-2" role="status">
+          {holidays.map((h) => (
+            <div key={h.id} className="flex gap-2.5 rounded-[12px] border border-[#F3E5B5] bg-[#FFFCF0] px-3.5 py-3">
+              <span aria-hidden className="text-[20px] leading-none">😊</span>
+              <div className="min-w-0 text-[13px] leading-[1.45] text-[#3A4456]">
+                <p className="font-semibold text-[#0E1A33]">{toTitle(`Holiday break: ${h.dates_label}`)}</p>
+                {h.message && <p className="mt-0.5 break-words">{h.message}</p>}
+                <p className="mt-0.5 font-medium text-[#0E1A33]">{toTitle(`You can book from ${h.resume_label}.`)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {/* Day pills */}
       <div className="relative">
         <div ref={strip} className="hide-scrollbar -mx-1 flex snap-x gap-2 overflow-x-auto px-1 pb-1" role="group" aria-label="Choose a day">
@@ -123,6 +155,7 @@ export function SlotBoard({
             const { top, bottom } = dayParts(d, today);
             const selected = d === date;
             const closed = openOn(i) === false;
+            const offDay = closed && holidayOn(i);
             return (
               <button
                 key={d}
@@ -142,7 +175,7 @@ export function SlotBoard({
                 }`}
               >
                 <span className={`text-[12px] font-semibold ${selected ? "text-white" : "text-[#0E1A33]"}`}>{top}</span>
-                <span className={`text-[12px] ${selected ? "text-white/85" : closed ? "text-[#9AA3B2]" : "text-[#5F6878]"}`}>{closed && !selected ? "Full" : bottom}</span>
+                <span className={`text-[12px] ${selected ? "text-white/85" : closed ? "text-[#9AA3B2]" : "text-[#5F6878]"}`}>{closed && !selected ? (offDay ? "Holiday" : "Full") : bottom}</span>
               </button>
             );
           })}
@@ -236,6 +269,8 @@ export function SlotBoard({
 }
 
 function SlotChip({ slot }: { slot: SlotAvailability }) {
+  if (slot.holiday)
+    return <span className="shrink-0 rounded-full bg-[#FFF6D6] px-2.5 py-1 text-[11px] font-semibold text-[#7A5B00] @2xl:ml-[30px]">Holiday</span>;
   if (slot.status === "full") return <span className="shrink-0 rounded-full bg-[#EEF1F5] px-2.5 py-1 text-[11px] font-semibold text-[#8A93A3] @2xl:ml-[30px]">Full</span>;
   if (slot.status === "low" && slot.remaining != null)
     return (

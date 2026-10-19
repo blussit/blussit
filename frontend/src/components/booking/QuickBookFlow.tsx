@@ -323,6 +323,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const subscriptionParam = isCustomer ? searchParams.get("subscription") : null;
   // ?type=<vehicleTypeId> (garage "Book wash", home "Clean again"): that car type preselected.
   const typeParam = isManager ? null : searchParams.get("type");
+  // ?date=YYYY-MM-DD (the holiday popup's "Book For 3 Oct"): open on that day.
+  const dateParam = isManager ? null : searchParams.get("date");
   const [restored, setRestored] = useState(false);
   const restoreAddressRef = useRef<null | { pinned: LocationValue | null; savedAddressId: string | null; pincode: string; typed: boolean; slot: string }>(null);
   const skipAutoDateRef = useRef(false);
@@ -394,6 +396,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       // storage unavailable — nothing to keep
     }
   }, [restored, repeatId, storageKey, step, added, draft, planIntro, name, phone, pickedCustomerId, savedAddressId, pinned, typedAddress, line1, pincode, date, slot, confirmSlots, paymentMethod, couponCode, notes, altName, altPhone, logTime, sendWhatsApp, discount, tip, tipMethod]);
+
+  useEffect(() => {
+    if (!restored || !dateParam || !/^\d{4}-\d{2}-\d{2}$/.test(dateParam) || dateParam < todayIST()) return;
+    setDate(dateParam);
+    setSlot("");
+  }, [restored, dateParam]);
 
   useEffect(() => {
     scrollToTopNow();
@@ -2092,7 +2100,18 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           {addressBlock}
         </div>
       ) : slotCenter ? (
-        <SlotBoard centerId={slotCenter} date={date} onDateChange={setDate} value={slot} onChange={pickSlot} maxAdvanceDays={policy?.max_advance_days} heldSeconds={hold.secondsLeft} notice={slotNotice} />
+        <SlotBoard
+          centerId={slotCenter}
+          date={date}
+          onDateChange={setDate}
+          value={slot}
+          onChange={pickSlot}
+          maxAdvanceDays={policy?.max_advance_days}
+          heldSeconds={hold.secondsLeft}
+          notice={slotNotice}
+          holidayPopup={coverage === "covered" && slotCenter === centerId}
+          bookPath={isCustomer ? "/app/book" : "/book"}
+        />
       ) : (
         <div className="space-y-3">
           {/* Clipped, never scrolled: five day tiles are wider than a phone. */}

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { OFFER_POPUP_SEEN_KEY, useHolidayGate } from "../../lib/holidayGate";
 import { ArrowRight, Check, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
@@ -16,7 +17,7 @@ import {
   titleCase,
 } from "./landing/shared";
 
-const SEEN_KEY = "blussit:offerPopupSeen";
+const SEEN_KEY = OFFER_POPUP_SEEN_KEY;
 
 export interface PromotedOffer {
   service: Service;
@@ -151,8 +152,15 @@ export function LaunchOfferPopup({
   onClaim: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // A holiday notice takes the visit's one popup (lib/holidayGate): wait
+  // for that check (briefly), and stay away when a holiday popup showed.
+  const gate = useHolidayGate();
+  const decided = useRef(false);
 
   useEffect(() => {
+    if (gate === "pending" || decided.current) return;
+    decided.current = true;
+    if (gate === "showing") return;
     try {
       if (sessionStorage.getItem(SEEN_KEY)) return;
       sessionStorage.setItem(SEEN_KEY, "1");
@@ -161,7 +169,7 @@ export function LaunchOfferPopup({
     }
 
     setOpen(true);
-  }, []);
+  }, [gate]);
 
   useEffect(() => {
     if (!open) return;
