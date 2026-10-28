@@ -979,9 +979,11 @@ the start (default 2) → `notice_from`.
   on those slots). The live holiday list is cached **30 s per process** and
   dropped on every write, so the hot path adds no database round trip; other
   API instances see a change within 30 s.
-- **Not blocked:** a manager's Log A Done Job (never takes a seat), the
-  recycle-bin restore of an existing booking (`holiday_check=False`), edits
-  that don't move the date/slot. **Existing bookings inside a new holiday are
+- **Not blocked:** a manager's Log A Done Job (never takes a seat), edits
+  that don't move the date/slot. **The recycle-bin restore IS refused** when
+  the booking's date became a holiday after the delete (400, "… is now a
+  holiday. Book the customer again for another day." — RT-01, 2026-10-28;
+  done/cancelled jobs take no seat so are unaffected). **Existing bookings inside a new holiday are
   NOT cancelled** — create / update / preview return `affected_bookings
   {count, sample[≤10]: booking_number, date, slot, center_name,
   customer_name}` so the admin can act. Society scheduled visits: rows already
@@ -1138,13 +1140,15 @@ backend shapes. Request timeout 30 s (uploads 120 s).
 `lib/socket.ts` opens one shared socket to `wss://api.blussit.com/api/v1/ws?token=…`
 only while a screen subscribes (`useLiveChannel`), reconnects with backoff,
 refreshes a near-expiry token, pauses in hidden tabs. Channels (authorised
-server-side in `ws_routes.py:_authorize_channel`, ≤ 50 per socket):
+server-side in `ws_routes.py:_authorize_channel`, ≤ 50 per socket, ≤ 20 open
+sockets per account per instance → close code 4429, frames ≤ 64 KiB via
+`uvicorn --ws-max-size 65536`):
 
 | Channel | Used by | Who may subscribe |
 |---|---|---|
 | `user:{id}` | staff shells (bell) | that user |
 | `center-bookings:{center}` | manager queue | admin, that center's manager |
-| `slots:{center}:{date}` | slot pickers | any logged-in user |
+| `slots:{center}:{date}` | slot pickers | any logged-in user (only this exact shape: 24-hex center id + `YYYY-MM-DD`) |
 | `booking:{id}` | customer booking detail | admin, its customer, its captain, that center's manager |
 | `captain-location:{captain}` | live captain map | admin, the captain, that center's manager |
 
@@ -1293,16 +1297,58 @@ the worker fails.
   (`role`, `total_amount`, `is_deleted`, …) are silently dropped by every
   write schema, uploads are sniffed by magic bytes (no SVG, 8 MB cap) and
   KYC downloads check an ownership record, plan/wallet double-spend races
-  are closed by atomic ledger writes. One real gap found and left as a
-  recommendation (not fixed — touches the recycle-bin restore transaction):
-  `restore_booking` intentionally skips the holiday check
-  (`holiday_check=False`) when putting a deleted booking's seat back, so a
-  booking deleted before a holiday was declared on its date can be restored
-  into it; low exposure (admin/manager-only, recycle bin) but worth an
-  explicit "this date is now a holiday — restore anyway?" confirmation.
-  Known, already-documented limitation unchanged: rate limits are
+  are closed by atomic ledger writes. One real gap (RT-01, the recycle-bin restore skipping the
+  holiday check) was fixed in pass 2 below. Known, already-documented limitation unchanged: rate limits are
   per-instance (`core/rate_limit.py`), so N Cloud Run instances allow
   roughly N× one instance's limit.
+- **2026-10-28 red-team pass 2** (live, local stack only; two centers, two
+  managers/captains, three customers):
+  - *Role x endpoint matrix* — all 412 route-methods of the router table
+    called as anonymous, customer A, customer B, captain 1/2, manager 1/2 and
+    admin (plus reverse-direction calls with center-2 ids): ~4,380 calls,
+    **0 routes reachable by a role they should not be, 0 responses carrying
+    another party's data, 0 private data without auth**; the only 500 was a
+    dev-only artefact (`LogWhatsAppProvider` has no `create_template`).
+    Targeted cross-party attacks with real bodies (edit / cancel / assign /
+    photo / delete / restore / complaint reply / address / vehicle / center
+    edit) from customer B, customer C, captain 2, manager 2 and an unassigned
+    captain 1 changed nothing.
+  - *Webhooks* — Razorpay: no / empty / wrong-secret / other-body signature
+    -> 400 and nothing changes; a valid signature settles ONCE (12 parallel
+    deliveries with distinct event ids -> one settlement; the amount comes
+    from our own order row, never the payload); a second distinct payment on
+    a paid order is credited to the wallet. Meta: no / bad / sha1 /
+    unprefixed / empty signature -> 403; handshake with a wrong token or mode
+    -> 403.
+  - *WebSockets* — nobody can subscribe to another party's `booking:`,
+    `user:`, `captain-location:` or `center-bookings:` channel; expired,
+    tampered, role-edited and `alg: none` tokens close 4401. **Hardened:**
+    `slots:*` accepts only the real shape, one account may hold 20 sockets
+    (close 4429), uvicorn frame cap 64 KiB.
+  - *Races* (parallel on the local API): last capacity seat (10 -> 1), coupon
+    total limit (10 -> 1), per-user coupon (4 -> 1), wallet credit vs 8
+    bookings (never overspent), same OTP twice (1 of 8), parallel register
+    (1 of 8), `extend_pass` beyond the 10-day cap (1 of 6), finance void (1 of
+    8), booking cancel (1 of 6): no double success.
+  - *Rate limiting* — the limiter keys on the socket peer, or on the
+    `X-Forwarded-For` entry at `-TRUSTED_PROXY_COUNT` when `TRUST_PROXY_HEADERS`
+    is on; `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP` are
+    never read, and client-supplied left-hand entries are ignored when a proxy
+    appends the real IP. **Cloud Run setting:** `TRUST_PROXY_HEADERS=true`,
+    `TRUSTED_PROXY_COUNT=1` (the Google front end appends one entry; `2` lets a
+    client pick its own bucket; `0` behaves as `1`; never start uvicorn with
+    `--forwarded-allow-ips=*`).
+  - *Dependencies* — nothing exploitable in this deployment; `certifi` bumped
+    to 2026.10.19 (revoked CA root). starlette/fastapi, motor+pymongo,
+    axios/zod/follow-redirects bumps are recommended in a normal release.
+  - *Open (reported, not fixed — design decisions):* login lockout is per
+    account (5 bad passwords from anyone lock that account for 5 min);
+    anonymous account enumeration (`otp/request` `new_account`,
+    `forgot-password` 404 vs 200 incl. staff e-mails, `booking-access` mode);
+    OTP sends have no global ceiling (per phone 15/h, per (phone, IP) 5/h) and
+    three IPs can exhaust one victim's 15/h; the git history of `main` still
+    holds the 2026-10-06 dev DB dump and dev logs (see
+    [SECURITY_REPO_CLEANUP.md](SECURITY_REPO_CLEANUP.md), still to do).
 
 ## 14. Testing
 
@@ -1386,6 +1432,7 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Red-team pass 2 (live, local): full 412-route role x endpoint matrix, webhook forgery, websocket and race attacks, rate-limit/proxy trust, dependency and secrets-in-history scans — see §13. Fixed: RT-01 (the recycle-bin restore now refuses a date that became a holiday), websocket hardening (`slots:` channel shape, 20 sockets per account, 64 KiB frame cap), `certifi` 2026.10.19. Tests `test_redteam2_*`; the `test_feat_holidays_booking` restore expectation was reversed. |
 | 2026-10-28 | Red-team pass (local dev stack): auth/session, authz/IDOR matrix, money/booking-logic, injection/XSS/upload, infra/config and insider-abuse checks against every router — see §13. No code change (nothing low-risk-and-clear to fix was found; one finding — `restore_booking`'s deliberate holiday-check skip — reported, not fixed). Full backend suite run on a fresh local DB. |
 | 2026-10-28 | Plans audit: extended passes now usable on every auto-apply path (`_usable_passes` honours `extended_until`); plan picker data (`covers`, `usable`, `unusable_reason`, `explicit_only`) on all pass lists + `subscription_ids` on quote lines; per-car plan chooser in QuickBookFlow (manager Log A Done Job + booking, customer booking); overlap rule type-pass vs car-bound (§7.3); tests `test_feat_planfix_*`. |
 | 2026-10-28 | Names + customer location: deleted vehicle types keep their name (soft delete, `VehicleTypeNames` resolver, `/vehicle-types/lookup`, tombstone backfill boot task, "Removed" tag in admin, no raw ids in CRM/garage/KPI); customer home center/city/pincode on `users` (derivation precedence, address + booking hooks, resumable boot backfill + script, `/users` and `/crm/customers` filters/sort, new indexes, admin Users Center/City columns). |

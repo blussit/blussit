@@ -40,4 +40,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # shutdown (up to 5 s: finish background WhatsApp sends, stop the reminder
 # loop cleanly — app/main.py on_shutdown) still runs before the kill. The
 # same command serves both services; RUN_MODE decides what starts.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --no-access-log --ws-per-message-deflate false --timeout-graceful-shutdown 4"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --no-access-log --ws-per-message-deflate false --ws-max-size 65536 --timeout-graceful-shutdown 4"]

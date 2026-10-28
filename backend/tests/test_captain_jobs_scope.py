@@ -208,7 +208,7 @@ def test_ws_caps_channels_per_socket(monkeypatch):
     with client.websocket_connect(f"/api/v1/ws?token={_token(600)}") as ws:
         assert ws.receive_json() == {"type": "connected"}
         for i in range(ws_routes.MAX_CHANNELS_PER_SOCKET):
-            ws.send_json({"action": "subscribe", "channel": f"slots:c{i}:2026-01-01"})
+            ws.send_json({"action": "subscribe", "channel": f"slots:{i:024x}:2026-01-01"})
             assert ws.receive_json()["type"] == "subscribed"
-        ws.send_json({"action": "subscribe", "channel": "slots:one-too-many:2026-01-01"})
+        ws.send_json({"action": "subscribe", "channel": f"slots:{999:024x}:2026-01-01"})
         assert ws.receive_json() == {"type": "error", "message": "Too many channels on this connection"}

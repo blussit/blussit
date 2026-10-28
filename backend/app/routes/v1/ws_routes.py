@@ -21,6 +21,7 @@ code 4401, before any channel is ever accepted.
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -37,6 +38,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Realtime"])
 
 MAX_CHANNELS_PER_SOCKET = 50
+# RT2 (2026-10-28): sockets one account may hold open on this instance. Real
+# use is a few tabs plus a phone; one signed-in script opening hundreds of
+# sockets (each with 50 channels) was a memory/connection-exhaustion lever.
+MAX_SOCKETS_PER_USER = 20
+_open_sockets: dict[str, int] = {}
+_SLOT_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_OBJECT_ID = re.compile(r"^[0-9a-f]{24}$")
+
+
+def _reserve_socket(user_id: str) -> bool:
+    """Counts one more open socket for this account; False when it is at the cap."""
+    if _open_sockets.get(user_id, 0) >= MAX_SOCKETS_PER_USER:
+        return False
+    _open_sockets[user_id] = _open_sockets.get(user_id, 0) + 1
+    return True
+
+
+def _release_socket(user_id: str) -> None:
+    left = _open_sockets.get(user_id, 0) - 1
+    if left > 0:
+        _open_sockets[user_id] = left
+    else:
+        _open_sockets.pop(user_id, None)
 
 
 class _WsUser:
@@ -57,7 +81,10 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
     kind = parts[0]
 
     if kind == "slots" and len(parts) == 3:
-        return True  # same as the public GET /service-centers/{id}/slots — no auth restriction on this data
+        # Same as the public GET /service-centers/{id}/slots — no auth
+        # restriction on this data, but only the one shape the booking page
+        # uses (a junk name would just sit in the registry).
+        return bool(_OBJECT_ID.match(parts[1]) and _SLOT_DATE.match(parts[2]))
 
     if kind == "center-bookings" and len(parts) == 2:
         center_id = parts[1]
@@ -132,6 +159,12 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
         await websocket.close(code=4401)
         return
 
+    if not _reserve_socket(user.id):
+        await websocket.accept()
+        await websocket.close(code=4429)  # too many open connections for this account
+        return
+    owner_id = user.id
+
     db = get_database()
 
     await websocket.accept()
@@ -202,3 +235,4 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
         if expiry_handle:
             expiry_handle.cancel()
         manager.unsubscribe_all(websocket)
+        _release_socket(owner_id)

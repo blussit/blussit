@@ -52,7 +52,7 @@ from app.services.capacity_policy_service import CapacityPolicyService
 from app.services import booking_money as bm
 from app.services.coupon_service import CouponService
 from app.services.customer_charge_service import CustomerChargeService, late_cancellation_quote
-from app.services.holiday_service import HolidayService, overlaps as holiday_overlaps
+from app.services.holiday_service import HolidayException, HolidayService, overlaps as holiday_overlaps
 from app.services.money_service import MoneyService
 from app.services.notification_service import NotificationService
 from app.services.pricing_service import PricingService
@@ -4235,8 +4235,8 @@ class BookingService:
         Holidays: a slot inside one is refused first (HolidayException,
         error_code HOLIDAY) — this is the one place every seat-taking path
         passes (create, quick, group, staff, reschedule, edit, WhatsApp
-        bot). `holiday_check=False` only for the recycle-bin restore, which
-        puts back a booking that already existed."""
+        bot) — the recycle-bin restore included (RT-01). `holiday_check=False`
+        remains a parameter for any future path that must skip it."""
         center_id = str(service_center["_id"])
         if holiday_check:
             await HolidayService(self.db).ensure_bookable(center_id, date_str, slot_key)
@@ -8368,9 +8368,16 @@ class BookingService:
                     if not center:
                         raise BadRequestException(f"{live[0].get('booking_number')} can't be restored — its service center no longer exists.")
                     try:
-                        # A restore puts back a booking that already existed —
-                        # never refused for a holiday declared since.
-                        await self._take_seat(session, center, live[0]["_id"], key["date"], key["slot_key"], holiday_check=False)
+                        # RT-01 (red-team 2026-10-28): a holiday declared since
+                        # the delete refuses the restore too — a booking must
+                        # not come back to life inside a break.
+                        await self._take_seat(session, center, live[0]["_id"], key["date"], key["slot_key"])
+                    except HolidayException:
+                        raise BadRequestException(
+                            f"{live[0].get('booking_number')} can't be restored — "
+                            f"{datetime.strptime(key['date'], '%Y-%m-%d').strftime('%d %b %Y')} is now a holiday. "
+                            "Book the customer again for another day."
+                        )
                     except BadRequestException:
                         raise BadRequestException(
                             f"{live[0].get('booking_number')} can't be restored — its slot ({format_slot_12h(key['slot_key'])} on "

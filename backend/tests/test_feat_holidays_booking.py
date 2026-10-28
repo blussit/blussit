@@ -214,7 +214,10 @@ async def test_end_now_reopens_booking_at_once(db, clean):
     assert await HolidayService(db).public_list(s["center_id"]) == []
 
 
-async def test_existing_bookings_are_kept_and_restore_is_not_blocked(db, clean):
+async def test_existing_bookings_are_kept_and_restore_is_refused_inside_a_holiday(db, clean):
+    # RT-01 (2026-10-28): the restore used to skip the holiday check; it now
+    # refuses a date that became a holiday after the delete (see
+    # test_redteam2_holiday_restore.py). Existing live bookings stay untouched.
     s = await _rig(db, clean)
     b = await fb.book(db, s["cu"], hh.day(1), SLOTS[0])
     async with h.client() as c:
@@ -222,8 +225,6 @@ async def test_existing_bookings_are_kept_and_restore_is_not_blocked(db, clean):
         assert (await fb.doc(db, b["id"]))["is_deleted"] is True
         made = await hh.make(c, s["admin"], scope="centers", service_center_ids=[s["center_id"]])
         assert made["affected_bookings"]["count"] == 0  # in the recycle bin
-        # Restoring a booking that already existed is never refused.
         r = await c.post(f"/api/v1/bookings/{b['id']}/restore", headers=s["admin"])
-        assert r.status_code == 200, r.text
-    d = await fb.doc(db, b["id"])
-    assert d["status"] == "pending" and not d.get("is_deleted") and d["holds_seat"] is True
+        assert r.status_code == 400 and "holiday" in r.json()["message"].lower(), r.text
+    assert (await fb.doc(db, b["id"]))["is_deleted"] is True
