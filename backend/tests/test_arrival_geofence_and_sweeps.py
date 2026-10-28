@@ -71,20 +71,25 @@ def _plate(booking: dict) -> str:
 
 
 @pytest.mark.asyncio
-async def test_far_arrival_is_flagged_and_manager_notified(rig, db):
+async def test_far_arrival_is_refused_and_leaves_evidence(rig, db):
+    """Was flag-only ("flag, never block"). Since the GPS-integrity change
+    (docs/ARCHITECTURE.md 7.10) an arrival outside the geofence is REFUSED
+    with GEO_CHECK_FAILED; the full matrix is in tests/test_gps_integrity.py."""
+    from app.services.geo_integrity_service import GeoCheckException
+
     bs = BookingService(db)
     booking = await _booking_on_the_way(rig, db)
-    await bs.verify_vehicle(
-        str(booking["_id"]),
-        VerifyVehicleRequest(registration_number=_plate(booking), latitude=FAR[0], longitude=FAR[1]),
-        rig["captain_id"],
-    )
+    with pytest.raises(GeoCheckException):
+        await bs.verify_vehicle(
+            str(booking["_id"]),
+            VerifyVehicleRequest(registration_number=_plate(booking), latitude=FAR[0], longitude=FAR[1]),
+            rig["captain_id"],
+        )
     updated = await db.bookings.find_one({"_id": booking["_id"]})
-    assert updated["vehicle_verified"] is True  # flag, never block
-    assert updated["arrival_flagged"] is True
-    assert updated["arrival_distance_m"] > 10000
-    note = await db.notifications.find_one({"user_id": rig["manager_id"], "title": {"$regex": "Location flagged"}})
-    assert note is not None and "reached" in note["message"]
+    assert not updated.get("vehicle_verified")
+    assert updated["geo_refusals"] == 1
+    assert await db.geo_events.count_documents({"booking_id": str(booking["_id"]), "step": "arrival"}) == 1
+    await db.geo_events.delete_many({"booking_id": str(booking["_id"])})
 
 
 @pytest.mark.asyncio
@@ -105,14 +110,24 @@ async def test_near_arrival_is_clean_and_breadcrumbed(rig, db):
 
 
 @pytest.mark.asyncio
-async def test_verify_without_gps_still_works(rig, db):
-    """Old app versions in the field send only the plate — must not break."""
+async def test_verify_without_gps_needs_a_pin_to_be_refused(rig, db):
+    """Old behaviour: a missing fix was only flagged. Now it is refused when
+    the address has a pin; an address WITHOUT a pin can't be geofenced, so it
+    keeps the old flag-only path (arrival_no_gps)."""
+    from app.services.geo_integrity_service import GeoCheckException
+
     bs = BookingService(db)
     booking = await _booking_on_the_way(rig, db)
+    with pytest.raises(GeoCheckException):
+        await bs.verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(registration_number=_plate(booking)), rig["captain_id"])
+    await db.geo_events.delete_many({"booking_id": str(booking["_id"])})
+
+    await db.addresses.update_one({"_id": ObjectId(rig["address_id"])}, {"$set": {"latitude": None, "longitude": None}})
+    await db.bookings.update_one({"_id": booking["_id"]}, {"$unset": {"address_snapshot": ""}})
     await bs.verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(registration_number=_plate(booking)), rig["captain_id"])
     updated = await db.bookings.find_one({"_id": booking["_id"]})
     assert updated["vehicle_verified"] is True
-    assert updated.get("arrival_location") is None
+    assert updated.get("arrival_location") is None and updated["arrival_no_gps"] is True
 
 
 # ------------------------------------------------------------- sweeps
@@ -122,7 +137,9 @@ async def test_verify_without_gps_still_works(rig, db):
 async def test_idle_after_arrival_sweep(rig, db):
     bs = BookingService(db)
     booking = await _booking_on_the_way(rig, db)
-    await bs.verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(registration_number=_plate(booking)), rig["captain_id"])
+    await bs.verify_vehicle(
+        str(booking["_id"]), VerifyVehicleRequest(registration_number=_plate(booking), latitude=NEAR[0], longitude=NEAR[1]), rig["captain_id"],
+    )
 
     # Fresh arrival — not idle yet.
     assert not any(str(b["_id"]) == str(booking["_id"]) for b in await bs.find_bookings_idle_after_arrival())

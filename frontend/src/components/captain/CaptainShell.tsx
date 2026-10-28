@@ -19,6 +19,8 @@ import { useLiveChannel } from "../../lib/socket";
 import { notificationTargetPath } from "../../lib/notifications";
 import { playNotificationChime } from "../../lib/notificationSound";
 import { MandatoryGates } from "../shared/MandatoryGates";
+import { getErrorStatus } from "../../lib/api-client";
+import { fixFields, toPosition, type Position } from "./photo";
 
 // A manager watching the live map sees real movement; sparse enough for a
 // phone battery. Only while he has at least one active job.
@@ -68,15 +70,69 @@ function useJobPlumbing() {
   const hasActiveJob = (active.data?.meta.total ?? 0) > 0;
   useEffect(() => {
     if (!hasActiveJob || !navigator.geolocation) return;
+    // Pings the server can use as evidence of the trip (it keeps each
+    // fix's own time): a failed send is queued and retried oldest-first, so
+    // a patch of bad network doesn't leave a hole in the trail. Bounded —
+    // the server drops anything older than ~10 minutes anyway.
+    const queue: Position[] = [];
+    let flushing = false;
+    const flush = async () => {
+      if (flushing) return;
+      flushing = true;
+      try {
+        while (queue.length) {
+          const next = queue[0];
+          try {
+            await staffDirectoryApi.pingLocation(fixFields(next));
+          } catch (e) {
+            // A 4xx is a final answer (too old, bad clock): drop it. Network: keep and retry later.
+            if (getErrorStatus(e) !== undefined && (getErrorStatus(e) as number) < 500) {
+              queue.shift();
+              continue;
+            }
+            return;
+          }
+          queue.shift();
+        }
+      } finally {
+        flushing = false;
+      }
+    };
     const send = () =>
       navigator.geolocation.getCurrentPosition(
-        (pos) => staffDirectoryApi.pingLocation(pos.coords.latitude, pos.coords.longitude).catch(() => {}),
+        (pos) => {
+          queue.push(toPosition(pos));
+          if (queue.length > 24) queue.shift();
+          void flush();
+        },
         () => {},
-        { enableHighAccuracy: true, timeout: 15000 },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
       );
     send();
     const timer = setInterval(send, LOCATION_PING_INTERVAL_MS);
-    return () => clearInterval(timer);
+    // A phone that slept in a pocket sends a ping the moment the app is back.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") send();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    // Keep the screen awake while a job is live (best effort) so the trail
+    // stays continuous — not available everywhere, never required.
+    let lock: { release: () => Promise<void> } | null = null;
+    const wake = () => {
+      const nav = navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<{ release: () => Promise<void> }> } };
+      nav.wakeLock?.request("screen").then((l) => (lock = l)).catch(() => {});
+    };
+    wake();
+    const onVisibleWake = () => {
+      if (document.visibilityState === "visible") wake();
+    };
+    document.addEventListener("visibilitychange", onVisibleWake);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("visibilitychange", onVisibleWake);
+      void lock?.release().catch(() => {});
+    };
   }, [hasActiveJob]);
 }
 

@@ -42,16 +42,16 @@ async def test_withdrawal_queue_carries_the_captain_name(db, monkeypatch):
     assert calls["users.find_one"] == 0  # batched, never one lookup per row
 
 
-async def test_staff_code_reset_refusal_has_a_stable_error_code(db):
+async def test_staff_code_reset_is_refused_without_saying_so(db, cleanup):
+    """Was a distinct STAFF_RESET_REFUSED error; that told anyone which emails/
+    numbers are staff, so now the request answers like any other identifier
+    (nothing is sent) and the reset says only "Invalid or expired code."."""
     admin = await db.users.find_one({"email": "admin@doorstepvehiclecare.in"})
-    with pytest.raises(StaffResetRefusedException) as exc:
-        await AuthService(db).request_otp(admin["email"], OTP_PASSWORD_RESET)
-    assert exc.value.error_code == "STAFF_RESET_REFUSED" and exc.value.status_code == 400
+    cleanup.append(("otp_requests", {"identifier": admin["phone"]}))
+    cleanup.append(("otp_requests", {"_id": f"otp-send-cap:{admin['phone']}"}))
+    before = await db.whatsapp_outbox.count_documents({"phone": admin["phone"]})
+    assert await AuthService(db).request_otp(admin["email"], OTP_PASSWORD_RESET) == "whatsapp"
+    assert await db.whatsapp_outbox.count_documents({"phone": admin["phone"]}) == before
     async with h.client() as c:
-        for path, body in (
-            ("/api/v1/auth/forgot-password", {"identifier": admin["email"]}),
-            ("/api/v1/auth/reset-password", {"identifier": admin["phone"], "otp": "123456", "new_password": "Owned@123456"}),
-        ):
-            r = await c.post(path, json=body)
-            assert r.status_code == 400, r.text
-            assert r.json()["error_code"] == "STAFF_RESET_REFUSED" and "admin" in r.json()["message"]
+        r = await c.post("/api/v1/auth/reset-password", json={"identifier": admin["phone"], "otp": "123456", "new_password": "Owned@123456"})
+        assert r.status_code == 400 and r.json()["message"] == "Invalid or expired code."

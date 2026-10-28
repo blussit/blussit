@@ -17,12 +17,18 @@ is what the review actually checks.
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.authz import ensure_own_center
-from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
 from app.repositories.user_repository import UserRepository
 from app.schemas.staff_kyc_schema import KycReviewRequest, KycSubmitRequest
 from app.services.audit_service import AuditService
 from app.services.notification_service import NotificationService
 from app.utils.timezone import from_stored, now_ist
+
+VERIFIED_LOCK_MESSAGE = "Verified Documents Can't Be Changed — Contact Your Manager"
+# Every earlier version of a captain's packet is kept here, never deleted
+# (no purge endpoint exists; retention is the founder's call, see
+# docs/ARCHITECTURE.md). The document FILES are never deleted either.
+KYC_VERSIONS = "kyc_versions"
 
 
 def _mask_tail(value: str | None, visible: int = 4) -> str | None:
@@ -95,7 +101,7 @@ class StaffKycService:
             raise NotFoundException("Captain not found")
         current = captain.get("captain_kyc") or {}
         if current.get("status") == "verified":
-            raise BadRequestException("Your documents are already verified — ask your manager to reopen them if something changed.")
+            raise ConflictException(VERIFIED_LOCK_MESSAGE)
 
         data = payload.model_dump()
         if data.get("same_as_local"):
@@ -120,6 +126,8 @@ class StaffKycService:
         updated = await self.user_repo.update_if(captain_id, guard, {"captain_kyc": kyc})
         if updated is None:
             raise BadRequestException("Your verification status just changed — reload your profile and try again.")
+        if current.get("submitted_at"):
+            await self._archive(captain_id, current, "superseded_by_resubmission", captain_id)
         await self.audit.log_action(captain_id, "captain", "SUBMIT_KYC", "staff", captain_id, {"status": "submitted"})
         return _serialized(kyc)
 
@@ -142,13 +150,56 @@ class StaffKycService:
                 continue
             raise BadRequestException(f"Please upload your {label} again from this screen.")
 
-    async def get_for_review(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+    async def _archive(self, captain_id: str, kyc: dict, reason: str, actor_id: str) -> None:
+        """Keep the packet being replaced/reopened as a numbered version."""
+        coll = self.user_repo.collection.database[KYC_VERSIONS]
+        count = await coll.count_documents({"captain_id": captain_id})
+        await coll.insert_one({
+            "captain_id": captain_id, "version": count + 1, "snapshot": dict(kyc),
+            "reason": reason, "archived_by": actor_id, "archived_at": now_ist(),
+        })
+
+    async def list_versions(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> list[dict]:
+        """Earlier packets (numbers masked to the last 4 for everyone —
+        the full value is only ever on the live packet's admin view)."""
+        await self._own_center_captain(captain_id, actor_role, actor_center_id, allow_deleted=actor_role == "admin")
+        rows = await self.user_repo.collection.database[KYC_VERSIONS].find({"captain_id": captain_id}).sort("version", 1).to_list(length=200)
+        out = []
+        for r in rows:
+            snap = _serialized(dict(r.get("snapshot") or {}))
+            for key in ("aadhaar_number", "pan_number"):
+                if snap.get(key):
+                    snap[key] = _mask_tail(str(snap[key]))
+            at = r.get("archived_at")
+            out.append({
+                "version": r.get("version"), "reason": r.get("reason"), "archived_by": r.get("archived_by"),
+                "archived_at": from_stored(at).isoformat() if at is not None and not isinstance(at, str) else at,
+                "packet": snap,
+            })
+        return out
+
+    async def get_for_review(self, captain_id: str, actor_role: str, actor_center_id: str | None, actor_id: str | None = None, ip: str | None = None) -> dict:
         captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
+        if actor_id:
+            await self.audit.log_action(actor_id, actor_role, "VIEW_KYC_PACKET", "kyc", captain_id, {"ip": ip, "full_numbers": actor_role == "admin"})
         return _for_reviewer(captain.get("captain_kyc") or {"status": "pending"}, actor_role)
 
-    async def review(self, captain_id: str, payload: KycReviewRequest, reviewer_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+    async def request_reverification(self, captain_id: str, note: str | None, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+        """The ONLY way a verified packet is reopened: a manager/admin asks
+        for re-verification (with a reason the captain sees). The verified
+        version is kept as history; the captain can then resubmit."""
         captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
-        kyc = captain.get("captain_kyc") or {}
+        if not (captain.get("captain_kyc") or {}).get("status") == "verified":
+            raise BadRequestException("Only verified documents need a re-verification request.")
+        if not (note or "").strip():
+            raise BadRequestException("Please tell the captain what needs to be re-checked.")
+        return await self.review(captain_id, KycReviewRequest(status="rejected", note=note), actor_id, actor_role, actor_center_id, _reason="reverification_requested")
+
+    async def review(self, captain_id: str, payload: KycReviewRequest, reviewer_id: str, actor_role: str, actor_center_id: str | None, _reason: str = "reopened_by_review") -> dict:
+        captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
+        kyc = dict(captain.get("captain_kyc") or {})
+        was_verified = kyc.get("status") == "verified"
+        before_review = dict(kyc)
         if kyc.get("status") not in ("submitted", "verified", "rejected"):
             raise BadRequestException("This captain hasn't submitted their documents yet.")
         kyc.update({
@@ -165,6 +216,8 @@ class StaffKycService:
         )
         if updated is None:
             raise BadRequestException("The captain just resubmitted their documents — reload and review the new packet.")
+        if was_verified and payload.status != "verified":
+            await self._archive(captain_id, before_review, _reason, reviewer_id)
         await self.audit.log_action(reviewer_id, actor_role, "REVIEW_KYC", "staff", captain_id, {"status": payload.status, "note": payload.note})
         title = "Background verification approved" if payload.status == "verified" else "Documents need another look"
         message = (
@@ -175,9 +228,9 @@ class StaffKycService:
         await self.notifications.notify(captain_id, title, message)
         return _for_reviewer(kyc, actor_role)
 
-    async def _own_center_captain(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> dict:
+    async def _own_center_captain(self, captain_id: str, actor_role: str, actor_center_id: str | None, allow_deleted: bool = False) -> dict:
         captain = await self.user_repo.find_by_id(captain_id)
-        if not captain or captain.get("role") != "captain":
+        if not captain or captain.get("role") != "captain" or (captain.get("is_deleted") and not allow_deleted):
             raise NotFoundException("Captain not found")
         ensure_own_center(actor_role, actor_center_id, captain.get("service_center_id"))
         return captain

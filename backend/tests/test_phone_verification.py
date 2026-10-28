@@ -202,5 +202,8 @@ async def test_otp_resend_is_rate_limited(rig, db, cleanup):
 
     auth = AuthService(db)
     await auth.request_phone_verification(customer_id)
-    with pytest.raises(BadRequestException, match="wait"):
+    from app.core.exceptions import TooManyRequestsException
+
+    with pytest.raises(TooManyRequestsException, match="Try again in") as hit:
         await auth.request_phone_verification(customer_id)
+    assert hit.value.details["retry_after"] >= 1

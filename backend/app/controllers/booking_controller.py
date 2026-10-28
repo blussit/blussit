@@ -18,6 +18,8 @@ from app.schemas.booking_schema import (
     BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
+    GeoApprovalRequest,
+    GeoOverrideRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
     ManagerLogBookingRequest,
@@ -407,6 +409,23 @@ class BookingController:
         result = await self.service.resolve_issue(booking_id, current_user.id, payload.note, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "RESOLVE_BOOKING_ISSUE", "bookings", booking_id, {"note": payload.note})
         return success(result, "Issue marked resolved")
+
+    async def geo_request_approval(self, current_user: CurrentUser, booking_id: str, payload: GeoApprovalRequest):
+        result = await self.service.geo_request_approval(booking_id, payload.step, current_user.id, payload.note)
+        return success(result, "Your manager has been asked")
+
+    async def geo_override(self, current_user: CurrentUser, booking_id: str, payload: GeoOverrideRequest):
+        result = await self.service.geo_decide(
+            booking_id, payload.step, payload.approve, payload.reason, current_user.id, current_user.role, current_user.service_center_id,
+        )
+        await self.audit.log_action(
+            current_user.id, current_user.role, "GEO_OVERRIDE_APPROVED" if payload.approve else "GEO_OVERRIDE_DECLINED",
+            "bookings", booking_id, {"step": payload.step, "reason": payload.reason},
+        )
+        return success(result, "Approved" if payload.approve else "Declined")
+
+    async def geo_status(self, current_user: CurrentUser, booking_id: str):
+        return success(await self.service.geo_status(booking_id, current_user.id, current_user.role, current_user.service_center_id))
 
     async def update_priority(self, current_user: CurrentUser, booking_id: str, payload: PriorityUpdateRequest):
         result, old_priority = await self.service.update_priority(

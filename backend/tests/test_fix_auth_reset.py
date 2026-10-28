@@ -24,7 +24,7 @@ from bson import ObjectId
 from app.core.config import settings
 from app.core.security import create_access_token, hash_password
 from app.services.msg91_widget_service import Msg91WidgetService
-from tests.factories import make_customer
+from tests.factories import make_customer, TEST_PASSWORD
 
 pytestmark = pytest.mark.asyncio
 _RealAsyncClient = httpx.AsyncClient
@@ -116,20 +116,27 @@ async def test_unverified_staff_cannot_reset_by_code_and_no_code_is_sent(db, cle
     staff = await _staff(db, cleanup, role, verified=flag_only)
     _stub_msg91(monkeypatch, staff["phone"])
     async with _client() as c:
+        ghost = f"no.such.{ObjectId()}@example.com"
+        cleanup.append(("otp_requests", {"identifier": f"id:{ghost}"}))
+        cleanup.append(("otp_requests", {"_id": f"otp-send-cap:id:{ghost}"}))
+        unknown = await c.post("/api/v1/auth/forgot-password", json={"identifier": ghost})
         for ident in (staff["phone"], staff["email"]):
+            # The same 200 as for an unknown identifier — no "ask your admin".
             r = await c.post("/api/v1/auth/forgot-password", json={"identifier": ident})
-            assert r.status_code == 400, r.text
-            assert "staff account" in r.json()["message"] and "admin" in r.json()["message"]
+            assert r.status_code == 200 and r.json() == unknown.json(), r.text
+            await _uncool(db, staff["phone"])
         assert await db.whatsapp_outbox.count_documents({"phone": staff["phone"]}) == 0
         assert await _code(db, staff["phone"]) is None
 
-        # A code that reached the phone some other way (the public booking
-        # popup) can't do it either, nor can an MSG91 widget token.
+        # A booking-popup request for the number is answered alike and sends
+        # nothing; no code can reset it, nor can an MSG91 widget token — and
+        # every failure reads the same generic "Invalid or expired code."
         assert (await c.post("/api/v1/bookings/verify-phone/request", json={"phone": staff["phone"]})).status_code == 200
-        r = await c.post("/api/v1/auth/reset-password", json={"identifier": staff["phone"], "otp": await _code(db, staff["phone"]), "new_password": "Owned@123456"})
-        assert r.status_code == 400 and "admin" in r.json()["message"], r.text
+        assert await db.whatsapp_outbox.count_documents({"phone": staff["phone"]}) == 0
+        r = await c.post("/api/v1/auth/reset-password", json={"identifier": staff["phone"], "otp": "123456", "new_password": "Owned@123456"})
+        assert r.status_code == 400 and r.json()["message"] == "Invalid or expired code.", r.text
         r = await c.post("/api/v1/auth/reset-password/widget", json={"access_token": _fake_jwt({"identifier": f"91{staff['phone']}"}), "phone": staff["phone"], "new_password": "Owned@123456"})
-        assert r.status_code == 400 and "admin" in r.json()["message"], r.text
+        assert r.status_code == 400 and "could not be confirmed" in r.json()["message"], r.text
 
         assert await _login(c, staff["email"], "Owned@123456") == 401
         assert await _login(c, staff["email"], "Staff@12345") == 200
@@ -145,7 +152,8 @@ async def test_seed_placeholder_staff_cannot_be_taken_over(db):
             before = await db.whatsapp_outbox.count_documents({"phone": user["phone"]})
             for ident in (email, user["phone"]):
                 r = await c.post("/api/v1/auth/forgot-password", json={"identifier": ident})
-                assert r.status_code == 400 and "admin" in r.json()["message"], r.text
+                assert r.status_code == 200 and r.json()["data"]["otp_sent"] is True, r.text
+                await db.otp_requests.delete_many({"identifier": user["phone"]})
             assert await db.whatsapp_outbox.count_documents({"phone": user["phone"]}) == before
             assert await db.otp_requests.find_one({"identifier": user["phone"], "purpose": "password_reset"}) is None
 
@@ -186,7 +194,7 @@ async def test_admin_phone_change_drops_the_self_verification(db, cleanup):
         stored = await db.users.find_one({"_id": ObjectId(staff["id"])})
         assert stored["phone"] == new_phone and stored["phone_verified"] is False
         r = await c.post("/api/v1/auth/forgot-password", json={"identifier": new_phone})
-        assert r.status_code == 400 and "admin" in r.json()["message"]
+        assert r.status_code == 200
         assert await db.whatsapp_outbox.count_documents({"phone": new_phone}) == 0
 
 
@@ -309,6 +317,6 @@ async def test_customer_temp_password_reset_never_locks_the_customer_out(db, cle
         r = await c.post(f"/api/v1/auth/customers/{customer_id}/reset-password", headers=_auth(admin["id"], "admin"))
         assert r.status_code == 400, r.text
         assert ("can't be sent" if not deliverable else "unchanged") in r.json()["message"]
-        assert await _login(c, user["phone"], "Test@12345") == 200
+        assert await _login(c, user["phone"], TEST_PASSWORD) == 200
     stored = await db.users.find_one({"_id": ObjectId(customer_id)})
     assert stored["password_hash"] == user["password_hash"] and not stored.get("must_change_password")

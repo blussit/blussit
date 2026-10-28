@@ -11,7 +11,8 @@ Accounts (customers log in with their phone + the dev OTP, 123456):
   Admin     admin@doorstepvehiclecare.in
   Manager   manager.indore@doorstepvehiclecare.in
   Captain   captain.indore@doorstepvehiclecare.in
-    (passwords: SEED_*_PASSWORD, else the local-only defaults in app/seed.py)
+    (passwords: SEED_*_PASSWORD, else generated into the git-ignored
+     backend/.seed-credentials.local - no default password exists)
   Customer  9000000001  new customer, no plan, no bookings
   Customer  9000000002  has an active monthly pass
   Customer  9000000003  has a completed wash in their history

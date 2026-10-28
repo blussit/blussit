@@ -32,7 +32,8 @@ python -m app.seed
 API docs: `http://localhost:8000/api/docs`
 
 Default seeded super admin: `admin@doorstepvehiclecare.in` — password from
-`SEED_ADMIN_PASSWORD`, else the local-only dev default in `app/seed.py`.
+`SEED_ADMIN_PASSWORD`, else the generated one in the git-ignored
+`backend/.seed-credentials.local` (see `.seed-credentials.example`).
 Demo staff accounts are created ONLY against a local database; the seed never
 creates them on Atlas/production.
 
@@ -67,9 +68,9 @@ surface used by the frontend.
 
 
 
-Admin: admin@doorstepvehiclecare.in (password: SEED_ADMIN_PASSWORD or the dev default in app/seed.py)
-Manager: manager.indore@doorstepvehiclecare.in (SEED_MANAGER_PASSWORD or the dev default)
-Captain: captain.indore@doorstepvehiclecare.in (SEED_CAPTAIN_PASSWORD or the dev default)
+Admin: admin@doorstepvehiclecare.in (password: SEED_ADMIN_PASSWORD or .seed-credentials.local)
+Manager: manager.indore@doorstepvehiclecare.in (SEED_MANAGER_PASSWORD or .seed-credentials.local)
+Captain: captain.indore@doorstepvehiclecare.in (SEED_CAPTAIN_PASSWORD or .seed-credentials.local)
 Customer: 9000000001 / OTP 123456
 Customer: 9000000002 / OTP 123456
 Customer: 9000000003 / OTP 123456

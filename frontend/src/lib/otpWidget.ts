@@ -23,9 +23,11 @@ declare global {
   }
 }
 
-/** Same as the backend's resend cooldown (AuthService._OTP_RESEND_COOLDOWN_SECONDS). */
-export const OTP_RESEND_SECONDS = 30;
+/** Same as the backend's resend cooldown (Settings.OTP_RESEND_COOLDOWN_SECONDS); the server's own number wins. */
+export const OTP_RESEND_SECONDS = 60;
 export type OtpChannel = "backend" | "widget";
+/** What the backend sends the code on: WhatsApp first, SMS as the fallback / by choice. */
+export type BackendChannel = "whatsapp" | "sms";
 
 // A hung script/callback must end in the backend fallback or a clear error,
 // never an endless "Sending…".
@@ -204,17 +206,43 @@ export interface OtpSent {
   channel: OtpChannel;
   /** Seconds until Resend may be tapped — the server's own cooldown. */
   cooldown: number;
+  /** Which channel the backend delivered on (null for the MSG91 widget, which is SMS). */
+  delivered: BackendChannel | null;
+}
+
+/** The 429 body: { error_code, details: { retry_after } }. */
+function rateLimit(err: unknown): { code: string; retryAfter: number } | null {
+  if (!axios.isAxiosError(err) || err.response?.status !== 429) return null;
+  const data = err.response.data as { error_code?: string; details?: { retry_after?: number } } | undefined;
+  const retryAfter = Number(data?.details?.retry_after);
+  return { code: data?.error_code ?? "", retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : OTP_RESEND_SECONDS };
+}
+
+/** Pulls { channel, cooldown_seconds } out of a request endpoint's answer. */
+function backendAnswer(res: unknown): { channel: BackendChannel | null; cooldown: number } {
+  const body = res as { channel?: string; cooldown_seconds?: number } | undefined | null;
+  return {
+    channel: body?.channel === "sms" || body?.channel === "whatsapp" ? body.channel : null,
+    cooldown: Number(body?.cooldown_seconds) > 0 ? Number(body?.cooldown_seconds) : OTP_RESEND_SECONDS,
+  };
 }
 
 /**
  * Sends one code, trying channels in order and falling back on failure:
  * default order is backend first once WhatsApp has an approved template
- * (whatsapp_primary), the MSG91 widget (SMS) first until then. A "Please
- * wait Ns" from the backend means its code went out moments ago, so the
- * person just enters that one.
+ * (whatsapp_primary), the MSG91 widget (SMS) first until then. `wanted` is the
+ * channel asked of the BACKEND ("sms" = "Send Code By SMS Instead": the SAME
+ * live code goes out by SMS, so the same input accepts it). A 429 cooldown
+ * ("Try again in N seconds") means a code went out moments ago, so the person
+ * just enters that one; any other 429 (a hold, a limit) is final.
  */
-export async function sendOtpCode(phone10: string, backendSend: () => Promise<unknown>, order?: OtpChannel[]): Promise<OtpSent> {
-  const channels: OtpChannel[] = order ?? ((await whatsappIsPrimary()) ? ["backend", "widget"] : ["widget", "backend"]);
+export async function sendOtpCode(
+  phone10: string,
+  backendSend: (channel: BackendChannel) => Promise<unknown>,
+  order?: OtpChannel[],
+  wanted: BackendChannel = "whatsapp",
+): Promise<OtpSent> {
+  const channels: OtpChannel[] = order ?? (wanted === "sms" ? ["backend", "widget"] : (await whatsappIsPrimary()) ? ["backend", "widget"] : ["widget", "backend"]);
   let backendError = "";
   let widgetError = "";
   for (const channel of channels) {
@@ -222,19 +250,19 @@ export async function sendOtpCode(phone10: string, backendSend: () => Promise<un
       if (!(await ensureOtpWidget())) continue;
       try {
         await widgetSendOtp(phone10);
-        return { channel, cooldown: OTP_RESEND_SECONDS };
+        return { channel, cooldown: OTP_RESEND_SECONDS, delivered: null };
       } catch (err) {
         widgetError = otpErrorMessage(err);
       }
     } else {
       try {
-        await backendSend();
-        return { channel, cooldown: OTP_RESEND_SECONDS };
+        const answer = backendAnswer(await backendSend(wanted));
+        return { channel, cooldown: answer.cooldown, delivered: answer.channel };
       } catch (err) {
+        const limited = rateLimit(err);
+        if (limited?.code === "OTP_COOLDOWN") return { channel, cooldown: limited.retryAfter, delivered: null };
         const message = otpErrorMessage(err);
-        const wait = /^Please wait (\d+)s/.exec(message);
-        if (wait) return { channel, cooldown: Number(wait[1]) };
-        if (FINAL_SEND_ERROR.test(message)) throw new Error(message);
+        if (limited || FINAL_SEND_ERROR.test(message)) throw new Error(message);
         backendError = message;
       }
     }
@@ -242,4 +270,10 @@ export async function sendOtpCode(phone10: string, backendSend: () => Promise<un
   // Backend's generic "couldn't send" says less than the widget's reason.
   const specificBackend = /couldn't send/i.test(backendError) ? "" : backendError;
   throw new Error(specificBackend || widgetError || backendError || "Couldn't send the code right now — please try again in a moment.");
+}
+
+/** "Code Sent On WhatsApp" / "Code Sent By SMS" for the popup, from what the backend said it used. */
+export function sentVia(delivered: BackendChannel | null, channel: OtpChannel | null): string {
+  if (channel === "widget" || delivered === "sms") return "Code Sent By SMS";
+  return delivered === "whatsapp" ? "Code Sent On WhatsApp" : "";
 }

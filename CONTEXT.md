@@ -263,7 +263,8 @@ Demo accounts created by `seed.py` — LOCAL databases only (it refuses to creat
 staff on a remote/production database): `admin@doorstepvehiclecare.in`,
 `manager.indore@doorstepvehiclecare.in`, `captain.indore@doorstepvehiclecare.in`.
 Passwords: `SEED_ADMIN_PASSWORD` / `SEED_MANAGER_PASSWORD` / `SEED_CAPTAIN_PASSWORD`
-if set, otherwise the local-only dev defaults in `backend/app/seed.py`.
+if set, else read from the git-ignored `backend/.seed-credentials.local`, else
+randomly generated and written there (mode 600). No default password exists.
 
 ---
 

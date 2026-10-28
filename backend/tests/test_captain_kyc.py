@@ -6,7 +6,7 @@ editing locks once verified, numbers are masked on list surfaces.
 import pytest
 from bson import ObjectId
 
-from app.core.exceptions import BadRequestException, ForbiddenException
+from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException
 from app.schemas.staff_kyc_schema import KycReviewRequest, KycSubmitRequest
 from app.services.staff_kyc_service import StaffKycService, masked_kyc
 
@@ -56,7 +56,7 @@ async def test_submit_and_manager_verify(rig, db):
     assert reviewed["status"] == "verified"
 
     # Verified locks self-editing.
-    with pytest.raises(BadRequestException, match="already verified"):
+    with pytest.raises(ConflictException, match="Verified Documents Can't Be Changed"):
         await svc.submit(rig["captain_id"], PACKET)
 
     # The captain got told.

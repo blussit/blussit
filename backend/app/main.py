@@ -52,6 +52,7 @@ from app.routes.v1 import (
     user_routes,
     vehicle_type_routes,
     wallet_routes,
+    whatsapp_campaign_routes,
     whatsapp_crm_routes,
     zone_routes,
     holiday_routes,
@@ -239,6 +240,7 @@ _DEFAULT_BODY_LIMIT = 2 * 1024 * 1024
 _BODY_LIMITS: tuple[tuple[str, int], ...] = (
     (f"{settings.API_V1_PREFIX}/uploads/", STORAGE_MAX_UPLOAD_BYTES + _BODY_LIMIT_MARGIN),
     (f"{settings.API_V1_PREFIX}/whatsapp/crm/media", whatsapp_crm_routes.MAX_UPLOAD_BYTES + _BODY_LIMIT_MARGIN),
+    (f"{settings.API_V1_PREFIX}/whatsapp/campaigns/image", whatsapp_campaign_routes.MAX_IMAGE_BYTES + _BODY_LIMIT_MARGIN),
 )
 
 
@@ -361,6 +363,21 @@ app.add_middleware(RequestIdMiddleware)
 # A worker serves no files (and its 404 guard would refuse them anyway).
 if _serves_public_routes():
     (upload_root() / "photos").mkdir(parents=True, exist_ok=True)
+    # Identity documents are NEVER static files. Move any an older build left
+    # in the public folder, and answer the old static path with a 404 (this
+    # route is registered before the mount, so it wins).
+    try:
+        from app.core.kyc_migration import move_local_documents
+
+        move_local_documents()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not move legacy local KYC documents to private storage")
+
+    @app.get("/uploads/documents/{rest:path}", include_in_schema=False)
+    @app.head("/uploads/documents/{rest:path}", include_in_schema=False)
+    async def _no_static_documents(rest: str):
+        return JSONResponse(status_code=404, content={"success": False, "error_code": "NOT_FOUND", "message": "Not found"})
+
     app.mount("/uploads", StaticFiles(directory=str(upload_root())), name="uploads")
 
 
@@ -1254,6 +1271,36 @@ async def _whatsapp_retry_loop() -> None:
         await _sleep_unless_stopping(_RETRY_EVERY_SECONDS)
 
 
+# Festival / broadcast campaigns: while one is running the worker drains it in
+# ~20 s slices (whatsapp_campaign_service.run_pass - rate limited, leased,
+# resumable); idle, it only looks every few seconds.
+_CAMPAIGN_SLICE_SECONDS = 20.0
+_CAMPAIGN_IDLE_SECONDS = 5
+_CAMPAIGN_SLICE_TIMEOUT_SECONDS = 60
+
+
+async def _campaign_pass(db) -> dict:
+    from app.services.whatsapp_campaign_service import run_pass
+
+    out: dict = {}
+
+    async def one() -> None:
+        out.update(await run_pass(db, _CAMPAIGN_SLICE_SECONDS))
+
+    await _boxed("WhatsApp campaign", _CAMPAIGN_SLICE_TIMEOUT_SECONDS, one)
+    return out
+
+
+async def _campaign_loop() -> None:
+    while not _stopping():
+        db = mongodb.db
+        busy = False
+        if db is not None:
+            stats = await _campaign_pass(db)
+            busy = stats.get("status") in ("sending", "queued")
+        await _sleep_unless_stopping(1 if busy else _CAMPAIGN_IDLE_SECONDS)
+
+
 async def _sync_whatsapp_templates(db) -> None:
     from app.services.whatsapp_crm_service import WhatsAppCrmService
 
@@ -1385,6 +1432,12 @@ async def _deferred_init() -> None:
     except Exception:
         logger.exception("Index creation failed — queries still work, just unindexed until next boot")
     try:
+        from app.core.kyc_migration import rewrite_local_document_urls
+
+        await rewrite_local_document_urls(get_database())
+    except Exception:
+        logger.exception("Local KYC document URL rewrite failed — retried next boot")
+    try:
         from app.services.auth_service import assign_missing_employee_ids
 
         await assign_missing_employee_ids(get_database())
@@ -1483,6 +1536,7 @@ async def on_startup() -> None:
         _loop_tasks["reminder"] = _reminder_task
         _loop_tasks["whatsapp_retry"] = _start_maintenance(_whatsapp_retry_loop())
         _loop_tasks["template_sync"] = _start_maintenance(_template_sync_loop())
+        _loop_tasks["whatsapp_campaign"] = _start_maintenance(_campaign_loop())
     # PERF-01: websocket events reach users on every instance. Runs in EVERY
     # mode: on the API it delivers events to this instance's sockets; on the
     # worker it is what makes the sweeps' broadcasts (a booking cancelled by
@@ -1755,6 +1809,7 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(purchase_confirmation_routes.router, prefix=api_prefix)
     target.include_router(whatsapp_webhook_routes.router, prefix=api_prefix)
     target.include_router(whatsapp_crm_routes.router, prefix=api_prefix)
+    target.include_router(whatsapp_campaign_routes.router, prefix=api_prefix)
     target.include_router(zone_routes.router, prefix=api_prefix)
     target.include_router(coverage_lead_routes.router, prefix=api_prefix)
     target.include_router(society_routes.form_router, prefix=api_prefix)

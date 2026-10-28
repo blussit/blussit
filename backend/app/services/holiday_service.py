@@ -187,7 +187,27 @@ def resume_label(resume: datetime) -> str:
 
 
 def refusal_message(holiday: dict, resume: datetime) -> str:
-    return f"We're on a holiday break on {dates_label(holiday)}. You can book from {resume_label(resume)}."
+    return f"🌴 We're taking a little holiday break on {dates_label(holiday)}. You can book from {resume_label(resume)} — see you then! 😊"
+
+
+def friendly_message(dates: str, resume: str, note: str | None = None) -> str:
+    """The warm version of refusal_message for chat (the WhatsApp bot): the
+    same dates and reopening day, plus the admin's own holiday note when
+    there is one."""
+    text = f"🌴 We're taking a little holiday break on {dates}. You can book from {resume} — see you then! 😊"
+    note = " ".join((note or "").split())
+    if note:
+        text += f"\n💛 {note[:160]}"
+    return text
+
+
+def friendly_refusal(error: "HolidayException") -> str:
+    """friendly_message for a HolidayException (its details carry the dates
+    and the reopening day); falls back to the plain refusal text."""
+    details = getattr(error, "details", None) or {}
+    if details.get("dates_label") and details.get("resume_label"):
+        return friendly_message(details["dates_label"], details["resume_label"])
+    return f"🌴 {error.message} 😊"
 
 
 def _iso(moment: datetime | None) -> str | None:

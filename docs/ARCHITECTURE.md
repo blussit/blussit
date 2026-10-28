@@ -157,7 +157,7 @@ backend/                      FastAPI service (Python 3.12, Motor/MongoDB)
     utils/                    timezone (IST), slots, money rounding, phone + plate
                               normalisation, geo, serializers
     scripts/                  one-off backfills/migrations, seed_dev, smoke test
-    seed.py                   reference data + (local only) demo accounts
+    seed.py                   reference data + (local only) demo accounts; passwords from SEED_*_PASSWORD / git-ignored backend/.seed-credentials.local / generated (mode 600), none hardcoded
   tests/                      pytest suite (~160 files) on a local replica-set Mongo
 frontend/                     React 19 + TypeScript + Vite SPA (Vercel)
   src/App.tsx                 every route, grouped by role
@@ -315,6 +315,7 @@ secrets.
 | Payments | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_LIVE_KEY_ID`/`_SECRET` (parking only) | `rzp_live_` key + secret + webhook secret |
 | Google | `GOOGLE_MAPS_BROWSER_KEY`, `GOOGLE_MAPS_SERVER_KEY`, `GOOGLE_OAUTH_CLIENT_ID` | optional |
 | Other | `META_PIXEL_ID`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`, `DEV_TOOLS_ENABLED`, `DEV_OTP_CODE` | dev tools refused in production |
+| Location check | `GEOFENCE_ENFORCE` (true), `GEOFENCE_MIN_SERVICE_SECONDS` (120) | on; `false` is the emergency kill switch (see §7.10) |
 
 Dev tools (fixed OTP `123456`, "log in as") work only with
 `DEV_TOOLS_ENABLED=true` **and** `APP_ENV=development` **and** a local
@@ -347,7 +348,8 @@ customers get 400 `ACCOUNT_INACTIVE`).
   longer match the database — **role and center always come from the
   database, never from the token.**
 - Passwords: bcrypt (on a worker thread); login checks always cost one bcrypt
-  (no account-enumeration timing); 5 failures lock the account for 5 min.
+  (no account-enumeration timing); wrong passwords are throttled per (account
+  + device + source IP), never account-wide — see **Login throttle** below.
 - The browser keeps both tokens in `localStorage`; `lib/api-client.ts`
   refreshes ahead of expiry and once on a 401, one refresh at a time across
   calls (rotation-safe across tabs); network errors and 5xx never log out.
@@ -364,11 +366,81 @@ customers get 400 `ACCOUNT_INACTIVE`).
   `mark_phone_proven`).
 
 **OTP rules.** Purposes `verification`, `booking_confirmation`,
-`password_reset`, each consumer accepts only its own (`OTP_ACCEPTS`).
-10-minute codes, 5 guesses, 30 s resend cooldown, 5 sends/hour per (phone,
-requester) and 15/hour per phone (a stranger can't lock someone's login).
-Delivery: WhatsApp first (authentication template, or free text inside an
-open 24 h chat), SMS (MSG91) as fallback; `OTP_CHANNEL` flips the order.
+`password_reset` are stored as a `purposes` list on the ONE live code per
+phone (`otp_requests`, `_id=otp:<phone>`); each consumer accepts only its own
+(`OTP_ACCEPTS`). 10-minute codes; a requester (IP) gets 5 wrong guesses, the
+code 15 in all (a stranger can't burn the owner's guesses). Requests
+(`AuthService._issue_otp`, in order): (1) a source on **hold** → 429; (2) no
+channel can reach the number → refused; (3) **one request per phone per 60 s**
+→ 429 `OTP_COOLDOWN` `{details.retry_after}`; (4) per-source count (below);
+(5) per-phone allowances; (6) **a resend inside the validity window re-sends the
+SAME code** (a stranger asking for a victim's number can never replace or
+invalidate the victim's code — only the resend clock and `purposes` move; a new
+code is made only when none is live); (7) delivery. Every number is a Settings
+value (`OTP_*`, `backend/.env.example`):
+
+| Limit | Default | On breach |
+|---|---|---|
+| Resend cooldown per phone | 60 s | 429 `OTP_COOLDOWN`, `retry_after` |
+| Requests/hour per device (no `X-Device-Id`: per IP) | 5 (the 6th starts a hold) | 429 `OTP_HELD` |
+| Requests/hour per IP | 30 | 429 `OTP_HELD` |
+| Hold per repeated violation of one source | 5 min → 30 min → 2 h → 24 h (remembered 24 h) | `abuse_holds` (TTL) |
+| Codes/hour for one phone from one requester | 5 | 429 `OTP_PHONE_LIMIT` |
+| Codes/hour for one phone, all requesters | 15; past it only requesters that have not sent for that phone yet (and devices that signed in to that account) still get a message, up to 40 | beyond: answered as sent when a code is live (no message), else 429 |
+| Platform budget WhatsApp+SMS | 500/h, 3000/day | ERROR log + one bell alert to admins and managers; new codes then allowed once per 300 s per source (`OTP_BUSY`); live codes and verifies untouched |
+
+Counters live in `rate_counters` / `abuse_holds` (shared by every instance,
+TTL-indexed; keys are hashed, never raw IPs or device ids). The source limits
+and the budget are active when `RATE_LIMIT_ENABLED` (always true in
+production); per-phone allowances and the cooldown always apply. The browser
+sends `X-Device-Id` (random id from `lib/device.ts`); the server only checks its
+shape (16–64 of `[A-Za-z0-9_-]`) and always combines it with the IP.
+
+**Channels: WhatsApp first, SMS second — the same code.** The primary channel
+stays the Blussit WhatsApp *authentication* template. Meta's Cloud API **cannot
+pre-check whether a number is on WhatsApp**, so this is detect-and-fall-back:
+(a) a WhatsApp send that the API refuses falls through to SMS in the same
+request (`_deliver_otp`); (b) a send Meta accepts and later reports `failed`
+with a definite-undeliverable code (131026, 131047, 131030, 133010, 131049,
+131021, 130472 — `UNDELIVERABLE_ERROR_CODES`) in the status webhook triggers
+`AuthService.otp_whatsapp_failed`: the SAME live code goes out by SMS (MSG91),
+once (`sms_fallback` claim, latest send only, counted in the platform budget).
+(c) Every OTP popup (login, booking, society enrol, verify/change phone,
+forgot password) has a permanent **Send Code By SMS Instead** button
+(`OtpSmsButton`; disabled with a countdown during the cooldown) that calls the
+same request endpoint with `channel: "sms"` — the same live code by SMS, same
+input, same limits/budget; the popup shows "Code Sent On WhatsApp" / "Code
+Sent By SMS". `channel` is validated to `{whatsapp, sms}`; SMS with no provider
+is a 400. Responses are `{otp_sent, channel, cooldown_seconds}`.
+
+**Login throttle (`services/auth_guard.py`).** Wrong passwords count in a bucket
+keyed by (account, device, IP): 5 failures → locked 1 min, 10 → 5 min, 20 → 30
+min (for THAT device/IP only; `LOGIN_THROTTLE_STEPS`); a success clears it. A
+stranger therefore never locks the owner out (the account itself is never
+locked; the old `login_locked_until` fields are ignored). A device that signed
+in to the account before (`users.trusted_devices`: HMAC-hashed ids, last 10) is
+never blocked. Account-wide failures (30/h) only add a 2 s delay for unknown
+devices; one IP with > 60 failures in 10 min across accounts is blocked 10 min
+(credential stuffing) — trusted devices excepted. 429 `LOGIN_THROTTLED` with
+`details.retry_after`; unknown identifiers throttle identically.
+
+**No enumeration.** `otp/request`, `forgot-password`, `bookings/verify-phone/request`
+and `booking-access` answer identically for a known customer, an unknown
+identifier and a staff (admin/manager/captain) number: same status, shape
+(`new_account` is gone; `booking-access` is always `{mode: "otp"}`), message,
+cooldown/caps/holds and — via a pretend send of the same duration
+(`OTP_FAKE_SEND_DELAY_MS`) — about the same time. For staff numbers (and unknown
+emails / unproven-staff password resets) nothing is sent: an unmatchable
+placeholder code (`fake: true`) keeps every counter identical, and verifying
+returns the generic "Invalid or expired code." (`otp-login`, `reset-password`,
+the widget reset); a suspended customer gets a real code and is told the
+standing only after proving the phone. A new phone gets a real code; `otp-login`
+answers `{needs_name: true}` after the code checks out and the name is asked
+then. `register` checks the phone proof before it says anything is taken.
+Staff sign in with email/password; the signed-in verify-phone / add-phone paths
+still send to the staff member's own phone. Left as is: a manager's exact
+10-digit `crm/customers/search` and the `auth/customers` 409 still confirm a
+customer exists across centers (the manager booking flow needs that).
 
 **Staff phone proof.** An admin/manager types a staff member's phone, so it
 is not proof of anything: self-service password reset by code works for staff
@@ -438,7 +510,7 @@ Recurring patterns (look for them before inventing new ones):
 
 | Collection | Purpose | Key fields / invariants |
 |---|---|---|
-| `users` | every account | `role` (customer/captain/manager/admin), `status` (active/inactive/suspended/pending), `phone` (10-digit, unique sparse), `email` (unique sparse), `employee_id` (CAP-NNN, unique sparse), `service_center_id` (staff), `token_version`, `phone_verified`, `self_verified_phone` (staff), embedded `kyc` (captain KYC; numbers masked for managers), login lockout fields, notification toggles (`whatsapp_new_booking_alerts`, default on; `last_review_request_at`) |
+| `users` | every account | `role` (customer/captain/manager/admin), `status` (active/inactive/suspended/pending), `phone` (10-digit, unique sparse), `email` (unique sparse), `employee_id` (CAP-NNN, unique sparse), `service_center_id` (staff), `token_version`, `phone_verified`, `self_verified_phone` (staff), embedded `kyc` (captain KYC; numbers masked for managers), `trusted_devices` (hashed ids of devices that signed in; legacy lockout fields are ignored), notification toggles (`whatsapp_new_booking_alerts`, default on; `last_review_request_at`) |
 | `users` (customer location) | where each customer is — staff-only, flat | `home_center_id`, `home_city`, `home_state`, `home_pincode`, `home_lat`/`home_lng` (nullable, admin-only in responses), `location_source` (`address`/`booking`/`manual`), `location_updated_at`, `first_booking_center_id`, `last_booking_center_id`, `last_booking_at`, `bookings_count` (booking rows ever created). **Precedence**: default saved address (else newest) with a covering center (zones → nearest within radius → pincode) → latest booking's center (+ its address snapshot) → none; `manual` (admin `PUT /users/{id}/home-center`) is never overwritten. Maintained by `AddressService` create/update/delete (`refresh_customer_location`) and one hook in `create_booking` (`note_booking_created`); boot task `customer locations` backfills unstamped customers (500/batch, 20 s budget, resumes by itself; script `app/scripts/backfill_customer_location.py [--all]`). Indexes `(role, home_center_id)`, `(role, home_city)`, `(role, home_pincode)`. Admin `GET /users?center_id=&city=&pincode=&sort_by=` and `GET /crm/customers` (manager: only customers their center has dealt with — filters never widen it; centre/city/pincode but no coordinates). Never in customer/WhatsApp text. |
 | `counters` | atomic sequences | `booking_number` (BK10000+), `captain_employee_id` |
 | `otp_requests` | OTP codes | hashed code, `purpose`, attempts (5 guesses), 10-min TTL; send caps per (phone, requester) and per phone |
@@ -571,6 +643,7 @@ covered visit are always paid.
 | `whatsapp_conversations` | one per WhatsApp user: bot state, CRM inbox, `bot_paused`, unread, opt-out | unique `wa_id` |
 | `whatsapp_message_dedup` | inbound `wamid` de-dup (a re-delivered "Confirm" can't book twice) | TTL 14 d |
 | `whatsapp_templates` | synced from Meta (status, category, language) + local definitions | unique `name` |
+| `wa_campaigns` / `wa_campaign_recipients` / `wa_campaign_state` | festival broadcast campaigns, one row per person (status queued/sending/sent/failed/skipped + delivery rank), single-running-campaign claim | unique `(campaign_id, user_id)`; recipients TTL 400 d |
 | `sms_outbox` | SMS log | TTL 365 d |
 | `ws_events` | websocket relay bus | TTL 300 s |
 | `locks` | worker lease `reminder_loop` (+ paced-sweep stamps), template-sync lock | |
@@ -637,7 +710,10 @@ captain per day, with location), `leave_requests`, `purchase_confirmations`
    (5 wrong codes lock it + alert; manager unlocks) → `capture_before_photo`
    (`service_started`) → `capture_after_photo_and_complete` (`completed`).
    Photos must be this captain's own fresh upload (≤ 6 h), each used once;
-   GPS outside the geofence flags, never blocks; too-fast jobs are flagged.
+   From 2026-10-28 the location check **refuses** (not just flags) arrived /
+   start / complete outside the geofence, on a stale, weak or replayed fix, or
+   a faked-looking trail; a manager approves exceptions — see §7.10.
+   Too-fast jobs (< 5 min) are still flagged, < 2 min refused.
 8. **Collect.** If money is due the captain collects **cash**
    (`/payments/collect/cash`, quotes the expected amount — 409
    `AMOUNT_DUE_CHANGED` if it moved; `expected_amount` stays optional so an
@@ -858,12 +934,61 @@ extend ≤ 10 days. Full design: [SOCIETY_PLANS.md](SOCIETY_PLANS.md).
   Unless the conversation is paused (an agent took over, or a 12 h hand-off),
   the **bot** walks car type → service → address/location → time → hold →
   confirm → `create_quick_booking(source="whatsapp")` → cash or payment link.
-  Staff numbers are routed to the CRM only.
+  Staff numbers are routed to the CRM only. Alignment rules (2026-10-28): the
+  sender's number is the identity (a chat linked to an account with another
+  phone is dropped); holiday days are never offered and answered with
+  `holiday_service.friendly_message` + the next open days; after the service
+  pick, `q_plan` offers the customer's own usable plans (`pass_usability`,
+  Last Booking Day, society/custom/extended) as "Use My Plan" / chooser /
+  "Pay Normal Price" and names the pick on the quote line; the cancel prompt
+  shows `cancellation_charge_preview`. No OTP step, no plan sales in the bot.
 - **CRM inbox** (admin, `/whatsapp/crm`): conversations, replies, media,
   pause/resume bot, templates (submit to Meta, sync status), delivery health
   (`GET /whatsapp/crm/delivery-health`, cached 15 s per instance, `?fresh=1`
   recomputes — the card's Refresh; cards: Sent, Sending, Retrying =
   `pending`, Failed = `failed`, Undelivered, Dead, Refused).
+- **Festival / broadcast campaigns** (admin only, Admin → WhatsApp →
+  Campaigns; `routes/v1/whatsapp_campaign_routes.py`,
+  `services/whatsapp_campaign_service.py`, template in
+  `whatsapp_campaign_template.py`): one JPG/PNG (≤ 5 MB, public image storage)
+  + one message through the MARKETING template `blussit_festival_greeting`
+  (en; IMAGE header, BODY `Greetings from Blussit!\n\n{{1}}\n\nWarm wishes,
+  Team Blussit`, footer "Reply STOP to opt out", no buttons — a free-text STOP
+  is the opt-out). The message is sanitised to one line (whitespace runs → one
+  space, control chars dropped, ≤ 600 chars, emoji kept). Template JSON:
+  `python -m app.scripts.print_festival_template [--header-handle H]` (no
+  network; Meta needs a sample-image handle); the bootstrap submits it only
+  when `WHATSAPP_FESTIVAL_HEADER_HANDLE` is set. Providers gained
+  `send_header_image_template_outcome` and `SendOutcome` now carries
+  `wamid`/`error_code`/`error`.
+  *Audience* = customers who are `active`, not deleted, have a valid
+  10-digit mobile, `marketing_opt_out != true` and are not a staff or the
+  business number — re-checked when each message is sent. The only consent
+  tracked is that opt-out flag (no explicit opt-in exists). Selection =
+  `{mode all|none|ids, filter, excluded_ids, included_ids}` resolved on the
+  server, so "Select All" of 100 000 is a filter plus exclusions; filters:
+  search, home center, city, last-booking range / never booked, active plan,
+  bookings count. *Send* (`POST /whatsapp/campaigns/{id}/send`, typed
+  `confirm_count`) validates caps/template/one-running-campaign (atomic claim
+  on `wa_campaign_state`), freezes the selection and returns; the WORKER
+  (`_campaign_loop` → `run_pass`) writes `wa_campaign_recipients` in batches
+  of 1 000 (unique `(campaign_id, user_id)`, resumable `_id` cursor), claims
+  20 at a time with a 120 s lease and sends through a token bucket
+  (`WHATSAPP_CAMPAIGN_RATE_PER_SECOND`, default 40; one drainer per campaign
+  via a 45 s lease). A row left `sending` by a dead worker is first matched
+  against its outbox row so Meta never gets it twice. Person-level Meta errors
+  (131026, 131050, 131049…) fail that recipient; template/account errors
+  (132015/132016/131048/auth…) or the template leaving APPROVED stop the
+  campaign (status `stopped`, rest skipped); 429/5xx retry with backoff (3
+  tries). Caps: `WHATSAPP_CAMPAIGN_MAX_RECIPIENTS` (10 000) per campaign and
+  `WHATSAPP_CAMPAIGN_DAILY_CAP` (10 000) per rolling 24 h (the worker waits).
+  Meta's status webhook → `apply_status` (delivered/read/failed per wamid).
+  Cancel skips unsent rows. "Send Test To My Number" (admin's own phone, ≤ 10 /
+  h). Cost estimate = count × `WHATSAPP_MARKETING_COST_PAISE` (78; editable via
+  `PUT /whatsapp/campaigns/limits`, stored in `settings`). Audit actions
+  CREATE/UPDATE/DELETE/TEST/SEND/CANCEL_CAMPAIGN, UPDATE_CAMPAIGN_SETTINGS.
+  Collections: `wa_campaigns`, `wa_campaign_recipients` (TTL 400 d),
+  `wa_campaign_state`. Tests `test_whatsapp_campaigns.py`.
 - **Outbound — `NotificationService.notify(user, title, body, type, ref,
   wa_event=…, wa_params=…)`:** always writes the in-app notification; then
   WhatsApp unless the user opted out of marketing (marketing templates),
@@ -1021,8 +1146,10 @@ the start (default 2) → `notice_from`.
   (`lib/holidayGate.ts`, ≤ 2.5 s) and is skipped that session. The slot
   picker (`SlotBoard`) shows an inline notice for the center's holidays,
   "Holiday" chips and day pills, and the popup once the address resolves to
-  the center. The WhatsApp bot answers with the holiday message when every
-  offered day is closed. Manager dashboard: a "Holiday: {dates}" banner for
+  the center. The WhatsApp bot (2026-10-28 alignment, see change log) skips holiday days,
+  warns with `friendly_message`/`friendly_refusal` (🌴 dates + reopening day +
+  the admin's note) and offers the next open days — on the day list, a stale
+  tap, the real center at hold/confirm, and reschedule. Manager dashboard: a "Holiday: {dates}" banner for
   their center.
 
 
@@ -1074,6 +1201,106 @@ booking, payment or KPI collection.
   entries table (cards at phone width) with filters, Show Voided, Export CSV;
   Add/Edit dialog ("Done By" remembered per admin in `localStorage`) and a
   Void dialog with a reason. Tests: `tests/test_feat_finance_*.py`.
+
+### 7.10 Captain GPS integrity (the location check)
+
+**Goal and honest limit.** The founder asked that nobody can skip the
+location check. A browser/PWA can never *prove* a real GPS: coordinates come
+from the phone, and an Android mock-location app can feed any value that a web
+page cannot detect. What the server can do — and now does — is make remote
+completion need a **sustained, physically plausible fake trail**, refuse
+everything else, and leave evidence. The only path to stronger guarantees is a
+native captain app using Play Integrity and mock-location detection
+(recommended if cheating shows up in the flags below).
+
+Code: `services/geo_integrity_service.py` (evaluation, approvals, evidence),
+hooks in `BookingService` (`start_heading`, `verify_vehicle`,
+`capture_before_photo`, `capture_after_photo_and_complete`,
+`record_captain_ping`, `geo_*`), schemas `GpsFixMeta` / `GeoApprovalRequest` /
+`GeoOverrideRequest`. Tests: `tests/test_gps_integrity.py`.
+
+**Layers (all server-side).**
+
+1. *The fix itself.* Heading / Arrived / Start / Complete send latitude,
+   longitude and the device's metadata (`accuracy_m`, `fix_at` = the device's
+   timestamp, `speed_mps`, `heading_deg`, `altitude_m`, `secure_context`,
+   `permission_state`). Refused when: no fix (address pinned), `stale_fix`
+   (older than `geo_max_fix_age_s`), `future_fix` (clock ahead by more than
+   `geo_future_tolerance_s`), `replayed_fix` (not newer than the previous
+   accepted step's fix — a fix is never reusable), `poor_accuracy` (> cap),
+   `outside_geofence` (distance > `photo_geofence_radius_m` + min(accuracy,
+   `geo_accuracy_cap_m`)). The server's own receive time is stored with each.
+   An address without a map pin cannot be geofenced: that stays the old manager
+   flag (`arrival_no_gps`), not a dead end.
+2. *The server-held trail* (`captain_locations`, written by the 25 s on-job
+   ping + every step): `trail_teleport` (implied speed > `geo_max_speed_kmh`
+   between consecutive fixes; hops under 300 m / 10 s are noise),
+   `trail_frozen` (identical 6-decimal coordinates on >= 5 consecutive pings
+   while the device reports speed >= 0.5 m/s — a parked real phone reports ~0
+   and is not flagged), `trail_accuracy_constant` (>= 8 identical accuracy
+   values over a trail that moved > 300 m), and — for *Arrived* only —
+   `trail_missing` (after the first `geo_trail_grace_s`, fewer than
+   `geo_min_trail_pings` spaced points since heading out; the soft path for
+   bad networks and short trips). Teleport / frozen / constant / replay mark
+   the job `geo_suspect` with the reasons and alert the manager once.
+3. *Ordering and duration.* Steps follow the status machine; a replayed fix is
+   refused; `too_quick`: completion sooner than `geo_min_service_seconds`
+   (default 120 s, env `GEOFENCE_MIN_SERVICE_SECONDS`) after the before-photo
+   is refused; the older 5-minute `completed_too_fast` flag stays.
+4. *Client signals* (extra evidence only; never claimed to detect mock apps):
+   the captain panel takes a fresh fix (`maximumAge: 0`), reads
+   accuracy/speed/heading/altitude/secure-context/permission, blocks with a
+   clear message when permission is denied or the position is unavailable,
+   shows a "Location Check" chip (green Location Verified / blue Approved By
+   Manager / amber Not Verified), queues pings through bad network (the server
+   keeps their original time; older than `geo_ping_max_age_s` are dropped, from
+   the future are rejected), pings immediately when the app returns to the
+   foreground and holds a screen wake lock while a job is live.
+
+**Refusal and approval.** A refusal is HTTP 409 `GEO_CHECK_FAILED` with
+`details = {step, reasons[], distance_m, allowed_m, can_request_approval,
+approval}`. The captain sees e.g. "You Must Be At The Customer's Location To
+Mark Arrived" and **Ask Manager To Approve**
+(`POST /bookings/{id}/geo-approval-request`, notifies the center's manager). A
+manager of that center or an admin approves or declines ONE step of ONE job
+(`POST /bookings/{id}/geo-override {step, approve, reason>=5}`: audit-logged
+`GEO_OVERRIDE_APPROVED/DECLINED`, history row, captain notified + pushed). The
+approval is single-use (claimed atomically right before the step's write, handed
+back if the write loses a race), expires after `geo_override_valid_minutes`,
+sets `geo_override`, and a captain can never approve (route guard + service
+check). A wrong service code does not burn an approval; the location is
+checked *before* the code so a remote captain cannot guess codes.
+
+**Evidence.** Per step `geo_checks.<step>` on the booking (status
+verified / override / unpinned / unverified, distance, accuracy, reasons,
+approver), `geo_suspect(+_reasons)`, `geo_override`, `geo_refusals`,
+`geo_last_fix_at`; every failed check inserts a `geo_events` row (90-day TTL);
+approvals live in `geo_overrides`. `GET /bookings/{id}/geo-status` (assigned
+captain / center manager / admin) summarises it; the staff booking drawer shows
+"Location Verdict" with Approve / Decline; the captain flags view
+(`flags_by_type`) gains `geo_suspect`, `geo_override`, `geo_refused`.
+Customers never receive any `geo_*` field.
+
+**Location-free paths** (kept on purpose, audited): the manager's "Log A Done
+Job" (`/manager-log-completed`, manager only) and "Mark Done"
+(`/{id}/mark-done`, manager/admin) have no captain and no GPS; both sit behind
+`require_manager(_or_admin)`, a captain token is refused, and the captain
+endpoints take the captain from the token (a captain cannot step another
+captain's job: `_ensure_captain_job`).
+
+**Tunables** (Business Settings → Checks & Reminders; defaults in
+`DEFAULT_BOOKING_POLICY`): `photo_geofence_radius_m` 300, `geo_accuracy_cap_m`
+100, `geo_max_fix_age_s` 120, `geo_future_tolerance_s` 60, `geo_ping_max_age_s`
+600, `geo_trail_grace_s` 120, `geo_min_trail_pings` 2, `geo_max_speed_kmh` 150,
+`geo_min_service_seconds` 120, `geo_override_valid_minutes` 30. Env:
+`GEOFENCE_ENFORCE` (default true; `false` = kill switch: everything is still
+evaluated and recorded, nothing refused) and `GEOFENCE_MIN_SERVICE_SECONDS`.
+
+**Known gaps.** A mock-location app that produces a smooth, jittered, plausible
+trail from the first minute defeats every software check (it also keeps the app
+pinging as if present); photos' EXIF GPS/time are not compared (no image
+library installed — a native app or `Pillow` would add it); a phone that sleeps
+all trip produces a sparse trail, which needs a manager approval at *Arrived*.
 
 ---
 
@@ -1264,7 +1491,8 @@ the worker fails.
   family revocation, `token_version` revocation, account status enforced on
   every request, role/center re-read from the database, OTP purpose binding
   and caps, single-use widget tokens, staff phone proof before self-reset,
-  login lockout, constant-cost login.
+  per-device login throttle (no account-wide lockout), constant-cost login,
+  OTP holds + platform message budget, no account enumeration (§5).
 - **Authorisation:** role guards on every route; center scoping for managers
   and captains (`core/authz.py`); customer scope (404 outside it); captain
   steps re-check center and assignment; customer booking reads (detail,
@@ -1336,18 +1564,19 @@ the worker fails.
     never read, and client-supplied left-hand entries are ignored when a proxy
     appends the real IP. **Cloud Run setting:** `TRUST_PROXY_HEADERS=true`,
     `TRUSTED_PROXY_COUNT=1` (the Google front end appends one entry; `2` lets a
-    client pick its own bucket; `0` behaves as `1`; never start uvicorn with
-    `--forwarded-allow-ips=*`).
+    client pick its own bucket and now needs `ALLOW_PROXY_COUNT_GT_1=true`; `0`
+    with trust on is refused at boot (and trusts nothing at runtime) instead of
+    behaving as `1`; never start uvicorn with `--forwarded-allow-ips=*`).
   - *Dependencies* — nothing exploitable in this deployment; `certifi` bumped
     to 2026.10.19 (revoked CA root). starlette/fastapi, motor+pymongo,
     axios/zod/follow-redirects bumps are recommended in a normal release.
-  - *Open (reported, not fixed — design decisions):* login lockout is per
-    account (5 bad passwords from anyone lock that account for 5 min);
-    anonymous account enumeration (`otp/request` `new_account`,
-    `forgot-password` 404 vs 200 incl. staff e-mails, `booking-access` mode);
-    OTP sends have no global ceiling (per phone 15/h, per (phone, IP) 5/h) and
-    three IPs can exhaust one victim's 15/h; the git history of `main` still
-    holds the 2026-10-06 dev DB dump and dev logs (see
+  - *Open items closed 2026-10-28 (auth hardening, §5):* per-account login
+    lockout → per (account + device + IP) throttle; anonymous enumeration
+    (`new_account`, forgot-password 404/400, booking-access mode, staff
+    numbers) → identical answers; OTP flooding → 60 s per phone with the same
+    code re-sent, escalating source holds, per-phone reserve and a platform
+    budget. Still open: the git history of `main` still holds the 2026-10-06
+    dev DB dump and dev logs (see
     [SECURITY_REPO_CLEANUP.md](SECURITY_REPO_CLEANUP.md), still to do).
 
 ## 14. Testing
@@ -1428,14 +1657,30 @@ system and is updated with every change.** When you change the project:
    copying it.
 4. Add a line to the change log below.
 
+### KYC and identity documents (privacy model)
+
+- **Storage:** identity documents (Aadhaar / PAN images) are never public. r2: the private bucket `R2_PRIVATE_BUCKET_NAME`; local provider: `KYC_PRIVATE_DIR` (default `private_uploads/`), outside the static `/uploads` mount (and `/uploads/documents/*` answers 404 even if a file is planted there). Keys are `documents/<uuid4 hex>.<ext>`; the extension is sniffed from the file's bytes and decides the served type (allowlist, never the client header or bucket metadata). Exception: the captain's **selfie/profile photo** (`photo_url`) sits in the public photos bucket by design (customers see it on the assigned-captain card); its URL is a random uuid.
+- **Access:** only `GET /api/v1/uploads/document/{key}` for the uploader (captain), the manager of the uploader's *current* center, or an admin. Everyone else gets 403 (401 anonymous). Key shape is validated by regex (no traversal or foreign prefixes). Responses carry `Cache-Control: private, no-store`, `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Content-Disposition: inline; filename="document.<ext>"`, `Accept-Ranges: none` (Range ignored, full body) and no CORS grant for unknown origins; HEAD/PUT/DELETE are 405. Per-account limit: 60 opens / 10 min (`document_download_counters`, TTL).
+- **Audit (module `kyc`, admin-only read via `/audit-logs?module=kyc`):** `VIEW_KYC_DOCUMENT` (anyone but the owner: actor, role, owner, key, IP), `KYC_DOCUMENT_ACCESS_DENIED`, `VIEW_KYC_PACKET`, `REVIEW_KYC`, `SUBMIT_KYC`. Details never hold a document URL or ID number.
+- **Numbers:** roster/list responses carry `kyc_status` only; the packet shows Aadhaar/PAN in full to the captain (own) and admin, last 4 to a manager; `kyc_versions` history is always masked.
+- **Immutable once verified:** `PUT /staff/my-kyc` and `POST /uploads/document` by a captain whose packet is `verified` return 409 "Verified Documents Can't Be Changed - Contact Your Manager". No KYC delete route exists. Only the center's manager / an admin can reopen, via `POST /staff/captains/{id}/kyc/request-reverification` (reason required) or a reject; the verified packet (and any packet superseded by a resubmission) is archived to `kyc_versions` (numbered, never deleted). Files are never deleted by code.
+- **Account delete:** `UserService.delete_user` copies `captain_kyc` into `kyc_retained` in the same transaction before the row goes; files and history stay; afterwards only an admin can open the files. **Retention:** indefinite; there is deliberately no purge endpoint (a purge would be a founder-approved manual operation with an audit entry).
+- **Migration:** `app/core/kyc_migration.py` - boot task moves legacy local files and rewrites `/uploads/documents/` URLs (idempotent); `python -m app.scripts.migrate_kyc_documents [--apply]` copies public-bucket R2 documents into the private bucket (copy only). Reads of the private bucket fall back to the legacy bucket for a missing key, so production works with no env change.
+- **Backups:** Atlas backups contain `captain_kyc`, `kyc_versions`, `kyc_retained` (numbers in clear); R2 backups hold the files; restrict who can read those consoles.
+
 ### Change log
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Auth hardening: login throttle per (account + device + IP) with escalating locks, hashed trusted devices and an IP credential-stuffing ceiling (no account-wide lockout); OTP requests 60 s per phone re-sending the SAME live code, per-source escalating holds, per-phone reserve, platform message budget + bell alert; WhatsApp-first with SMS fallback (send error or `failed` status webhook, detect-and-fall-back — Meta can't pre-check numbers) and a Send Code By SMS Instead button in every OTP popup; no account enumeration (identical answers for customer / unknown / staff, `new_account` removed, booking-access constant, staff numbers get a pretend send); proxy trust 0 / >1 refused at boot (`ALLOW_PROXY_COUNT_GT_1`); Razorpay webhook checks captured amount + currency; temp-password template key documented. New collections `rate_counters`, `abuse_holds`; env `LOGIN_*`, `OTP_*`. Tests `test_login_lockout.py`, `test_auth_hardening_*.py`. |
+| 2026-10-28 | GPS integrity (§7.10): arrived / start / complete are refused outside the geofence (accuracy-aware), on a missing, stale, future, weak or replayed fix, or when the stored breadcrumb trail teleports / freezes / has constant accuracy / is missing; refusals are 409 `GEO_CHECK_FAILED` with an Ask-Manager-To-Approve flow (single-use, expiring, audit-logged manager/admin override of one step of one job); minimum wash time; `geo_checks` / `geo_suspect` / `geo_override` evidence, `geo_events`, flag counts, staff Location Verdict; captain app sends fix metadata, queues pings, wake lock, Location Check chip. Kill switch `GEOFENCE_ENFORCE`. Tests `test_gps_integrity.py`; the old flag-only arrival tests were rewritten. |
+| 2026-10-28 | WhatsApp bot alignment: holidays (warm `holiday_service.friendly_message`, next open days from `_scan_days` over the booking window, stale-tap/hold/confirm/reschedule paths), "Use My Plan" step `q_plan` (own plans via `list_my_subscriptions` judged by `pass_usability`; one plan = Use My Plan / Pay Normal Price buttons, two or more = chooser; the pick is named on the line as `subscription_id` (+ car) so quote and booking consume it through the one BookingService path; Last Booking Day respected; exhausted/scheduled plan → one-line reason and normal price), cancel prompt shows `cancellation_charge_preview` (charge, plan wash, wallet) and the wallet line after, chat linked to an account whose phone is not the sender's is dropped (`_live_customer_id`). The bot has no OTP step and does not sell plans (nothing to align there). Tests `test_whatsapp_bot_alignment.py`. |
+| 2026-10-28 | KYC privacy pass: documents private by construction (local provider uses a private dir + 404 on the static path, strict random keys, sniffed type), hardened download headers, per-user rate limit, audit of every non-owner view and refusal (module `kyc`), verified packets immutable for the captain (409 + message, upload blocked), re-verification endpoint + `kyc_versions` history, `kyc_retained` on account delete, migration module/script, manager UI Request Re-Verification. Tests `test_kyc_privacy.py`. |
 | 2026-10-28 | Red-team pass 2 (live, local): full 412-route role x endpoint matrix, webhook forgery, websocket and race attacks, rate-limit/proxy trust, dependency and secrets-in-history scans — see §13. Fixed: RT-01 (the recycle-bin restore now refuses a date that became a holiday), websocket hardening (`slots:` channel shape, 20 sockets per account, 64 KiB frame cap), `certifi` 2026.10.19. Tests `test_redteam2_*`; the `test_feat_holidays_booking` restore expectation was reversed. |
 | 2026-10-28 | Red-team pass (local dev stack): auth/session, authz/IDOR matrix, money/booking-logic, injection/XSS/upload, infra/config and insider-abuse checks against every router — see §13. No code change (nothing low-risk-and-clear to fix was found; one finding — `restore_booking`'s deliberate holiday-check skip — reported, not fixed). Full backend suite run on a fresh local DB. |
 | 2026-10-28 | Plans audit: extended passes now usable on every auto-apply path (`_usable_passes` honours `extended_until`); plan picker data (`covers`, `usable`, `unusable_reason`, `explicit_only`) on all pass lists + `subscription_ids` on quote lines; per-car plan chooser in QuickBookFlow (manager Log A Done Job + booking, customer booking); overlap rule type-pass vs car-bound (§7.3); tests `test_feat_planfix_*`. |
 | 2026-10-28 | Names + customer location: deleted vehicle types keep their name (soft delete, `VehicleTypeNames` resolver, `/vehicle-types/lookup`, tombstone backfill boot task, "Removed" tag in admin, no raw ids in CRM/garage/KPI); customer home center/city/pincode on `users` (derivation precedence, address + booking hooks, resumable boot backfill + script, `/users` and `/crm/customers` filters/sort, new indexes, admin Users Center/City columns). |
+| 2026-10-28 | Festival / broadcast campaigns (admin): MARKETING template `blussit_festival_greeting` (image header + one message variable, print script `print_festival_template.py`), `wa_campaigns`/`wa_campaign_recipients`, server-resolved selection (all/none/ids + excluded/included + filters) over opted-in-by-default customers, API queues and the worker drains at the token-bucket rate with leases, resumable and idempotent, status webhook counts, caps (`WHATSAPP_CAMPAIGN_*`), test send, cancel, audit; admin Campaigns tab (wizard + live progress). Tests `test_whatsapp_campaigns.py`. |
 | 2026-10-28 | Finance ledger: admin-only `finance_entries` (credit/debit, paise, IST day, soft-void + audit), `/admin/finance/*` (entries, summary, CSV, categories), bookings earning read from `admin_collections.net_collected` (received money, 60 s cache), admin page "Expenses & Sales" (§7.9). Tests: `tests/test_feat_finance_*.py`. |
 | 2026-10-28 | Reconcile: sweeps and views use the USABLE pass end (`pass_usable_until` = later of `end_date`/`extended_until`) — the "ends soon" sweep, wash reminder, pass-ending date text, KPI expiring count/`days_left`, society card counts — so an extended pass is never reported ended or "ends today"; vehicle delete (and retype, now incl. paused) refused while a pass is inside its extension; `refuse_overlapping_type_pass` kept (one car is never paid for twice; test setup gained a second car for the type pass to serve); customers see "Removed Car Type" instead of a blank type name; sitemap.xml stays a build artifact (revert after build). Tests: `test_reconcile_extension_sweeps.py`. |
 | 2026-10-19 | Holiday system: `holidays` collection + `HolidayService` (30 s in-process cache), one HOLIDAY check in `_reserve_slot_capacity` / `hold_slot` / `precheck_quick_booking`, holiday-marked `available_slots`, admin `/admin/holidays` (list/create/edit/end/preview, audited, affected bookings — never auto-cancelled), public `/public/holidays` (60 s cache) and `/holidays/mine`; website popup (lazy, once per session, beats the offer popup), slot-picker notice + Holiday chips, `/book?date=`, bot holiday reply, manager banner (§7.8). Tests: `tests/test_feat_holidays_*.py`. |

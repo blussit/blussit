@@ -60,19 +60,81 @@ export interface Position {
   latitude: number;
   longitude: number;
   accuracy_m?: number;
+  /** The device's own time for this fix (ISO) — the server compares it with its clock. */
+  fix_at?: string;
+  speed_mps?: number;
+  heading_deg?: number;
+  altitude_m?: number;
+  /** Extra evidence only (never the control): HTTPS page? permission state? */
+  secure_context?: boolean;
+  permission_state?: string;
 }
 
-/** A blocking GPS fix — every job step is geo-stamped, so no fix, no step. */
-export function getPosition(failMessage: string): Promise<Position> {
+/** The fields every geo-stamped job step sends, whichever step it is. */
+export function fixFields(p: Position): Position {
+  return {
+    latitude: p.latitude,
+    longitude: p.longitude,
+    accuracy_m: p.accuracy_m,
+    fix_at: p.fix_at,
+    speed_mps: p.speed_mps,
+    heading_deg: p.heading_deg,
+    altitude_m: p.altitude_m,
+    secure_context: p.secure_context,
+    permission_state: p.permission_state,
+  };
+}
+
+const finite = (n: number | null | undefined): number | undefined => (typeof n === "number" && Number.isFinite(n) ? n : undefined);
+
+async function permissionState(): Promise<string | undefined> {
+  try {
+    const status = await navigator.permissions?.query({ name: "geolocation" as PermissionName });
+    return status?.state;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reads a browser position into the shape the server checks. */
+export function toPosition(pos: GeolocationPosition, permission?: string): Position {
+  const c = pos.coords;
+  return {
+    latitude: c.latitude,
+    longitude: c.longitude,
+    accuracy_m: finite(c.accuracy),
+    fix_at: new Date(pos.timestamp).toISOString(),
+    speed_mps: finite(c.speed),
+    heading_deg: finite(c.heading),
+    altitude_m: finite(c.altitude),
+    secure_context: typeof window !== "undefined" ? window.isSecureContext : undefined,
+    permission_state: permission,
+  };
+}
+
+/** Why a fix couldn't be taken, in words a captain can act on. */
+export function geoErrorMessage(err: GeolocationPositionError | undefined, fallback: string): string {
+  if (!err) return fallback;
+  if (err.code === 1) return "Location Is Blocked — Allow Location For This App In Your Browser Settings, Then Try Again";
+  if (err.code === 2) return "Your Location Isn't Available — Move To An Open Area And Try Again";
+  if (err.code === 3) return "Your Location Took Too Long — Try Again";
+  return fallback;
+}
+
+/** A blocking, FRESH GPS fix (maximumAge 0 — never a cached one): every job
+ * step is geo-stamped and the server refuses an old or missing position. */
+export async function getPosition(failMessage: string): Promise<Position> {
+  if (!navigator.geolocation) throw new Error(failMessage);
+  if (typeof window !== "undefined" && window.isSecureContext === false) {
+    throw new Error("Open The App Over A Secure (HTTPS) Link To Share Your Location");
+  }
+  const permission = await permissionState();
+  if (permission === "denied") throw new Error(geoErrorMessage({ code: 1 } as GeolocationPositionError, failMessage));
   return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error(failMessage));
-      return;
-    }
     navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy_m: pos.coords.accuracy ?? undefined }),
-      (err) => reject(new Error(err.message || failMessage)),
-      { enableHighAccuracy: true, timeout: 15000 },
+      (pos) => resolve(toPosition(pos, permission)),
+      (err) => reject(new Error(geoErrorMessage(err, failMessage))),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
     );
   });
 }
@@ -81,7 +143,7 @@ export function getPosition(failMessage: string): Promise<Position> {
  * must not stop a work day); it just stores no location. */
 export function tryPosition(): Promise<GeoPayload> {
   return getPosition("").then(
-    (p) => p,
+    (p) => ({ latitude: p.latitude, longitude: p.longitude, accuracy_m: p.accuracy_m }),
     () => ({}),
   );
 }

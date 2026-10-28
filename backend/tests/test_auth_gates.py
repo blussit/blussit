@@ -46,30 +46,33 @@ async def _proof(auth, db, phone: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_booking_access_modes(db, cleanup):
+async def test_booking_access_mode_is_the_same_for_every_number(db, cleanup):
+    """No enumeration: unknown, abandoned, fresh-verified, stale and staff
+    numbers all answer the identical { mode: otp } (the booking always proves
+    the phone with a code)."""
     auth = AuthService(db)
-    # Unknown number -> register.
-    assert (await auth.booking_access_mode("9888877701"))["mode"] == "register"
+    assert await auth.booking_access_mode("9888877701") == {"mode": "otp"}
 
-    # Abandoned guest signup: account exists, never verified -> otp.
     uid = await _legacy_unproven_signup(db, "9888877702", "Abandoned Guest")
     _cleanup_user(cleanup, uid, "9888877702")
-    assert (await auth.booking_access_mode("9888877702"))["mode"] == "otp"
+    assert await auth.booking_access_mode("9888877702") == {"mode": "otp"}
     user = await db.users.find_one({"_id": ObjectId(uid)})
     assert user["must_change_password"] is True  # guest flag -> forced password setup later
 
-    # Fresh-verified customer -> password.
     verified_id = await make_customer(db)
     fresh = await db.users.find_one({"_id": ObjectId(verified_id)})
     _cleanup_user(cleanup, verified_id)
-    assert (await auth.booking_access_mode(fresh["phone"]))["mode"] == "password"
-
-    # Verified long ago (91 days) -> stale -> otp again.
+    assert await auth.booking_access_mode(fresh["phone"]) == {"mode": "otp"}
     await db.users.update_one(
         {"_id": ObjectId(verified_id)},
         {"$set": {"phone_verified_at": datetime.now(timezone.utc) - timedelta(days=91)}},
     )
-    assert (await auth.booking_access_mode(fresh["phone"]))["mode"] == "otp"
+    assert await auth.booking_access_mode(fresh["phone"]) == {"mode": "otp"}
+
+    manager = await db.users.find_one({"role": "manager"})
+    assert await auth.booking_access_mode(manager["phone"]) == {"mode": "otp"}
+    with pytest.raises(BadRequestException):
+        await auth.booking_access_mode("123")
 
 
 @pytest.mark.asyncio

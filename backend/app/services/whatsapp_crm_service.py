@@ -1415,4 +1415,9 @@ async def bootstrap_blussit_templates(db: AsyncIOMotorDatabase) -> list[dict]:
             results.append({"name": otp_name, "status": "ERROR", "note": exc.message})
     for d in CURRENT_TEMPLATE_DEFS:
         results.append(await submit_template_def(db, d))
+    # Festival / broadcast campaign template (image header) — see
+    # whatsapp_campaign_template.py.
+    from app.services.whatsapp_campaign_template import submit_festival_template
+
+    results.append(await submit_festival_template(db))
     return results

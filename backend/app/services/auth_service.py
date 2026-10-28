@@ -5,6 +5,7 @@ when neither can reach a number the request is refused and the browser
 sends the code through the MSG91 widget instead (see Msg91WidgetService).
 Dev/test use the log-only providers.
 """
+import asyncio
 import hashlib
 import logging
 import math
@@ -28,7 +29,8 @@ from app.core.exceptions import (
     StaffResetRefusedException,
     UnauthorizedException,
 )
-from app.core.rate_limit import current_requester
+from app.core.rate_limit import current_client, current_device, current_requester
+from app.services import auth_guard as guard
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password_async, verify_password_async, verify_password_or_dummy_async
 from app.models.enums import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
@@ -181,6 +183,43 @@ class AuthService:
                 logger.exception("OTP delivery via %s raised for …%s", channel, phone[-4:])
         return None
 
+    async def otp_whatsapp_failed(self, phone: str, outbox_created_at: datetime | None) -> bool:
+        """Meta accepted the WhatsApp code and then reported it FAILED (the
+        number isn't on WhatsApp / undeliverable — the Cloud API can't tell
+        us beforehand, so this is detect-and-fall-back): send the SAME live
+        code by SMS, once. Honours the platform message budget; only for the
+        latest code on that phone and only if SMS is configured. True when an
+        SMS went out."""
+        if not self.sms.enabled:
+            return False
+        local = validate_indian_mobile(phone) or phone
+        key = f"otp:{local}"
+        now = datetime.now(timezone.utc)
+        doc = await self.otp_store.find_one({"_id": key})
+        if not doc or doc.get("fake") or not doc.get("otp") or guard.aware(doc.get("expires_at")) <= now:
+            return False
+        sent_at = guard.aware(doc.get("last_sent_at"))
+        made = guard.aware(outbox_created_at)
+        if doc.get("channel") != "whatsapp" or doc.get("sms_fallback") or (sent_at and made and made < sent_at):
+            return False  # already moved to SMS, or the failure is for an older send
+        claimed = await self.otp_store.update_one(
+            {"_id": key, "sms_fallback": {"$ne": True}, "otp": doc["otp"]}, {"$set": {"sms_fallback": True, "channel": "sms"}}
+        )
+        if not claimed.modified_count:
+            return False
+        if settings.RATE_LIMIT_ENABLED:
+            crossed = await guard.budget_count(self.db, now)
+            if crossed:
+                await self._alert_budget(crossed)
+        try:
+            ok = await self.sms.send_otp(local, doc["otp"])
+        except Exception:  # noqa: BLE001
+            logger.exception("SMS fallback raised for …%s", local[-4:])
+            ok = False
+        if not ok:
+            logger.error("WhatsApp OTP to …%s failed and the SMS fallback did not send", local[-4:])
+        return ok
+
     async def register_customer(self, payload: RegisterRequest) -> dict:
         # A password account on a number nobody proved was the way to take
         # over a stranger's future account: their OTP bookings and logins
@@ -188,11 +227,13 @@ class AuthService:
         # be proven first — the same OTP / widget proof a booking uses.
         if not payload.phone:
             raise BadRequestException("Enter your mobile number to create an account")
+        # The proof comes BEFORE the "already exists" answers: only whoever
+        # holds the phone learns whether the number or an email is taken.
+        await self.require_phone_proof(payload.phone, payload.phone_otp, payload.phone_access_token)
         if payload.email and await self.users.find_by_email(payload.email):
             raise ConflictException("An account with this email already exists")
         if await self.users.find_by_phone(payload.phone):
             raise ConflictException("An account with this phone number already exists")
-        await self.require_phone_proof(payload.phone, payload.phone_otp, payload.phone_access_token)
 
         referral_code = self._generate_referral_code(payload.full_name)
         user_doc = self._strip_absent_contact_fields({
@@ -411,48 +452,62 @@ class AuthService:
             at = at.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) - at <= timedelta(days=AuthService.PHONE_REVERIFY_DAYS)
 
+    @staticmethod
+    def _canonical_identifier(identifier: str) -> str:
+        """The typed email/phone in one spelling (throttle keys for an
+        identifier that has no account must match the one that does)."""
+        raw = (identifier or "").strip().lower()
+        if "@" in raw:
+            return raw
+        return validate_indian_mobile(raw) or raw
+
+    async def _remember_device(self, user: dict, device_id: str | None = None) -> None:
+        """Records the signing-in device (hashed, bounded list) as one that has
+        logged in to this account OK — the login throttle never blocks it."""
+        digest = guard.device_hash(device_id if device_id is not None else current_device())
+        if not digest or digest in (user.get("trusted_devices") or []):
+            return
+        try:
+            await self.users.collection.update_one({"_id": user["_id"]}, {"$pull": {"trusted_devices": digest}})
+            await self.users.collection.update_one(
+                {"_id": user["_id"]}, {"$push": {"trusted_devices": {"$each": [digest], "$slice": -max(1, settings.TRUSTED_DEVICES_MAX)}}}
+            )
+        except Exception:  # noqa: BLE001 — never fail a sign-in over bookkeeping
+            logger.exception("Could not record a trusted device")
+
+    def _is_trusted_device(self, user: dict | None) -> bool:
+        digest = guard.device_hash(current_device())
+        return bool(user and digest and digest in (user.get("trusted_devices") or []))
+
     async def login(self, identifier: str, password: str) -> dict:
         user = await self.users.find_by_identifier(identifier)
-        if user and user.get("login_locked_until"):
-            locked_until = user["login_locked_until"]
-            if locked_until.tzinfo is None:
-                locked_until = locked_until.replace(tzinfo=timezone.utc)
-            if locked_until > datetime.now(timezone.utc):
-                raise UnauthorizedException("Too many failed attempts. Try again in a few minutes.")
+        # Failed passwords are throttled per (account + device + source IP),
+        # never account-wide: a stranger's guesses lock only THEIR bucket, so
+        # the owner on another device/IP signs in at once. A device that has
+        # signed in to this account before is never blocked at all.
+        account = str(user["_id"]) if user else "id:" + self._canonical_identifier(identifier)
+        ip, device = current_client(), current_device()
+        trusted = self._is_trusted_device(user)
+        slow = await guard.login_gate(self.db, account, device, ip, trusted)
+        if slow:
+            await asyncio.sleep(slow)
         # Always exactly one bcrypt check — against a throwaway hash when
         # there's no account (or no password) — so the response time no
         # longer says whether the identifier exists (ENUM-1: 18 ms vs 1 s).
         if not await verify_password_or_dummy_async(password, (user or {}).get("password_hash")) or not user:
-            if user:
-                # Counted with $inc: a read-then-write counter lost every
-                # concurrent miss, so a parallel burst of guesses never
-                # tripped the lock.
-                counted = await self.users.collection.find_one_and_update(
-                    {"_id": user["_id"]}, {"$inc": {"failed_login_attempts": 1}}, return_document=ReturnDocument.AFTER
-                )
-                if counted and counted.get("failed_login_attempts", 0) >= self.LOGIN_MAX_FAILURES:
-                    await self.users.collection.update_one(
-                        {"_id": user["_id"], "failed_login_attempts": {"$gte": self.LOGIN_MAX_FAILURES}},
-                        {"$set": {
-                            "login_locked_until": datetime.now(timezone.utc) + timedelta(minutes=self.LOGIN_LOCK_MINUTES),
-                            "failed_login_attempts": 0,
-                        }},
-                    )
+            await guard.login_failed(self.db, account, device, ip)
             raise UnauthorizedException("Invalid credentials")
         standing = account_switched_off(user)
         if standing:
             raise UnauthorizedException(standing)
 
-        # The lock is checked again as the success is recorded: a correct
-        # guess racing inside a burst that has just locked the account
-        # must not get through.
         now = datetime.now(timezone.utc)
-        signed_in = await self.users.collection.find_one_and_update(
-            {"_id": user["_id"], "$or": [{"login_locked_until": None}, {"login_locked_until": {"$lte": now}}]},
-            {"$set": {"last_login_at": now, "failed_login_attempts": 0, "login_locked_until": None, "updated_at": now}},
+        await self.users.collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"last_login_at": now, "updated_at": now}, "$unset": {"login_locked_until": "", "failed_login_attempts": ""}},
         )
-        if not signed_in:
-            raise UnauthorizedException("Too many failed attempts. Try again in a few minutes.")
+        await guard.login_succeeded(self.db, account, device, ip)
+        await self._remember_device(user)
         return self._issue_tokens(user)
 
     async def refresh(self, refresh_token: str) -> dict:
@@ -568,19 +623,14 @@ class AuthService:
         # Invalidate every refresh token issued before this change.
         await self.users.collection.update_one({"_id": ObjectId(user_id)}, {"$inc": {"token_version": 1}})
 
-    _OTP_RESEND_COOLDOWN_SECONDS = 30
+    # Tunables live in Settings (OTP_*): the resend cooldown (60 s per phone),
+    # per-phone hourly allowances, source holds and the global budget.
     _OTP_TTL_MINUTES = 10
-    _OTP_MAX_ATTEMPTS = 5
-    # Hourly allowance per (phone, requester) — the requester being the
-    # caller's IP bucket for anonymous requests, the account for signed-in
-    # ones (see _claim_otp_send). A stranger asking for codes to someone
-    # else's number uses up only THEIR share, never the owner's (AUTH-06:
-    # five booking-popup codes used to lock a customer out of OTP login for
-    # an hour).
-    _OTP_MAX_SENDS_PER_WINDOW = 5
-    # Per-phone ceiling whatever the requester — the per-IP limiter alone
-    # can't stop SMS pumping spread across many addresses.
-    _OTP_MAX_SENDS_PER_PHONE_WINDOW = 15
+    # A code takes 5 wrong guesses from any ONE requester and 15 in all, so a
+    # stranger burning guesses on someone else's number can't use up the
+    # owner's share.
+    _OTP_MAX_ATTEMPTS = 15
+    _OTP_MAX_ATTEMPTS_PER_REQUESTER = 5
     _OTP_SEND_WINDOW_SECONDS = 3600
     _OTP_SEND_FAILED = "Couldn't send the verification code — please try again in a moment."
     _OTP_INVALID = "Invalid or expired code."
@@ -608,36 +658,56 @@ class AuthService:
             return user.get("phone") if user else None
         return validate_indian_mobile(raw) or raw or None
 
-    async def request_otp(self, identifier: str, purpose: str = OTP_LOGIN, customer_only: bool = False, requester: str | None = None) -> str:
+    @staticmethod
+    def _wanted_channel(channel: str | None) -> str:
+        if channel in (None, "", "whatsapp"):
+            return "whatsapp"
+        if channel == "sms":
+            return "sms"
+        raise BadRequestException("Choose WhatsApp or SMS for the code.")
+
+    async def request_otp(
+        self, identifier: str, purpose: str = OTP_LOGIN, customer_only: bool = False, requester: str | None = None,
+        channel: str | None = None,
+    ) -> str:
         """Sends a code to the phone on file for this account (email or phone
         both resolve to the account's real number). Never returns the code —
-        callers must not echo it back to the client. customer_only is the
-        OTP-login entry: staff can't log in by OTP, so no code is spent on
-        them. A password_reset code is refused (nothing sent) unless the
-        account may reset by code at all — _ensure_code_reset_allowed."""
-        user = await self._find_user_by_identifier(identifier)
-        if not user:
-            new_phone = validate_indian_mobile((identifier or "").strip()) if "@" not in (identifier or "") else None
-            if customer_only and new_phone and purpose == OTP_LOGIN:
-                # First visit by phone: the code goes out like any other and
-                # the account is created (after asking the name) once it is
-                # proven — see otp_login.
+        callers must not echo it back to the client.
+
+        NO ENUMERATION: this answers the same for a customer, an unknown
+        identifier and a staff account. Where a code must not go out (unknown
+        email/phone on a reset, a staff number on a customer path, a
+        suspended account, no phone on file, a staff reset the staff member
+        hasn't proven) the request still runs every check and the same
+        cooldown/caps/holds — it just stores an unmatchable placeholder and
+        sends nothing (_issue_otp fake=True). The only way to learn anything
+        is to hold the phone. A first visit by phone (customer_only login)
+        gets a real code: the account is created once it is proven."""
+        raw = (identifier or "").strip()
+        user = await self._find_user_by_identifier(raw)
+        send = False
+        phone: str | None = None
+        if user is None:
+            new_phone = None if "@" in raw else validate_indian_mobile(raw)
+            if new_phone and customer_only and purpose == OTP_LOGIN:
                 if is_business_whatsapp_number(new_phone):
                     raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
-                return await self._issue_otp(new_phone, purpose, requester)
-            raise NotFoundException("No account found with this phone number or email.")
-        if customer_only:
-            if user.get("role") != UserRole.CUSTOMER.value:
-                raise BadRequestException("This number belongs to a staff account — use Staff login.")
-            standing = account_switched_off(user)
-            if standing:
-                raise UnauthorizedException(standing)
-        if purpose == OTP_PASSWORD_RESET:
-            self._ensure_code_reset_allowed(user)
-        phone = user.get("phone")
-        if not phone:
-            raise BadRequestException("This account has no phone number on file to send a code to.")
-        return await self._issue_otp(phone, purpose, requester)
+                send, phone = True, new_phone
+            phone = phone or new_phone or f"id:{raw.lower()[:120]}"
+        else:
+            phone = user.get("phone")
+            send = bool(phone) and not user.get("is_deleted")
+            # A suspended/inactive customer still gets the code: only whoever
+            # holds the phone then learns the standing (otp_login checks the
+            # proof first), so nothing is revealed to a stranger.
+            if send and customer_only and user.get("role") != UserRole.CUSTOMER.value:
+                send = False
+            if send and purpose == OTP_PASSWORD_RESET and user.get("role") != UserRole.CUSTOMER.value and not self.phone_self_verified(user):
+                send = False
+            phone = phone or f"id:{user['_id']}"
+        return await self._issue_otp(
+            phone, purpose, requester, channel, fake=not send, trusted=self._is_trusted_device(user),
+        )
 
     @staticmethod
     def phone_self_verified(user: dict) -> bool:
@@ -667,62 +737,160 @@ class AuthService:
         last_sent = (record or {}).get("last_sent_at")
         if not last_sent:
             return
-        if last_sent.tzinfo is None:
-            last_sent = last_sent.replace(tzinfo=timezone.utc)
-        remaining = self._OTP_RESEND_COOLDOWN_SECONDS - (now - last_sent).total_seconds()
+        remaining = settings.OTP_RESEND_COOLDOWN_SECONDS - (now - guard.aware(last_sent)).total_seconds()
         if remaining > 0:
-            raise BadRequestException(f"Please wait {math.ceil(remaining)}s before requesting another code.")
+            wait = math.ceil(remaining)
+            raise guard.throttled(f"Try again in {wait} second{'s' if wait != 1 else ''}.", wait, "OTP_COOLDOWN")
 
-    async def _issue_otp(self, phone: str, purpose: str, requester: str | None = None) -> str:
-        """One live code per phone, stored with its purpose; returns the
-        channel that delivered it. Refused when no backend channel can reach
-        the number, inside the resend cooldown, or over the hourly caps —
-        and a code that then fails to send is rolled back (no cooldown, not
-        counted), so the client can fall back to the MSG91 widget at once."""
+    async def _fake_pause(self) -> None:
+        """A pretend send takes about as long as a real one."""
+        base = max(0, settings.OTP_FAKE_SEND_DELAY_MS) / 1000
+        if base:
+            await asyncio.sleep(base * (0.8 + 0.4 * random.random()))
+
+    async def _issue_otp(
+        self, phone: str, purpose: str, requester: str | None = None, channel: str | None = None, *,
+        fake: bool = False, trusted: bool = False,
+    ) -> str:
+        """One live code per phone, stored with the purposes it was asked for;
+        returns the channel that delivered it. The rules, in order:
+          1. a source (device/IP) on hold is refused (429 + retry_after);
+          2. no backend channel can reach the number -> refused (the client
+             falls back to the MSG91 widget);
+          3. one request per phone per OTP_RESEND_COOLDOWN_SECONDS (429 +
+             retry_after);
+          4. per-source requests/hour — the one past the allowance starts an
+             escalating hold;
+          5. per-phone hourly allowances (_claim_otp_send);
+          6. a resend inside the code's validity re-sends the SAME code (a
+             stranger asking for a victim's code can never replace it); it is
+             only a NEW code when none is live;
+          7. delivery: WhatsApp first, SMS fallback, or SMS alone when the
+             caller chose channel "sms". A code that then fails to send is
+             rolled back (no cooldown, not counted).
+        `fake`: do all of the above except storing a real code and sending
+        (see request_otp). `trusted`: a device that signed in to this account
+        before — see _claim_otp_send."""
         phone = validate_indian_mobile(phone) or phone
+        want = self._wanted_channel(channel)
         if settings.dev_tools_active:
+            if fake:
+                return want
             return await self._issue_dev_otp(phone, purpose)
-        channels = await self._otp_channels(phone)
-        if not channels:
-            raise BadRequestException(self._OTP_SEND_FAILED)
         now = datetime.now(timezone.utc)
+        ip, device = current_client(), current_device()
+        controls = settings.RATE_LIMIT_ENABLED
+        if controls:
+            await guard.check_otp_holds(self.db, ip, device, now)
+        if want == "sms":
+            if not self.sms.enabled:
+                raise BadRequestException("SMS isn't available right now — use WhatsApp.")
+            channels = ["sms"]
+        else:
+            channels = await self._otp_channels(phone)
+            if not channels:
+                raise BadRequestException(self._OTP_SEND_FAILED)
         key = f"otp:{phone}"
-        self._raise_if_cooling_down(await self.otp_store.find_one({"identifier": phone}, sort=[("last_sent_at", -1)]), now)
-        await self._claim_otp_send(phone, requester)
+        rec = await self.otp_store.find_one({"identifier": phone}, sort=[("last_sent_at", -1)])
+        self._raise_if_cooling_down(rec, now)
+        live = bool(
+            rec and rec["_id"] == key and guard.aware(rec.get("expires_at")) > now
+            and rec.get("attempts", 0) < self._OTP_MAX_ATTEMPTS and (fake or not rec.get("fake"))
+        )
+        if controls:
+            await guard.count_otp_request(self.db, ip, device, now)
+            if not fake and not live and await guard.budget_over(self.db, now):
+                await guard.over_budget_gate(self.db, ip, device, now)
+        if not await self._claim_otp_send(phone, requester, trusted, live):
+            # The phone's allowance for strangers is spent but a code is live
+            # and already on its way to the owner: answer as if sent.
+            if fake:
+                await self._fake_pause()
+            return (rec or {}).get("channel") or want
+        if not fake and controls:
+            crossed = await guard.budget_count(self.db, now)
+            if crossed:
+                await self._alert_budget(crossed)
 
-        otp = f"{secrets.randbelow(1_000_000):06d}"
-        cutoff = now - timedelta(seconds=self._OTP_RESEND_COOLDOWN_SECONDS)
-        try:
-            # Fixed _id: a code sent inside the cooldown turns this upsert
-            # into a duplicate-key insert, so two racing sends can't both win.
-            await self.otp_store.update_one(
-                {"_id": key, "$or": [{"last_sent_at": {"$lte": cutoff}}, {"last_sent_at": None}]},
-                {
-                    "$set": {
-                        "identifier": phone,
-                        "otp": otp,
-                        "purpose": purpose,
-                        "expires_at": now + timedelta(minutes=self._OTP_TTL_MINUTES),
-                        "last_sent_at": now,
-                        "attempts": 0,
-                        "verified": False,
-                    }
-                },
-                upsert=True,
+        if live:
+            otp = None if fake else rec.get("otp")
+            # Same code, same validity: only the resend clock and purposes move.
+            moved = await self.otp_store.update_one(
+                {"_id": key, "last_sent_at": rec.get("last_sent_at")},
+                {"$set": {"last_sent_at": now}, "$addToSet": {"purposes": purpose}},
             )
-        except DuplicateKeyError:
-            await self._release_otp_send(phone, requester)
-            self._raise_if_cooling_down(await self.otp_store.find_one({"_id": key}), datetime.now(timezone.utc))
-            raise BadRequestException(self._OTP_SEND_FAILED)
-        # Codes stored before the fixed _id would otherwise shadow this one.
-        await self.otp_store.delete_many({"identifier": phone, "_id": {"$ne": key}})
+            if not moved.modified_count:
+                await self._release_otp_send(phone, requester)
+                self._raise_if_cooling_down(await self.otp_store.find_one({"_id": key}), datetime.now(timezone.utc))
+                raise BadRequestException(self._OTP_SEND_FAILED)
+        else:
+            otp = None if fake else f"{secrets.randbelow(1_000_000):06d}"
+            cutoff = now - timedelta(seconds=settings.OTP_RESEND_COOLDOWN_SECONDS)
+            try:
+                # Fixed _id: a code sent inside the cooldown turns this upsert
+                # into a duplicate-key insert, so two racing sends can't both win.
+                await self.otp_store.update_one(
+                    {"_id": key, "$or": [{"last_sent_at": {"$lte": cutoff}}, {"last_sent_at": None}]},
+                    {
+                        "$set": {
+                            "identifier": phone,
+                            "otp": otp,
+                            "fake": fake,
+                            "purpose": purpose,
+                            "purposes": [purpose],
+                            "expires_at": now + timedelta(minutes=self._OTP_TTL_MINUTES),
+                            "last_sent_at": now,
+                            "attempts": 0,
+                            "att": {},
+                            "verified": False,
+                            "channel": None,
+                            "sms_fallback": False,
+                        }
+                    },
+                    upsert=True,
+                )
+            except DuplicateKeyError:
+                await self._release_otp_send(phone, requester)
+                self._raise_if_cooling_down(await self.otp_store.find_one({"_id": key}), datetime.now(timezone.utc))
+                raise BadRequestException(self._OTP_SEND_FAILED)
+            # Codes stored before the fixed _id would otherwise shadow this one.
+            await self.otp_store.delete_many({"identifier": phone, "_id": {"$ne": key}})
 
-        channel = await self._deliver_otp(phone, otp, purpose, channels)
-        if not channel:
-            await self.otp_store.delete_one({"_id": key, "otp": otp})
+        if fake:
+            await self._fake_pause()
+            return want
+        delivered = await self._deliver_otp(phone, otp, purpose, channels)
+        if not delivered:
+            if live:
+                await self.otp_store.update_one({"_id": key}, {"$set": {"last_sent_at": rec.get("last_sent_at")}})
+            else:
+                await self.otp_store.delete_one({"_id": key, "otp": otp})
             await self._release_otp_send(phone, requester)
             raise BadRequestException(self._OTP_SEND_FAILED)
-        return channel
+        await self.otp_store.update_one({"_id": key}, {"$set": {"channel": delivered}})
+        return delivered
+
+    async def _alert_budget(self, which: str) -> None:
+        """The platform's OTP message budget was just crossed (once per
+        window): one bell alert to the admins and managers. The ERROR log
+        line is written by auth_guard.budget_count."""
+        try:
+            from app.models.enums import NotificationType
+            from app.services.notification_service import NotificationService
+
+            limit = settings.OTP_GLOBAL_HOURLY_BUDGET if which == "hourly" else settings.OTP_GLOBAL_DAILY_BUDGET
+            notifications = NotificationService(self.db)
+            recipients = self.db.users.find(
+                {"role": {"$in": ["admin", "manager"]}, "is_deleted": {"$ne": True}}, {"_id": 1}
+            ).limit(25)
+            async for person in recipients:
+                await notifications.notify(
+                    str(person["_id"]), "Verification Codes Over Budget",
+                    f"More than {limit} login codes went out this {'hour' if which == 'hourly' else 'day'}. New visitors are slowed down; check for abuse.",
+                    NotificationType.SYSTEM, send_whatsapp=False,
+                )
+        except Exception:  # noqa: BLE001 — an alert must never break a login
+            logger.exception("Could not send the OTP budget alert")
 
     async def _issue_dev_otp(self, phone: str, purpose: str) -> str:
         """LOCAL TESTING ONLY (settings.dev_tools_active): the code is always
@@ -752,51 +920,64 @@ class AuthService:
         who = requester or current_requester() or "-"
         return hashlib.sha256(who.encode()).hexdigest()[:16]
 
-    async def _claim_otp_send(self, phone: str, requester: str | None = None) -> None:
-        """Counts one code toward this phone's hourly allowances, or
-        refuses. Two caps in ONE doc keyed by the PHONE (fixed _id, so
-        concurrent claims can't both slip under either): `by.<requester>`
-        per requester (_OTP_MAX_SENDS_PER_WINDOW) and `sent` for the phone
-        as a whole (_OTP_MAX_SENDS_PER_PHONE_WINDOW). Apart from the code
-        doc: consuming a code on verify, or asking by email instead of
-        phone, must not reset it. The collection's TTL on expires_at clears
-        it when the window ends."""
+    async def _claim_otp_send(self, phone: str, requester: str | None = None, trusted: bool = False, have_live: bool = False) -> bool:
+        """Counts one code toward this phone's hourly allowances, or refuses.
+        Two counters in ONE doc keyed by the PHONE (fixed _id, so concurrent
+        claims can't both slip under a cap): `by.<requester>` and `sent`.
+        Apart from the code doc, so consuming a code on verify, or asking by
+        email instead of phone, can't reset them; TTL clears the window.
+
+        The rules (see Settings OTP_PHONE_*): a requester gets
+        OTP_PHONE_SOURCE_HOURLY_LIMIT; once the phone's total reaches
+        OTP_PHONE_HOURLY_LIMIT only requesters that have NOT sent for this
+        phone yet (and devices that signed in to the account before) still
+        count, up to OTP_PHONE_ABSOLUTE_HOURLY_LIMIT — so strangers
+        hammering a victim's number from a few addresses can't stop the
+        owner's own request. Returns False for "no new message, but a code
+        is already live and on its way to the owner" (answer as if sent)."""
         key = f"otp-send-cap:{phone}"
         slot = self._requester_slot(requester)
         mine = f"by.{slot}"
+        per_source = settings.OTP_PHONE_SOURCE_HOURLY_LIMIT
+        total_cap = settings.OTP_PHONE_HOURLY_LIMIT
+        absolute = settings.OTP_PHONE_ABSOLUTE_HOURLY_LIMIT
         now = datetime.now(timezone.utc)
-        for _ in range(3):
-            claimed = await self.otp_store.update_one(
-                {
-                    "_id": key, "expires_at": {"$gt": now},
-                    "sent": {"$lt": self._OTP_MAX_SENDS_PER_PHONE_WINDOW},
-                    mine: {"$not": {"$gte": self._OTP_MAX_SENDS_PER_WINDOW}},
-                },
-                {"$inc": {"sent": 1, mine: 1}},
-            )
-            if claimed.modified_count:
-                return
+
+        def refuse(window_end: datetime):
+            window_end = guard.aware(window_end)
+            wait = max(1, (window_end - now).total_seconds())
+            return guard.throttled(f"Too many codes requested for this number — try again in {guard.human_wait(wait)}.", wait, "OTP_PHONE_LIMIT")
+
+        for _ in range(8):
             live = await self.otp_store.find_one({"_id": key, "expires_at": {"$gt": now}})
-            if live:
-                if (live.get("sent", 0) < self._OTP_MAX_SENDS_PER_PHONE_WINDOW
-                        and (live.get("by") or {}).get(slot, 0) < self._OTP_MAX_SENDS_PER_WINDOW):
+            if not live:
+                try:
+                    # Upsert over a stale (not yet TTL-swept) window or none at
+                    # all; a live one makes the insert collide instead.
+                    await self.otp_store.update_one(
+                        {"_id": key, "expires_at": {"$lte": now}},
+                        {"$set": {"sent": 1, "by": {slot: 1}, "expires_at": now + timedelta(seconds=self._OTP_SEND_WINDOW_SECONDS)}},
+                        upsert=True,
+                    )
+                    return True
+                except DuplicateKeyError:
                     continue
-                window_end = live["expires_at"]
-                if window_end.tzinfo is None:
-                    window_end = window_end.replace(tzinfo=timezone.utc)
-                minutes = max(1, math.ceil((window_end - now).total_seconds() / 60))
-                raise BadRequestException(f"Too many codes requested for this number — try again in {minutes} minute{'s' if minutes != 1 else ''}.")
-            try:
-                # Upsert over a stale (not yet TTL-swept) window or none at
-                # all; a live one makes the insert collide instead.
-                await self.otp_store.update_one(
-                    {"_id": key, "expires_at": {"$lte": now}},
-                    {"$set": {"sent": 1, "by": {slot: 1}, "expires_at": now + timedelta(seconds=self._OTP_SEND_WINDOW_SECONDS)}},
-                    upsert=True,
-                )
-                return
-            except DuplicateKeyError:
-                continue
+            sent = int(live.get("sent", 0))
+            used = int((live.get("by") or {}).get(slot, 0))
+            if used >= per_source:
+                raise refuse(live["expires_at"])
+            # State-based (not "sent == what I read") so a burst of parallel
+            # claims all get their turn instead of losing a compare-and-swap.
+            guards: dict = {"_id": key, "expires_at": {"$gt": now}, mine: {"$not": {"$gte": per_source}}}
+            if not trusted:
+                if sent >= absolute or (sent >= total_cap and used >= 1):
+                    if have_live:
+                        return False
+                    raise refuse(live["expires_at"])
+                guards["sent"] = {"$lt": total_cap if used >= 1 else absolute}
+            claimed = await self.otp_store.update_one(guards, {"$inc": {"sent": 1, mine: 1}})
+            if claimed.modified_count:
+                return True
         raise BadRequestException(self._OTP_SEND_FAILED)
 
     async def _release_otp_send(self, phone: str, requester: str | None = None) -> None:
@@ -808,16 +989,19 @@ class AuthService:
             {"$inc": {"sent": -1, f"by.{slot}": -1}},
         )
 
-    async def request_phone_otp(self, phone: str, requester: str | None = None) -> str:
+    async def request_phone_otp(self, phone: str, requester: str | None = None, channel: str | None = None) -> str:
         """Backend OTP for a bare phone number (the confirm-booking popup) —
         the same code, cooldown, caps and delivery as login, minus the
         account lookup (a first-time booker has no account yet). Its purpose
         (booking_confirmation) proves the phone for booking / login /
-        enrolment — never for a password reset (OTP_ACCEPTS)."""
+        enrolment — never for a password reset (OTP_ACCEPTS). A staff
+        account's number gets the same answer and no message."""
         normalized = validate_indian_mobile(phone)
         if not normalized:
             raise BadRequestException("Enter a valid 10-digit mobile number")
-        return await self._issue_otp(normalized, OTP_BOOKING, requester)
+        user = await self.users.find_by_phone(normalized)
+        staff = bool(user and (user.get("role") != UserRole.CUSTOMER.value or user.get("is_deleted")))
+        return await self._issue_otp(normalized, OTP_BOOKING, requester, channel, fake=staff, trusted=self._is_trusted_device(user))
 
     async def verify_phone_proof(
         self, phone: str, otp: str | None, widget_access_token: str | None, accept: frozenset[str] = OTP_ACCEPTS["phone_proof"],
@@ -880,7 +1064,9 @@ class AuthService:
         could reset the password, then log in, then re-verify the phone).
         Every guess, right or wrong, atomically spends one of the attempts,
         so parallel guesses can't exceed the limit and two parallel submits
-        of the right code can't both succeed.
+        of the right code can't both succeed. A requester (IP) gets 5 guesses
+        and the code 15 in all, so a stranger who burns his own 5 on someone
+        else's number leaves the owner theirs.
 
         `accept`: the purposes this consumer takes (OTP_ACCEPTS). A code
         issued for anything else is not even compared — no attempt spent,
@@ -893,11 +1079,17 @@ class AuthService:
         record = await self.otp_store.find_one({"identifier": phone}, sort=[("last_sent_at", -1)])
         if not record:
             return False
-        guard: dict = {"_id": record["_id"], "attempts": {"$lt": self._OTP_MAX_ATTEMPTS}, "expires_at": {"$gt": datetime.now(timezone.utc)}}
+        mine = f"att.{self._requester_slot(None)}"
+        guard_q: dict = {
+            "_id": record["_id"], "attempts": {"$lt": self._OTP_MAX_ATTEMPTS},
+            mine: {"$not": {"$gte": self._OTP_MAX_ATTEMPTS_PER_REQUESTER}},
+            "expires_at": {"$gt": datetime.now(timezone.utc)},
+        }
         if accept is not None:
-            guard["purpose"] = {"$in": sorted(accept)}
-        record = await self.otp_store.find_one_and_update(guard, {"$inc": {"attempts": 1}}, return_document=ReturnDocument.AFTER)
-        if not record or not secrets.compare_digest(str(record.get("otp", "")), code):
+            wanted = sorted(accept)
+            guard_q["$or"] = [{"purposes": {"$in": wanted}}, {"purposes": {"$exists": False}, "purpose": {"$in": wanted}}]
+        record = await self.otp_store.find_one_and_update(guard_q, {"$inc": {"attempts": 1, mine: 1}}, return_document=ReturnDocument.AFTER)
+        if not record or not record.get("otp") or record.get("fake") or not secrets.compare_digest(str(record.get("otp", "")), code):
             return False
         if not consume:
             # A peek (new-account login asks the name AFTER the code checks
@@ -926,15 +1118,19 @@ class AuthService:
             raise BadRequestException(self._OTP_INVALID)
 
     async def reset_password(self, identifier: str, otp: str, new_password: str) -> None:
+        # Every failure — unknown identifier, staff who haven't proven their
+        # phone, wrong/expired code — is the same answer.
         user = await self._find_user_by_identifier(identifier)
-        if not user or not user.get("phone"):
-            raise BadRequestException("No account found with this phone number or email.")
-        self._ensure_code_reset_allowed(user)
-        if not await self.verify_otp(user["phone"], otp, accept=OTP_ACCEPTS["password_reset"]):
+        usable = bool(user and user.get("phone") and not user.get("is_deleted"))
+        if usable and user.get("role") != UserRole.CUSTOMER.value and not self.phone_self_verified(user):
+            usable = False
+        # Same lookup + attempt spend either way.
+        code_ok = await self.verify_otp((user or {}).get("phone") or identifier, otp, accept=OTP_ACCEPTS["password_reset"], consume=usable)
+        if not usable or not code_ok:
             raise BadRequestException(self._OTP_INVALID)
         await self._apply_reset_password(user, new_password)
 
-    async def request_phone_verification(self, user_id: str) -> str:
+    async def request_phone_verification(self, user_id: str, channel: str | None = None) -> str:
         """Verify-my-phone while signed in — any role. For a customer it
         clears the 90-day re-verification gate; for staff it is the ONLY
         way their phone counts as theirs (a code reset needs it — see
@@ -946,7 +1142,7 @@ class AuthService:
             raise NotFoundException("User not found")
         if not user.get("phone"):
             raise BadRequestException("Add a phone number to your profile before verifying it.")
-        return await self._issue_otp(user["phone"], OTP_LOGIN, requester=f"user:{user_id}")
+        return await self._issue_otp(user["phone"], OTP_LOGIN, requester=f"user:{user_id}", channel=channel, trusted=True)
 
     async def _mark_self_verified(self, user: dict) -> dict:
         """The signed-in account holder just proved the phone on file.
@@ -974,18 +1170,22 @@ class AuthService:
         return await self._mark_self_verified(user)
 
     async def reset_password_widget(self, access_token: str, phone: str, new_password: str) -> None:
-        """MSG91-widget variant of forgot-password. Same account rule as the
-        OTP reset (checked BEFORE the token is spent); then the token must
-        verify, be bound to the given phone and be unused — only then does
-        the password change (and every existing refresh token dies via
-        token_version)."""
+        """MSG91-widget variant of forgot-password. The token must verify, be
+        bound to the given phone and be unused; only then are the account
+        rules applied — and every failure (unknown number, staff without a
+        proven phone, bad token) says the same thing. The password changes and
+        every existing refresh token dies via token_version."""
+        failed = "Verification could not be confirmed — please try again."
         normalized = validate_indian_mobile(phone)
-        user = await self.users.find_by_phone(normalized) if normalized else None
-        if not user:
-            raise BadRequestException("No account found for this phone number")
-        self._ensure_code_reset_allowed(user)
-        if not await self.verify_phone_proof(normalized, None, access_token):
-            raise BadRequestException("Verification could not be confirmed — please try again.")
+        if not normalized:
+            raise BadRequestException(failed)
+        proven = await self.verify_phone_proof(normalized, None, access_token)
+        user = await self.users.find_by_phone(normalized)
+        usable = bool(user and not user.get("is_deleted"))
+        if usable and user.get("role") != UserRole.CUSTOMER.value and not self.phone_self_verified(user):
+            usable = False
+        if not proven or not usable:
+            raise BadRequestException(failed)
         await self._apply_reset_password(user, new_password)
 
     async def confirm_phone_verification(self, user_id: str, otp: str) -> dict:
@@ -1085,35 +1285,17 @@ class AuthService:
         return target
 
     async def booking_access_mode(self, phone: str) -> dict:
-        """What should the guest wizard do for this phone?
-        - "register": no account -> normal silent registration path.
-        - "otp": no real, chosen password to fall back on (a quick-booking/
-          WhatsApp/Google account with no password at all, or a guest
-          account whose must_change_password is true because nobody ever
-          set one on purpose), or a real account whose
-          phone-ownership proof has gone stale -> prove ownership by OTP
-          instead and keep booking smooth. This is what stops "you already
-          have an account" from ever dead-ending someone who never
-          knowingly registered — silently created accounts always take
-          this path, regardless of how recently they were "verified".
-        - "password": a real account (their own chosen password) that was
-          phone-verified recently enough to trust -> log in normally,
-          which is less friction than an OTP round-trip for someone who
-          already knows their password.
-        Reveals no more than the register endpoint's 409 already does."""
+        """What should the guest wizard ask this phone for? ALWAYS "otp":
+        the answer used to be register / otp / password depending on whether
+        the number had an account, which told anyone whether (and what kind
+        of) account a number holds. Booking now always proves the phone with
+        a code, so nothing here depends on the account — identical for a
+        customer, an unknown number and a staff number."""
         from app.utils.phone import validate_indian_mobile
 
-        normalized = validate_indian_mobile(phone)
-        if not normalized:
+        if not validate_indian_mobile(phone):
             raise BadRequestException("Enter a valid 10-digit mobile number")
-        user = await self.users.find_by_phone(normalized)
-        if not user or user.get("is_deleted"):
-            return {"mode": "register"}
-        if user.get("role") != UserRole.CUSTOMER.value:
-            return {"mode": "password"}
-        if user.get("must_change_password") or not user.get("password_hash"):
-            return {"mode": "otp"}
-        return {"mode": "password" if self.phone_verification_fresh(user) else "otp"}
+        return {"mode": "otp"}
 
     async def otp_login(
         self, phone: str, otp: str | None = None, widget_access_token: str | None = None, full_name: str | None = None
@@ -1124,13 +1306,23 @@ class AuthService:
         auto-created) and the 90-day re-verification path. Marks the
         phone freshly verified. must_change_password is preserved, so the
         mandatory set-a-password gate still catches unknown-password
-        accounts afterwards."""
+        accounts afterwards.
+
+        Same answer for every failure: a wrong/expired code, a staff
+        number, a deleted account all say "Invalid or expired code." — and
+        the proof is checked BEFORE anything account-specific (a suspended
+        account's status is only told to whoever holds the phone)."""
         from app.utils.phone import validate_indian_mobile
 
         normalized = validate_indian_mobile(phone)
         if not normalized:
             raise BadRequestException("Enter a valid 10-digit mobile number")
         user = await self.users.find_by_phone(normalized)
+        if user and (user.get("is_deleted") or user.get("role") != UserRole.CUSTOMER.value):
+            # Staff numbers never sign in here. Do the same proof lookup a
+            # customer would cost, then refuse exactly like a wrong code.
+            await self.verify_phone_proof(normalized, otp, widget_access_token, OTP_ACCEPTS["login"], consume=False)
+            raise BadRequestException(self._OTP_INVALID)
         if not user:
             # A number with no account yet: prove it, ask the name, then
             # create the account. The first call (no name) only CHECKS the
@@ -1147,15 +1339,14 @@ class AuthService:
                 raise BadRequestException(self._OTP_INVALID)
             created = await self.ensure_customer_by_phone(normalized, name)
             fresh = await self.mark_phone_proven(created, last_login_at=datetime.now(timezone.utc))
+            await self._remember_device(fresh)
             return self._issue_tokens(fresh)
-        if user.get("is_deleted") or user.get("role") != UserRole.CUSTOMER.value:
-            raise BadRequestException("No customer account found for this phone number")
-        standing = account_switched_off(user)
-        if standing:
-            raise UnauthorizedException(standing)
 
         if not await self.verify_phone_proof(normalized, otp, widget_access_token, OTP_ACCEPTS["login"]):
             raise BadRequestException(self._OTP_INVALID)
+        standing = account_switched_off(user)
+        if standing:
+            raise UnauthorizedException(standing)
 
         if user.get("must_change_password"):
             # A customer who has just proven their phone signs in by code —
@@ -1169,9 +1360,10 @@ class AuthService:
             )
             user = await self.users.find_by_id(str(user["_id"])) or user
         fresh = await self.mark_phone_proven(user, last_login_at=datetime.now(timezone.utc))
+        await self._remember_device(fresh)
         return self._issue_tokens(fresh)
 
-    async def add_phone_request(self, user_id: str, phone: str) -> str:
+    async def add_phone_request(self, user_id: str, phone: str, channel: str | None = None) -> str:
         """Step 1 of attaching a phone to a phoneless account (Google
         sign-ins) or changing to a new one (staff profile page): validate +
         uniqueness-check the number, then send an
@@ -1188,7 +1380,7 @@ class AuthService:
         taken = await self.users.find_by_phone(normalized)
         if taken and str(taken["_id"]) != user_id:
             raise BadRequestException("This phone number is already used by another account.")
-        return await self._issue_otp(normalized, OTP_LOGIN, requester=f"user:{user_id}")
+        return await self._issue_otp(normalized, OTP_LOGIN, requester=f"user:{user_id}", channel=channel, trusted=True)
 
     async def add_phone_confirm(self, user_id: str, phone: str, otp: str | None = None, widget_access_token: str | None = None) -> dict:
         """Step 2: prove ownership (classic OTP or MSG91 widget token bound

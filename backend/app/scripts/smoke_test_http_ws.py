@@ -17,6 +17,7 @@ Run with:  python -m app.scripts.smoke_test_http_ws
 import asyncio
 import json
 import random
+import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -65,7 +66,7 @@ async def run(state: dict):
     async with httpx.AsyncClient(base_url=BASE, timeout=15) as client:
         # --- 1. Register a real customer over HTTP ---
         n = random.randint(100000, 999999)
-        register_payload = {"full_name": "Smoke Test Customer", "email": f"smoketest{n}@example.com", "phone": f"9{n:09d}"[:10], "password": "Test@12345"}
+        register_payload = {"full_name": "Smoke Test Customer", "email": f"smoketest{n}@example.com", "phone": f"9{n:09d}"[:10], "password": f"Sm-{secrets.token_urlsafe(12)}aA1"}
         r = await client.post("/auth/register", json=register_payload)
         if r.status_code != 200:
             fail("register", r.text)

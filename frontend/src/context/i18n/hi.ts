@@ -353,7 +353,7 @@ export const hi = {
   "captain.v2.attendance": "अटेंडेंस",
   "captain.v2.historyLeave": "हिस्ट्री और छुट्टी",
   "captain.v2.kyc": "KYC वेरिफ़िकेशन",
-  "captain.v2.kycLocked": "वेरिफ़ाइड — कुछ बदला हो तो मैनेजर से दोबारा खुलवाओ।",
+  "captain.v2.kycLocked": "वेरिफ़ाइड — वेरिफ़ाइड डॉक्यूमेंट बदले नहीं जा सकते। अपने मैनेजर से संपर्क करो।",
   "captain.v2.kycSent": "भेज दिया — मैनेजर चेक करेंगे।",
   "captain.v2.viewDoc": "अपलोड देखें",
   "captain.kyc.required": "ज़रूरी है।",

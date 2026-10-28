@@ -8,7 +8,8 @@ import { authApi, guestAuthApi } from "../../api/auth";
 import { getErrorMessage, tokenStorage } from "../../lib/api-client";
 import { roleHomePath } from "../../lib/roleHome";
 import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
-import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { otpErrorMessage, sendOtpCode, sentVia, widgetVerifyOtp, type BackendChannel, type OtpChannel } from "../../lib/otpWidget";
+import { OtpSmsButton } from "../../components/shared/OtpSmsButton";
 import { GoogleSignInButton } from "../../components/shared/GoogleSignInButton";
 import type { UserRole } from "../../types";
 
@@ -34,9 +35,8 @@ export default function LoginPage() {
   const [fullName, setFullName] = useState("");
   const proof = useRef<{ phone: string; otp?: string; access_token?: string } | null>(null);
   const [channel, setChannel] = useState<OtpChannel | null>(null);
-  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [delivered, setDelivered] = useState<BackendChannel | null>(null);
   const [cooldown, setCooldown] = useState(0);
-  const [smsAvailable, setSmsAvailable] = useState(false);
   const verifying = useRef(false);
   // -- staff (password) --
   const [identifier, setIdentifier] = useState("");
@@ -56,10 +56,6 @@ export default function LoginPage() {
     return () => clearTimeout(t);
   }, [cooldown]);
 
-  useEffect(() => {
-    if (otpStep === "code" && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
-  }, [otpStep, channel]);
-
   const routeState = location.state as { from?: { pathname?: string; search?: string; hash?: string }; notice?: string | null } | null;
   // Why the last session ended, when the server said (e.g. a suspended
   // account) — instead of a silent bounce to this page.
@@ -78,7 +74,7 @@ export default function LoginPage() {
   // the account check (no account / staff number stop right there) and it
   // costs nothing when WhatsApp can't reach the number, so the MSG91 widget
   // (SMS) takes over at once. Resend retries whichever channel delivered.
-  const sendCode = async (e?: React.FormEvent, order: OtpChannel[] = ["backend", "widget"]) => {
+  const sendCode = async (e?: React.FormEvent, order: OtpChannel[] = ["backend", "widget"], wanted: BackendChannel = "whatsapp") => {
     e?.preventDefault();
     if (isLoading) return;
     const normalized = validateIndianMobile(phone);
@@ -89,22 +85,15 @@ export default function LoginPage() {
     setError("");
     setIsLoading(true);
     try {
-      let backendChannel: "whatsapp" | "sms" | undefined;
-      const sent = await sendOtpCode(
-        normalized,
-        async () => {
-          backendChannel = (await authApi.requestOtp(normalized)).channel;
-        },
-        order,
-      );
+      const sent = await sendOtpCode(normalized, (ch) => authApi.requestOtp(normalized, ch), order, wanted);
       setChannel(sent.channel);
-      setDelivered(sent.channel === "widget" ? "sms" : (backendChannel ?? null));
+      setDelivered(sent.channel === "widget" ? "sms" : (sent.delivered ?? delivered));
       setCooldown(sent.cooldown);
       setOtp("");
       setOtpStep("code");
     } catch (err) {
       const message = otpErrorMessage(err);
-      setError(/no account/i.test(message) ? "No account for this number yet — your account is created automatically the first time you book." : message);
+      setError(message);
       setCooldown(0);
     } finally {
       setIsLoading(false);
@@ -282,6 +271,11 @@ export default function LoginPage() {
                   <button type="button" disabled={isLoading || otp.trim().length < 6} onClick={() => void verifyCode()} className={ctaClass}>
                     <span>{isLoading ? "Verifying…" : "Log In"}</span>
                   </button>
+                  {sentVia(delivered, channel) && (
+                    <p className="mt-2 text-center text-[12px] font-medium text-[#737B88]" data-testid="otp-sent-via">
+                      {sentVia(delivered, channel)}
+                    </p>
+                  )}
                   <div className="mt-3 flex items-center justify-between text-[12px]">
                     {cooldown > 0 ? (
                       <span className="font-medium text-[#737B88]">Resend in {cooldown}s</span>
@@ -290,22 +284,22 @@ export default function LoginPage() {
                         <button
                           type="button"
                           className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50"
-                          onClick={() => void sendCode(undefined, channel === "widget" ? ["widget", "backend"] : ["backend", "widget"])}
+                          onClick={() => void sendCode(undefined, channel === "widget" ? ["widget", "backend"] : ["backend", "widget"], delivered ?? "whatsapp")}
                           disabled={isLoading}
                         >
                           Resend Code
                         </button>
-                        {channel === "backend" && smsAvailable && (
-                          <button type="button" className="font-semibold text-[#1677FF] hover:text-[#0F5FD1] disabled:opacity-50" onClick={() => void sendCode(undefined, ["widget"])} disabled={isLoading}>
-                            Get It By SMS
-                          </button>
-                        )}
                       </span>
                     )}
                     <button type="button" className="font-medium text-[#737B88] hover:text-[#111]" onClick={changeNumber} disabled={isLoading}>
                       Change Number
                     </button>
                   </div>
+                  {channel === "backend" && (
+                    <div className="mt-2 text-center text-[12px]">
+                      <OtpSmsButton cooldown={cooldown} disabled={isLoading} onClick={() => void sendCode(undefined, ["backend", "widget"], "sms")} />
+                    </div>
+                  )}
                 </div>
               )}
 

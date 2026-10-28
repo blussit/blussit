@@ -549,10 +549,32 @@ async def test_webhook_after_verify_is_a_no_op(rig, db, rzp, webhook_secret, cle
     event_id = f"evt_{next(_seq)}"
     cleanup.append(("razorpay_webhook_events", {"_id": event_id}))
     raw, sig = _signed({"event": "order.paid", "payload": {
-        "payment": {"entity": {"id": payment_id, "order_id": order["order_id"], "status": "captured"}},
+        "payment": {"entity": {"id": payment_id, "order_id": order["order_id"], "status": "captured", "amount": order["amount"]}},
         "order": {"entity": {"id": order["order_id"]}}}})
     assert (await svc.handle_webhook(raw, sig, event_id))["outcome"] == "paid"
     assert await db.payment_orders.count_documents({"customer_id": rig["customer_id"], "status": "paid_attention"}) == 0
+
+
+async def test_webhook_refuses_a_captured_amount_or_currency_that_isnt_the_orders(rig, db, rzp, webhook_secret, cleanup):
+    """Defence in depth: a validly signed event whose captured amount (or
+    currency) differs from what we asked for settles nothing and is parked
+    for a refund."""
+    booking = await _parked_booking(rig)
+    svc = PaymentService(db)
+    order = await svc.create_order(rig["customer_id"], CreateOrderRequest(purpose="booking", booking_id=booking["id"]))
+    payment_id = rzp.order.pay(order["order_id"])
+    for i, (amount, currency) in enumerate([(order["amount"] - 100, "INR"), (order["amount"], "USD"), (None, "INR")]):
+        entity = {"id": payment_id, "order_id": order["order_id"], "status": "captured", "currency": currency}
+        if amount is not None:
+            entity["amount"] = amount
+        event_id = f"evt_{next(_seq)}"
+        cleanup.append(("razorpay_webhook_events", {"_id": event_id}))
+        raw, sig = _signed({"event": "payment.captured", "payload": {"payment": {"entity": entity}}})
+        assert (await svc.handle_webhook(raw, sig, event_id))["outcome"] == "amount_mismatch"
+    stored = await db.payment_orders.find_one({"razorpay_order_id": order["order_id"]})
+    assert stored["status"] != "paid"
+    assert (await _booking(db, booking["id"]))["payment_status"] != "paid"
+    await db.payment_orders.delete_many({"_id": f"mismatch_{payment_id}"})
 
 
 async def test_webhook_signature_is_the_whole_trust_decision(db, rzp, webhook_secret, monkeypatch):

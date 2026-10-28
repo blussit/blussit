@@ -9,6 +9,7 @@
 
 .env
 .env.*
+.seed-credentials.local
 
 .venv/
 venv/
@@ -22,6 +23,7 @@ __pycache__/
 .vite/
 
 uploads/
+private_uploads/
 tests/
 logs/
 *.log

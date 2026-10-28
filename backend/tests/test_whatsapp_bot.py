@@ -448,6 +448,8 @@ async def test_stateless_pay_buttons_send_link_or_cash_ack(db, cleanup, rig, mon
     cleanup.append(("whatsapp_outbox", {"phone": phone}))
     cleanup.append(("whatsapp_message_dedup", {}))
     cleanup.append(("payment_orders", {"customer_id": customer_id}))
+    # The chat's number IS the account's number (the bot refuses a chat linked to an account with another phone).
+    await db.users.update_one({"_id": _OID(customer_id)}, {"$set": {"phone": phone}})
     await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
 
     res = await db.bookings.insert_one({
@@ -490,6 +492,8 @@ async def test_cash_button_promotes_an_awaiting_payment_booking(db, cleanup, rig
     cleanup.append(("bookings", {"customer_id": customer_id}))
     cleanup.append(("slot_capacity", {"service_center_id": rig["center_id"]}))
     cleanup.append(("daily_capacity", {"service_center_id": rig["center_id"]}))
+    # The chat's number IS the account's number (the bot refuses a chat linked to an account with another phone).
+    await db.users.update_one({"_id": _OID(customer_id)}, {"$set": {"phone": phone}})
     await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
 
     bs = BookingService(db)
@@ -537,6 +541,8 @@ async def test_payment_reminder_sends_the_same_stateless_buttons(db, cleanup, ri
     cleanup.append(("whatsapp_conversations", {"wa_id": wa_id}))
     cleanup.append(("whatsapp_outbox", {"phone": phone}))
     cleanup.append(("whatsapp_message_dedup", {}))
+    # The chat's number IS the account's number (the bot refuses a chat linked to an account with another phone).
+    await db.users.update_one({"_id": _OID(customer_id)}, {"$set": {"phone": phone}})
     await db.whatsapp_conversations.insert_one({"wa_id": wa_id, "customer_id": customer_id, "state": None, "data": {}})
 
     res = await db.bookings.insert_one({

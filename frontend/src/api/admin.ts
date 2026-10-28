@@ -191,7 +191,8 @@ export const staffDirectoryApi = {
   // BookingService.update_captain_location/has_active_job. Rejected with a
   // normal error if the captain has no active job right now, which callers
   // should just swallow (this is a background sender, not a user action).
-  pingLocation: (latitude: number, longitude: number) => apiClient.post<ApiSuccess<null>>("/staff/captains/location", { latitude, longitude }).then((r) => r.data.data),
+  pingLocation: (fix: { latitude: number; longitude: number; accuracy_m?: number; fix_at?: string; speed_mps?: number; heading_deg?: number; altitude_m?: number; secure_context?: boolean; permission_state?: string }) =>
+    apiClient.post<ApiSuccess<{ accepted: boolean }>>("/staff/captains/location", fix).then((r) => r.data.data),
   attendance: (captainId: string, params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<AttendanceRecord>>(`/staff/captains/${captainId}/attendance`, { params }).then((r) => r.data),
   // GPS breadcrumb trail (30-day TTL) for the manager map/audit view.

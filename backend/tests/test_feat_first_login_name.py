@@ -30,7 +30,7 @@ async def test_new_number_gets_a_code_then_the_name_step_then_an_account(db):
         async with h.client() as c:
             r = await c.post("/api/v1/auth/otp/request", json={"identifier": phone})
             assert r.status_code == 200, r.text
-            assert r.json()["data"]["new_account"] is True
+            assert "new_account" not in r.json()["data"]
             code = await _code(db, phone)
             # 1) the right code, no name: only checked — nothing created, code kept
             r1 = await c.post("/api/v1/auth/otp-login", json={"phone": phone, "otp": code})
@@ -85,22 +85,31 @@ async def test_existing_customer_login_is_unchanged(db):
     phone = user["phone"]
     async with h.client() as c:
         r = await c.post("/api/v1/auth/otp/request", json={"identifier": phone})
-        assert r.status_code == 200 and r.json()["data"]["new_account"] is False
+        assert r.status_code == 200 and "new_account" not in r.json()["data"]
         code = await _code(db, phone)
         r2 = await c.post("/api/v1/auth/otp-login", json={"phone": phone, "otp": code})
         assert r2.status_code == 200 and r2.json()["data"]["access_token"]
     await db["otp_requests"].delete_many({"identifier": phone})
 
 
-async def test_staff_phone_still_refused(db):
+async def test_staff_phone_is_answered_like_any_other_but_nothing_is_sent(db):
     cid, _pin = await h.center(db)
     mgr = await h.manager(db, cid)
     user = await db.users.find_one({"_id": h.oid(mgr["id"])})
     if not user.get("phone"):
         pytest.skip("manager factory has no phone")
-    async with h.client() as c:
-        r = await c.post("/api/v1/auth/otp/request", json={"identifier": user["phone"]})
-    assert r.status_code == 400 and "staff" in r.text.lower()
+    phone = user["phone"]
+    await db.whatsapp_outbox.delete_many({"phone": phone})
+    try:
+        async with h.client() as c:
+            r = await c.post("/api/v1/auth/otp/request", json={"identifier": phone})
+            assert r.status_code == 200 and "staff" not in r.text.lower() and r.json()["data"]["otp_sent"] is True
+            assert await db.whatsapp_outbox.count_documents({"phone": phone}) == 0
+            # No session, and the same generic failure as any wrong code.
+            bad = await c.post("/api/v1/auth/otp-login", json={"phone": phone, "otp": "123456"})
+            assert bad.status_code == 400 and bad.json()["message"] == "Invalid or expired code."
+    finally:
+        await _cleanup(db, phone)
 
 
 async def test_code_login_clears_the_set_a_password_gate(db):

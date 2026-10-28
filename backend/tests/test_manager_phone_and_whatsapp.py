@@ -20,7 +20,7 @@ from app.services.user_service import UserService
 from app.services.whatsapp_service import MetaCloudWhatsAppProvider
 from app.utils.phone import is_business_whatsapp_number
 
-from tests.factories import make_customer, make_manager, make_service_center
+from tests.factories import make_customer, make_manager, make_service_center, TEST_PASSWORD
 
 BUSINESS = "918962200001"
 BUSINESS_LOCAL = "8962200001"
@@ -123,7 +123,7 @@ async def test_business_number_refused_everywhere_a_phone_is_set(db, manager, bu
         await UserService(db).admin_update_user(manager["id"], AdminUserUpdateRequest(phone=business_number))
     with pytest.raises(BadRequestException):
         await auth.create_staff_account(
-            StaffCreateRequest(full_name="Dup Manager", phone=business_number, password="Test@12345", role="manager", service_center_id=manager["center_id"]),
+            StaffCreateRequest(full_name="Dup Manager", phone=business_number, password=TEST_PASSWORD, role="manager", service_center_id=manager["center_id"]),
             created_by="test",
         )
     assert (await db.users.find_one({"_id": ObjectId(manager["id"])}))["phone"] == manager["phone"]

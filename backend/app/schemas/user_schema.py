@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -51,8 +51,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+OtpChannelName = Literal["whatsapp", "sms"]
+
+
 class RequestOtpRequest(BaseModel):
     identifier: str = Field(description="Email or phone number to send OTP placeholder to")
+    # WhatsApp is the primary channel; "sms" asks for the SAME live code by SMS.
+    channel: OtpChannelName = "whatsapp"
+
+
+class OtpChannelRequest(BaseModel):
+    """Optional body of the signed-in "send me a code" endpoints."""
+    channel: OtpChannelName = "whatsapp"
 
 
 class VerifyOtpRequest(BaseModel):
@@ -70,6 +80,7 @@ class ConfirmPhoneVerificationRequest(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     identifier: str
+    channel: OtpChannelName = "whatsapp"
 
 
 class ResetPasswordRequest(BaseModel):

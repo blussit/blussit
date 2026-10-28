@@ -16,13 +16,13 @@ import pytest
 from bson import ObjectId
 
 from app.core.config import settings
-from app.core.exceptions import BadRequestException, UnauthorizedException
+from app.core.exceptions import BadRequestException, TooManyRequestsException, UnauthorizedException
 from app.core.security import hash_password_async, verify_password_async
 from app.services import google_auth_service
 from app.services.auth_service import AuthService
 from app.services.google_auth_service import GoogleAuthService
 from app.services.whatsapp_bot_service import WhatsAppBotService
-from tests.factories import make_customer
+from tests.factories import make_customer, TEST_PASSWORD
 
 
 def _client():
@@ -113,10 +113,10 @@ async def test_password_login_still_works_and_wrong_or_malformed_is_401(db, clea
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     phone = (await db.users.find_one({"_id": ObjectId(customer_id)}))["phone"]
 
-    tokens = await AuthService(db).login(phone, "Test@12345")
+    tokens = await AuthService(db).login(phone, TEST_PASSWORD)
     assert tokens["user"]["id"] == customer_id
     async with _client() as client:
-        good = await client.post("/api/v1/auth/login", json={"identifier": phone, "password": "Test@12345"})
+        good = await client.post("/api/v1/auth/login", json={"identifier": phone, "password": TEST_PASSWORD})
         bad = await client.post("/api/v1/auth/login", json={"identifier": phone, "password": "Wrong@12345"})
     assert good.status_code == 200, good.text
     assert bad.status_code == 401, bad.text
@@ -124,7 +124,7 @@ async def test_password_login_still_works_and_wrong_or_malformed_is_401(db, clea
     # A malformed legacy hash is a mismatch, not a crash.
     await db.users.update_one({"_id": ObjectId(customer_id)}, {"$set": {"password_hash": "x", "failed_login_attempts": 0}})
     with pytest.raises(UnauthorizedException, match="Invalid credentials"):
-        await AuthService(db).login(phone, "Test@12345")
+        await AuthService(db).login(phone, TEST_PASSWORD)
 
 
 @pytest.mark.asyncio
@@ -166,7 +166,9 @@ async def test_async_bcrypt_keeps_the_event_loop_running():
 
 @pytest.mark.asyncio
 async def test_hourly_otp_cap_per_phone_across_entry_points(db, cleanup, monkeypatch):
-    monkeypatch.setattr(AuthService, "_OTP_RESEND_COOLDOWN_SECONDS", 0)
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 0)
     customer_id = await make_customer(db)
     cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     phone = (await db.users.find_one({"_id": ObjectId(customer_id)}))["phone"]
@@ -183,9 +185,10 @@ async def test_hourly_otp_cap_per_phone_across_entry_points(db, cleanup, monkeyp
     code = (await db.otp_requests.find_one({"identifier": phone}))["otp"]
     assert await auth.verify_otp(phone, code) is True
 
-    with pytest.raises(BadRequestException, match="Too many codes requested for this number — try again in 60 minutes"):
+    with pytest.raises(TooManyRequestsException, match="Too many codes requested for this number — try again in 60 minutes") as hit:
         await auth.request_otp(phone)
-    with pytest.raises(BadRequestException, match="Too many codes"):
+    assert 3500 < hit.value.details["retry_after"] <= 3600
+    with pytest.raises(TooManyRequestsException, match="Too many codes"):
         await auth.request_phone_otp(phone)
     sent = await db.whatsapp_outbox.count_documents({"phone": phone})
     assert sent == 5
@@ -205,8 +208,10 @@ async def test_otp_cap_holds_under_a_concurrent_burst(db, cleanup):
     auth = AuthService(db)
 
     results = await asyncio.gather(*(auth._claim_otp_send(phone) for _ in range(12)), return_exceptions=True)
-    allowed = [r for r in results if r is None]
-    refused = [r for r in results if isinstance(r, BadRequestException)]
-    assert len(allowed) == AuthService._OTP_MAX_SENDS_PER_WINDOW
-    assert len(refused) == 12 - AuthService._OTP_MAX_SENDS_PER_WINDOW
+    from app.core.config import settings
+
+    allowed = [r for r in results if r is True]
+    refused = [r for r in results if isinstance(r, TooManyRequestsException)]
+    assert len(allowed) == settings.OTP_PHONE_SOURCE_HOURLY_LIMIT
+    assert len(refused) == 12 - settings.OTP_PHONE_SOURCE_HOURLY_LIMIT
     assert all("Too many codes" in r.message for r in refused)

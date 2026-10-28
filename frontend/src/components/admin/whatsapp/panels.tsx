@@ -447,43 +447,6 @@ export function ContactsView({ onOpenChat }: { onOpenChat: (waId: string) => voi
 }
 
 /* ------------------------------------------------------------------ */
-/* Campaigns (future marketing area — deliberately restrained)         */
-/* ------------------------------------------------------------------ */
-export function CampaignsView() {
-  const { data, isError, isFetching, refetch } = useQuery({ queryKey: ["wa-templates"], queryFn: () => whatsappCrmApi.templates() });
-  const marketing = (data || []).filter((t) => t.category === "MARKETING");
-  return (
-    <div className="max-w-2xl space-y-4">
-      <Card>
-        <CardBody className="space-y-2 p-5">
-          <h3 className="text-sm font-bold text-[var(--color-text-primary)]">Marketing Campaigns</h3>
-          <p className="text-sm text-[var(--color-text-secondary)]">
-            Marketing messages are kept strictly separate from operational (utility) messages. They may only be sent to customers with
-            marketing consent/opt-in, are billed at WhatsApp's marketing rate, and Meta frequency-caps them per user. Bulk campaign
-            sending will be enabled here once the consent flow is live.
-          </p>
-        </CardBody>
-      </Card>
-      {isError && !data && <ErrorState message="Couldn't load marketing templates." onRetry={() => void refetch()} busy={isFetching} />}
-      {marketing.map((t) => (
-        <Card key={t.name}>
-          <CardBody className="space-y-2 p-4">
-            <div className="flex items-center justify-between">
-              <p className="font-mono-num text-sm font-bold">{t.name}</p>
-              <Badge tone={t.status === "APPROVED" ? "success" : t.status === "DRAFT" ? "neutral" : "warning"}>{toTitle(t.status.toLowerCase())}</Badge>
-            </div>
-            <p className="whitespace-pre-wrap rounded-lg bg-gray-50 p-2 text-xs">{t.body}</p>
-            {t.status === "DRAFT" && (
-              <p className="text-[11px] text-[var(--color-text-secondary)]">Draft — will be submitted to Meta when the opt-in flow is ready.</p>
-            )}
-          </CardBody>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /* Analytics                                                           */
 /* ------------------------------------------------------------------ */
 type WaAnalytics = {

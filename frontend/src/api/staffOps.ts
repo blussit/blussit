@@ -57,6 +57,9 @@ export const kycApi = {
   forCaptain: (captainId: string) => apiClient.get<ApiSuccess<CaptainKyc>>(`/staff/captains/${captainId}/kyc`).then((r) => r.data.data),
   review: (captainId: string, status: "verified" | "rejected", note?: string) =>
     apiClient.post<ApiSuccess<CaptainKyc>>(`/staff/captains/${captainId}/kyc/review`, { status, note }).then((r) => r.data.data),
+  // The only way verified documents are reopened; the verified version is kept as history.
+  requestReverification: (captainId: string, note: string) =>
+    apiClient.post<ApiSuccess<CaptainKyc>>(`/staff/captains/${captainId}/kyc/request-reverification`, { note }).then((r) => r.data.data),
 };
 
 export const leaveApi = {

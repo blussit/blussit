@@ -275,6 +275,8 @@ def _canonical_phone(v: str) -> str:
 
 class BookingPhoneOtpRequest(BaseModel):
     phone: str = Field(min_length=10, max_length=20)
+    # "sms" re-sends the SAME live code by SMS (the popup's "Send Code By SMS Instead").
+    channel: Literal["whatsapp", "sms"] = "whatsapp"
     _phone = field_validator("phone")(_canonical_phone)
 
 
@@ -545,7 +547,21 @@ Latitude = Annotated[float, Field(ge=-90, le=90)]
 Longitude = Annotated[float, Field(ge=-180, le=180)]
 
 
-class HeadingRequest(BaseModel):
+class GpsFixMeta(BaseModel):
+    """What the device says about the fix it just took. Evidence the server
+    cross-checks against its own clock and stored trail (geo_integrity_service)
+    — never trusted by itself. All optional so an old cached app still works."""
+    accuracy_m: Optional[float] = Field(default=None, ge=0, le=100000)
+    # The device's own timestamp for the fix (Position.timestamp), ISO 8601.
+    fix_at: Optional[datetime] = None
+    speed_mps: Optional[float] = Field(default=None, ge=0, le=1000)
+    heading_deg: Optional[float] = Field(default=None, ge=0, le=360)
+    altitude_m: Optional[float] = Field(default=None, ge=-1000, le=100000)
+    secure_context: Optional[bool] = None
+    permission_state: Optional[str] = Field(default=None, max_length=20)
+
+
+class HeadingRequest(GpsFixMeta):
     """Captain taps 'Heading to customer' — captures departure time + their
     current GPS location, and the equipment they're carrying from the store."""
     latitude: Latitude
@@ -553,14 +569,14 @@ class HeadingRequest(BaseModel):
     equipment_used: list[EquipmentUsedInput] = []
 
 
-class CaptainLocationPingRequest(BaseModel):
+class CaptainLocationPingRequest(GpsFixMeta):
     """Periodic location update while a captain has an active job — see
     BookingService.update_captain_location / has_active_job."""
     latitude: Latitude
     longitude: Longitude
 
 
-class PhotoCaptureRequest(BaseModel):
+class PhotoCaptureRequest(GpsFixMeta):
     """Used for both the before-service and after-service photo steps. The
     image must come from a live camera capture on the frontend (never a
     file picker) and always carries the device's GPS coordinates."""
@@ -588,7 +604,7 @@ class ReassignCaptainRequest(BaseModel):
     estimated_start_at: Optional[datetime] = None
 
 
-class VerifyVehicleRequest(BaseModel):
+class VerifyVehicleRequest(GpsFixMeta):
     """Captain types the plate they see on arrival — a deliberate typed check,
     not a yes/no toggle, so a captain can't rubber-stamp past the wrong car.
     This is also the "I've reached" moment, so it carries the device's GPS
@@ -601,7 +617,6 @@ class VerifyVehicleRequest(BaseModel):
     registration_number: Optional[str] = Field(default=None, min_length=3, max_length=20)
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
-    accuracy_m: Optional[float] = Field(default=None, ge=0, le=100000)
 
     @model_validator(mode="after")
     def _code_or_plate(self) -> "VerifyVehicleRequest":
@@ -614,6 +629,23 @@ class ResolveIssueRequest(BaseModel):
     # Required, same as BookingCancelRequest.reason — a manager must state
     # why an issue is being dismissed, not just click it away silently.
     note: str = Field(min_length=3, max_length=300)
+
+
+GeoStep = Literal["heading", "arrival", "start", "complete"]
+
+
+class GeoApprovalRequest(BaseModel):
+    """Captain: 'Ask Manager To Approve' for the step the location check refused."""
+    step: GeoStep
+    note: Optional[str] = Field(default=None, max_length=200)
+
+
+class GeoOverrideRequest(BaseModel):
+    """Manager/admin: approve (or decline) ONE step of ONE job. The reason is
+    required and goes to the audit log."""
+    step: GeoStep
+    approve: bool = True
+    reason: str = Field(min_length=5, max_length=300)
 
 
 class PriorityUpdateRequest(BaseModel):

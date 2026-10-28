@@ -240,8 +240,37 @@ MSG91 widget trio).
 (must be true), `ACCESS_TOKEN_EXPIRE_MINUTES` (15),
 `REFRESH_TOKEN_EXPIRE_DAYS` (7), `WHATSAPP_API_VERSION`,
 `WHATSAPP_*_LANGUAGE`, `MSG91_WIDGET_ID`, `MSG91_OTP_TEMPLATE_ID`,
+`WHATSAPP_MARKETING_COST_PAISE` (78), `WHATSAPP_CAMPAIGN_RATE_PER_SECOND` (40),
+`WHATSAPP_CAMPAIGN_MAX_RECIPIENTS` (10000), `WHATSAPP_CAMPAIGN_DAILY_CAP` (10000;
+raise with Meta's messaging tier), `WHATSAPP_FESTIVAL_TEMPLATE_NAME`,
+`WHATSAPP_FESTIVAL_HEADER_HANDLE` (festival campaigns; needs `R2_*` public image
+storage so Meta can fetch the picture),
 `GOOGLE_MAPS_BROWSER_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `LOG_FORMAT`,
 `SENTRY_TRACES_SAMPLE_RATE`, `META_PIXEL_ID`.
+
+**Captain location check:** `GEOFENCE_ENFORCE` (default `true`) refuses a
+captain's Arrived / Start / Complete when the GPS check fails; set `false`
+only as an emergency kill switch (checks still run and are recorded, nothing
+is refused). `GEOFENCE_MIN_SERVICE_SECONDS` (default 120) is the shortest
+believable wash. Radius and the other thresholds are in Admin → Pricing →
+Checks & Reminders. Needs no env change to deploy.
+
+**Auth hardening (2026-10-28) — no env change needed, defaults are safe.**
+Proxy trust: keep `TRUST_PROXY_HEADERS=true` and `TRUSTED_PROXY_COUNT=1`
+(Cloud Run direct). The app now refuses to start with trust on and a count
+below 1 (0 is never read as 1), and with a count above 1 unless
+`ALLOW_PROXY_COUNT_GT_1=true` (only behind an external load balancer; a wrong
+2 lets a client pick its own throttle bucket). Optional tuning, passed to Cloud
+Run only when set in the env file (all listed with defaults in
+`backend/.env.example`): `LOGIN_THROTTLE_STEPS` (`5:60,10:300,20:1800`),
+`LOGIN_IP_FAIL_CEILING` (60 / 10 min), `OTP_RESEND_COOLDOWN_SECONDS` (60),
+`OTP_SOURCE_HOURLY_LIMIT` (5), `OTP_IP_HOURLY_LIMIT` (30),
+`OTP_HOLD_STEPS_SECONDS` (`300,1800,7200,86400`), `OTP_PHONE_HOURLY_LIMIT` (15),
+`OTP_PHONE_ABSOLUTE_HOURLY_LIMIT` (40), `OTP_GLOBAL_HOURLY_BUDGET` (500),
+`OTP_GLOBAL_DAILY_BUDGET` (3000). New collections `rate_counters` and
+`abuse_holds` (TTL-indexed at start-up; nothing to migrate). Needs SMS
+(`SMS_PROVIDER=msg91`) for the "Send Code By SMS Instead" button and the
+WhatsApp-failed fallback; without it both are simply unavailable.
 
 Never put a backend secret in a `VITE_*` variable — those are public.
 
@@ -265,6 +294,16 @@ Never put a backend secret in a `VITE_*` variable — those are public.
 - **MongoDB Atlas:** replica set (transactions + change streams are
   required); allow Cloud Run egress; backups on.
 - **Cloudflare R2:** public bucket (photos) + private bucket (KYC documents).
+  KYC documents must live ONLY in the private bucket (`R2_PRIVATE_BUCKET_NAME`,
+  default `blussit-private-documents`): create it if missing, keep "Public
+  Development URL (r2.dev)" OFF and no custom domain on it, and give the API
+  token Object Read & Write on both buckets. Existing documents in the public
+  bucket: dry-run `python -m app.scripts.migrate_kyc_documents` (counts), then
+  `--apply` (copies; run with the production env in the shell), check a
+  manager can open a document, then delete the old objects. Until then the API
+  falls back to the public bucket for a key missing from the private one, so
+  nothing breaks mid-migration. Local dev keeps documents in
+  `backend/private_uploads/` (`KYC_PRIVATE_DIR`, git-ignored).
 - **Vercel:** `VITE_API_BASE_URL=https://api.blussit.com/api/v1` for
   Production; Preview builds need their own (staging) API URL — they refuse to
   build against production.
@@ -277,6 +316,10 @@ scripts/dev.sh test      # backend suite on a throwaway local database
 ```
 
 Uses `backend/.env.development` only (fixed OTP 123456 on a local database).
+Staff seed passwords are generated into the git-ignored
+`backend/.seed-credentials.local` (or taken from `SEED_*_PASSWORD`); production
+never seeds staff and boot never creates an account - create the first admin
+by hand with a secret-managed password.
 To try the split locally, run two processes against the same local database:
 
 ```bash

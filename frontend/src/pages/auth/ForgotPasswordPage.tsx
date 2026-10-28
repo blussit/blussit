@@ -4,7 +4,8 @@ import { motion, useReducedMotion } from "framer-motion";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { authApi, otpWidgetApi } from "../../api/auth";
 import { CheckCircle2 } from "lucide-react";
-import { otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { otpErrorMessage, sendOtpCode, sentVia, widgetVerifyOtp, type BackendChannel, type OtpChannel } from "../../lib/otpWidget";
+import { OtpSmsButton } from "../../components/shared/OtpSmsButton";
 import { validateIndianMobile } from "../../lib/validators";
 
 
@@ -19,7 +20,7 @@ export default function ForgotPasswordPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [channel, setChannel] = useState<OtpChannel | null>(null);
-  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [delivered, setDelivered] = useState<BackendChannel | null>(null);
   const [cooldown, setCooldown] = useState(0);
   // Only a typed phone can fall back to the MSG91 widget (SMS) — for an
   // email we don't know (and must not reveal) the number on file.
@@ -31,21 +32,19 @@ export default function ForgotPasswordPage() {
     return () => clearTimeout(t);
   }, [cooldown]);
 
-  const sendCode = async (order?: OtpChannel[]) => {
+  const sendCode = async (order?: OtpChannel[], wanted: BackendChannel = "whatsapp") => {
     if (isLoading) return;
     setError("");
     setIsLoading(true);
     try {
-      let backendChannel: "whatsapp" | "sms" | undefined;
       const sent = await sendOtpCode(
         phone || "",
-        async () => {
-          backendChannel = (await authApi.forgotPassword(phone || identifier.trim())).channel;
-        },
+        (ch) => authApi.forgotPassword(phone || identifier.trim(), ch),
         order ?? (phone ? ["backend", "widget"] : ["backend"]),
+        wanted,
       );
       setChannel(sent.channel);
-      setDelivered(sent.channel === "widget" ? "sms" : (backendChannel ?? null));
+      setDelivered(sent.channel === "widget" ? "sms" : (sent.delivered ?? delivered));
       setCooldown(sent.cooldown);
       setOtp("");
       setStep("reset");
@@ -227,6 +226,10 @@ export default function ForgotPasswordPage() {
                   <p className="mt-1 text-[13px] leading-5 text-[#747C8A]">
                     We sent a 6-digit code {sentTo} {phone ? <span className="font-medium">+91 {phone}</span> : <>the number on file for <span className="font-medium">{identifier}</span></>}.
                   </p>
+                  {sentVia(delivered, channel) && (
+                    <p className="mt-1 text-[12px] font-medium text-[#737B88]" data-testid="otp-sent-via">{sentVia(delivered, channel)}</p>
+                  )}
+                  <p className="mt-1 text-[12px] leading-4 text-[#9AA1AD]">No code? Staff accounts are reset by your admin or manager.</p>
                 </div>
                 <form onSubmit={resetPassword}>
                   <label className="block">
@@ -290,7 +293,7 @@ export default function ForgotPasswordPage() {
                         type="button"
                         className="font-semibold text-[#0A66F0] hover:text-[#0857D0] disabled:opacity-50"
                         disabled={isLoading}
-                        onClick={() => void sendCode(channel === "widget" ? ["widget", "backend"] : undefined)}
+                        onClick={() => void sendCode(channel === "widget" ? ["widget", "backend"] : undefined, delivered ?? "whatsapp")}
                       >
                         Resend Code
                       </button>
@@ -310,6 +313,11 @@ export default function ForgotPasswordPage() {
                       Change Email / Phone
                     </button>
                   </div>
+                  {channel === "backend" && (
+                    <div className="mt-2 text-center text-[12px]">
+                      <OtpSmsButton cooldown={cooldown} disabled={isLoading} onClick={() => void sendCode(["backend"], "sms")} />
+                    </div>
+                  )}
                   <button
                     type="submit"
                     disabled={isLoading || otp.length < 6 || newPassword.length < 8}

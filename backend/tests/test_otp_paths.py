@@ -23,7 +23,7 @@ import pytest
 from bson import ObjectId
 
 from app.core.config import settings
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, TooManyRequestsException
 from app.services import msg91_widget_service as widget_mod
 from app.services.auth_service import AuthService
 from app.services.msg91_widget_service import Msg91Unavailable, Msg91WidgetService
@@ -106,7 +106,7 @@ async def test_failed_send_is_rolled_back_not_capped_and_not_cooling_down(db, cl
     state = _flaky_whatsapp(monkeypatch)
 
     # More failures than the hourly cap allows sends — none may count.
-    for _ in range(AuthService._OTP_MAX_SENDS_PER_WINDOW + 2):
+    for _ in range(settings.OTP_PHONE_SOURCE_HOURLY_LIMIT + 2):
         with pytest.raises(BadRequestException, match="Couldn't send the verification code"):
             await auth.request_otp(phone)
     assert await _cap(db, phone) == 0
@@ -140,7 +140,7 @@ async def test_no_reachable_channel_is_refused_before_cooldown_and_cap(db, clean
 
 @pytest.mark.asyncio
 async def test_any_phone_format_resolves_to_one_code(db, cleanup, monkeypatch):
-    monkeypatch.setattr(AuthService, "_OTP_RESEND_COOLDOWN_SECONDS", 0)
+    monkeypatch.setattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 0)
     phone = "9722200003"
     _track(cleanup, phone)
     await AuthService(db).ensure_customer_by_phone(phone, "Formats")
@@ -181,38 +181,42 @@ async def test_forgot_password_by_email_in_any_case_resets_via_phone_key(db, cle
 
 
 @pytest.mark.asyncio
-async def test_otp_login_request_refuses_staff_and_unknown_numbers(db, cleanup):
+async def test_otp_login_request_answers_staff_unknown_and_new_numbers_alike(db, cleanup):
+    """No enumeration: a staff number, an unknown email and a new number all
+    get the same 200 / shape / message; only the new number actually gets a
+    code. A staff number is never sent anything and verifies as a wrong code."""
     manager_id = await make_manager(db, None)
     cleanup.append(("users", {"_id": ObjectId(manager_id)}))
     manager_phone = (await db.users.find_one({"_id": ObjectId(manager_id)}))["phone"]
     _track(cleanup, manager_phone)
+    _track(cleanup, "9722200099")
+    await db.otp_requests.delete_many({"identifier": {"$in": [manager_phone, "9722200099"]}})
 
     async with _client() as client:
         staff = await client.post("/api/v1/auth/otp/request", json={"identifier": manager_phone})
-        # A phone with no account is no longer refused (2026-10-09): the code
-        # goes out and the account is created, after asking the name, once it
-        # is proven (test_feat_first_login_name). An unknown EMAIL has no
-        # phone to send to, so it still gets "No account found".
-        unknown = await client.post("/api/v1/auth/otp/request", json={"identifier": "nobody.here@gmail.com"})
+        ghost = f"nobody.{ObjectId()}@gmail.com"
+        cleanup.append(("otp_requests", {"identifier": f"id:{ghost}"}))
+        cleanup.append(("otp_requests", {"_id": f"otp-send-cap:id:{ghost}"}))
+        unknown = await client.post("/api/v1/auth/otp/request", json={"identifier": ghost})
         new_number = await client.post("/api/v1/auth/otp/request", json={"identifier": "9722200099"})
         assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 0
-        # Staff reset a password by code only once they've verified the
-        # phone themselves while signed in (AUTH-01 / P0-2: a staff phone is
-        # typed in by an admin — a code sent there proved nothing). Before
-        # that: refused, nothing sent, "ask your admin".
+        # Forgot-password: the same 200 whether or not the staff member proved
+        # their phone; a code goes out only once they have (AUTH-01 / P0-2).
+        await db.otp_requests.delete_many({"identifier": manager_phone})  # the 60 s resend clock
         refused = await client.post("/api/v1/auth/forgot-password", json={"identifier": manager_phone})
         assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 0
         await db.users.update_one(
             {"_id": ObjectId(manager_id)},
             {"$set": {"phone_verified": True, "phone_verified_at": datetime.now(timezone.utc), "self_verified_phone": manager_phone}},
         )
+        await db.otp_requests.delete_many({"identifier": manager_phone})
         reset = await client.post("/api/v1/auth/forgot-password", json={"identifier": manager_phone})
-    assert staff.status_code == 400 and "Staff login" in staff.json()["message"]
-    assert unknown.status_code == 404 and "No account found" in unknown.json()["message"]
-    assert new_number.status_code == 200 and new_number.json()["data"]["new_account"] is True
-    _track(cleanup, "9722200099")
-    assert refused.status_code == 400 and "ask your admin" in refused.json()["message"], refused.text
-    assert reset.status_code == 200, reset.text
+        unknown_forgot = await client.post("/api/v1/auth/forgot-password", json={"identifier": f"ghost.{ObjectId()}@nowhere.example"})
+    for r in (staff, unknown, new_number):
+        assert r.status_code == 200 and r.json() == new_number.json(), r.text
+        assert "new_account" not in r.json()["data"]
+    for r in (refused, reset, unknown_forgot):
+        assert r.status_code == 200 and r.json() == reset.json(), r.text
     assert await db.whatsapp_outbox.count_documents({"phone": manager_phone}) == 1
 
 
@@ -236,7 +240,9 @@ async def test_attempt_limit_holds_under_parallel_guesses(db, cleanup):
     code = await _code(db, phone)
     wrong = "000000" if code != "000000" else "111111"
     assert not any(await asyncio.gather(*(auth.verify_otp(phone, wrong) for _ in range(12))))
-    assert (await db.otp_requests.find_one({"identifier": phone}))["attempts"] == AuthService._OTP_MAX_ATTEMPTS
+    # One requester gets 5 guesses (the code 15 in all, so a stranger can't burn
+    # the owner's share): parallel guesses still can't exceed it.
+    assert (await db.otp_requests.find_one({"identifier": phone}))["attempts"] == AuthService._OTP_MAX_ATTEMPTS_PER_REQUESTER
     assert await auth.verify_otp(phone, code) is False  # locked, even with the right code
 
 
@@ -247,13 +253,14 @@ async def test_parallel_sends_make_one_code_and_one_cap_claim(db, cleanup):
     auth = AuthService(db)
     results = await asyncio.gather(*(auth.request_phone_otp(phone) for _ in range(5)), return_exceptions=True)
     assert results.count("whatsapp") == 1
-    refused = [r for r in results if isinstance(r, BadRequestException)]
-    assert len(refused) == 4 and all(r.message.startswith("Please wait") for r in refused)
+    refused = [r for r in results if isinstance(r, TooManyRequestsException)]
+    assert len(refused) == 4 and all(r.message.startswith("Try again in") for r in refused)
     assert await _cap(db, phone) == 1
     assert await db.whatsapp_outbox.count_documents({"phone": phone}) == 1
 
-    with pytest.raises(BadRequestException, match=r"^Please wait (29|30)s before requesting another code\.$"):
+    with pytest.raises(TooManyRequestsException, match=r"^Try again in (59|60) seconds\.$") as hit:
         await auth.request_phone_otp(phone)
+    assert hit.value.details["retry_after"] in (59, 60)
 
 
 @pytest.mark.asyncio

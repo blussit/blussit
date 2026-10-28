@@ -26,6 +26,7 @@ how many photos exist.
 import hashlib
 import hmac
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +70,34 @@ def _r2_http() -> httpx.AsyncClient:
 
 def upload_root() -> Path:
     return Path(settings.UPLOAD_DIR)
+
+
+def private_root() -> Path:
+    """Where the local provider keeps identity documents. Deliberately NOT
+    under upload_root(): that directory is mounted as public static files
+    (/uploads), this one is reachable only through the authorized download
+    route."""
+    return Path(settings.KYC_PRIVATE_DIR)
+
+
+# Document keys are server-generated: documents/<32 hex>.<ext>. Anything
+# else (traversal, other prefixes, odd characters) is never looked up.
+DOCUMENT_KEY_RE = re.compile(r"^documents/[A-Za-z0-9_-]{1,64}\.(jpg|png|webp|heic|heif|pdf)$")
+# Served content type comes from the stored extension (decided server-side
+# from the file's own bytes at upload) — never from the client or from the
+# object store's metadata.
+DOCUMENT_MEDIA_TYPES = {
+    "jpg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+    "heic": "image/heic", "heif": "image/heif", "pdf": "application/pdf",
+}
+
+
+def is_valid_document_key(key: str | None) -> bool:
+    return bool(key) and bool(DOCUMENT_KEY_RE.match(key))
+
+
+def document_media_type(key: str) -> str:
+    return DOCUMENT_MEDIA_TYPES.get(key.rsplit(".", 1)[-1].lower(), "application/octet-stream")
 
 
 # Magic-byte prefixes for the accepted formats — the client's Content-Type
@@ -159,14 +188,19 @@ async def save_document_upload(file: UploadFile) -> str:
 
     if extension == "pdf" and not data.startswith(b"%PDF-"):
         raise BadRequestException("That file doesn't look like a valid PDF")
-    if extension != "pdf" and not _sniff_image_ext(data[:16]):
-        raise BadRequestException("That file doesn't look like a valid image")
+    if extension != "pdf":
+        # The stored extension (hence the type it is served as) comes from
+        # the file's own bytes, never from the client's header.
+        sniffed = _sniff_image_ext(data[:16])
+        if not sniffed:
+            raise BadRequestException("That file doesn't look like a valid image")
+        extension = sniffed
 
     if settings.STORAGE_PROVIDER == "r2":
         key = await _r2_upload(
             data,
             extension,
-            file.content_type or "application/octet-stream",
+            DOCUMENT_MEDIA_TYPES.get(extension, "application/octet-stream"),
             prefix="documents",
             bucket=settings.R2_PRIVATE_BUCKET_NAME,
             private=True,
@@ -175,12 +209,13 @@ async def save_document_upload(file: UploadFile) -> str:
     if settings.STORAGE_PROVIDER != "local":
         raise BadRequestException(f"Storage provider '{settings.STORAGE_PROVIDER}' is not configured")
 
-    subdir = upload_root() / "documents"
+    subdir = private_root() / "documents"
     subdir.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid.uuid4().hex}.{extension}"
     (subdir / filename).write_bytes(data)
-    base = (settings.PUBLIC_BASE_URL or LOCAL_FALLBACK_BASE_URL).rstrip("/")
-    return f"{base}/uploads/documents/{filename}"
+    # Local documents are private too: the URL is the authorized download
+    # route, never a static /uploads path.
+    return f"{_document_route_base()}documents/{filename}"
 
 
 def _local_upload_base() -> str:
@@ -188,7 +223,8 @@ def _local_upload_base() -> str:
 
 
 def _document_route_base() -> str:
-    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}{settings.API_V1_PREFIX}/uploads/document/"
+    base = (settings.PUBLIC_BASE_URL or LOCAL_FALLBACK_BASE_URL).rstrip("/")
+    return f"{base}{settings.API_V1_PREFIX}/uploads/document/"
 
 
 def is_own_upload_url(url: str | None) -> bool:
@@ -203,7 +239,7 @@ def is_own_upload_url(url: str | None) -> bool:
     prefixes = []
     if settings.R2_PUBLIC_BASE_URL:
         prefixes.append(f"{settings.R2_PUBLIC_BASE_URL.rstrip('/')}/")
-    if settings.PUBLIC_BASE_URL:
+    if settings.PUBLIC_BASE_URL or settings.STORAGE_PROVIDER == "local":
         prefixes.append(_document_route_base())
     if settings.STORAGE_PROVIDER == "local":
         prefixes.append(_local_upload_base())
@@ -213,7 +249,7 @@ def is_own_upload_url(url: str | None) -> bool:
 def document_key_for_url(url: str) -> str | None:
     """The storage key behind a document URL save_document_upload returned
     ("documents/<id>.<ext>"), or None for any other URL."""
-    for base in (_document_route_base() if settings.PUBLIC_BASE_URL else None, _local_upload_base()):
+    for base in (_document_route_base() if (settings.PUBLIC_BASE_URL or settings.STORAGE_PROVIDER == "local") else None, _local_upload_base()):
         if base and url.startswith(base):
             key = unquote(url[len(base):]).strip("/")
             if key.startswith("documents/") and ".." not in key.split("/"):
@@ -385,9 +421,9 @@ async def _r2_upload(
     return f"{public_base}/{encoded_key}"
 
 
-async def download_private_document(key: str) -> tuple[bytes, str]:
-    """Read one object from the private R2 document bucket."""
-    endpoint, bucket, _, access_key, secret_key = _r2_config(settings.R2_PRIVATE_BUCKET_NAME)
+async def _r2_get(bucket_name: str, key: str) -> bytes | None:
+    """Signed GET of one object. None = no such object; raises for outages."""
+    endpoint, bucket, _, access_key, secret_key = _r2_config(bucket_name)
     parsed = urlparse(endpoint)
     encoded_bucket = quote(bucket, safe="")
     encoded_key = "/".join(quote(part, safe="") for part in key.split("/"))
@@ -423,8 +459,37 @@ async def download_private_document(key: str) -> tuple[bytes, str]:
         raise StorageUnavailableException("Document storage is unreachable right now — please try again in a minute.") from exc
     if response.status_code >= 500 or response.status_code == 429:
         raise StorageUnavailableException("Document storage is unreachable right now — please try again in a minute.")
-    if response.status_code == 404:
-        raise BadRequestException("Document not found")
+    if response.status_code in (403, 404):
+        return None
     if response.status_code >= 300:
         raise BadRequestException("Document could not be retrieved")
-    return response.content, response.headers.get("content-type", "application/octet-stream")
+    return response.content
+
+
+async def download_private_document(key: str) -> tuple[bytes, str]:
+    """Read one identity document. The key is validated against the
+    server-generated shape first (no traversal, no foreign prefixes), and
+    the returned type comes from the extension allowlist — never from the
+    object store's metadata or a client header.
+
+    local provider: the private directory (a file left in the old public
+    uploads/documents folder is still readable until the boot migration
+    moves it). r2: the private bucket; if the object is not there yet
+    (documents uploaded before the private bucket existed), the legacy
+    bucket is tried so production keeps working during the migration."""
+    if not is_valid_document_key(key):
+        raise BadRequestException("Document not found")
+    content_type = document_media_type(key)
+    if settings.STORAGE_PROVIDER == "local":
+        name = key.split("/", 1)[1]
+        for root in (private_root(), upload_root()):
+            path = root / "documents" / name
+            if path.is_file():
+                return path.read_bytes(), content_type
+        raise BadRequestException("Document not found")
+    data = await _r2_get(settings.R2_PRIVATE_BUCKET_NAME, key)
+    if data is None and settings.R2_BUCKET_NAME != settings.R2_PRIVATE_BUCKET_NAME:
+        data = await _r2_get(settings.R2_BUCKET_NAME, key)
+    if data is None:
+        raise BadRequestException("Document not found")
+    return data, content_type

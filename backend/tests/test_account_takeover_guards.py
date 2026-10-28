@@ -19,7 +19,7 @@ from app.schemas.user_schema import RegisterRequest
 from app.services.auth_service import AuthService
 from app.services.google_auth_service import GoogleAuthService
 
-from tests.factories import make_manager
+from tests.factories import make_manager, TEST_PASSWORD
 
 pytestmark = pytest.mark.asyncio
 
@@ -128,7 +128,7 @@ async def test_google_still_signs_in_a_passwordless_customer(db, cleanup, monkey
     assert result["user"]["id"] == str(existing.inserted_id)
 
 
-async def test_parallel_wrong_passwords_lock_the_account(db, cleanup):
+async def test_parallel_wrong_passwords_lock_that_devices_bucket_not_the_account(db, cleanup):
     manager_id = await make_manager(db, None)
     cleanup.append(("users", {"_id": ObjectId(manager_id)}))
     manager = await db.users.find_one({"_id": ObjectId(manager_id)})
@@ -136,8 +136,18 @@ async def test_parallel_wrong_passwords_lock_the_account(db, cleanup):
 
     results = await asyncio.gather(*(auth.login(manager["email"], "wrong-guess") for _ in range(20)), return_exceptions=True)
     assert all(isinstance(r, UnauthorizedException) for r in results)
-    locked = await db.users.find_one({"_id": ObjectId(manager_id)})
-    assert locked.get("login_locked_until") is not None
-    # Even the right password waits out the lock.
-    with pytest.raises(UnauthorizedException, match="Too many failed attempts"):
-        await auth.login(manager["email"], "Test@12345")
+    cleanup.append(("rate_counters", {"_id": {"$regex": "^login"}}))
+    # The burst is counted in full (atomic $inc) and locks THIS device/IP's
+    # bucket: even the right password waits out the lock from here...
+    from app.core import rate_limit
+    from app.core.exceptions import TooManyRequestsException
+
+    with pytest.raises(TooManyRequestsException):
+        await auth.login(manager["email"], TEST_PASSWORD)
+    # ...while the account itself is not locked: another device signs straight in.
+    assert (await db.users.find_one({"_id": ObjectId(manager_id)})).get("login_locked_until") is None
+    rate_limit._request_client.set("198.51.100.250")
+    try:
+        assert (await auth.login(manager["email"], TEST_PASSWORD))["user"] is not None
+    finally:
+        rate_limit._request_client.set(None)

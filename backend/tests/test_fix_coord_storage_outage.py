@@ -23,6 +23,7 @@ class _Client:
 
 @pytest.fixture
 def r2(monkeypatch):
+    monkeypatch.setattr(storage.settings, "STORAGE_PROVIDER", "r2")
     monkeypatch.setattr(storage, "_r2_config", lambda bucket=None: ("https://acct.r2.cloudflarestorage.com", "bucket", "https://cdn.test", "ak", "sk"))
 
     def use(outcome):
@@ -38,7 +39,7 @@ async def test_r2_outage_is_a_retryable_503(r2, outcome):
         await storage._r2_upload(b"x", "jpg", "image/jpeg")
     assert err.value.status_code == 503
     with pytest.raises(StorageUnavailableException):
-        await storage.download_private_document("docs/a.jpg")
+        await storage.download_private_document("documents/" + "a" * 32 + ".jpg")
 
 
 async def test_r2_rejecting_the_request_stays_a_400(r2):

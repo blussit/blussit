@@ -7,6 +7,8 @@ Run with:  python -m app.seed
 """
 import asyncio
 import os
+import secrets
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
@@ -17,17 +19,53 @@ from app.core.security import hash_password
 from app.utils.text import slugify
 
 
-# Demo staff logins (admin / center manager / captain). The defaults are
-# LOCAL-ONLY: they sit in this public repo, so staff accounts are created
-# only when the target database is on this machine (settings.mongo_is_local)
-# — never on Atlas/production, where anyone who read the repo could log in
-# with them. SEED_ADMIN_PASSWORD / SEED_MANAGER_PASSWORD /
-# SEED_CAPTAIN_PASSWORD override them. The catalogue below seeds anywhere.
-_DEV_STAFF_PASSWORDS = {"admin": "Admin@12345", "manager": "Manager@12345", "captain": "Captain@12345"}
+# Demo staff logins (admin / center manager / captain). No password literal
+# lives in this public repo. Staff accounts are created only when the target
+# database is on this machine (settings.mongo_is_local) — never on
+# Atlas/production. The password for each role comes from, in order:
+#   1. env SEED_ADMIN_PASSWORD / SEED_MANAGER_PASSWORD / SEED_CAPTAIN_PASSWORD
+#   2. the git-ignored file backend/.seed-credentials.local (KEY=value lines)
+#   3. a newly generated random password, written to that file (mode 600).
+# Only the file path is ever printed, never a password.
+CREDENTIALS_FILE = Path(__file__).resolve().parent.parent / ".seed-credentials.local"
+_CRED_HEADER = "# Local dev seed passwords (git-ignored, generated). Delete a line to regenerate it.\n"
+
+
+def _read_credentials() -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for line in CREDENTIALS_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                values[key.strip()] = val.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _generate_password() -> str:
+    # 20 url-safe chars + a fixed suffix so it satisfies the complexity rule
+    # (upper, lower, digit, symbol) whatever the random part contained.
+    return secrets.token_urlsafe(15) + "aA1!"
 
 
 def _staff_password(role: str) -> str:
-    return os.environ.get(f"SEED_{role.upper()}_PASSWORD") or _DEV_STAFF_PASSWORDS[role]
+    key = f"SEED_{role.upper()}_PASSWORD"
+    from_env = os.environ.get(key)
+    if from_env:
+        return from_env
+    stored = _read_credentials()
+    if stored.get(key):
+        return stored[key]
+    stored[key] = _generate_password()
+    body = _CRED_HEADER + "".join(f"{k}={v}\n" for k, v in stored.items())
+    fd = os.open(CREDENTIALS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    os.chmod(CREDENTIALS_FILE, 0o600)
+    print(f"Generated a password for the {role} seed account -> see {CREDENTIALS_FILE}")
+    return stored[key]
 
 
 async def seed() -> None:
@@ -55,7 +93,7 @@ async def seed() -> None:
                 "created_at": datetime.now(timezone.utc),
             }
         )
-        print(f"Created super admin -> {admin_email} (password: SEED_ADMIN_PASSWORD or the local dev default)")
+        print(f"Created super admin -> {admin_email} (password: see {CREDENTIALS_FILE.name})")
     elif existing_admin:
         print("Super admin already exists, skipping.")
 
@@ -271,7 +309,7 @@ async def seed() -> None:
             }
         )
         await db.service_centers.update_one({"_id": result.inserted_id}, {"$set": {"manager_id": str(manager_result.inserted_id)}})
-        print(f"Created service center + manager -> {manager_email} (password: SEED_MANAGER_PASSWORD or the local dev default)")
+        print(f"Created service center + manager -> {manager_email} (password: see {CREDENTIALS_FILE.name})")
 
         captain_email = "captain.indore@doorstepvehiclecare.in"
         captain_result = await db.users.insert_one(
@@ -291,7 +329,7 @@ async def seed() -> None:
         await db.captain_wallets.insert_one(
             {"captain_id": captain_id, "balance": 200.0, "minimum_balance": 50.0, "is_deleted": False}
         )
-        print(f"Created captain -> {captain_email} (password: SEED_CAPTAIN_PASSWORD or the local dev default; wallet seeded with ₹200)")
+        print(f"Created captain -> {captain_email} (password: see {CREDENTIALS_FILE.name}; wallet seeded with ₹200)")
 
     # --- Pricing configuration --------------------------------------------
     existing_pricing = await db.settings.find_one({"key": "pricing_config"})

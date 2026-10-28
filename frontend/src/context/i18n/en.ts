@@ -353,7 +353,7 @@ export const en = {
   "captain.v2.attendance": "Attendance",
   "captain.v2.historyLeave": "History & Leave",
   "captain.v2.kyc": "KYC Verification",
-  "captain.v2.kycLocked": "Verified — ask your manager to reopen if anything changed.",
+  "captain.v2.kycLocked": "Verified — Verified Documents Can't Be Changed. Contact Your Manager.",
   "captain.v2.kycSent": "Sent — your manager will review it.",
   "captain.v2.viewDoc": "View Uploaded",
   "captain.kyc.required": "Required.",

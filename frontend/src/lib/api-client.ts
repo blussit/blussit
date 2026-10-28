@@ -1,4 +1,5 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
+import { getDeviceId } from "./device";
 
 /**
  * Where the API lives — always VITE_API_BASE_URL. There is deliberately no
@@ -143,7 +144,7 @@ export function refreshSession(): Promise<string> {
   if (!refreshToken) return Promise.reject(new Error("No session to refresh"));
   refreshInFlight = (async () => {
     try {
-      const { data } = await axios.post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken }, { timeout: REQUEST_TIMEOUT_MS });
+      const { data } = await axios.post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken }, { timeout: REQUEST_TIMEOUT_MS, headers: { "X-Device-Id": getDeviceId() } });
       tokenStorage.set(data.data.access_token, data.data.refresh_token);
       lastRefreshedAccess = data.data.access_token;
       return data.data.access_token as string;
@@ -174,6 +175,8 @@ export const apiClient = axios.create({
 const AUTH_ATTEMPT = /\/auth\/(login|register|refresh|logout|google|otp-login|otp\/|booking-access|forgot-password|reset-password|verify-phone)/;
 
 apiClient.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+  // Which browser this is — one key part of the server's login/OTP throttles.
+  config.headers?.set?.("X-Device-Id", getDeviceId());
   const isAuthAttempt = AUTH_ATTEMPT.test(config.url || "");
   let token = tokenStorage.getAccess();
   // Refresh a token that's about to lapse BEFORE using it: endpoints that
@@ -319,4 +322,9 @@ export function getErrorCode(error: unknown): string | undefined {
     return (error.response?.data as ApiError | undefined)?.error_code;
   }
   return undefined;
+}
+
+/** The structured `details` of a failed API call (e.g. the reasons of a refused location check). */
+export function getErrorDetails(error: unknown): Record<string, unknown> | undefined {
+  return axios.isAxiosError(error) ? (error.response?.data as ApiError | undefined)?.details : undefined;
 }

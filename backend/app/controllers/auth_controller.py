@@ -29,6 +29,13 @@ class AuthController:
         self.user_service = UserService(db)
         self.audit = AuditService(db)
 
+    @staticmethod
+    def _sent(channel: str) -> dict:
+        """The one response shape of every "code requested" endpoint."""
+        from app.core.config import settings
+
+        return {"otp_sent": True, "channel": channel, "cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS}
+
     async def register(self, payload: RegisterRequest):
         result = await self.auth_service.register_customer(payload)
         return success(result, "Account created successfully")
@@ -66,25 +73,27 @@ class AuthController:
         # Earlier Phase 1 code echoed it back as "debug_otp" for testing
         # before any real delivery existed, which made the whole
         # verification step trivially bypassable.
-        known = await self.auth_service._find_user_by_identifier(payload.identifier)
-        channel = await self.auth_service.request_otp(payload.identifier, customer_only=True)
-        return success({"otp_sent": True, "channel": channel, "new_account": known is None}, "Verification code sent")
+        # Identical for a customer, an unknown identifier and a staff
+        # account (no `new_account` flag any more — the name is asked after
+        # the code is proven, see AuthService.otp_login).
+        channel = await self.auth_service.request_otp(payload.identifier, customer_only=True, channel=payload.channel)
+        return success(self._sent(channel), "Verification code sent")
 
     async def verify_otp(self, payload: VerifyOtpRequest):
         verified = await self.auth_service.verify_otp(payload.identifier, payload.otp)
         return success({"verified": verified}, "OTP verified" if verified else "OTP verification failed")
 
     async def forgot_password(self, payload: ForgotPasswordRequest):
-        channel = await self.auth_service.request_otp(payload.identifier, purpose="password_reset")
-        return success({"otp_sent": True, "channel": channel}, "Reset code sent")
+        channel = await self.auth_service.request_otp(payload.identifier, purpose="password_reset", channel=payload.channel)
+        return success(self._sent(channel), "Reset code sent")
 
     async def reset_password(self, payload: ResetPasswordRequest):
         await self.auth_service.reset_password(payload.identifier, payload.otp, payload.new_password)
         return success(None, "Password reset successfully")
 
-    async def request_phone_verification(self, current_user: CurrentUser):
-        channel = await self.auth_service.request_phone_verification(current_user.id)
-        return success({"otp_sent": True, "channel": channel}, "Verification code sent")
+    async def request_phone_verification(self, current_user: CurrentUser, channel: str = "whatsapp"):
+        used = await self.auth_service.request_phone_verification(current_user.id, channel)
+        return success(self._sent(used), "Verification code sent")
 
     async def confirm_phone_verification(self, current_user: CurrentUser, payload: ConfirmPhoneVerificationRequest):
         user = await self.auth_service.confirm_phone_verification(current_user.id, payload.otp)

@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.authz import ensure_own_center
 from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_captain, require_manager_or_admin
@@ -32,11 +32,40 @@ async def submit_my_kyc(payload: KycSubmitRequest, current_user: CurrentUser = D
 
 
 @router.get("/captains/{captain_id}/kyc", dependencies=[Depends(require_manager_or_admin)])
-async def captain_kyc(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def captain_kyc(captain_id: str, request: Request, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """The review view. Aadhaar/PAN numbers are masked to the last 4 for a
     manager (DATA-1) — the uploaded card images, which the manager checks,
     stay viewable; an admin sees the full numbers."""
-    return success(await StaffKycService(db).get_for_review(captain_id, current_user.role, current_user.service_center_id))
+    from app.core.rate_limit import _client_ip
+
+    return success(await StaffKycService(db).get_for_review(
+        captain_id, current_user.role, current_user.service_center_id, current_user.id, _client_ip(request),
+    ))
+
+
+class KycReverifyRequest(BaseModel):
+    note: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/captains/{captain_id}/kyc/request-reverification", dependencies=[Depends(require_manager_or_admin)])
+async def request_kyc_reverification(
+    captain_id: str,
+    payload: KycReverifyRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The only way verified documents are reopened. The verified version
+    is kept in history; the captain is asked to resubmit."""
+    result = await StaffKycService(db).request_reverification(
+        captain_id, payload.note, current_user.id, current_user.role, current_user.service_center_id,
+    )
+    return success(result, "Re-verification requested")
+
+
+@router.get("/captains/{captain_id}/kyc/versions", dependencies=[Depends(require_manager_or_admin)])
+async def captain_kyc_versions(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Earlier (superseded / reopened) packets, read-only, numbers masked."""
+    return success(await StaffKycService(db).list_versions(captain_id, current_user.role, current_user.service_center_id))
 
 
 @router.post("/captains/{captain_id}/kyc/review", dependencies=[Depends(require_manager_or_admin)])
@@ -92,8 +121,8 @@ async def ping_captain_location(
     booking_service = BookingService(db)
     if not await booking_service.has_active_job(current_user.id):
         raise BadRequestException("Location updates are only accepted while you have an active job.")
-    await booking_service.update_captain_location(current_user.id, payload.latitude, payload.longitude)
-    return success(None, "Location updated")
+    result = await booking_service.record_captain_ping(current_user.id, payload)
+    return success(result, "Location updated")
 
 
 @router.get("/captains/center/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])

@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
 from fastapi import UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
 from app.core.dependencies import CurrentUser
-from app.core.exceptions import TooManyRequestsException
+from app.core.exceptions import ConflictException, TooManyRequestsException
 from app.core.responses import success
 from app.core.storage import document_key_for_url, record_photo_upload, save_document_upload, save_photo_upload
 from app.utils.timezone import now_ist
@@ -46,6 +47,14 @@ class UploadController:
         return success({"url": url}, "Photo uploaded")
 
     async def upload_document(self, file: UploadFile, current_user: CurrentUser):
+        if current_user.role == "captain":
+            # Verified documents are permanent: no new identity file may be
+            # added behind a verified packet (a manager reopens it first).
+            from app.services.staff_kyc_service import VERIFIED_LOCK_MESSAGE
+
+            me = await self.db.users.find_one({"_id": ObjectId(current_user.id)}, {"captain_kyc.status": 1})
+            if ((me or {}).get("captain_kyc") or {}).get("status") == "verified":
+                raise ConflictException(VERIFIED_LOCK_MESSAGE)
         await self._count_upload(current_user.id)
         url = await save_document_upload(file)
         await self.db.uploaded_documents.insert_one({

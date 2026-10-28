@@ -65,8 +65,8 @@ async def test_partial_afternoon_holiday_blocks_only_overlapping_slots(db, clean
     async with h.client() as c:
         r = await h.book(c, db, s["cu"], hh.day(2), "15:00-18:00")
         assert _is_holiday_refusal(r)
-        assert r.json()["message"].startswith("We're on a holiday break on") and "You can book from" in r.json()["message"]
-        assert r.json()["message"].endswith(f"{hh.long(hh.day(2))}, 4:00 PM.")
+        assert r.json()["message"].startswith("🌴 We're taking a little holiday break on") and "You can book from" in r.json()["message"]
+        assert r.json()["message"].endswith(f"{hh.long(hh.day(2))}, 4:00 PM — see you then! 😊")
         assert (await h.book(c, db, s["cu"], hh.day(2), "18:00-19:00")).status_code == 200
 
 
@@ -163,14 +163,17 @@ async def test_whatsapp_bot_says_holiday_and_never_books(db, clean):
     sent = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", 1).to_list(None)
     texts = [m.get("message") or "" for m in sent]
     assert any("holiday break" in t and hh.long(hh.day(4)) in t for t in texts), texts
-    # Every day the bot offers (today + 2) is a holiday: it says so instead of "booked".
-    assert any(t.startswith("We're on a holiday break") and "Type *hi*" in t for t in texts), texts
+    # The chosen day is a holiday: the bot says so warmly (with the reopening
+    # day) instead of "booked", then offers the next open days (after day 3).
+    assert any(t.startswith("🌴 We're taking a little holiday break") for t in texts), texts
+    offered = [r["id"] for m in sent for r in (m.get("options") or [])]
+    assert offered and all(i.split(":", 1)[1].split("|")[0] >= hh.day(4) for i in offered if i.startswith("when:")), offered
     assert not any("Confirm your booking" in t for t in texts)
     # A stale Confirm tap (the bot's create path) is refused too.
     await bot._on_confirm(wa_id, phone, s["cu"]["id"], dict(data), "reply", "confirm:yes")
     assert await db.bookings.count_documents({"customer_id": s["cu"]["id"]}) == 0
     last = await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(None)
-    assert any("Couldn't complete the booking: We're on a holiday break" in (m.get("message") or "") for m in last)
+    assert any("🌴" in (m.get("message") or "") and "holiday break" in (m.get("message") or "") for m in last)
     await db.whatsapp_outbox.delete_many({"phone": phone})
     await db.whatsapp_conversations.delete_many({"wa_id": wa_id})
 

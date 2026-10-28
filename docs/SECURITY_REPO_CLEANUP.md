@@ -1,9 +1,56 @@
 # Security: Repo Cleanup After The Data Leak (P0-1)
 
-> **STATUS: NOT DONE. Every step below is a MANUAL action for the repo owner
-> (GitHub admin). None of these commands have been run by anyone.**
-> Do them in order, today. Step 1 takes two minutes and stops the leak; the
-> rest removes the data for good.
+> **STATUS (2026-10-28): tooling built and validated; the purge itself is NOT
+> run on the real repo.** Steps marked **FOUNDER** are manual actions that only
+> the repo owner / GitHub admin can do. Step 1 takes two minutes and stops the
+> leak; do it first.
+
+### Done vs to-do
+
+| Item | Status |
+|---|---|
+| `devdata/`, `.dev/`, `*.archive(.gz)`, `*.bson(.gz)`, `.seed-credentials.local` ignored | Done (`.gitignore`) |
+| Demo/seed passwords removed from tracked code, docs and tests | Done (seed generates random ones into git-ignored `backend/.seed-credentials.local`) |
+| `scripts/purge-history.sh` built | Done |
+| Script validated end-to-end on throwaway clones | Done: 169 MB to 99 MB `.git`; leaked paths unreachable from every ref; every branch tip tree byte-identical; `git fsck` clean |
+| Make repo private, run the script, force-push, GitHub Support, re-clone everywhere, rotate credentials | **FOUNDER** |
+
+### Runbook (what to actually do, in order)
+
+1. **FOUNDER** - Step 1 below: list forks, make the repo private.
+2. `pipx install git-filter-repo` (or `python3 -m pip install --user git-filter-repo`).
+3. Commit everything first (clean tree required), then, **in your normal working copy on the laptop**
+   (not a fresh clone from GitHub: the laptop holds unpushed work, including `blussit-v2`):
+   ```bash
+   cd ~/Documents/doorstep-vehicle-care-platform/doorstep-platform
+   scripts/purge-history.sh          # asks you to type the repo folder name
+   ```
+   It writes a backup bundle to `~/blussit-purge-backups/` (this still contains the
+   leaked data: keep it offline, delete it once the purge is verified), drops local
+   checkpoint refs (`refs/codex/*`, `refs/pull/*`), runs `git filter-repo`, expires
+   reflogs, gc, and prints the verification. It never pushes.
+4. **FOUNDER** - allow force-push on protected branches briefly, then
+   `git push --force origin main blussit-v2` and `git push --force --tags origin`
+   (never `--mirror`). `frontend-work` and `nidhi-work` never held the leak: leave them.
+5. **FOUNDER** - GitHub Support ("Removing sensitive data"): purge cached views,
+   dangling objects and `refs/pull/*`; give both SHAs below. Delete/close PRs.
+6. **FOUNDER** - every other clone, fork, CI cache and laptop: delete and re-clone.
+   Never `git pull` into an old clone.
+7. **FOUNDER** - Step 7 (credentials, accounts, legal notice).
+
+Paths the script removes from all history (the only sensitive ones found in a scan
+of all 1,323 historic paths): `devdata/` (database dump), `.dev/` (backend/frontend
+logs, pids), plus defensive globs `*.archive(.gz)`, `*.bson(.gz)`,
+`backend/deleted-*.json`, `.seed-credentials.local`. No `.env.production`, key or
+certificate file was ever committed. A regex scan found only placeholder-looking
+connection strings and key prefixes in docs/tests/examples; still run
+`gitleaks detect --log-opts="--all"` after the purge.
+
+Validation numbers (throwaway `git clone` of the real repo, run twice): `.git`
+169,052 KiB to 99,228 KiB; history 70 to 69 commits (`b04ad32`, which only touched
+`.dev/backend.log`, becomes empty and disappears); `git log --all -- devdata .dev`
+empty; `111213a` and `b04ad32` no longer exist; `main` and `blussit-v2` tip tree
+hashes identical to before (so the working tree content is byte-identical).
 
 ## What leaked
 
@@ -25,8 +72,8 @@ Your **local** `main` has one more commit that was **never pushed**:
 
 Facts checked in the local clone:
 
-- Only `origin/main` contains the leaked commit. `blussit-v2` and
-  `frontend-work` do not, so their history does not change.
+- `origin/main` and `blussit-v2` (local and origin) contain the leaked commits.
+  `frontend-work` and `nidhi-work` do not, so their history does not change.
 - There are no tags.
 - No other commit in the history touches `devdata/` or `.dev/`.
 - The audit's search of the history found **no live API keys** (Razorpay,
@@ -68,6 +115,10 @@ git filter-repo --version
 ```
 
 ## Step 3: Purge `devdata/` And `.dev/` From All History
+
+> Superseded by `scripts/purge-history.sh` (see the Runbook at the top). The
+> manual mirror-clone commands below are kept as a fallback reference; Step 6
+> is not needed when you run the script in place.
 
 Work in a **fresh mirror clone** in a new folder, not in your normal working
 copy:

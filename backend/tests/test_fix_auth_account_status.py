@@ -70,15 +70,21 @@ async def test_pending_account_can_still_sign_in(db, cleanup):
 
 
 @pytest.mark.parametrize("status", ["inactive", "suspended"])
-async def test_switched_off_customer_otp_paths_are_refused(db, cleanup, status):
+async def test_switched_off_customer_gets_a_code_and_the_standing_only_after_proving_the_phone(db, cleanup, status):
     user = await _user(db, cleanup, "customer")
     await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"status": status}})
     cleanup.append(("otp_requests", {"identifier": user["phone"]}))
     cleanup.append(("otp_requests", {"_id": f"otp-send-cap:{user['phone']}"}))
     async with _client() as c:
+        # A stranger sees nothing different (no enumeration)...
         r = await c.post("/api/v1/auth/otp/request", json={"identifier": user["phone"]})
+        assert r.status_code == 200 and "suspended" not in r.text and "inactive" not in r.text, r.text
+        code = (await db.otp_requests.find_one({"identifier": user["phone"]}))["otp"]
+        # ...whoever holds the phone is told the standing once the code checks out.
+        bad = await c.post("/api/v1/auth/otp-login", json={"phone": user["phone"], "otp": "000000" if code != "000000" else "111111"})
+        assert bad.status_code == 400 and status not in bad.text
+        r = await c.post("/api/v1/auth/otp-login", json={"phone": user["phone"], "otp": code})
         assert r.status_code in (401, 403) and status in r.json()["message"], r.text
-        assert await db.otp_requests.find_one({"identifier": user["phone"]}) is None
 
 
 @pytest.mark.parametrize("status", ["inactive", "suspended"])

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -9,6 +11,7 @@ from app.schemas.user_schema import (
     ForgotPasswordRequest,
     LoginRequest,
     ManagerCreateCustomerRequest,
+    OtpChannelRequest,
     RefreshTokenRequest,
     RegisterRequest,
     RequestOtpRequest,
@@ -116,12 +119,16 @@ async def create_customer(
 
 
 @router.post("/verify-phone/request")
-async def request_phone_verification(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def request_phone_verification(
+    payload: OtpChannelRequest | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
     """Sends an OTP to the LOGGED-IN user's own phone — any role. For a
     customer it is the 90-day re-verification gate; for staff it is how they
     prove the phone on file is theirs, which "Forgot password" by code then
     requires. Always the caller's own phone; never takes a target identifier."""
-    return await AuthController(db).request_phone_verification(current_user)
+    return await AuthController(db).request_phone_verification(current_user, payload.channel if payload else "whatsapp")
 
 
 @router.post("/verify-phone/confirm")
@@ -248,6 +255,7 @@ class GoogleLoginRequest(_BaseModel):
 
 class AddPhoneRequest(_BaseModel):
     phone: str = _WField(min_length=10, max_length=15)
+    channel: Literal["whatsapp", "sms"] = "whatsapp"
 
 
 class AddPhoneConfirmRequest(_BaseModel):
@@ -286,8 +294,8 @@ async def add_phone_request(
 ):
     """A phoneless account (Google sign-in) attaching its primary contact
     number — sends the OTP to the NEW number."""
-    channel = await AuthService(db).add_phone_request(current_user.id, payload.phone)
-    return success({"otp_sent": True, "channel": channel}, message="Code sent")
+    channel = await AuthService(db).add_phone_request(current_user.id, payload.phone, payload.channel)
+    return success(AuthController._sent(channel), message="Code sent")
 
 
 @router.post("/add-phone/confirm")

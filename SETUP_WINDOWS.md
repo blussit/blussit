@@ -210,8 +210,9 @@ Only with Option B (the owner's data): society resident **Neha Verma**
 `9876512340` (ask the owner for that account's password).
 
 Staff passwords: `SEED_ADMIN_PASSWORD` / `SEED_MANAGER_PASSWORD` /
-`SEED_CAPTAIN_PASSWORD` if you set them before seeding, otherwise the
-local-only defaults in `backend/app/seed.py`. The seed creates these staff
+`SEED_CAPTAIN_PASSWORD` if you set them before seeding; otherwise the seed
+generates random ones and writes them to `backend/.seed-credentials.local`
+(git-ignored; open that file to read them). The seed creates these staff
 accounts only on a database running on your own computer.
 
 Any other 10-digit mobile number also works with OTP `123456` — it creates a

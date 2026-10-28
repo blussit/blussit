@@ -36,6 +36,8 @@ from app.schemas.booking_schema import (
     BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
+    GeoApprovalRequest,
+    GeoOverrideRequest,
     HeadingRequest,
     ManagerBookingCreateRequest,
     ManagerLogBookingRequest,
@@ -87,8 +89,10 @@ async def create_booking(payload: BookingCreateRequest, current_user: CurrentUse
 
 @router.post("/verify-phone/request")
 async def request_booking_phone_otp(payload: BookingPhoneOtpRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
-    await AuthService(db).request_phone_otp(payload.phone)
-    return success(None, "Verification code sent")
+    from app.controllers.auth_controller import AuthController
+
+    channel = await AuthService(db).request_phone_otp(payload.phone, channel=payload.channel)
+    return success(AuthController._sent(channel), "Verification code sent")
 
 
 @router.post("/quick")
@@ -357,6 +361,24 @@ async def start_heading(booking_id: str, payload: HeadingRequest, current_user: 
 @router.post("/{booking_id}/verify-vehicle", dependencies=[Depends(require_captain)])
 async def verify_vehicle(booking_id: str, payload: VerifyVehicleRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await BookingController(db).verify_vehicle(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/geo-approval-request", dependencies=[Depends(require_captain)])
+async def geo_approval_request(booking_id: str, payload: GeoApprovalRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Captain: 'Ask Manager To Approve' after the location check refused a step."""
+    return await BookingController(db).geo_request_approval(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/geo-override", dependencies=[Depends(require_manager_or_admin)])
+async def geo_override(booking_id: str, payload: GeoOverrideRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Manager (own center) / admin: approve or decline ONE step of ONE job."""
+    return await BookingController(db).geo_override(current_user, booking_id, payload)
+
+
+@router.get("/{booking_id}/geo-status")
+async def geo_status(booking_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    """The job's location verdict: per-step checks, suspect reasons, approvals."""
+    return await BookingController(db).geo_status(current_user, booking_id)
 
 
 @router.get("/{booking_id}/eligible-captains", dependencies=[Depends(require_manager_or_admin)])

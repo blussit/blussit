@@ -74,6 +74,60 @@ class Settings(BaseSettings):
     # client-supplied and spoofable. 1 = Cloud Run direct; 2 = an external
     # HTTPS load balancer in front of Cloud Run.
     TRUSTED_PROXY_COUNT: int = 1
+    # Safety catch for TRUSTED_PROXY_COUNT > 1: a wrong 2 lets a client pick
+    # its own rate-limit/throttle bucket (it trusts an entry the client wrote),
+    # so the app refuses to start with 2+ unless this is set on purpose (an
+    # external HTTPS load balancer in front of Cloud Run).
+    ALLOW_PROXY_COUNT_GT_1: bool = False
+
+    # ---- Login throttling (AuthService.login) -----------------------------
+    # Failed passwords are throttled per (account + device + source IP) —
+    # never account-wide, so a stranger can't lock the real owner out.
+    # "fails:seconds" steps, escalating: 5 fails -> 1 min, 10 -> 5 min,
+    # 20 -> 30 min for THAT device/IP bucket only.
+    LOGIN_THROTTLE_STEPS: str = "5:60,10:300,20:1800"
+    # A bucket forgets its failures after this long without a new one.
+    LOGIN_FAIL_WINDOW_MINUTES: int = 60
+    # Credential-stuffing guard: failures from one IP across ALL accounts.
+    # Past the ceiling the IP is blocked for the block time (devices that
+    # already signed in to that account successfully are never blocked).
+    LOGIN_IP_FAIL_CEILING: int = 60
+    LOGIN_IP_WINDOW_SECONDS: int = 600
+    LOGIN_IP_BLOCK_SECONDS: int = 600
+    # Account-wide failures (all devices) in the last hour at/over this slow
+    # every UNKNOWN device by the delay below; they never block anyone.
+    LOGIN_ACCOUNT_SLOWDOWN_FAILS: int = 30
+    LOGIN_ACCOUNT_SLOWDOWN_SECONDS: float = 2.0
+    # Remembered (hashed) device ids per user that have logged in OK.
+    TRUSTED_DEVICES_MAX: int = 10
+
+    # ---- OTP request rules (AuthService._issue_otp / services/otp_guard) --
+    # One request per phone per N seconds; a resend inside the code's
+    # validity re-sends the SAME code.
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
+    # Per source: requests that pass the cooldown per hour from one device
+    # (or, with no valid X-Device-Id, one IP). The next one starts a hold.
+    OTP_SOURCE_HOURLY_LIMIT: int = 5
+    # Per IP (shared carrier IPs: roomy). The next one starts a hold.
+    OTP_IP_HOURLY_LIMIT: int = 30
+    # Escalating hold seconds per repeated violation by one source, and how
+    # long a violation is remembered.
+    OTP_HOLD_STEPS_SECONDS: str = "300,1800,7200,86400"
+    OTP_HOLD_MEMORY_SECONDS: int = 86400
+    # Per phone per hour: from one requester / from everyone. Beyond the
+    # total only a FIRST-time requester (or a device that signed in to that
+    # account before) still gets a code, up to the absolute ceiling.
+    OTP_PHONE_SOURCE_HOURLY_LIMIT: int = 5
+    OTP_PHONE_HOURLY_LIMIT: int = 15
+    OTP_PHONE_ABSOLUTE_HOURLY_LIMIT: int = 40
+    # Platform-wide message budget (WhatsApp + SMS). Tripping logs an ERROR,
+    # alerts the admins/managers once, and tightens new-source cooldown.
+    OTP_GLOBAL_HOURLY_BUDGET: int = 500
+    OTP_GLOBAL_DAILY_BUDGET: int = 3000
+    OTP_OVER_BUDGET_COOLDOWN_SECONDS: int = 300
+    # Pretend-send pause (staff / unknown identifiers) so the response time
+    # doesn't tell a real send from none.
+    OTP_FAKE_SEND_DELAY_MS: int = 350
 
     # Mongo
     MONGO_URI: str = "mongodb://localhost:27017"
@@ -100,6 +154,9 @@ class Settings(BaseSettings):
     # fast; find() effectively hung) — see KNOWN_ISSUES.md.
     STORAGE_PROVIDER: str = "local"
     UPLOAD_DIR: str = "uploads"
+    # Local provider only: where identity documents (KYC) are kept. NOT
+    # served statically — only the authorized download route reads it.
+    KYC_PRIVATE_DIR: str = "private_uploads"
     # PUBLIC_BASE_URL (this backend's own public base) is declared ONCE,
     # in the payments block below — local file storage reads the same
     # setting to build absolute photo URLs.
@@ -138,6 +195,19 @@ class Settings(BaseSettings):
     # Invalid parameter" — so no account may use it as its phone, and any
     # send addressed to it is skipped. Blank = no check.
     WHATSAPP_BUSINESS_NUMBER: str = ""
+    # Festival / broadcast campaigns (Admin -> WhatsApp -> Campaigns). The
+    # per-message MARKETING rate used for the cost estimate, the drain rate
+    # (kept below Meta's throughput so transactional sends keep headroom),
+    # and the safety caps: recipients per campaign and per rolling 24 h.
+    # Raise the caps only as Meta lifts the account's messaging tier.
+    WHATSAPP_MARKETING_COST_PAISE: int = 78
+    WHATSAPP_CAMPAIGN_RATE_PER_SECOND: int = 40
+    WHATSAPP_CAMPAIGN_MAX_RECIPIENTS: int = 10000
+    WHATSAPP_CAMPAIGN_DAILY_CAP: int = 10000
+    WHATSAPP_FESTIVAL_TEMPLATE_NAME: str = "blussit_festival_greeting"
+    # Meta "header_handle" for the template's sample image (Resumable Upload
+    # API). Needed only when submitting the template through the pipeline.
+    WHATSAPP_FESTIVAL_HEADER_HANDLE: str = ""
     # Once you've created and gotten Meta's approval for a real
     # "authentication"-category template (its body should have exactly one
     # {{1}} placeholder for the code), set this and OTPs switch from plain
@@ -250,6 +320,17 @@ class Settings(BaseSettings):
     # production refused outright — see validate_production_settings).
     DEV_TOOLS_ENABLED: bool = False
     DEV_OTP_CODE: str = "123456"
+
+    # Captain GPS integrity (app/services/geo_integrity_service.py). ON by
+    # default: arrived / start / complete are REFUSED when the position is
+    # outside the geofence, stale, inaccurate, replayed or the stored trail
+    # looks faked. false = emergency kill switch: the same checks still run
+    # and are recorded, but only flag (the old behaviour), never refuse.
+    # GEOFENCE_MIN_SERVICE_SECONDS: the shortest believable wash — a
+    # completion sooner than this after the before-photo is refused (a
+    # manager can approve). Other tunables live in Business Settings.
+    GEOFENCE_ENFORCE: bool = True
+    GEOFENCE_MIN_SERVICE_SECONDS: int = 120
 
     # Logs: "" = automatic (one JSON object per line in production, which
     # Cloud Logging parses into severity/message/request_id; plain text
@@ -371,6 +452,24 @@ def _mongo_hosts(uri: str) -> list[str] | None:
     hosts = parsed.netloc.rsplit("@", 1)[-1]
     names = [h.strip().rsplit(":", 1)[0].strip("[]").lower() for h in hosts.split(",") if h.strip()]
     return names or None
+
+
+def validate_proxy_settings(s: Settings) -> List[str]:
+    """Proxy trust rules, every environment: when X-Forwarded-For is trusted
+    the hop count must be explicit — 0 means "trust nothing" and so cannot be
+    combined with trusting, and 2+ lets a client choose its own bucket unless
+    ALLOW_PROXY_COUNT_GT_1 says there really are that many proxies."""
+    problems: List[str] = []
+    if not s.TRUST_PROXY_HEADERS:
+        return problems
+    if s.TRUSTED_PROXY_COUNT < 1:
+        problems.append("TRUSTED_PROXY_COUNT must be 1 or more when TRUST_PROXY_HEADERS is true (0 would trust nothing; use TRUST_PROXY_HEADERS=false for that).")
+    elif s.TRUSTED_PROXY_COUNT > 1 and not s.ALLOW_PROXY_COUNT_GT_1:
+        problems.append(
+            "TRUSTED_PROXY_COUNT above 1 needs ALLOW_PROXY_COUNT_GT_1=true (only behind an external load balancer; "
+            "a wrong value lets a client pick its own rate-limit bucket). Cloud Run direct is 1."
+        )
+    return problems
 
 
 def validate_production_settings(s: Settings) -> List[str]:
@@ -499,7 +598,7 @@ def validate_settings(s: Settings) -> List[str]:
     if not s.DEBUG and "*" in s.cors_origins_list:
         problems.append("CORS_ORIGINS contains '*' — list the exact site origins.")
 
-    for problem in validate_production_settings(s):
+    for problem in validate_proxy_settings(s) + validate_production_settings(s):
         if problem not in problems:
             problems.append(problem)
     if s.APP_ENV == "production":

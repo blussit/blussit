@@ -177,6 +177,11 @@ class StaffDirectoryService:
             ):
                 if b.get(key):
                     flags_by_type[label] = flags_by_type.get(label, 0) + 1
+            # GPS-integrity evidence (geo_integrity_service): a trail that
+            # looked faked, a step a manager had to approve, a step refused.
+            for key, label in (("geo_suspect", "geo_suspect"), ("geo_override", "geo_override"), ("geo_refusals", "geo_refused")):
+                if b.get(key):
+                    flags_by_type[label] = flags_by_type.get(label, 0) + 1
 
         return {
             "flags_by_type": flags_by_type,

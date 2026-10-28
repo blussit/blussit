@@ -7,14 +7,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, Loader2, MapPin, RefreshCw } from "lucide-react";
 import { uploadApi } from "../../api/upload";
-import { getPosition, shrinkPhoto, type Position } from "./photo";
+import { fixFields, getPosition, shrinkPhoto, type Position } from "./photo";
 
 export interface Shot {
   ready: boolean;
   busy: boolean;
   error: string | null;
   /** Uploads (once) and returns what the photo endpoints take. */
-  submit: () => Promise<{ image_url: string; latitude: number; longitude: number }>;
+  submit: () => Promise<{ image_url: string } & Position>;
   input: {
     preview: string | null;
     status: "idle" | "locating" | "ready";
@@ -64,7 +64,11 @@ export function usePhotoShot(geoFailMessage: string): Shot {
   const submit = async () => {
     if (!file || !geo) throw new Error(geoFailMessage);
     if (!uploaded.current) uploaded.current = await uploadApi.photo(file);
-    return { image_url: uploaded.current, latitude: geo.latitude, longitude: geo.longitude };
+    // The position sent is taken NOW (the server refuses a stale fix and
+    // the photo may have been taken minutes ago); the photo-time fix is the
+    // fallback if a second fix can't be had in time.
+    const fresh = await getPosition(geoFailMessage).catch(() => geo);
+    return { image_url: uploaded.current, ...fixFields(fresh) };
   };
 
   return {

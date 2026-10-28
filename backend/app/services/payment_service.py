@@ -2159,6 +2159,27 @@ class PaymentService:
         await events.update_one({"_id": event_id}, {"$set": {"status": "processed", "outcome": outcome}})
         return {"status": "ok", "outcome": outcome}
 
+    async def _webhook_amount_ok(self, doc: dict, payment: dict, order_id: str | None) -> bool:
+        """The webhook's captured payment is for this order's expected amount
+        (fee-bearer aware, see _covers) in INR — else logged at ERROR, parked
+        on the attention queue (when captured) and NOT settled."""
+        expected = doc.get("amount_paise")
+        currency = str(payment.get("currency") or "INR").upper()
+        if expected is None or (_covers(payment, expected) and currency == "INR"):
+            return True
+        logger.error(
+            "Razorpay webhook payment %s (order %s) amount %s %s doesn't match our order %s (%s paise INR) — not settled",
+            payment.get("id"), order_id or doc.get("razorpay_link_id"), payment.get("amount"), currency,
+            doc.get("razorpay_order_id") or doc.get("razorpay_link_id"), expected,
+        )
+        if payment.get("id") and payment.get("amount") is not None:
+            await self._record_duplicate_payment(
+                doc, payment["id"], "webhook", kind="amount_mismatch",
+                reason=f"captured {payment.get('amount')} {currency} paise on an order for {expected} paise INR — check and refund",
+                amount_paise=payment.get("amount"),
+            )
+        return False
+
     async def _dispatch_webhook(self, name: str, payload: dict) -> str:
         def entity(key: str) -> dict:
             return (payload.get(key) or {}).get("entity") or {}
@@ -2171,6 +2192,11 @@ class PaymentService:
             doc = await self.orders.find_one({"razorpay_order_id": order_id})
             if not doc or doc.get("kind"):
                 return "unknown_order"  # e.g. a payment link's own order — payment_link.paid covers it
+            # Defence in depth: the signature proves Razorpay sent this, not
+            # that the captured amount/currency is what WE asked for. A
+            # mismatch never settles — the money is parked for a refund.
+            if not await self._webhook_amount_ok(doc, payment, order_id):
+                return "amount_mismatch"
             return (await self._apply_order_paid(doc, payment["id"], via="webhook"))["status"]
         if name == "payment.failed":
             doc = await self.orders.find_one({"razorpay_order_id": payment.get("order_id")}) if payment.get("order_id") else None
@@ -2187,6 +2213,8 @@ class PaymentService:
             doc = await self.orders.find_one({"razorpay_link_id": link_id}) if link_id else None
             if not doc:
                 return "unknown_link"
+            if payment.get("amount") is not None and not await self._webhook_amount_ok(doc, payment, None):
+                return "amount_mismatch"
             # The confirmation (booking receipt / plan active / society plan
             # active) is sent by the settle path itself, once — not here: this
             # used to add a "booking *None* is fully paid" to a society link.

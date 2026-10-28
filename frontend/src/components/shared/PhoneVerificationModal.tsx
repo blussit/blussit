@@ -4,7 +4,8 @@ import { MessageCircle, ShieldCheck } from "lucide-react";
 import { authApi, googleAuthApi, otpWidgetApi } from "../../api/auth";
 import { Button, Input, Modal, OtpInput } from "../ui";
 import { useAuth } from "../../context/AuthContext";
-import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { otpErrorMessage, sendOtpCode, sentVia as sentViaLabel, widgetVerifyOtp, type BackendChannel, type OtpChannel } from "../../lib/otpWidget";
+import { OtpSmsButton } from "./OtpSmsButton";
 import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
 
 /**
@@ -42,29 +43,25 @@ export function PhoneVerificationModal({
   const targetPhone = (needsPhone ? validateIndianMobile(newPhone) : user?.phone) || "";
   const sameAsCurrent = changeNumber && !!targetPhone && targetPhone === user?.phone;
   const [channel, setChannel] = useState<OtpChannel | null>(null);
-  const [delivered, setDelivered] = useState<"whatsapp" | "sms" | null>(null);
+  const [delivered, setDelivered] = useState<BackendChannel | null>(null);
   const [cooldown, setCooldown] = useState(0);
-  const [smsAvailable, setSmsAvailable] = useState(false);
   const verifyingRef = useRef(false);
 
   const sendMutation = useMutation({
-    mutationFn: async (order?: OtpChannel[]) => {
+    mutationFn: async (req?: { order?: OtpChannel[]; wanted?: BackendChannel }) => {
       const phone = needsPhone ? validateIndianMobile(newPhone) : user?.phone;
       if (!phone) throw new Error("Enter a valid 10-digit mobile number.");
-      let backendChannel: "whatsapp" | "sms" | undefined;
-      const sent = await sendOtpCode(
+      return sendOtpCode(
         phone,
-        async () => {
-          const res = needsPhone ? await googleAuthApi.addPhoneRequest(phone) : await authApi.requestPhoneVerification();
-          backendChannel = res.channel;
-        },
-        order,
+        (ch) => (needsPhone ? googleAuthApi.addPhoneRequest(phone, ch) : authApi.requestPhoneVerification(ch)),
+        req?.order,
+        req?.wanted,
       );
-      return { ...sent, delivered: sent.channel === "widget" ? ("sms" as const) : (backendChannel ?? null) };
     },
     onSuccess: (sent) => {
       setChannel(sent.channel);
-      setDelivered(sent.delivered);
+      if (sent.delivered) setDelivered(sent.delivered);
+      else if (sent.channel === "widget") setDelivered(null);
       setCooldown(sent.cooldown);
       setOtp("");
       setStep("verify");
@@ -112,8 +109,8 @@ export function PhoneVerificationModal({
     verifyMutation.mutate(clean, { onSettled: () => (verifyingRef.current = false) });
   };
 
-  const send = (order?: OtpChannel[]) => {
-    if (!sendMutation.isPending) sendMutation.mutate(order);
+  const send = (order?: OtpChannel[], wanted?: BackendChannel) => {
+    if (!sendMutation.isPending) sendMutation.mutate({ order, wanted });
   };
 
   const autoSent = useRef(false);
@@ -124,7 +121,7 @@ export function PhoneVerificationModal({
     }
     if (!autoSend || autoSent.current || step !== "send" || needsPhone) return;
     autoSent.current = true;
-    sendMutation.mutate(undefined);
+    sendMutation.mutate({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSend, open, step, needsPhone]);
 
@@ -133,10 +130,6 @@ export function PhoneVerificationModal({
     const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
     return () => clearTimeout(t);
   }, [cooldown]);
-
-  useEffect(() => {
-    if (open && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
-  }, [open, channel]);
 
   const close = () => {
     setStep("send");
@@ -149,7 +142,7 @@ export function PhoneVerificationModal({
     onClose();
   };
 
-  const sentVia = delivered === "sms" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : "";
+  const sentVia = delivered === "sms" || channel === "widget" ? " by SMS" : delivered === "whatsapp" ? " on WhatsApp" : "";
   const resendOrder: OtpChannel[] | undefined = channel ? [channel, channel === "widget" ? "backend" : "widget"] : undefined;
 
   return (
@@ -196,6 +189,11 @@ export function PhoneVerificationModal({
             <p className="text-sm text-[var(--color-text-secondary)]">
               Enter the 6-digit code sent to <span className="font-medium text-black">+91 {targetPhone}</span>.
             </p>
+            {sentViaLabel(delivered, channel) && (
+              <p className="-mt-2 text-xs font-medium text-[var(--color-text-secondary)]" data-testid="otp-sent-via">
+                {sentViaLabel(delivered, channel)}
+              </p>
+            )}
             <OtpInput value={otp} onChange={setOtp} autoFocus disabled={verifyMutation.isPending} onComplete={submitCode} />
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
             <Button className="w-full" disabled={otp.trim().length < 6 || sendMutation.isPending} isLoading={verifyMutation.isPending} onClick={() => submitCode(otp)}>
@@ -212,18 +210,16 @@ export function PhoneVerificationModal({
               {cooldown > 0 ? (
                 <span>Resend In {cooldown}s</span>
               ) : (
-                <span className="flex items-center gap-3">
-                  {channel === "backend" && smsAvailable && (
-                    <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(["widget"])}>
-                      Get It By SMS
-                    </button>
-                  )}
-                  <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(resendOrder)}>
-                    Resend Code
-                  </button>
-                </span>
+                <button type="button" className="font-semibold text-black hover:underline disabled:opacity-50" disabled={sendMutation.isPending} onClick={() => send(resendOrder, delivered ?? "whatsapp")}>
+                  Resend Code
+                </button>
               )}
             </div>
+            {channel === "backend" && (
+              <div className="text-center text-xs">
+                <OtpSmsButton className="!text-black" cooldown={cooldown} disabled={sendMutation.isPending} onClick={() => send(["backend", "widget"], "sms")} />
+              </div>
+            )}
           </>
         )}
       </div>

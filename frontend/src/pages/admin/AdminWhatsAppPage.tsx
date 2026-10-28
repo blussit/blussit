@@ -5,7 +5,8 @@
  */
 import { useSearchParams } from "react-router-dom";
 import { InboxView } from "../../components/admin/whatsapp/InboxView";
-import { AnalyticsView, CampaignsView, ContactsView, TemplatesView, WhatsAppSettingsView } from "../../components/admin/whatsapp/panels";
+import { CampaignsView } from "../../components/admin/whatsapp/CampaignsPanel";
+import { AnalyticsView, ContactsView, TemplatesView, WhatsAppSettingsView } from "../../components/admin/whatsapp/panels";
 
 const TABS = [
   { key: "inbox", label: "Inbox" },

@@ -18,6 +18,7 @@ Two providers ship today:
     are both set in .env — see get_whatsapp_provider().
 """
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -161,6 +162,31 @@ def redact_secret(kind: str | None, text: str, template_name: str | None = None)
     return f"[template:{template_name}] {label}" if template_name else label
 
 
+# Meta codes that definitely mean "this message can't reach this number" — the
+# number isn't on WhatsApp (the Cloud API has NO way to pre-check that), is
+# unreachable, or Meta won't deliver to it. Seen either in the send response or
+# later in a `failed` delivery status; an OTP that hits one is re-sent, same
+# code, by SMS (AuthService.otp_whatsapp_failed).
+#   131026 message undeliverable (not a WhatsApp user / old app / blocked)
+#   131047 re-engagement (24 h window closed)   131030 recipient not allowed
+#   133010 phone number not registered          131049 Meta chose not to deliver
+#   131021 recipient is the sender              130472 number in a Meta experiment
+UNDELIVERABLE_ERROR_CODES = frozenset({131026, 131047, 131030, 133010, 131049, 131021, 130472})
+
+
+def undeliverable_code(errors: list[dict] | None) -> int | None:
+    """The first definite-undeliverable Meta code among `errors` (a webhook
+    status' list, or [{"code": …}] from a send response), else None."""
+    for error in errors or []:
+        try:
+            code = int(error.get("code"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if code in UNDELIVERABLE_ERROR_CODES:
+            return code
+    return None
+
+
 @dataclass(frozen=True)
 class SendOutcome:
     """A send attempt in enough detail to choose a fallback: truthy when
@@ -177,6 +203,12 @@ class SendOutcome:
     #   configuration problem, not this message;
     # "opted_out" = the template is MARKETING and the customer opted out.
     reason: str | None = None
+    # Broadcast campaigns (services/whatsapp_campaign_service.py) need the
+    # message id to match Meta's later status webhook, and Meta's error
+    # code/text to tell "this number is bad" from "the template is paused".
+    wamid: str | None = None
+    error_code: int | None = None
+    error: str | None = None
 
     def __bool__(self) -> bool:
         return self.ok
@@ -234,6 +266,13 @@ class WhatsAppProvider(ABC):
     async def send_outcome(self, phone: str, message: str, extra: dict | None = None) -> SendOutcome:
         """send (free text), reporting WHY a send failed."""
         return SendOutcome(await self.send(phone, message, extra=extra))
+
+    async def send_header_image_template_outcome(
+        self, phone: str, template_name: str, language_code: str, header_image_url: str, body_params: list[str], extra: dict | None = None
+    ) -> SendOutcome:
+        """A template whose HEADER is an image (by public URL) with body
+        parameters — the festival/broadcast template. Providers override."""
+        raise NotImplementedError
 
     @abstractmethod
     async def send_interactive_list(self, phone: str, body: str, button: str, rows: list[dict]) -> bool:
@@ -335,6 +374,18 @@ class LogWhatsAppProvider(WhatsAppProvider):
         })
         return True
 
+    async def send_header_image_template_outcome(
+        self, phone: str, template_name: str, language_code: str, header_image_url: str, body_params: list[str], extra: dict | None = None
+    ) -> SendOutcome:
+        wamid = f"log.{uuid.uuid4().hex}"
+        message = f"[template:{template_name}/{language_code}] [header_image={header_image_url}] " + ", ".join(body_params)
+        logger.info("WHATSAPP [log provider, image template] -> %s: %s", mask_phone(phone), message)
+        await self.db.whatsapp_outbox.insert_one({
+            "phone": phone, "message": message, "template_name": template_name, "provider": "log", "wamid": wamid,
+            "created_at": datetime.now(timezone.utc), **(extra or {}),
+        })
+        return SendOutcome(True, wamid=wamid)
+
     async def send_media(self, phone: str, media_type: str, media_id: str, caption: str = "", filename: str = "", extra: dict | None = None) -> bool:
         await self.db.whatsapp_outbox.insert_one({
             "phone": phone,
@@ -431,6 +482,11 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
     ) -> SendOutcome:
         return await self._template_outcome(phone, template_name, language_code, body_params, button_param, False, extra)
 
+    async def send_header_image_template_outcome(
+        self, phone: str, template_name: str, language_code: str, header_image_url: str, body_params: list[str], extra: dict | None = None
+    ) -> SendOutcome:
+        return await self._template_outcome(phone, template_name, language_code, body_params, None, False, extra, header_image_url=header_image_url)
+
     async def _template_outcome(
         self,
         phone: str,
@@ -440,12 +496,15 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
         button_param: str | None,
         otp_button: bool,
         extra: dict | None,
+        header_image_url: str | None = None,
     ) -> SendOutcome:
         # Meta rejects template parameters containing newlines, tabs, or
         # 4+ consecutive spaces (error 132000) — flatten every param so a
         # multi-line notification text can never silently kill the send.
         params = [_flatten_param(p) for p in body_params]
         components = [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}] if params else []
+        if header_image_url:
+            components.insert(0, {"type": "header", "parameters": [{"type": "image", "image": {"link": header_image_url}}]})
         if button_param:
             # Fills the {{1}} in a URL button whose template was created
             # with one (see WhatsAppCrmService.create_template's
@@ -672,7 +731,17 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             if not ok:
                 logger.error("WhatsApp send failed (%s) to %s: %s", response.status_code, mask_phone(phone), response.text[:500])
                 await self._note_marketing_refusal(phone, response)
-            return SendOutcome(ok, transport_failure=not ok and transport)
+            code, err_text = None, None
+            if not ok:
+                try:
+                    err = response.json().get("error") or {}
+                    code, err_text = err.get("code"), str(err.get("error_data", {}).get("details") or err.get("message") or "")[:300]
+                except Exception:  # noqa: BLE001 — not JSON
+                    err_text = response.text[:300]
+            return SendOutcome(
+                ok, transport_failure=not ok and transport, wamid=outbox_doc.get("wamid"),
+                error_code=code if isinstance(code, int) else None, error=err_text,
+            )
         except httpx.HTTPError as exc:
             # Pool timeouts included (httpx.PoolTimeout is an HTTPError):
             # transient, retried by the delivery queue.

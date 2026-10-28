@@ -8,7 +8,7 @@ from bson import ObjectId
 
 from app.repositories.user_repository import lowercase_user_emails
 from tests import test_fix_core_helpers as h
-from tests.factories import make_manager
+from tests.factories import make_manager, TEST_PASSWORD
 
 pytestmark = pytest.mark.asyncio
 
@@ -23,8 +23,8 @@ async def test_login_by_email_ignores_case(db):
     email = _email("mgr")
     await db.users.update_one({"_id": ObjectId(mid)}, {"$set": {"email": email}})
     async with h.client() as c:
-        mixed = await c.post("/api/v1/auth/login", json={"identifier": "  " + email.capitalize() + " ", "password": "Test@12345"})
-        upper = await c.post("/api/v1/auth/login", json={"identifier": email.upper(), "password": "Test@12345"})
+        mixed = await c.post("/api/v1/auth/login", json={"identifier": "  " + email.capitalize() + " ", "password": TEST_PASSWORD})
+        upper = await c.post("/api/v1/auth/login", json={"identifier": email.upper(), "password": TEST_PASSWORD})
     assert mixed.status_code == 200, mixed.text
     assert upper.status_code == 200, upper.text
 
@@ -36,7 +36,7 @@ async def test_staff_created_with_mixed_case_email_is_stored_lower_case(db):
     async with h.client() as c:
         r = await c.post("/api/v1/auth/staff", headers=admin["h"], json={
             "full_name": "Mixed Case Captain", "email": email, "phone": f"98{uuid.uuid4().int % 10**8:08d}",
-            "password": "Captain@12345", "role": "manager", "service_center_id": cid,
+            "password": TEST_PASSWORD, "role": "manager", "service_center_id": cid,
         })
     assert r.status_code in (200, 201), r.text
     stored = await db.users.find_one({"email": email.lower()})
@@ -45,7 +45,7 @@ async def test_staff_created_with_mixed_case_email_is_stored_lower_case(db):
     async with h.client() as c:
         dup = await c.post("/api/v1/auth/staff", headers=admin["h"], json={
             "full_name": "Dup Captain", "email": email.upper(), "phone": f"97{uuid.uuid4().int % 10**8:08d}",
-            "password": "Captain@12345", "role": "manager", "service_center_id": cid,
+            "password": TEST_PASSWORD, "role": "manager", "service_center_id": cid,
         })
     assert dup.status_code == 409, dup.text
 

@@ -16,6 +16,7 @@ import { asUtcInstant, formatDateTime, formatSlot } from "../../lib/date";
 import { isArrivalLocked, issueLabel, vehicleLabel } from "../../lib/constants";
 import { bookingServiceLabel, combinedStatus } from "../../lib/bookingGroups";
 import { toTitle } from "../../lib/titleCase";
+import { GeoReview } from "./GeoReview";
 import type { Booking } from "../../types";
 
 /** "Sedan" (quick booking) or "Sedan · Honda City · MP09AB1234" (older
@@ -607,6 +608,10 @@ export function BookingDetailDrawer({
                 distanceM={car.after_photo_distance_m}
               />
             </Section>
+          )}
+
+          {isStaff && car.captain_id && ["assigned", "captain_on_the_way", "service_started", "completed"].includes(car.status) && (
+            <GeoReview car={car} />
           )}
 
           {(car.before_photo || car.after_photo) && (

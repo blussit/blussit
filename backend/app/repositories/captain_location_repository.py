@@ -7,7 +7,8 @@ class CaptainLocationRepository(BaseRepository):
     collection_name = "captain_locations"
 
     async def record(self, captain_id: str, latitude: float, longitude: float, at: datetime,
-                     source: str = "ping", booking_id: str | None = None, accuracy_m: float | None = None) -> None:
+                     source: str = "ping", booking_id: str | None = None, accuracy_m: float | None = None,
+                     extra: dict | None = None) -> None:
         """Fire-and-forget breadcrumb append — never let a trail write break
         the workflow action it rides on."""
         try:
@@ -19,6 +20,9 @@ class CaptainLocationRepository(BaseRepository):
                 "accuracy_m": accuracy_m,
                 "source": source,
                 "at": at,
+                # fix_at / speed_mps / heading_deg / altitude_m: what the
+                # device reported (geo_integrity_service reads them back).
+                **{k: v for k, v in (extra or {}).items() if v is not None},
             })
         except Exception:
             pass
@@ -31,6 +35,14 @@ class CaptainLocationRepository(BaseRepository):
         if since is not None:
             query["at"] = {"$gte": since}
         cursor = self.collection.find(query).sort("at", -1).limit(limit)
+        rows = await cursor.to_list(length=limit)
+        rows.reverse()
+        return rows
+
+    async def list_since(self, captain_id: str, since: datetime, limit: int = 400) -> list[dict]:
+        """Rows RECEIVED since `since`, oldest first — the trail the GPS
+        integrity checks read. Bounded: the newest `limit` rows."""
+        cursor = self.collection.find({"captain_id": captain_id, "at": {"$gte": since}}).sort("at", -1).limit(limit)
         rows = await cursor.to_list(length=limit)
         rows.reverse()
         return rows

@@ -287,6 +287,10 @@ async def create_indexes() -> None:
     # design: rows self-expire after 30 days via the TTL index.
     await db.captain_locations.create_index([("captain_id", 1), ("at", 1)])
     await db.captain_locations.create_index("at", expireAfterSeconds=30 * 24 * 3600)
+    # GPS-integrity evidence + manager approvals (geo_integrity_service).
+    from app.services.geo_integrity_service import GeoIntegrityService
+
+    await GeoIntegrityService(db).ensure_indexes()
 
     # Captain staff ids are unique across the platform (sparse — customers
     # and managers never carry one).
@@ -451,6 +455,10 @@ async def create_indexes() -> None:
     # self-delete at their own expiry instant (TTL 0 on expires_at).
     await db.otp_requests.create_index("identifier")
     await db.otp_requests.create_index("expires_at", expireAfterSeconds=0)
+    # Abuse controls (services/auth_guard.py): fixed-window counters, login
+    # throttle buckets and escalating OTP holds, shared by every instance.
+    await db.rate_counters.create_index("expires_at", expireAfterSeconds=0)
+    await db.abuse_holds.create_index("expires_at", expireAfterSeconds=0)
     # Single-use MSG91 widget tokens (AuthService; _id = the token's sha256)
     # — remembered only until the token itself would have expired.
     await db.used_widget_tokens.create_index("expires_at", expireAfterSeconds=0)
@@ -502,6 +510,9 @@ async def create_indexes() -> None:
     # for the CRM inbox and template analytics; older rows age out.
     await _ensure_ttl(db.whatsapp_outbox, "created_at", 365 * 24 * 3600)
     await _ensure_ttl(db.whatsapp_inbox, "created_at", 365 * 24 * 3600)
+    from app.services.whatsapp_campaign_service import ensure_campaign_indexes
+
+    await ensure_campaign_indexes(db)
     await db.wallet_transactions.create_index([("captain_id", 1), ("created_at", -1)])
     await db.wallet_transactions.create_index("captain_id")
     await db.wallet_transactions.create_index("booking_id")
@@ -578,6 +589,13 @@ async def create_indexes() -> None:
     await db.uploaded_documents.create_index("key")
     await db.uploaded_documents.create_index([("url", 1), ("owner_id", 1)])
     await db.upload_counters.create_index("expires_at", expireAfterSeconds=0)
+    # Per-account identity-document download counter (upload_routes) and the
+    # permanent KYC history — NO TTL on the history: superseded packets and
+    # retained records of deleted captains are kept until the founder
+    # decides a retention period (see docs/ARCHITECTURE.md, KYC).
+    await db.document_download_counters.create_index("expires_at", expireAfterSeconds=0)
+    await db.kyc_versions.create_index([("captain_id", 1), ("version", 1)])
+    await db.kyc_retained.create_index("captain_id")
     # Photo upload records (app.core.storage, audit CAP-02) — a captain's
     # uploads newest first. No TTL: it is the audit trail of job photos.
     await db.uploaded_photos.create_index([("uploader_id", 1), ("created_at", -1)])

@@ -58,8 +58,11 @@ from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.booking_schema import BookingCancelRequest, BookingRescheduleRequest, QuickBookingLine, QuickBookingRequest
 from app.schemas.profile_schema import AddressCreateRequest
 from app.services.booking_service import BookingService
+from app.services.holiday_service import HolidayException, HolidayService, friendly_message, friendly_refusal
 from app.services.profile_service import AddressService
-from app.services.whatsapp_service import MARKETING_OPT_OUT_ERROR, WhatsAppService, inbound_session, mask_phone, set_marketing_opt_out
+from app.services.whatsapp_service import (
+    MARKETING_OPT_OUT_ERROR, WhatsAppService, inbound_session, mask_phone, set_marketing_opt_out, undeliverable_code,
+)
 from app.utils.slots import format_slot_12h
 from app.utils.timezone import now_ist
 
@@ -162,6 +165,11 @@ class WhatsAppBotService:
                     from app.services.notification_service import NotificationService
 
                     await NotificationService(self.db).apply_delivery_status(wamid, status.get("status"), status.get("errors"))
+                    from app.services.whatsapp_campaign_service import apply_status as apply_campaign_status
+
+                    await apply_campaign_status(self.db, wamid, status.get("status"), status.get("errors"))
+                    if status.get("status") == "failed" and undeliverable_code(status.get("errors")):
+                        await self._otp_sms_fallback(wamid)
                     if any(e.get("code") == MARKETING_OPT_OUT_ERROR for e in status.get("errors") or []):
                         # The recipient stopped our marketing messages (NTF-05).
                         recipient = status.get("recipient_id")
@@ -213,6 +221,20 @@ class WhatsAppBotService:
                             await self._set_state(wa_id, None, {})
         return {"processed": processed}
 
+    async def _otp_sms_fallback(self, wamid: str) -> None:
+        """A WhatsApp login code Meta accepted and then failed to deliver (not
+        on WhatsApp / undeliverable): the same live code goes out by SMS, once
+        (AuthService.otp_whatsapp_failed). Never raises (webhook path)."""
+        try:
+            row = await self.db.whatsapp_outbox.find_one({"wamid": wamid, "kind": "otp"}, {"phone": 1, "created_at": 1})
+            if not row or not row.get("phone"):
+                return
+            from app.services.auth_service import AuthService
+
+            await AuthService(self.db).otp_whatsapp_failed(row["phone"], row.get("created_at"))
+        except Exception:  # noqa: BLE001
+            logger.exception("OTP SMS fallback after a WhatsApp delivery failure raised")
+
     async def _handle_account_event(self, field: str | None, value: dict) -> None:
         """Webhook fields other than messages. Never raises (see
         handle_webhook): template review results (DEP-04 — a paused or
@@ -259,10 +281,23 @@ class WhatsAppBotService:
         so the number is resolved (or signed up) afresh."""
         if not customer_id:
             return None
-        if ObjectId.is_valid(customer_id) and await self.db.users.find_one({"_id": ObjectId(customer_id)}, {"_id": 1}):
+        user = await self.db.users.find_one({"_id": ObjectId(customer_id)}, {"phone": 1}) if ObjectId.is_valid(customer_id) else None
+        # The sender's WhatsApp number IS the proof of who is booking: a
+        # chat linked to an account whose phone is a DIFFERENT number (the
+        # account's number was changed since, or the link is stale) books
+        # nothing for it — the number is resolved afresh instead.
+        if user and self._same_number(user.get("phone"), wa_id):
             return customer_id
         await self.conversations.update_one({"wa_id": wa_id, "customer_id": customer_id}, {"$unset": {"customer_id": ""}})
         return None
+
+    @classmethod
+    def _same_number(cls, stored: str | None, wa_id: str) -> bool:
+        """The account phone and the sender's wa_id are the same number
+        (bare 10-digit vs 91-prefixed forms alike)."""
+        if not stored:
+            return False
+        return cls._local_phone(str(stored)) == cls._local_phone(wa_id)
 
     async def _first_time_seeing(self, wamid: str) -> bool:
         try:
@@ -520,6 +555,7 @@ class WhatsAppBotService:
             "menu": self._on_menu,
             "q_type": self._on_type,
             "q_service": self._on_service,
+            "q_plan": self._on_plan,
             "q_address": self._on_address,
             "await_location": self._on_await_location,
             "await_addr_pincode": self._on_await_addr_pincode,
@@ -754,9 +790,24 @@ class WhatsAppBotService:
             await self._send_menu(wa_id, phone)
             return
         if action == "cancel":
+            # What the website's cancel dialog shows first (the same
+            # cancellation_charge_preview): the charge, the plan wash and the
+            # wallet effect — a customer never learns the price AFTER.
+            note = ""
+            try:
+                preview = await self.booking_service.cancellation_charge_preview(data["booking_id"], customer_id, "customer", None)
+            except AppException:
+                preview = None
+            if preview:
+                if not preview.get("can_cancel"):
+                    await self.wa.send_text(phone, f"{preview.get('refusal') or 'This booking can no longer be cancelled.'}")
+                    await self._show_booking_detail(wa_id, phone, customer_id, data["booking_id"])
+                    return
+                note = self._cancel_note(preview)
             await self.wa.send_buttons(
                 phone,
-                f"Cancel booking *{booking['booking_number']}* ({self._fmt_date(booking)} · {format_slot_12h(booking.get('scheduled_slot'))})?",
+                f"Cancel booking *{booking['booking_number']}* ({self._fmt_date(booking)} · {format_slot_12h(booking.get('scheduled_slot'))})?"
+                + (f"\n\n{note}" if note else ""),
                 [{"id": "cxl:yes", "title": "Yes, cancel it"}, {"id": "cxl:no", "title": "Keep booking"}],
             )
             await self._set_state(wa_id, "cancel_confirm", data)
@@ -764,10 +815,36 @@ class WhatsAppBotService:
         # Reschedule — same policy checks as the website, enforced by
         # BookingService.reschedule_booking at the end of this flow.
         data["resched_center_id"] = booking["service_center_id"]
-        today = now_ist().date()
-        labels = ["Today", "Tomorrow", (today + timedelta(days=2)).strftime("%a %d %b")]
-        buttons = [{"id": f"rdate:{(today + timedelta(days=i)).isoformat()}", "title": labels[i]} for i in range(3)]
-        await self.wa.send_buttons(phone, "Pick the new day:", buttons)
+        await self._offer_resched_days(wa_id, phone, data)
+
+    @staticmethod
+    def _cancel_note(preview: dict) -> str:
+        """The cancel dialog's money lines, from cancellation_charge_preview."""
+        out = []
+        amount = float(preview.get("amount") or 0)
+        if amount > 0:
+            out.append(f"⚠️ Cancelling now costs ₹{amount:g}, taken from your Blussit wallet.")
+        if preview.get("plan_wash_forfeited_count"):
+            out.append("🎟 This plan wash will be used up.")
+        elif preview.get("plan_wash_returned"):
+            out.append("🎟 Your plan wash goes back to your plan.")
+        credit = float(preview.get("wallet_credit") or 0)
+        if credit > 0:
+            out.append(f"👛 ₹{credit:g} you paid goes back to your wallet.")
+        return "\n".join(out)
+
+    async def _offer_resched_days(self, wa_id, phone, data, quiet_note: str | None = None) -> None:
+        """The next days with a free slot — holiday days skipped, and said
+        so (the website's slot picker greys them out the same way)."""
+        center_id = data["resched_center_id"]
+        days, notes, _ = await self._scan_days(center_id, want_days=3)
+        if not days:
+            await self.wa.send_text(phone, (quiet_note or (notes[0] if notes else "There's no free day coming up 😔")) + "\n\nType *hi* for the menu.")
+            await self._set_state(wa_id, None, {})
+            return
+        buttons = [{"id": f"rdate:{d['date']}", "title": d["short_label"]} for d in days[:3]]
+        lead = quiet_note or (notes[0] if notes else None)
+        await self.wa.send_buttons(phone, (f"{lead}\n\n" if lead else "") + "Pick the new day:", buttons)
         await self._set_state(wa_id, "resched_date", data)
 
     async def _on_resched_date(self, wa_id, phone, customer_id, data, kind, value):
@@ -775,7 +852,16 @@ class WhatsAppBotService:
             await self._nudge(wa_id, phone, "resched_date", data, "Please pick the new day using the buttons above 👆", str(value))
             return
         data["resched_date"] = value.split(":", 1)[1]
-        slots = await self.booking_service.available_slots(data["resched_center_id"], data["resched_date"])
+        try:
+            slots = await self.booking_service.available_slots(data["resched_center_id"], data["resched_date"])
+        except AppException as exc:
+            await self.wa.send_text(phone, f"{exc.message}")
+            await self._offer_resched_days(wa_id, phone, data)
+            return
+        if slots and all(x.get("holiday") for x in slots):
+            note = await self._holiday_note(data["resched_center_id"], data["resched_date"], slots[0]["key"])
+            await self._offer_resched_days(wa_id, phone, data, quiet_note=note)
+            return
         open_slots = [x for x in slots if x["status"] != "full"]
         if not open_slots:
             await self.wa.send_text(phone, "That day is fully booked 😔 — try another day.")
@@ -798,6 +884,9 @@ class WhatsAppBotService:
                 actor_id=customer_id,
                 actor_role="customer",
             )
+        except HolidayException as exc:
+            await self._offer_resched_days(wa_id, phone, data, quiet_note=friendly_refusal(exc))
+            return
         except AppException as exc:
             await self.wa.send_text(phone, f"Couldn't reschedule: {exc.message}")
             await self._send_menu(wa_id, phone)
@@ -816,7 +905,7 @@ class WhatsAppBotService:
             await self._show_booking_detail(wa_id, phone, customer_id, data.get("booking_id", ""))
             return
         try:
-            await self.booking_service.cancel_booking(
+            result = await self.booking_service.cancel_booking(
                 data["booking_id"], BookingCancelRequest(reason="Cancelled by customer via WhatsApp"),
                 actor_id=customer_id, actor_role="customer",
             )
@@ -825,7 +914,11 @@ class WhatsAppBotService:
             await self._send_menu(wa_id, phone)
             return
         await self._set_state(wa_id, None, {})
-        await self.wa.send_text(phone, "✅ Your booking has been cancelled. Type *hi* any time to book again.")
+        wallet_line = ((result or {}).get("wallet") or {}).get("wallet_line")
+        await self.wa.send_text(
+            phone,
+            "✅ Your booking has been cancelled." + (f"\n{wallet_line}" if wallet_line else "") + "\nType *hi* any time to book again.",
+        )
 
     # -- vehicles: type → service, single booking ------------------------
     #
@@ -989,6 +1082,143 @@ class WhatsAppBotService:
             "type_name": line["type_name"],
             "count": line.get("count") or 1,
         }
+        await self._start_plan_choice(wa_id, phone, customer_id, data)
+
+    # -- plans: "Use My Plan" -----------------------------------------------
+    #
+    # The customer's plans are read through UserSubscriptionService (the
+    # same views the website's plan lists use) and judged by the SAME
+    # pass_usability rules: standard car-bound / type passes, society and
+    # custom multi-car passes, a pass inside its Last Booking Day extension
+    # are usable; a scheduled renewal, an exhausted or ended pass is not.
+    # The chosen pass is named on the booking line exactly like the website
+    # names it (subscription_id, plus the car for a car-bound one), so quote
+    # and booking consume it through the one BookingService path — no
+    # payment link, the wash goes back on cancel.
+
+    async def _plan_options(self, customer_id: str, line: dict) -> tuple[list[dict], str | None]:
+        """(usable plans for this line, one note about a plan that matches
+        but can't be used). Own plans only — list_my_subscriptions is keyed
+        by the customer id."""
+        from app.services.subscription_service import UserSubscriptionService, pass_covers_rows
+
+        views = await UserSubscriptionService(self.db).list_my_subscriptions(customer_id)
+        wanted = set(line.get("service_ids") or [])
+        vehicle_type = line.get("vehicle_type")
+        usable: list[dict] = []
+        blocked: list[dict] = []
+        cars: dict[str, dict | None] = {}
+        for view in views:
+            if view.get("customer_id") not in (None, customer_id):
+                continue
+            rows = [r for r in pass_covers_rows(view) if r.get("service_id") in wanted]
+            if not rows:
+                continue
+            car_id = view.get("vehicle_id") or None
+            if car_id and car_id not in cars:
+                cars[car_id] = await self.vehicles.find_by_id(car_id)
+            pass_type = (cars.get(car_id) or {}).get("vehicle_type") if car_id else view.get("vehicle_type")
+            if (pass_type or view.get("vehicle_type")) != vehicle_type:
+                continue
+            left = sum(int(r.get("remaining") or 0) for r in rows)
+            name = view.get("plan_name") or "Your plan"
+            if view.get("usable") and left >= 1:
+                usable.append({
+                    "id": str(view.get("id") or view.get("_id")), "name": name, "left": left,
+                    "last_label": view.get("last_booking_day_label"), "last_day": view.get("last_bookable_day"),
+                    "vehicle_id": car_id, "plate": view.get("registration_number"),
+                    "_sort": (bool(car_id), -left, str(view.get("usable_until") or "9999"), str(view.get("id") or "")),
+                })
+            elif view.get("unusable_reason") not in (None, "Cancelled", "Refunded"):
+                blocked.append({"name": name, "reason": view["unusable_reason"], "until": str(view.get("usable_until") or "9999"),
+                                "scheduled": view.get("effective_status") == "scheduled"})
+        usable.sort(key=lambda o: o["_sort"])
+        note = None
+        if not usable and blocked:
+            # A plan that ended long ago is history, not news.
+            cutoff = (now_ist() - timedelta(days=30)).isoformat()
+            recent = [b for b in blocked if b["scheduled"] or b["until"] >= cutoff]
+            if recent:
+                pick = next((b for b in recent if b["scheduled"]), max(recent, key=lambda b: b["until"]))
+                note = f"ℹ️ {pick['name']}: {pick['reason']}. This wash is at the normal price."
+        return usable, note
+
+    async def _start_plan_choice(self, wa_id, phone, customer_id, data, force: bool = False) -> None:
+        """After the service is picked: offer the customer's usable plan(s)
+        for it, else go straight on to the day."""
+        line = (data.get("lines") or [None])[0]
+        if not line:
+            await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
+            return
+        for key in ("subscription_id", "plan_vehicle_id", "plan_declined", "plan_name", "plan_last_day", "plan_last_label"):
+            line.pop(key, None)
+        data.pop("plan_options", None)
+        options: list[dict] = []
+        note = None
+        if int(line.get("quantity") or 1) == 1:
+            try:
+                options, note = await self._plan_options(customer_id, line)
+            except Exception:  # noqa: BLE001 — no plan offer beats a broken chat
+                logger.exception("Could not read the customer's plans for the WhatsApp booking")
+        if not options:
+            if note and not force:
+                await self.wa.send_text(phone, note)
+            await self._start_when_step(wa_id, phone, data)
+            return
+        data["plan_options"] = [o["id"] for o in options]
+        none_row = {"id": "plan:none", "title": "Pay Normal Price"}
+        if len(options) == 1:
+            o = options[0]
+            last = f" · Last Booking Day: {o['last_label']}" if o.get("last_label") else ""
+            await self.wa.send_buttons(
+                phone,
+                f"🎟 *{_short(o['name'], 60)}* — {o['left']} wash{'' if o['left'] == 1 else 'es'} left{last}\n\nUse it for this wash?",
+                [{"id": f"plan:{o['id']}", "title": "Use My Plan"}, none_row],
+            )
+        else:
+            rows = []
+            for o in options[:9]:
+                bits = [f"{o['left']} left"]
+                if o.get("plate"):
+                    bits.append(o["plate"])
+                if o.get("last_label"):
+                    bits.append(f"Last Booking Day {o['last_label']}")
+                rows.append({"id": f"plan:{o['id']}", "title": _short(o["name"]), "description": _short(" · ".join(bits), 72)})
+            rows.append(none_row)
+            await self.wa.send_list(phone, "You have more than one plan for this wash 🎟 Which one should we use?", "Choose plan", rows)
+        await self._set_state(wa_id, "q_plan", data)
+
+    async def _on_plan(self, wa_id, phone, customer_id, data, kind, value):
+        if kind != "reply" or not str(value).startswith("plan:"):
+            await self._nudge(wa_id, phone, "q_plan", data, "Please choose from the options above 👆", str(value))
+            return
+        line = (data.get("lines") or [None])[0]
+        if not line:
+            await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
+            return
+        choice = str(value).split(":", 1)[1]
+        if choice == "none":
+            for key in ("subscription_id", "plan_vehicle_id", "plan_name", "plan_last_day", "plan_last_label"):
+                line.pop(key, None)
+            line["plan_declined"] = True
+            data.pop("strikes", None)
+            await self._start_when_step(wa_id, phone, data)
+            return
+        # Re-judged now (an old button can be tapped later): the plan must
+        # still be one of this customer's usable plans for this wash.
+        options, _ = await self._plan_options(customer_id, line)
+        chosen = next((o for o in options if o["id"] == choice), None)
+        if not chosen:
+            await self.wa.send_text(phone, "That plan can't be used for this wash any more.")
+            await self._start_plan_choice(wa_id, phone, customer_id, data, force=True)
+            return
+        line.pop("plan_declined", None)
+        line["subscription_id"] = chosen["id"]
+        line["plan_vehicle_id"] = chosen.get("vehicle_id")
+        line["plan_name"] = chosen["name"]
+        line["plan_last_day"] = chosen.get("last_day")
+        line["plan_last_label"] = chosen.get("last_label")
+        data.pop("strikes", None)
         await self._start_when_step(wa_id, phone, data)
 
     def _current_vehicle_context(self, data: dict) -> dict:
@@ -1025,7 +1255,22 @@ class WhatsAppBotService:
 
         if state == "q_when":
             await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
-            await self._start_when_step(wa_id, phone, data)
+            await self._start_plan_choice(wa_id, phone, customer_id, data)
+            return True
+        # Past the day pick: a plan the customer could use for the NEW
+        # service is offered first (the old choice belonged to the old
+        # service), so the day is picked again; with none to offer the
+        # booking carries on where it was.
+        try:
+            options, _ = await self._plan_options(customer_id, line) if int(line.get("quantity") or 1) == 1 else ([], None)
+        except Exception:  # noqa: BLE001
+            options = []
+        if options and state in {"q_address", "await_location", "await_addr_pincode", "confirm"}:
+            if data.get("center_id") and data.get("date") and data.get("slot"):
+                await self.booking_service.release_hold(customer_id, data["center_id"], data["date"], data["slot"])
+            data.pop("date", None), data.pop("slot", None)
+            await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
+            await self._start_plan_choice(wa_id, phone, customer_id, data)
             return True
         if state in {"q_address", "await_location", "await_addr_pincode"}:
             await self.wa.send_text(phone, f"Updated to {line['service_name']} ✅")
@@ -1167,12 +1412,83 @@ class WhatsAppBotService:
         centers = await self.booking_service.center_repo.find_all_no_paginate({"is_active": {"$ne": False}}, sort_by="_id", sort_order=1)
         return str(centers[0]["_id"]) if centers else None
 
-    async def _start_when_step(self, wa_id, phone, data):
+    async def _holiday_note(self, center_id: str, date_str: str, slot_key: str) -> str | None:
+        """The warm holiday text for that slot at that center (None when it
+        isn't on a holiday) — HolidayService's own dates and reopening day,
+        plus the admin's note."""
+        try:
+            holidays = HolidayService(self.db)
+            holiday = await holidays.holiday_for_slot(center_id, date_str, slot_key)
+            if holiday is None:
+                return None
+            exc = await holidays.refusal(holiday, center_id)
+            return friendly_message(exc.details["dates_label"], exc.details["resume_label"], holiday.get("message"))
+        except Exception:  # noqa: BLE001 — the booking still refuses on its own
+            logger.exception("Could not build the holiday note")
+            return None
+
+    async def _scan_days(self, center_id: str, *, want_days: int = 3, last_day=None) -> tuple[list[dict], list[str], bool]:
+        """The next `want_days` bookable days at a center that have a free
+        slot, read from BookingService.available_slots (the website's own
+        numbers). A holiday day (whole or part) is skipped and does not
+        count as one of the days — so the customer is offered the next open
+        days instead — and its warm holiday text is collected (one per
+        holiday). `last_day`: a plan's Last Booking Day; later days are not
+        offered (third value says the plan cut the list)."""
+        policy = await self.booking_service.policy_service.get_policy()
+        window = int(policy.get("max_advance_days", 7))
+        today = now_ist().date()
+        days: list[dict] = []
+        notes: list[str] = []
+        noted: set[str] = set()
+        considered = 0
+        cut = False
+        for i in range(window):
+            d = today + timedelta(days=i)
+            if last_day is not None and d > last_day:
+                cut = True
+                break
+            try:
+                slots = await self.booking_service.available_slots(center_id, d.isoformat())
+            except AppException:
+                break
+            blocked = [x for x in slots if x.get("holiday")]
+            if blocked:
+                note = await self._holiday_note(center_id, d.isoformat(), blocked[0]["key"])
+                if note and note not in noted:
+                    noted.add(note)
+                    notes.append(note)
+                if len(blocked) == len(slots):
+                    continue  # the whole day is closed — not one of the offered days
+            considered += 1
+            open_slots = [x for x in slots if x["status"] != "full"]
+            if open_slots:
+                days.append({
+                    "date": d.isoformat(),
+                    "label": "Today" if i == 0 else "Tomorrow" if i == 1 else d.strftime("%a %d %b"),
+                    "short_label": "Today" if i == 0 else "Tomorrow" if i == 1 else d.strftime("%a %d %b"),
+                    "slots": open_slots,
+                })
+            if considered >= want_days:
+                break
+        return days, notes, cut
+
+    async def _plan_last_day(self, customer_id: str | None, data: dict):
+        """The chosen plan's Last Booking Day as a date, if the booking uses one."""
+        line = (data.get("lines") or [{}])[0] or {}
+        if not line.get("subscription_id") or not line.get("plan_last_day"):
+            return None
+        try:
+            return datetime.strptime(line["plan_last_day"], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    async def _start_when_step(self, wa_id, phone, data, quiet_holiday: bool = False):
         data.pop("strikes", None)
         # THE centralization point: identical availability to the website —
-        # per-slot counters + admin capacity policy + closures + cutoffs
-        # all come from the same BookingService.available_slots. In the
-        # new short WhatsApp flow this comes before location, so use the
+        # per-slot counters + admin capacity policy + closures + cutoffs +
+        # HOLIDAYS all come from the same BookingService.available_slots. In
+        # the new short WhatsApp flow this comes before location, so use the
         # customer's likely center for the early picker and revalidate after
         # location resolves the actual service center.
         convo = await self.conversations.find_one({"wa_id": wa_id}, {"customer_id": 1}) or {}
@@ -1182,21 +1498,14 @@ class WhatsAppBotService:
             await self._request_location(wa_id, phone, data)
             return
         data["slot_center_id"] = center_id
-        today = now_ist().date()
+        last_day = await self._plan_last_day(convo.get("customer_id"), data)
+        days, notes, cut = await self._scan_days(center_id, want_days=3, last_day=last_day)
         rows: list[dict] = []
-        for i in range(3):
-            d = today + timedelta(days=i)
-            label = "Today" if i == 0 else "Tomorrow" if i == 1 else d.strftime("%a %d %b")
-            try:
-                slots = await self.booking_service.available_slots(center_id, d.isoformat())
-            except AppException:
-                continue
-            for s in slots:
-                if s["status"] == "full":
-                    continue
+        for day in days:
+            for s in day["slots"]:
                 rows.append({
-                    "id": f"when:{d.isoformat()}|{s['key']}",
-                    "title": _short(f"{label} · {format_slot_12h(s['key'], compact=True)}"),
+                    "id": f"when:{day['date']}|{s['key']}",
+                    "title": _short(f"{day['label']} · {format_slot_12h(s['key'], compact=True)}"),
                     "description": "Available" if s["status"] == "available" else f"Only {s['remaining']} spot(s) left",
                 })
                 if len(rows) >= 10:
@@ -1204,24 +1513,26 @@ class WhatsAppBotService:
             if len(rows) >= 10:
                 break
         if not rows:
+            if cut:
+                # The plan's Last Booking Day leaves nothing to pick.
+                line = (data.get("lines") or [{}])[0]
+                await self.wa.send_text(
+                    phone,
+                    f"Your plan can be used for bookings up to {line.get('plan_last_label') or 'its Last Booking Day'}, and nothing is free by then 😔 "
+                    "Tap *Pay Normal Price* to book a later day.",
+                )
+                await self._start_plan_choice(wa_id, phone, convo.get("customer_id"), data, force=True)
+                return
             # A holiday says so (and when to come back) instead of "booked".
-            from app.services.holiday_service import HolidayService
-
-            try:
-                holidays = HolidayService(self.db)
-                soon = datetime.now(timezone.utc) + timedelta(days=3)
-                breaks = [h for h in await holidays.center_holidays(center_id) if h["start_at"] < soon]
-                note = (await holidays.refusal(breaks[0], center_id)).message if breaks else None
-            except Exception:  # noqa: BLE001 — the plain message still works
-                note = None
-            if note:
-                await self.wa.send_text(phone, f"{note} 😊 Type *hi* for the menu.")
+            if notes:
+                await self.wa.send_text(phone, f"{notes[0]}\n\nType *hi* for the menu.")
                 await self._set_state(wa_id, None, {})
                 return
             await self.wa.send_text(phone, "Everything's booked for the next 3 days 😔 — please try again tomorrow, or type *hi* for the menu.")
             await self._set_state(wa_id, None, {})
             return
-        await self.wa.send_list(phone, "When should we come?", "Pick a time", rows)
+        lead = f"{notes[0]}\n\nHere are the next open days 👇\n" if notes and not quiet_holiday else ""
+        await self.wa.send_list(phone, f"{lead}When should we come?", "Pick a time", rows)
         await self._set_state(wa_id, "q_when", data)
 
     async def _on_when(self, wa_id, phone, customer_id, data, kind, value):
@@ -1229,6 +1540,29 @@ class WhatsAppBotService:
             await self._nudge(wa_id, phone, "q_when", data, "Please pick a time from the list above 👆", str(value))
             return
         date_str, slot = str(value).split(":", 1)[1].split("|", 1)
+        # An old list can still be tapped: a day that became a holiday since
+        # is refused here, warmly, before anything else is asked.
+        center_id = data.get("center_id") or data.get("slot_center_id")
+        if center_id:
+            note = await self._holiday_note(center_id, date_str, slot)
+            if note:
+                await self.wa.send_text(phone, note)
+                await self._start_when_step(wa_id, phone, data, quiet_holiday=True)
+                return
+        last_day = await self._plan_last_day(customer_id, data)
+        try:
+            picked = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            picked = None
+        if last_day and picked and picked > last_day:
+            line = data["lines"][0]
+            await self.wa.send_text(
+                phone,
+                f"Your plan covers bookings up to {line.get('plan_last_label') or 'its Last Booking Day'}. "
+                "Pick an earlier day, or choose *Pay Normal Price*.",
+            )
+            await self._start_plan_choice(wa_id, phone, customer_id, data, force=True)
+            return
         data["date"], data["slot"] = date_str, slot
         await self._start_address_step(wa_id, phone, customer_id, data)
 
@@ -1241,6 +1575,12 @@ class WhatsAppBotService:
         # it automatically if they walk away.
         try:
             await self.booking_service.hold_slot(customer_id, data["center_id"], data["date"], data["slot"])
+        except HolidayException as exc:
+            # The real center (from the address) is on a holiday that day.
+            await self.wa.send_text(phone, friendly_refusal(exc))
+            data.pop("date", None), data.pop("slot", None)
+            await self._start_when_step(wa_id, phone, data, quiet_holiday=True)
+            return
         except AppException as exc:
             await self.wa.send_text(phone, f"{exc.message}")
             await self._start_when_step(wa_id, phone, data)
@@ -1303,6 +1643,12 @@ class WhatsAppBotService:
                 quantity=int(l.get("quantity") or 1),
                 service_ids=list(l.get("service_ids") or []),
                 service_quantities={k: int(v) for k, v in (l.get("service_quantities") or {}).items()},
+                # "Pay Normal Price": the customer chose not to spend a wash.
+                use_subscription=not l.get("plan_declined"),
+                # A plan the customer picked is named exactly (with its car,
+                # for a car-bound one) — society / custom passes need that.
+                vehicle_id=l.get("plan_vehicle_id") or None,
+                subscription_id=l.get("subscription_id") or None,
             )
             for l in lines
         ]
@@ -1416,7 +1762,7 @@ class WhatsAppBotService:
             await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
             return
         await self.wa.send_text(phone, f"Same as last time 👍\n\n{self._lines_summary(lines)}\n📍 {data['address_label']}")
-        await self._start_when_step(wa_id, phone, data)
+        await self._start_plan_choice(wa_id, phone, customer_id, data)
 
     # -- payment choice (stateless — booking id rides in the button id) --
 
@@ -1657,6 +2003,14 @@ class WhatsAppBotService:
                     # announcement's WhatsApp send must finish first.
                     notify_background=False,
                 )
+        except HolidayException as exc:
+            # A holiday declared since the seat was held: nothing was booked.
+            if data.get("center_id"):
+                await self.booking_service.release_hold(customer_id, data["center_id"], data["date"], data["slot"])
+            await self.wa.send_text(phone, friendly_refusal(exc))
+            data.pop("date", None), data.pop("slot", None)
+            await self._start_when_step(wa_id, phone, data, quiet_holiday=True)
+            return
         except AppException as exc:
             # A double-tapped Confirm: the first tap booked it, this one hit
             # the one-booking-per-slot guard. Say so, don't offer new times.
@@ -1700,12 +2054,20 @@ class WhatsAppBotService:
             if not link and first.get("id"):
                 await self.wa.send_buttons(phone, "Tap to get your payment link.", [{"id": f"pay:online:{first['id']}", "title": "💳 Pay online now"}])
             return
+        plan_line = ""
+        if first.get("id"):
+            booked = await self.bookings.find_by_id(first["id"])
+            if booked and booked.get("subscription_id") and ObjectId.is_valid(booked["subscription_id"]):
+                sub = await self.db.user_subscriptions.find_one({"_id": ObjectId(booked["subscription_id"])}, {"remaining_service_count": 1})
+                left = int((sub or {}).get("remaining_service_count") or 0)
+                plan_line = f"🎟 Covered by your plan — {left} wash{'' if left == 1 else 'es'} left\n"
         await self.wa.send_text(
             phone,
             "🎉 Booking confirmed!\n\n"
             f"🧾 *{numbers}*\n"
             f"{self._lines_summary(lines)}\n"
             f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
+            f"{plan_line}"
             f"{travel_line}"
             f"💰 Total: ₹{total:g}\n\n"
             + (f"🔐 Your service code: *{code}*\nShare it with the captain when they arrive.\n\n" if code else "")

@@ -197,16 +197,59 @@ export interface CreateBookingPayload {
   alternate_contact_phone?: string;
 }
 
-export interface HeadingPayload {
+/** What the device says about a fix; the server cross-checks it (never trusts it alone). */
+export interface GpsFix {
   latitude: number;
   longitude: number;
+  accuracy_m?: number;
+  fix_at?: string;
+  speed_mps?: number;
+  heading_deg?: number;
+  altitude_m?: number;
+  secure_context?: boolean;
+  permission_state?: string;
+}
+
+export interface HeadingPayload extends GpsFix {
   equipment_used?: EquipmentUsed[];
 }
 
-export interface PhotoCapturePayload {
+export interface PhotoCapturePayload extends GpsFix {
   image_url: string;
-  latitude: number;
-  longitude: number;
+}
+
+export type GeoStep = "heading" | "arrival" | "start" | "complete";
+
+export interface GeoApproval {
+  id: string;
+  step: GeoStep;
+  status: "pending" | "approved" | "denied" | "used";
+  requested_at?: string;
+  reason?: string | null;
+  decided_by_name?: string | null;
+  decided_at?: string | null;
+  expires_at?: string | null;
+}
+
+export interface GeoCheckRecord {
+  status: "verified" | "override" | "unpinned" | "unverified";
+  distance_m?: number | null;
+  allowed_m?: number | null;
+  accuracy_m?: number | null;
+  reasons?: string[];
+  override_by_name?: string | null;
+  override_reason?: string | null;
+}
+
+export interface GeoStatus {
+  checks: Partial<Record<GeoStep, GeoCheckRecord>>;
+  suspect: boolean;
+  suspect_reasons: string[];
+  override: boolean;
+  refusals: number;
+  approvals: GeoApproval[];
+  waiting_step: GeoStep | null;
+  approval: { status: "none" | "pending" | "approved" | "denied" | "expired"; reason?: string | null };
 }
 
 export interface ManagerCreateBookingPayload {
@@ -259,7 +302,10 @@ export const bookingApi = {
 
   /** Our own OTP for a phone with no account yet (WhatsApp / SMS from the
    *  backend). The MSG91 widget path needs no backend call to send. */
-  requestPhoneOtp: (phone: string) => apiClient.post("/bookings/verify-phone/request", { phone }).then((r) => r.data),
+  requestPhoneOtp: (phone: string, channel: "whatsapp" | "sms" = "whatsapp") =>
+    apiClient
+      .post<{ data: { otp_sent: boolean; channel?: "whatsapp" | "sms"; cooldown_seconds?: number } }>("/bookings/verify-phone/request", { phone, channel })
+      .then((r) => r.data.data),
 
   /** The quick-booking model: name + phone + what/where/when. Anonymous
    *  callers carry phone_otp / phone_access_token; a signed-in customer books
@@ -403,7 +449,7 @@ export const bookingApi = {
   // the backend can geofence-check the arrival like it does the photos.
   // Quick-booking model: the customer's 4-digit service code is the
   // arrival check (a plate is accepted only for older saved-vehicle bookings).
-  verifyVehicle: (id: string, check: { service_code?: string; registration_number?: string }, location?: { latitude: number; longitude: number; accuracy_m?: number }) =>
+  verifyVehicle: (id: string, check: { service_code?: string; registration_number?: string }, location?: GpsFix) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/verify-vehicle`, { ...check, ...location }).then((r) => r.data.data),
 
   resolveIssue: (id: string, note?: string) =>
@@ -417,6 +463,16 @@ export const bookingApi = {
 
   captureAfterPhoto: (id: string, payload: PhotoCapturePayload) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/after-photo`, payload).then((r) => r.data.data),
+
+  /** Captain: "Ask Manager To Approve" after the location check refused a step. */
+  geoRequestApproval: (id: string, step: GeoStep, note?: string) =>
+    apiClient.post<ApiSuccess<{ status: string }>>(`/bookings/${id}/geo-approval-request`, { step, note }).then((r) => r.data.data),
+
+  /** Manager / admin: approve or decline ONE step of ONE job (reason required, audit-logged). */
+  geoOverride: (id: string, step: GeoStep, approve: boolean, reason: string) =>
+    apiClient.post<ApiSuccess<{ status: string }>>(`/bookings/${id}/geo-override`, { step, approve, reason }).then((r) => r.data.data),
+
+  geoStatus: (id: string) => apiClient.get<ApiSuccess<GeoStatus>>(`/bookings/${id}/geo-status`).then((r) => r.data.data),
 
   reportRisk: (id: string, note?: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/report-risk`, { note }).then((r) => r.data.data),

@@ -204,7 +204,10 @@ export default function ManagerCaptainsPage() {
   const [kycNote, setKycNote] = useState("");
   const [kycError, setKycError] = useState("");
   const kycReviewMutation = useMutation({
-    mutationFn: ({ status }: { status: "verified" | "rejected" }) => kycApi.review(detailFor!.id, status, kycNote.trim() || undefined),
+    mutationFn: ({ status }: { status: "verified" | "rejected" }) =>
+      kyc?.status === "verified" && status === "rejected"
+        ? kycApi.requestReverification(detailFor!.id, kycNote.trim())
+        : kycApi.review(detailFor!.id, status, kycNote.trim() || undefined),
     onSuccess: () => {
       setKycNote("");
       setKycError("");
@@ -625,7 +628,7 @@ export default function ManagerCaptainsPage() {
                         </div>
                       </div>
                       {kyc.review_note && <p className="text-xs text-[var(--color-text-secondary)]">Last Review Note: {kyc.review_note}</p>}
-                      <Input placeholder="Review note (required to reject)" value={kycNote} onChange={(e) => setKycNote(e.target.value)} />
+                      <Input placeholder="Review note (required to reject or request re-verification)" value={kycNote} onChange={(e) => setKycNote(e.target.value)} />
                       {kycError && <p className="text-sm text-[var(--color-error)]">{kycError}</p>}
                       <div className="flex gap-2">
                         {kyc.status !== "verified" && (
@@ -641,7 +644,7 @@ export default function ManagerCaptainsPage() {
                           isLoading={kycReviewMutation.isPending}
                           onClick={() => kycReviewMutation.mutate({ status: "rejected" })}
                         >
-                          {kyc.status === "verified" ? "Reopen (Reject)" : "Reject"}
+                          {kyc.status === "verified" ? "Request Re-Verification" : "Reject"}
                         </Button>
                       </div>
                     </div>

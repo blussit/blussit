@@ -18,6 +18,7 @@ polling) stays far under it.
 """
 import ipaddress
 import logging
+import re
 import time
 from collections import defaultdict
 from contextvars import ContextVar
@@ -133,6 +134,28 @@ def current_requester() -> str | None:
     return f"ip:{client}" if client else None
 
 
+# The browser's random id (frontend lib/device.ts), sent as X-Device-Id on
+# every call. Only ever ONE key part next to the IP — the client chooses it, so
+# it can't be the sole key — and only its shape is validated.
+_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+_request_device: ContextVar[str | None] = ContextVar("request_device", default=None)
+
+
+def valid_device_id(raw: str | None) -> str | None:
+    value = (raw or "").strip()
+    return value if _DEVICE_ID.match(value) else None
+
+
+def current_device() -> str | None:
+    """The validated X-Device-Id of the request being handled, else None."""
+    return _request_device.get()
+
+
+def current_client() -> str | None:
+    """The calling client's IP bucket (IPv6 as its /64) for this request."""
+    return _request_client.get()
+
+
 def _parse_ip(raw: str) -> str | None:
     """One X-Forwarded-For entry as a normalized IP, or None for garbage.
     Tolerates the "1.2.3.4:5678" / "[::1]:5678" forms some proxies write."""
@@ -158,8 +181,13 @@ def _client_ip(request: Request) -> str:
     entries = [e for e in ",".join(request.headers.getlist("x-forwarded-for")).split(",") if e.strip()]
     chosen = peer
     if settings.TRUST_PROXY_HEADERS:
-        hops = max(1, settings.TRUSTED_PROXY_COUNT)
-        if len(entries) >= hops:
+        hops = settings.TRUSTED_PROXY_COUNT
+        if hops < 1:
+            # 0 (or negative) = "trust nothing": never silently read it as 1.
+            # The app refuses to boot with this (config.validate_proxy_settings);
+            # this guard covers a setting changed after boot.
+            _log_bad_proxy_count_once(hops)
+        elif len(entries) >= hops:
             chosen = _parse_ip(entries[-hops]) or peer
     if entries:
         _log_proxy_choice_once(peer, len(entries), chosen)
@@ -199,6 +227,16 @@ def _log_proxy_choice_once(peer: str, xff_entries: int, chosen: str) -> None:
     )
 
 
+_bad_count_logged = False
+
+
+def _log_bad_proxy_count_once(hops: int) -> None:
+    global _bad_count_logged
+    if not _bad_count_logged:
+        _bad_count_logged = True
+        logger.error("TRUSTED_PROXY_COUNT=%s with TRUST_PROXY_HEADERS on trusts nothing — fix the setting", hops)
+
+
 def _sweep(now: float) -> None:
     """Drop finished windows so memory stays bounded."""
     global _last_sweep
@@ -213,6 +251,7 @@ def _sweep(now: float) -> None:
 async def rate_limit_middleware(request: Request, call_next):
     client = _client_key(request)
     _request_client.set(client)
+    _request_device.set(valid_device_id(request.headers.get("x-device-id")))
     if not settings.RATE_LIMIT_ENABLED:
         return await call_next(request)
     path = request.url.path

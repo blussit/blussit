@@ -13,11 +13,16 @@ against the real dev database earlier in this project (not guessed), so
 they're known-good against the actual Pydantic models.
 """
 import itertools
+import secrets
 from datetime import datetime, timezone
 
 from app.core.security import hash_password
 
 _counter = itertools.count(1)
+
+# Throwaway password for fixture users: random per test run, so no password
+# literal exists in the repo (and none can be a valid production default).
+TEST_PASSWORD = "Tp-" + secrets.token_urlsafe(12) + "aA1"
 
 
 def _n() -> int:
@@ -80,7 +85,7 @@ async def make_customer(db, *, name: str | None = None, phone_verified: bool = T
         "full_name": name or f"Test Customer {n}",
         "email": f"test.customer.{n}@example.com",
         "phone": f"9{n:09d}",
-        "password_hash": hash_password("Test@12345"),
+        "password_hash": hash_password(TEST_PASSWORD),
         "role": "customer",
         "status": "active",
         "phone_verified": phone_verified,
@@ -141,7 +146,7 @@ async def make_captain(db, service_center_id: str | None = None, *, wallet_balan
         "full_name": f"Test Captain {n}",
         "email": f"test.captain.{n}@example.com",
         "phone": f"8{n:09d}",
-        "password_hash": hash_password("Test@12345"),
+        "password_hash": hash_password(TEST_PASSWORD),
         "role": "captain",
         "status": "active",
         "service_center_id": service_center_id,
@@ -164,7 +169,7 @@ async def make_manager(db, service_center_id: str | None) -> str:
         "full_name": f"Test Manager {n}",
         "email": f"test.manager.{n}@example.com",
         "phone": f"7{n:09d}",
-        "password_hash": hash_password("Test@12345"),
+        "password_hash": hash_password(TEST_PASSWORD),
         "role": "manager",
         "status": "active",
         "service_center_id": service_center_id,

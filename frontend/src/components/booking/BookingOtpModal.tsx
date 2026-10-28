@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { bookingApi, type PhoneProof } from "../../api/booking";
 import { Modal, OtpInput, Spinner } from "../ui";
-import { ensureOtpWidget, otpErrorMessage, sendOtpCode, widgetVerifyOtp, type OtpChannel } from "../../lib/otpWidget";
+import { otpErrorMessage, sendOtpCode, sentVia, widgetVerifyOtp, type BackendChannel, type OtpChannel } from "../../lib/otpWidget";
+import { OtpSmsButton } from "../shared/OtpSmsButton";
 
 /**
  * The last step of an anonymous website booking — the same OTP mechanics as
@@ -33,7 +34,7 @@ export function BookingOtpModal({
   const [verifying, setVerifying] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const [channel, setChannel] = useState<OtpChannel | null>(null);
-  const [smsAvailable, setSmsAvailable] = useState(false);
+  const [delivered, setDelivered] = useState<BackendChannel | null>(null);
   // Refs, not state: a pasted code fires onComplete and a tap can land in
   // the same tick, before a state update would disable anything.
   const sendingRef = useRef(false);
@@ -41,15 +42,17 @@ export function BookingOtpModal({
   const handledOpen = useRef(false);
   const lastSentPhone = useRef<string | null>(null);
 
-  const send = async (order?: OtpChannel[]) => {
+  const send = async (order?: OtpChannel[], wanted: BackendChannel = "whatsapp") => {
     if (sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
     setError("");
     setOtp("");
     try {
-      const sent = await sendOtpCode(phone, () => bookingApi.requestPhoneOtp(phone), order);
+      const sent = await sendOtpCode(phone, (ch) => bookingApi.requestPhoneOtp(phone, ch), order, wanted);
       setChannel(sent.channel);
+      if (sent.delivered) setDelivered(sent.delivered);
+      else if (sent.channel === "widget") setDelivered(null);
       setCooldown(sent.cooldown);
       lastSentPhone.current = phone;
     } catch (err) {
@@ -88,10 +91,6 @@ export function BookingOtpModal({
     return () => clearTimeout(t);
   }, [cooldown]);
 
-  useEffect(() => {
-    if (open && channel === "backend") void ensureOtpWidget().then(setSmsAvailable);
-  }, [open, channel]);
-
   const verify = async (code: string) => {
     const clean = code.trim();
     if (clean.length < 6 || verifyingRef.current || sendingRef.current) return;
@@ -117,9 +116,14 @@ export function BookingOtpModal({
     <Modal open={open} onClose={onClose} title="Confirm Your Booking" maxWidth="max-w-sm">
       <div className="space-y-4">
         <p className="text-sm text-gray-600">
-          {sending ? "Sending a code to " : `Enter the 6-digit code sent ${channel === "widget" ? "by SMS " : ""}to `}
+          {sending ? "Sending a code to " : "Enter the 6-digit code sent to "}
           <span className="font-semibold text-[#0E1A33]">+91 {phone}</span>
         </p>
+        {!sending && channel && sentVia(delivered, channel) && (
+          <p className="-mt-2 text-xs font-medium text-[var(--color-text-secondary)]" data-testid="otp-sent-via">
+            {sentVia(delivered, channel)}
+          </p>
+        )}
 
         <OtpInput value={otp} onChange={setOtp} autoFocus disabled={verifying} onComplete={(code) => void verify(code)} />
         {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
@@ -141,18 +145,16 @@ export function BookingOtpModal({
           {cooldown > 0 ? (
             <span>Resend in {cooldown}s</span>
           ) : (
-            <span className="flex items-center gap-3">
-              {channel === "backend" && smsAvailable && (
-                <button type="button" className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(["widget"])}>
-                  Get It By SMS
-                </button>
-              )}
-              <button type="button" className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(resendOrder)}>
-                Resend Code
-              </button>
-            </span>
+            <button type="button" className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-50" disabled={sending || verifying} onClick={() => void send(resendOrder, delivered ?? "whatsapp")}>
+              Resend Code
+            </button>
           )}
         </div>
+        {channel === "backend" && (
+          <div className="text-center text-xs">
+            <OtpSmsButton cooldown={cooldown} disabled={sending || verifying} onClick={() => void send(["backend", "widget"], "sms")} />
+          </div>
+        )}
       </div>
     </Modal>
   );

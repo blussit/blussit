@@ -208,6 +208,13 @@ export interface BookingPolicy {
   delay_tolerance_minutes: number;
   captain_travel_buffer_minutes: number;
   photo_geofence_radius_m: number;
+  geo_accuracy_cap_m?: number;
+  geo_max_fix_age_s?: number;
+  geo_trail_grace_s?: number;
+  geo_min_trail_pings?: number;
+  geo_max_speed_kmh?: number;
+  geo_min_service_seconds?: number;
+  geo_override_valid_minutes?: number;
   late_start_grace_minutes: number;
   // Minutes a captain gets from a LAST-MINUTE assignment before the late
   // clock starts (the booking was late, not the captain).
@@ -450,6 +457,21 @@ export interface Booking {
   arrival_location?: GeoPoint | null;
   arrival_flagged?: boolean;
   arrival_distance_m?: number | null;
+  // GPS-integrity evidence (staff + the captain's own screen; never the customer):
+  // per-step verdict, a faked-looking trail, a manager-approved step, refusals.
+  geo_checks?: Partial<Record<"heading" | "arrival" | "start" | "complete", {
+    status: "verified" | "override" | "unpinned" | "unverified";
+    distance_m?: number | null;
+    allowed_m?: number | null;
+    accuracy_m?: number | null;
+    reasons?: string[];
+    override_by_name?: string | null;
+    override_reason?: string | null;
+  }>>;
+  geo_suspect?: boolean;
+  geo_suspect_reasons?: string[];
+  geo_override?: boolean;
+  geo_refusals?: number;
   captain_earning?: number | null;
   platform_earning?: number | null;
   wallet_settled?: boolean;

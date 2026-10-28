@@ -52,13 +52,13 @@ async def test_strangers_booking_codes_dont_lock_the_owner_out_of_login(db, clea
             await _uncool(db, phone)
             r = await c.post("/api/v1/bookings/verify-phone/request", headers=_from("203.0.113.5"), json={"phone": phone})
             codes.append(r.status_code)
-        assert codes == [200] * 5 + [400]
+        assert codes == [200] * 5 + [429]
         await _uncool(db, phone)
         r = await c.post("/api/v1/auth/otp/request", headers=_from("198.51.100.7"), json={"identifier": phone})
         assert r.status_code == 200, r.text
         # The stranger is still capped, and so is a stranger hopping inside one IPv6 /64.
         await _uncool(db, phone)
-        assert (await c.post("/api/v1/bookings/verify-phone/request", headers=_from("203.0.113.5"), json={"phone": phone})).status_code == 400
+        assert (await c.post("/api/v1/bookings/verify-phone/request", headers=_from("203.0.113.5"), json={"phone": phone})).status_code == 429
 
 
 async def test_ipv6_requesters_share_their_64(db, cleanup, monkeypatch):
@@ -71,26 +71,52 @@ async def test_ipv6_requesters_share_their_64(db, cleanup, monkeypatch):
             await _uncool(db, phone)
             r = await c.post("/api/v1/bookings/verify-phone/request", headers=_from(f"2001:db8:1:1::{i + 1:x}"), json={"phone": phone})
             codes.append(r.status_code)
-    assert codes == [200] * 5 + [400]
+    assert codes == [200] * 5 + [429]
 
 
 async def test_per_phone_ceiling_still_bounds_the_bill(db, cleanup, monkeypatch):
+    """Past the per-phone total only a requester that has NOT yet sent for this
+    phone still gets a code (so strangers can't shut the owner out), and the
+    absolute ceiling bounds the bill whatever the number of addresses."""
     monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
     monkeypatch.setattr(settings, "TRUSTED_PROXY_COUNT", 1)
     phone = await _customer(db, cleanup)
-    ceiling = AuthService._OTP_MAX_SENDS_PER_PHONE_WINDOW
-    assert ceiling > AuthService._OTP_MAX_SENDS_PER_WINDOW
+    total, absolute = settings.OTP_PHONE_HOURLY_LIMIT, settings.OTP_PHONE_ABSOLUTE_HOURLY_LIMIT
+    assert absolute > total > settings.OTP_PHONE_SOURCE_HOURLY_LIMIT
     sent = 0
     async with _client() as c:
-        for i in range(ceiling + 3):
+        for i in range(absolute + 3):
             await _uncool(db, phone)
             r = await c.post("/api/v1/bookings/verify-phone/request", headers=_from(f"192.0.2.{i + 1}"), json={"phone": phone})
             if r.status_code == 200:
                 sent += 1
             else:
-                assert "Too many codes" in r.json()["message"]
-    assert sent == ceiling
-    assert await db.whatsapp_outbox.count_documents({"phone": phone}) == ceiling
+                assert r.status_code == 429
+    # The 41st+ requester gets "sent" too (a live code exists) but no new message.
+    assert await db.whatsapp_outbox.count_documents({"phone": phone}) == absolute
+
+
+async def test_a_flood_from_a_few_addresses_cannot_shut_the_owner_out(db, cleanup, monkeypatch):
+    """Three strangers use up the phone's total allowance; the owner (a fresh
+    address, and a device that signed in before) still gets a code."""
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_COUNT", 1)
+    phone = await _customer(db, cleanup)
+    async with _client() as c:
+        for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
+            for _ in range(5):
+                await _uncool(db, phone)
+                assert (await c.post("/api/v1/bookings/verify-phone/request", headers=_from(ip), json={"phone": phone})).status_code == 200
+        assert (await db.otp_requests.find_one({"_id": f"otp-send-cap:{phone}"}))["sent"] == 15
+        # a fourth stranger who has not sent yet, and the owner, both still get through
+        await _uncool(db, phone)
+        before = await db.whatsapp_outbox.count_documents({"phone": phone})
+        r = await c.post("/api/v1/auth/otp/request", headers=_from("198.51.100.77"), json={"identifier": phone})
+        assert r.status_code == 200
+        assert await db.whatsapp_outbox.count_documents({"phone": phone}) == before + 1
+        code = (await db.otp_requests.find_one({"identifier": phone}))["otp"]
+        login = await c.post("/api/v1/auth/otp-login", headers=_from("198.51.100.77"), json={"phone": phone, "otp": code})
+        assert login.status_code == 200, login.text
 
 
 async def test_signed_in_requests_count_against_the_account(db, cleanup):

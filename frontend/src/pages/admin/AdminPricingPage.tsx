@@ -37,6 +37,13 @@ type NumericPolicyKey =
   | "arrival_to_start_tolerance_minutes"
   | "delay_tolerance_minutes"
   | "photo_geofence_radius_m"
+  | "geo_accuracy_cap_m"
+  | "geo_max_fix_age_s"
+  | "geo_trail_grace_s"
+  | "geo_min_trail_pings"
+  | "geo_max_speed_kmh"
+  | "geo_min_service_seconds"
+  | "geo_override_valid_minutes"
   | "repeat_reminder_days"
   | "cancellation_fee_1_to_4h"
   | "cancellation_fee_under_1h"
@@ -90,7 +97,14 @@ const POLICY_GROUPS: { title: string; appliesTo: string; fields: PolicyField[] }
     title: "Checks & Reminders",
     appliesTo: "Captain App · WhatsApp · Customer Notifications",
     fields: [
-      { key: "photo_geofence_radius_m", label: "Photo Geofence", unit: "Metres", effect: "Before/after photos and the 'reached' tap taken farther than this from the address are flagged (never blocked).", min: 10 },
+      { key: "photo_geofence_radius_m", label: "Location Check Radius", unit: "Metres", effect: "'Reached', start and finish are REFUSED farther than this from the customer (plus the phone's own accuracy, up to the cap below). A manager can approve an exception.", min: 10 },
+      { key: "geo_accuracy_cap_m", label: "Weak GPS Limit", unit: "Metres", effect: "A fix less accurate than this is refused; accuracy up to this widens the radius.", min: 10, max: 1000 },
+      { key: "geo_max_fix_age_s", label: "Oldest Allowed Location", unit: "Seconds", effect: "A location older than this (by the phone's own clock) is refused as stale.", min: 10, max: 900 },
+      { key: "geo_trail_grace_s", label: "Trip Trail Grace", unit: "Seconds", effect: "No trip trail is needed this long after 'heading out' (bad network, short trips).", min: 0, max: 1800 },
+      { key: "geo_min_trail_pings", label: "Trip Pings Before 'Reached'", unit: "Pings", effect: "How many spaced location pings must exist from the trip before 'reached' is accepted. 0 turns it off.", min: 0, max: 20 },
+      { key: "geo_max_speed_kmh", label: "Impossible Speed", unit: "Km/h", effect: "A jump between two locations faster than this marks the trail as faked.", min: 60, max: 400 },
+      { key: "geo_min_service_seconds", label: "Shortest Believable Wash", unit: "Seconds", effect: "Finishing sooner than this after the before-photo is refused (a manager can approve).", min: 0, max: 3600 },
+      { key: "geo_override_valid_minutes", label: "Manager Approval Lasts", unit: "Minutes", effect: "How long an approved location exception stays usable (one step, once).", min: 5, max: 240 },
       { key: "repeat_reminder_days", label: "'Time For A Wash?' After", unit: "Days", effect: "Days after a customer's last wash before a gentle reminder — only if nothing is booked and no pass is live, at most once a month.", min: 3, max: 365 },
     ],
   },

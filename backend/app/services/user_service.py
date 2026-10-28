@@ -334,6 +334,20 @@ class UserService:
             raise NotFoundException("User not found")
 
         async def _do(session):
+            if user.get("role") == "captain" and user.get("captain_kyc"):
+                # A deleted account never takes its KYC with it: the packet
+                # is copied to kyc_retained (same transaction — it rolls
+                # back with a refused delete). Document FILES are never
+                # touched; earlier versions stay in kyc_versions.
+                await self.db.kyc_retained.update_one(
+                    {"captain_id": str(user["_id"])},
+                    {"$set": {
+                        "captain_id": str(user["_id"]), "full_name": user.get("full_name"), "phone": user.get("phone"),
+                        "service_center_id": user.get("service_center_id"), "captain_kyc": user["captain_kyc"],
+                        "account_deleted_at": datetime.now(timezone.utc),
+                    }},
+                    upsert=True, session=session,
+                )
             result = await self.db.users.delete_one({"_id": user["_id"]}, session=session)
             reasons = await self._delete_blockers(user, session=session)
             if reasons:

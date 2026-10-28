@@ -20,6 +20,10 @@ scripts/dev.sh up      # local Mongo (Docker) + backend + website, seeds test da
 Website http://localhost:5173 · API docs http://localhost:8000/api/docs · every
 OTP is `123456` locally. Live credentials live only in `backend/.env.production`,
 which the deploy script reads — local runs never touch production.
+Staff test logins (admin/manager/captain) have no default password: the first
+`scripts/dev.sh up` generates random ones into the git-ignored
+`backend/.seed-credentials.local` (copy `backend/.seed-credentials.example` to
+choose your own). Staff are only ever seeded on a local database.
 
 ## What's included (Phase 1 scope)
 - Premium public landing page (hero, how it works, services, why choose us,

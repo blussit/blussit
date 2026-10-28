@@ -70,6 +70,7 @@ import time
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.config import settings
 from app.core.exceptions import BadRequestException
 from app.models.service_center import DEFAULT_WORKING_HOURS_END, DEFAULT_WORKING_HOURS_START
 from app.repositories.content_repository import SettingRepository
@@ -94,6 +95,18 @@ DEFAULT_BOOKING_POLICY = {
     "delay_tolerance_minutes": 20,
     "captain_travel_buffer_minutes": 15,
     "photo_geofence_radius_m": 300,
+    # Captain GPS integrity (geo_integrity_service). The radius above is the
+    # geofence for arrived / start / complete; these decide which fixes are
+    # believable. Allowed distance = radius + min(reported accuracy, cap).
+    "geo_accuracy_cap_m": 100,       # a fix worse than this is refused
+    "geo_max_fix_age_s": 120,        # an older fix is stale
+    "geo_future_tolerance_s": 60,    # a fix this far in the future = bad clock
+    "geo_ping_max_age_s": 600,       # late/offline pings older than this are dropped
+    "geo_trail_grace_s": 120,        # no trail needed this long after heading out
+    "geo_min_trail_pings": 2,        # spaced trail points needed before 'arrived'
+    "geo_max_speed_kmh": 150,        # faster between two fixes = teleport
+    "geo_min_service_seconds": settings.GEOFENCE_MIN_SERVICE_SECONDS,
+    "geo_override_valid_minutes": 30,
     # How long a captain can sit between "I've reached" (vehicle verified)
     # and the before-photo before the manager gets pinged — the
     # reached-but-not-started gap is the classic side-job window.

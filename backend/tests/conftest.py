@@ -18,6 +18,9 @@ import os
 
 os.environ["MONGO_DB_NAME"] = os.environ.get("TEST_MONGO_DB_NAME", "doorstep_vehicle_care_test")
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# Legacy job-flow tests complete a wash seconds after starting it; the
+# minimum-wash-time floor has its own tests (tests/test_gps_integrity.py).
+os.environ["GEOFENCE_MIN_SERVICE_SECONDS"] = "0"
 # The local dev shortcuts (fixed OTP) would mask the real OTP rules the
 # suite tests — always off here, whatever backend/.env.development says.
 os.environ["DEV_TOOLS_ENABLED"] = "false"
@@ -39,6 +42,8 @@ os.environ["WHATSAPP_ACCESS_TOKEN"] = ""
 os.environ["WHATSAPP_OTP_TEMPLATE_NAME"] = ""
 os.environ["SMS_PROVIDER"] = ""
 os.environ["OTP_CHANNEL"] = "whatsapp"
+# Staff/unknown identifiers get a pretend send; no pause needed in tests.
+os.environ["OTP_FAKE_SEND_DELAY_MS"] = "0"
 # Same reason for Razorpay: .env holds the LIVE pair. Tests stub the client,
 # but a missed stub must fail against fake keys, never move real money.
 os.environ["RAZORPAY_KEY_ID"] = "rzp_test_fakekey"
