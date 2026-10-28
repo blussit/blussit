@@ -1,3 +1,4 @@
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.authz import customers_known_to_center, ensure_customer_in_scope
@@ -10,6 +11,7 @@ from app.repositories.complaint_repository import ComplaintRepository
 from app.repositories.service_center_repository import ServiceCenterRepository
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
 from app.repositories.user_repository import UserRepository
+from app.services.vehicle_type_names import VehicleTypeNames
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.user_schema import UserPublic
@@ -31,6 +33,7 @@ class CRMService:
         self.address_repo = AddressRepository(db)
         self.service_repo = ServiceRepository(db)
         self.vehicle_type_repo = VehicleTypeRepository(db)
+        self.db = db
 
     async def find_customer_by_phone(
         self, phone: str, actor_role: str = "admin", actor_center_id: str | None = None,
@@ -107,6 +110,53 @@ class CRMService:
             return []
         known = await self._known_to_center([str(u["_id"]) for u in candidates], actor_center_id)
         return [self._lookup_row(u) for u in candidates if str(u["_id"]) in known][:limit]
+
+    _MANAGER_LIST_CANDIDATES = 5000
+
+    async def list_customers(
+        self, actor_role: str, actor_center_id: str | None, *, center_id: str | None = None, city: str | None = None,
+        pincode: str | None = None, search: str | None = None, sort_by: str = "created_at", sort_order: int = -1,
+        page: int = 1, page_size: int = 20,
+    ) -> tuple[list[dict], int]:
+        """Customer list with the location facets (center / city / pincode).
+
+        Admin: every customer. Manager: ONLY customers their center has
+        dealt with (customers_known_to_center's rule — the filters here never
+        widen it; home_center_id is a facet, not a grant of access). Staff
+        see center/city/pincode; exact coordinates are admin-only."""
+        from app.core.exceptions import ForbiddenException
+        from app.repositories.base_repository import build_search_filter
+        from app.services.customer_location_service import (
+            SORTABLE, attach_center_names, location_filters, location_view,
+        )
+
+        query: dict = {"role": UserRole.CUSTOMER.value, "is_deleted": {"$ne": True}, **location_filters(center_id, city, pincode)}
+        if search and len(search.strip()) >= 2:
+            query.update(build_search_filter(search.strip(), ["full_name", "phone"]))
+        db = self.user_repo.collection.database
+        if actor_role != "admin":
+            if actor_role != "manager" or not actor_center_id:
+                raise ForbiddenException("Your account isn't linked to a service center yet — ask an admin to link one.")
+            cap = self._MANAGER_LIST_CANDIDATES
+            known = set(await db.bookings.distinct("customer_id", {"service_center_id": actor_center_id}))
+            known.update(await db.user_subscriptions.distinct("customer_id", {"service_center_id": actor_center_id}))
+            society_ids = [str(s["_id"]) for s in await db.societies.find({"service_center_id": actor_center_id}, {"_id": 1}).to_list(length=500)]
+            if society_ids:
+                known.update(await db.society_enrollments.distinct("customer_id", {"society_id": {"$in": society_ids}}))
+            ids = [ObjectId(i) for i in list(known)[:cap] if ObjectId.is_valid(str(i))]
+            query["_id"] = {"$in": ids}
+        total = await self.user_repo.collection.count_documents(query)
+        field = SORTABLE.get(sort_by, "created_at")
+        cursor = self.user_repo.collection.find(query).sort([(field, 1 if sort_order == 1 else -1), ("_id", 1)]).skip(max(page - 1, 0) * page_size).limit(page_size)
+        rows = []
+        for u in await cursor.to_list(length=page_size):
+            row = UserPublic.from_doc(u).model_dump()
+            if actor_role != "admin":  # a manager gets the lookup shape + location, never contact extras
+                row = {k: row[k] for k in ("id", "full_name", "phone", "role", "created_at")}
+            row.update(location_view(u, include_coordinates=actor_role == "admin"))
+            rows.append(row)
+        await attach_center_names(db, rows)
+        return rows, total
 
     @staticmethod
     def _lookup_row(user: dict) -> dict:
@@ -224,7 +274,7 @@ class CRMService:
 
         services = {str(s["_id"]): s.get("name") for s in await self.service_repo.find_by_ids(list(service_ids))} if service_ids else {}
         booking_addresses = {str(a["_id"]): a for a in await self.address_repo.find_by_ids(list(booking_address_ids))} if booking_address_ids else {}
-        vehicle_type_names = {str(v["_id"]): v.get("name") for v in await self.vehicle_type_repo.find_by_ids(list(vehicle_type_ids))} if vehicle_type_ids else {}
+        vehicle_type_names = await VehicleTypeNames(self.db).names(list(vehicle_type_ids)) if vehicle_type_ids else {}
         centers = {str(c["_id"]): c.get("name") for c in await self.center_repo.find_by_ids(list(center_ids))} if center_ids else {}
         plans = {str(p["_id"]): p.get("name") for p in await self.plan_repo.find_by_ids(list(plan_ids))} if plan_ids else {}
 
@@ -250,8 +300,13 @@ class CRMService:
             for s in subscriptions
         ]
 
+        from app.services.customer_location_service import attach_center_names, location_view
+
+        profile = UserPublic.from_doc(user).model_dump()
+        profile.update(location_view(user, include_coordinates=actor_role == "admin"))
+        await attach_center_names(self.user_repo.collection.database, [profile])
         return {
-            "profile": UserPublic.from_doc(user).model_dump(),
+            "profile": profile,
             "bookings": serialize_list(enriched_bookings),
             "subscriptions": serialize_list(enriched_subscriptions),
             "complaints": serialize_list(complaints),

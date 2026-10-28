@@ -116,7 +116,7 @@ class VehicleService:
             # A pass is priced for the car's type when bought — retyping the
             # car would let a hatchback pass wash an XUV.
             live_pass = await self.repo.collection.database.user_subscriptions.find_one(
-                {"vehicle_id": vehicle_id, "status": {"$in": ["active", "scheduled"]}, "is_deleted": {"$ne": True}}
+                {"vehicle_id": vehicle_id, "status": {"$in": ["active", "paused", "scheduled"]}, "is_deleted": {"$ne": True}}
             )
             if live_pass:
                 raise BadRequestException("This vehicle has an active plan, so its type can't be changed until the plan ends.")
@@ -151,7 +151,7 @@ class VehicleService:
         now = datetime.now(timezone.utc)
         live_pass = await self.repo.collection.database.user_subscriptions.find_one({
             "customer_id": owner_id, "vehicle_id": vehicle_id, "status": {"$in": ["active", "paused", "scheduled"]},
-            "is_deleted": {"$ne": True}, "$or": [{"end_date": None}, {"end_date": {"$gte": now}}],
+            "is_deleted": {"$ne": True}, "$or": [{"end_date": None}, {"end_date": {"$gte": now}}, {"extended_until": {"$gte": now}}],
         }, {"_id": 1})
         if live_pass:
             raise BadRequestException("This vehicle is on an active plan, so it can't be removed until the plan ends.")
@@ -214,7 +214,15 @@ class AddressService:
         doc = payload.model_dump()
         doc["owner_id"] = owner_id
         created = await self.repo.create(doc)
+        await self._refresh_location(owner_id)
         return serialize_doc(created)
+
+    async def _refresh_location(self, owner_id: str) -> None:
+        """Keep the customer's home center/city/pincode (users doc) in step
+        with their saved addresses — non-throwing."""
+        from app.services.customer_location_service import refresh_customer_location
+
+        await refresh_customer_location(self.repo.db, owner_id)
 
     async def update(self, owner_id: str, address_id: str, payload: AddressUpdateRequest) -> dict:
         existing = await self.repo.find_by_id(address_id)
@@ -231,6 +239,7 @@ class AddressService:
         # (PATCH /bookings/{id}), which re-checks the center and re-prices.
         await freeze_live_bookings_for_address(self.repo.collection.database, existing)
         updated = await self.repo.update_by_id(address_id, data)
+        await self._refresh_location(owner_id)
         return serialize_doc(updated)
 
     async def delete(self, owner_id: str, address_id: str) -> None:
@@ -244,3 +253,4 @@ class AddressService:
                 "cancel or complete that booking before removing the address."
             )
         await self.repo.soft_delete(address_id, owner_id)
+        await self._refresh_location(owner_id)

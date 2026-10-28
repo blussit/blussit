@@ -17,6 +17,13 @@ async def list_vehicle_types(
     return await VehicleTypeController(db).list(active_only or not is_catalogue_editor(viewer))
 
 
+@router.get("/lookup")
+async def lookup_vehicle_types(db: AsyncIOMotorDatabase = Depends(get_db)):
+    """Id -> name for EVERY type, deleted ones flagged `removed` — display
+    only (names are not sensitive); pickers keep using the plain list."""
+    return await VehicleTypeController(db).lookup()
+
+
 @router.post("", dependencies=[Depends(require_admin)])
 async def create_vehicle_type(
     payload: VehicleTypeCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)

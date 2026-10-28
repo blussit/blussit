@@ -110,6 +110,7 @@ const AdminSocietyPlannerPage = lazy(() => import("./pages/admin/AdminSocietyPla
 const AdminChargesPage = lazy(() => import("./pages/admin/AdminChargesPage"));
 const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPage"));
 const AdminHolidaysPage = lazy(() => import("./pages/admin/AdminHolidaysPage"));
+const AdminFinancePage = lazy(() => import("./pages/admin/AdminFinancePage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
 const CustomerProfilePage = lazy(() => import("./pages/customer/CustomerProfilePage"));
@@ -287,6 +288,7 @@ export default function App() {
                 <Route path="society-planner" element={<AdminSocietyPlannerPage />} />
                 <Route path="charges" element={<AdminChargesPage />} />
                 <Route path="holidays" element={<AdminHolidaysPage />} />
+                <Route path="finance" element={<AdminFinancePage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>

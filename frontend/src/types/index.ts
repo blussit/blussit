@@ -34,6 +34,14 @@ export interface User {
   marketing_opt_out?: boolean;
   /** Managers: "WhatsApp me new bookings" (on unless switched off). */
   whatsapp_new_booking_alerts?: boolean;
+  /** Customers, staff views only: where they are (resolved from address -> latest booking). */
+  home_center_id?: string | null;
+  home_center_name?: string | null;
+  home_city?: string | null;
+  home_state?: string | null;
+  home_pincode?: string | null;
+  bookings_count?: number | null;
+  last_booking_at?: string | null;
   created_at: string;
   // Only ever populated for captains, and only by the manager/admin-scoped
   // staff-directory endpoints (staffDirectoryApi.captainsForCenter) — see
@@ -681,6 +689,17 @@ export interface UserSubscription {
   /** Renewal links (PLANS-2): the pass this one renews / the cart that renewed it. */
   renewal_of_subscription_id?: string | null;
   renewed_by_custom_plan_id?: string | null;
+  /** Picker data (PLANS-AUDIT 2026-10-28), on every staff/customer list: can
+   *  this pass pay for a booking right now, and if not why not. A society or
+   *  custom pass is `explicit_only` — booked by naming its car and the pass. */
+  usable?: boolean;
+  unusable_reason?: string | null;
+  explicit_only?: boolean;
+  auto_applies?: boolean;
+  /** The service name of a standard pass. */
+  service_name?: string | null;
+  /** What the pass pays for: one row per service with washes left. */
+  covers?: PassServiceQuota[] | null;
 }
 
 /** One service's washes on a custom-plan pass. */

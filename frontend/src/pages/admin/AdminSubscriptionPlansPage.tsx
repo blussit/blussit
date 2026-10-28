@@ -10,6 +10,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { passFromPrice, passHeadlinePrice } from "../../lib/passPricing";
 import { toTitle } from "../../lib/titleCase";
+import { useVehicleTypeNames } from "../../lib/vehicleTypeNames";
 import type { SubscriptionPlan } from "../../types";
 
 const emptyForm = {
@@ -158,7 +159,8 @@ export default function AdminSubscriptionPlansPage() {
   });
 
   const categoryName = (id: string) => toTitle(categories?.find((c) => c.id === id)?.name) || id;
-  const vehicleTypeName = (id: string) => toTitle(vehicleTypes?.find((t) => t.id === id)?.name) || id;
+  const typeNames = useVehicleTypeNames();
+  const vehicleTypeName = (id: string) => typeNames.tagged(id);
   const serviceName = (id: string) => toTitle(services.find((s) => s.id === id)?.name) || id;
 
   const toggleIncludedService = (id: string) => {
@@ -429,6 +431,17 @@ export default function AdminSubscriptionPlansPage() {
                   }`}
                 >
                   {toTitle(t.name)}
+                </button>
+              ))}
+              {form.vehicle_types.filter((id) => !(vehicleTypes || []).some((t) => t.id === id)).map((id) => (
+                <button
+                  type="button"
+                  key={id}
+                  title="This vehicle type was deleted — click to drop it from here"
+                  onClick={() => toggleVehicleType(id)}
+                  className="rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-400 line-through"
+                >
+                  {vehicleTypeName(id)}
                 </button>
               ))}
             </div>

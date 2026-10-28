@@ -25,6 +25,7 @@ from app.repositories.slot_capacity_repository import DailyCapacityRepository, S
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
+from app.services.customer_location_service import note_booking_created
 from app.utils.slots import format_slot_12h, generate_slots
 from app.utils.text import normalize_plate
 from app.schemas.booking_schema import (
@@ -1389,6 +1390,8 @@ class BookingService:
                 ),
             ),
         )
+        # Customer location counters (users.bookings_count / last_booking_*) — HOOK (names-location)
+        await self._post_commit("customer location", created, note_booking_created(self.db, created))
         # NOTHING is announced for an unpaid booking: no "booking confirmed"
         # to the customer, no "needs a captain" to the manager. Both go out
         # from confirm_awaiting_payment_booking the moment it becomes real.
@@ -3126,7 +3129,7 @@ class BookingService:
         - Order is deterministic, so a quote and the create that follows
           pick the same pass: type-scoped (no car) passes first, then most
           washes left, then the earliest end, then the oldest."""
-        from app.services.subscription_service import HIDDEN_PLAN_TYPES, is_custom_pass
+        from app.services.subscription_service import HIDDEN_PLAN_TYPES, is_custom_pass, pass_usable_until
 
         try:
             subs = await self.subscription_service.repo.collection.find(
@@ -3149,8 +3152,12 @@ class BookingService:
         now = datetime.now(timezone.utc)
         usable = []
         for sub in subs:
-            end = sub.get("end_date")
-            if end is not None and end.replace(tzinfo=timezone.utc) <= now:
+            # The pass's LAST BOOKING DAY counts, not just its plan-month end:
+            # a granted extension (extended_until) keeps it bookable
+            # (PLANS-AUDIT 2026-10-28 — an extended pass was silently dropped
+            # here, so no auto-apply path could ever use it).
+            until = pass_usable_until(sub)
+            if until is not None and until <= now:
                 continue
             if int(sub.get("remaining_service_count") or 0) < 1:
                 continue
@@ -3485,7 +3492,10 @@ class BookingService:
             coupon_error = "Your plan already covers this wash — a coupon can't be used on it."
         line_rows = [
             {"line_index": i, "vehicle_type": vehicle_type, "quantity": quantity, "subtotal": 0.0,
-             "regular_subtotal": 0.0, "plan_discount": 0.0, "coupon_discount": 0.0, "plan_covered": 0, "total": 0.0}
+             "regular_subtotal": 0.0, "plan_discount": 0.0, "coupon_discount": 0.0, "plan_covered": 0, "total": 0.0,
+             # WHICH pass(es) paid for this line — the screens say "Covered by
+             # Monthly Pass — 3 left" from this, never from their own guess.
+             "subscription_ids": []}
             for i, (vehicle_type, quantity) in enumerate(line_specs)
         ]
         for index, (line_index, car) in enumerate(units):
@@ -3515,6 +3525,7 @@ class BookingService:
             row["regular_subtotal"] += priced["regular_subtotal"]
             if car.subscription_id:
                 row["plan_covered"] += 1
+                row["subscription_ids"].append(car.subscription_id)
                 row["plan_discount"] += priced["discount_amount"]
             else:
                 row["coupon_discount"] += priced["discount_amount"]

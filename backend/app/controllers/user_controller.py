@@ -17,12 +17,24 @@ class UserController:
         result = await self.service.update_profile(current_user.id, payload)
         return success(result, "Profile updated successfully")
 
-    async def list_users(self, role: str | None, period: str | None, start: str | None, end: str | None, pagination: PaginationParams):
-        items, total = await self.service.list_users(role, pagination.page, pagination.page_size, pagination.search, period, start, end)
+    async def list_users(
+        self, role: str | None, period: str | None, start: str | None, end: str | None, pagination: PaginationParams,
+        center_id: str | None = None, city: str | None = None, pincode: str | None = None,
+    ):
+        items, total = await self.service.list_users(
+            role, pagination.page, pagination.page_size, pagination.search, period, start, end,
+            center_id, city, pincode, pagination.sort_by, pagination.sort_order,
+        )
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def get_user(self, user_id: str):
         result = await self.service.get_by_id(user_id)
+        if result.get("role") == "customer":
+            from app.services.customer_location_service import attach_center_names, location_view
+
+            raw = await self.service.repo.find_by_id(user_id)
+            result.update(location_view(raw, include_coordinates=True))
+            await attach_center_names(self.service.repo.db, [result])
         return success(result)
 
     async def admin_update_user(self, current_user: CurrentUser, user_id: str, payload: AdminUserUpdateRequest):

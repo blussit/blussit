@@ -11,6 +11,7 @@ from app.repositories.subscription_repository import UserSubscriptionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
+from app.services.vehicle_type_names import REMOVED_LABEL, VehicleTypeNames
 from app.utils.timezone import now_ist
 
 # Shared by every per-group KPI breakdown below (vehicle-type, service) —
@@ -368,7 +369,7 @@ class AnalyticsService:
                     "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
                 }},
             ], allowDiskUse=True).to_list(length=None),
-            self.vehicle_type_repo.find_all_no_paginate(),
+            VehicleTypeNames(self.db).entries(),
             self._ratings_by(
                 "captain_rating", service_center_id, {"vehicle_type": 1, "vehicle_id": 1},
                 lambda b: [("vt", b["vehicle_type"])] if b.get("vehicle_type") else [("vid", b.get("vehicle_id"))],
@@ -376,7 +377,7 @@ class AnalyticsService:
         )
         vehicle_ids = {g["_id"].get("vid") for g in groups if g["_id"].get("vid")} | {key for kind, key in ratings if kind == "vid" and key}
         vehicles = {str(v["_id"]): v for v in await self.vehicle_repo.find_by_ids(list(vehicle_ids))} if vehicle_ids else {}
-        type_names = {str(t["_id"]): t.get("name", "Unknown") for t in types}
+        type_names = {t["id"]: t["name"] for t in types}
 
         def type_of(key: dict):
             return key.get("vt") or (vehicles.get(key.get("vid")) or {}).get("vehicle_type")
@@ -402,7 +403,7 @@ class AnalyticsService:
             rating_sum, rating_n = rating_totals.get(vt_id, (0.0, 0))
             results.append({
                 "vehicle_type_id": vt_id,
-                "vehicle_type_name": type_names.get(vt_id, vt_id),
+                "vehicle_type_name": type_names.get(vt_id) or REMOVED_LABEL,
                 "total_bookings": g["total"],
                 "completed_bookings": g["completed"],
                 "avg_service_minutes": round(g["service_sum"] / g["service_n"], 1) if g["service_n"] else None,

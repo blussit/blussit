@@ -55,6 +55,7 @@ from app.routes.v1 import (
     whatsapp_crm_routes,
     zone_routes,
     holiday_routes,
+    finance_routes,
     whatsapp_webhook_routes,
     ws_routes,
 )
@@ -968,8 +969,11 @@ async def _sweep_once(db, holder: str) -> None:
         customer = await db.users.find_one({"_id": ObjectId(cid)}) if ObjectId.is_valid(cid) else None
         plan = await db.subscription_plans.find_one({"_id": ObjectId(pid)}) if ObjectId.is_valid(pid) else None
         first = ((customer or {}).get("full_name") or "there").split(" ")[0]
-        end = sub.get("end_date")
-        # end_date is a computed instant (stored UTC) — from_stored, or a
+        from app.services.subscription_service import pass_usable_until
+
+        end = pass_usable_until(sub)
+        # The usable end (period end or a granted extension when later) is
+        # the date to tell the customer. end_date is a computed instant (stored UTC) — from_stored, or a
         # pass ending late evening IST shows the day before.
         return first, (plan or {}).get("name") or "Monthly pass", (from_stored(end).strftime("%d %b") if end else "soon")
 
@@ -1280,6 +1284,19 @@ def _start_maintenance(coro) -> asyncio.Task:
 # here must be idempotent and safe while the API serves traffic — the
 # worker boots first on a deploy (DEPLOYMENT.md), but the API keeps running.
 _OPTIONAL_BOOT_TASKS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        # NAMES: every customer's home center / city / pincode on the users
+        # doc (bounded, resumable — 20 s a boot until everyone is stamped).
+        "customer locations",
+        (("app.services.customer_location_service", "boot_backfill_customer_locations"),),
+    ),
+    (
+        # NAMES: vehicle types deleted before soft delete existed get a
+        # soft-deleted stub (original name from stored labels) so no screen
+        # ever prints a raw id for them.
+        "vehicle type tombstones",
+        (("app.services.vehicle_type_names", "backfill_vehicle_type_tombstones"),),
+    ),
     (
         # MONEY: amount_paid / wallet_applied / amount_due materialised on
         # bookings written before those fields existed (feature plan 1.5).
@@ -1750,6 +1767,7 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(holiday_routes.admin_router, prefix=api_prefix)
     target.include_router(holiday_routes.public_router, prefix=api_prefix)
     target.include_router(holiday_routes.customer_router, prefix=api_prefix)
+    target.include_router(finance_routes.router, prefix=api_prefix)
 
 
 if _serves_public_routes():

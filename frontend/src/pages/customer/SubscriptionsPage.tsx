@@ -23,6 +23,7 @@ import { NextPremiumWash } from "../../components/society/schedule/ResidentSched
 import type { UserSubscription } from "../../types";
 import { VehicleIcon } from "../../components/shared/VehicleIcon";
 import { titleCase } from "../../components/public/landing/shared";
+import { useVehicleTypeNames } from "../../lib/vehicleTypeNames";
 
 const PAST_SHOWN = 4;
 
@@ -65,7 +66,9 @@ export default function SubscriptionsPage() {
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const services = servicesData?.data || [];
   const serviceName = (id?: string | null) => titleCase(services.find((s) => s.id === id)?.name);
-  const typeNameOf = (id?: string | null) => titleCase((vehicleTypes || []).find((t) => t.id === id)?.name);
+  // Customers see a removed type's own name, else "Removed Car Type" (never the tag).
+  const { name: lookupTypeName } = useVehicleTypeNames();
+  const typeNameOf = (id?: string | null) => (id ? titleCase((vehicleTypes || []).find((t) => t.id === id)?.name) || lookupTypeName(id) : "");
   const hasSociety = (mySubs || []).some(isSocietyPass);
   const { data: myVehicles } = useQuery({ queryKey: ["vehicles"], queryFn: vehicleApi.list, enabled: hasSociety });
   const plateOf = (id?: string | null) => (myVehicles || []).find((v) => v.id === id)?.registration_number || "";

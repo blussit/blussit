@@ -256,6 +256,10 @@ async def create_indexes() -> None:
     await db.users.create_index("phone", unique=True, sparse=True)
     await db.users.create_index("role")
     await db.users.create_index("service_center_id")
+    # Customer location (staff filters/sorts by center, city, pincode)
+    await db.users.create_index([("role", 1), ("home_center_id", 1)])
+    await db.users.create_index([("role", 1), ("home_city", 1)])
+    await db.users.create_index([("role", 1), ("home_pincode", 1)])
 
     await db.vehicles.create_index("owner_id")
     # For the semi-unique-registration check (allow the same plate on up to
@@ -779,6 +783,14 @@ async def create_indexes() -> None:
         await ensure_holiday_indexes(db)
     except Exception as exc:  # degrade, don't die — same rule as the scale pack
         logger.warning("Holiday indexes skipped: %s", exc)
+
+    # Finance ledger (FinanceService): admin-only credit/debit entries.
+    try:
+        from app.repositories.finance_repository import ensure_finance_indexes
+
+        await ensure_finance_indexes(db)
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("Finance indexes skipped: %s", exc)
 
     # Society plans (docs/SOCIETY_PLANS.md) keep their own index list.
     from app.repositories.society_repository import ensure_society_indexes

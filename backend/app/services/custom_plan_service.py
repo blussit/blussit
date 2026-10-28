@@ -334,6 +334,12 @@ class CustomPlanService:
                 continue
             live = await subs._active_pass_for_vehicle(customer_id, car["vehicle_id"])
             if not live:
+                # A running TYPE pass for the same type + service would be
+                # paid for twice (overlap rule, PLANS-AUDIT 2026-10-28).
+                await subs.refuse_overlapping_type_pass(
+                    customer_id, car.get("vehicle_type"), [str(i["service_id"]) for i in car.get("items") or []],
+                    car.get("registration_number"), vehicle_id=car["vehicle_id"],
+                )
                 continue
             plate = car.get("registration_number") or "A car"
             renews = car.get("renews_subscription_id")
@@ -993,6 +999,9 @@ class CustomPlanService:
                 # False: the old pass ended meanwhile — it starts today below.
             if await subs._active_pass_for_vehicle(customer_id, car["vehicle_id"]):
                 cars.append(skip)
+                continue
+            if await subs._type_pass_covering(customer_id, car.get("vehicle_type"), [str(i["service_id"]) for i in car.get("items") or []]):
+                cars.append({**skip, "note": "A running plan for this car type already covers one of its services"})
                 continue
             try:
                 claim = await claim_pass(self.db, pass_claim_keys(customer_id, vehicle_id=car["vehicle_id"]), customer_id)

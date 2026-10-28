@@ -6,6 +6,7 @@ import { adminCatalogApi, analyticsApi } from "../../api/admin";
 import { Badge, Button, DataTable, ErrorState, Input, Modal, Select } from "../../components/ui";
 import { getErrorMessage } from "../../lib/api-client";
 import { toTitle } from "../../lib/titleCase";
+import { useVehicleTypeNames } from "../../lib/vehicleTypeNames";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import type { Service, VehicleType } from "../../types";
@@ -66,7 +67,8 @@ export default function AdminServicesPage() {
   });
   const vehicleTypesQuery = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list(false) });
   const vehicleTypes = vehicleTypesQuery.data;
-  const vehicleTypeName = (id: string) => vehicleTypes?.find((t) => t.id === id)?.name || id;
+  const typeNames = useVehicleTypeNames();
+  const vehicleTypeName = (id: string) => typeNames.tagged(id);
 
   const breakdownQuery = useQuery({ queryKey: ["service-breakdown"], queryFn: () => analyticsApi.serviceBreakdown() });
   const breakdown = breakdownQuery.data;
@@ -550,6 +552,17 @@ export default function AdminServicesPage() {
                   }`}
                 >
                   {toTitle(t.name)}
+                </button>
+              ))}
+              {form.vehicle_types.filter((id) => !(vehicleTypes || []).some((t) => t.id === id)).map((id) => (
+                <button
+                  type="button"
+                  key={id}
+                  title="This vehicle type was deleted — click to drop it from here"
+                  onClick={() => toggleVehicleType(id)}
+                  className="rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-400 line-through"
+                >
+                  {vehicleTypeName(id)}
                 </button>
               ))}
             </div>

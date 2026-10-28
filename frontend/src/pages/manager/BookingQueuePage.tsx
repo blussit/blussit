@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import RemovedTypeTag from "../../components/shared/RemovedTypeTag";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, HandCoins, LockOpen, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
@@ -940,7 +941,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                       {slab.bookings.map((b, i) => (
                         <li key={b.id}>
                           <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
-                          {toTitle(b.vehicle_type_name) || vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {toTitle(bookingServiceLabel(b, "—"))}</span>
+                          {toTitle(b.vehicle_type_name) || vehicleLabel(b) || "—"}<RemovedTypeTag typeId={b.vehicle_type} /> <span className="text-[var(--color-text-secondary)]">— {toTitle(bookingServiceLabel(b, "—"))}</span>
                         </li>
                       ))}
                     </ul>

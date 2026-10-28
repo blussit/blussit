@@ -33,6 +33,11 @@ export default function AdminUsersPage() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [page, setPage] = useState(1);
+  // Where the customer lives (home center / city / pincode) — filter + sort.
+  const [centerFilter, setCenterFilter] = useState("");
+  const [cityFilter, setCityFilter] = useState("");
+  const [pincodeFilter, setPincodeFilter] = useState("");
+  const [sortKey, setSortKey] = useState("created_at");
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState("");
@@ -60,11 +65,17 @@ export default function AdminUsersPage() {
   }, [search]);
 
   const { data, isLoading, isFetching, error: usersError, refetch: refetchUsers } = useQuery({
-    queryKey: ["admin-users", role, debounced, page],
-    queryFn: () => adminUserApi.list({ role: role || undefined, search: debounced || undefined, page, page_size: 15 }),
+    queryKey: ["admin-users", role, debounced, page, centerFilter, cityFilter, pincodeFilter, sortKey],
+    queryFn: () =>
+      adminUserApi.list({
+        role: role || undefined, search: debounced || undefined, page, page_size: 15,
+        center_id: centerFilter || undefined, city: cityFilter || undefined, pincode: pincodeFilter.trim() || undefined,
+        sort_by: sortKey, sort_order: sortKey === "created_at" || sortKey === "bookings_count" || sortKey === "last_booking_at" ? -1 : 1,
+      }),
     placeholderData: keepPreviousData, // the old rows stay put while the new ones load — no flash
   });
 
+  const facetsQuery = useQuery({ queryKey: ["admin-user-location-facets"], queryFn: () => adminUserApi.locationFacets(), staleTime: 60_000 });
   const centersQuery = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
   const centers = centersQuery.data;
   // A failed centers read would leave the picker on "Not Assigned" only —
@@ -190,6 +201,32 @@ export default function AdminUsersPage() {
             <option value="admin">Admin</option>
           </Select>
         </div>
+        <div className="sm:w-48">
+          <Select label="Center" value={centerFilter} onChange={(e) => { setCenterFilter(e.target.value); setPage(1); }}>
+            <option value="">All Centers</option>
+            {(centers?.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </Select>
+        </div>
+        <div className="sm:w-40">
+          <Select label="City" value={cityFilter} onChange={(e) => { setCityFilter(e.target.value); setPage(1); }}>
+            <option value="">All Cities</option>
+            {(facetsQuery.data?.cities || []).map((c) => <option key={c} value={c}>{c}</option>)}
+          </Select>
+        </div>
+        <div className="sm:w-32">
+          <Input label="Pincode" inputMode="numeric" maxLength={6} placeholder="452001" value={pincodeFilter} onChange={(e) => { setPincodeFilter(e.target.value.replace(/\D/g, "")); setPage(1); }} />
+        </div>
+        <div className="sm:w-44">
+          <Select label="Sort By" value={sortKey} onChange={(e) => { setSortKey(e.target.value); setPage(1); }}>
+            <option value="created_at">Newest</option>
+            <option value="full_name">Name</option>
+            <option value="center">Center</option>
+            <option value="city">City</option>
+            <option value="pincode">Pincode</option>
+            <option value="bookings_count">Most Bookings</option>
+            <option value="last_booking_at">Last Booking</option>
+          </Select>
+        </div>
         {data && (
           <p className={`pb-2.5 text-sm text-[var(--color-text-secondary)] transition-opacity ${isFetching ? "opacity-50" : ""}`}>
             {data.meta.total} {data.meta.total === 1 ? "User" : "Users"}
@@ -209,6 +246,14 @@ export default function AdminUsersPage() {
           { header: "Name", accessor: (u) => <span className="font-medium text-black">{u.full_name}</span> },
           { header: "Contact", accessor: (u) => u.email || u.phone || "—" },
           { header: "Role", accessor: (u) => <span className="capitalize">{u.role}</span> },
+          { header: "Center", accessor: (u) => <span className="whitespace-nowrap">{u.role === "customer" ? u.home_center_name || "—" : "—"}</span> },
+          {
+            header: "City",
+            accessor: (u) =>
+              u.role === "customer" && (u.home_city || u.home_pincode)
+                ? <span className="whitespace-nowrap">{[u.home_city, u.home_pincode].filter(Boolean).join(" · ")}</span>
+                : "—",
+          },
           { header: "Status", accessor: (u) => <StatusBadge status={u.status} /> },
           ...(role === "" || role === "manager"
             ? [

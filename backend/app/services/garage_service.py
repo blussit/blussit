@@ -29,6 +29,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.repositories.booking_repository import BookingRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
+from app.services.vehicle_type_names import VehicleTypeNames
 from app.utils.text import normalize_plate
 from app.utils.timezone import now_ist, to_ist
 
@@ -254,8 +255,8 @@ class GarageService:
 
         type_ids = {v.get("vehicle_type") for v in vehicles} | {g.get("vehicle_type") for g in groups}
         type_ids |= {v.get("vehicle_type") for v in others.values()}
-        types = await self.vehicle_type_repo.find_by_ids([t for t in type_ids if t])
-        type_names = {str(t["_id"]): t.get("name") or "" for t in types}
+        # A removed type still resolves to its original name (never an id).
+        type_names = await VehicleTypeNames(self.db).names([t for t in type_ids if t])
         # Names for the next/last wash services — one batched lookup.
         service_ids = {str(i) for g in groups for key in ("next", "last_wash") for i in ((g.get(key) or {}).get("svc") or [])}
         services = await self.db.services.find(

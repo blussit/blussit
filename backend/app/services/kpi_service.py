@@ -581,7 +581,7 @@ class KpiService:
             key = g["_id"]
             v = vehicles.get(key.get("vid") or "")
             vt_id = key.get("vt") or (v.get("vehicle_type") if v else None)
-            vt = vt_names.get(str(vt_id or ""), key.get("label") or "Unknown")
+            vt = vt_names.get(str(vt_id or ""), key.get("label") or "Removed Car Type")
             row = vt_mix.setdefault(vt, {"name": vt, "bookings": 0, "revenue": 0.0})
             row["bookings"] += g["bookings"]
             row["revenue"] += g["revenue"] or 0

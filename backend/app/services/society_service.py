@@ -716,7 +716,7 @@ class SocietyService:
         if plans:
             now = now_ist()
             agg = await self.db.user_subscriptions.aggregate([
-                {"$match": {"plan_id": {"$in": [str(p["_id"]) for p in plans]}, "status": "active", "end_date": {"$gt": now}, "is_deleted": {"$ne": True}}},
+                {"$match": {"plan_id": {"$in": [str(p["_id"]) for p in plans]}, "status": "active", "$or": [{"end_date": {"$gt": now}}, {"extended_until": {"$gt": now}}], "is_deleted": {"$ne": True}}},
                 {"$group": {"_id": "$plan_id", "n": {"$sum": 1}}},
             ]).to_list(length=None)
             counts = {r["_id"]: r["n"] for r in agg}
@@ -924,7 +924,7 @@ class SocietyService:
         # Residents = people holding a LIVE plan here, counted once each — an
         # enrollment stays "active" after every car on it lapsed (SOC-9).
         cars = await self.db.user_subscriptions.aggregate([
-            {"$match": {"society_id": {"$in": society_ids}, "status": "active", "end_date": {"$gt": now}, "is_deleted": {"$ne": True}}},
+            {"$match": {"society_id": {"$in": society_ids}, "status": "active", "$or": [{"end_date": {"$gt": now}}, {"extended_until": {"$gt": now}}], "is_deleted": {"$ne": True}}},
             {"$group": {"_id": "$society_id", "cars": {"$sum": 1}, "residents": {"$addToSet": "$customer_id"}}},
         ]).to_list(length=None)
         from app.services.society_support_service import open_issue_counts

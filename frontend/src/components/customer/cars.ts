@@ -4,6 +4,7 @@ import { societyPlanSuffix, type BookingSlab } from "../../lib/bookingGroups";
 import { vehicleLabel } from "../../lib/constants";
 import { formatShortDate } from "../../lib/date";
 import type { Booking, VehicleTypeOption } from "../../types";
+import { REMOVED_CAR_TYPE } from "../../lib/vehicleTypeNames";
 
 /** The query every "your cars" surface shares. Under "my-bookings" on
  *  purpose: anything that invalidates the customer's bookings (a new
@@ -71,7 +72,9 @@ export function garageNextOrLast(car: GarageCar, services: GarageServices = {}):
 /** "Clean Again" once the car has been washed, "Book Wash" before that. */
 export const garageCta = (car: GarageCar) => (car.wash_count > 0 ? "Clean Again" : "Book Wash");
 
-export const typeNameOf = (types: VehicleTypeOption[] | undefined, id?: string | null) => titleCase(types?.find((t) => t.id === id)?.name);
+/** A type missing from a LOADED list was removed: customers see the fallback, never blank. */
+export const typeNameOf = (types: VehicleTypeOption[] | undefined, id?: string | null) =>
+  titleCase(types?.find((t) => t.id === id)?.name) || (id && types && types.length ? REMOVED_CAR_TYPE : "");
 
 /* ------------------------------------------------------------------ */
 /* Car type + service on every booking surface                        */

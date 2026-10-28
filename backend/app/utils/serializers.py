@@ -35,7 +35,7 @@ COMPUTED_INSTANT_KEYS = frozenset({
     "service_started_at", "completed_at", "captured_at",
     "start_date", "end_date", "extended_until",
     "valid_from", "valid_until",
-    "last_login_at",
+    "last_login_at", "location_updated_at", "last_booking_at",
     "awaiting_assignment_since", "unassigned_reminder_sent_at", "late_start_reminder_sent_at",
     # Written via a raw update_one in inventory_repository.py::adjust_quantity
     # (bypasses BaseRepository.update_by_id's usual path) — same "computed

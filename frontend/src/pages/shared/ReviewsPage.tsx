@@ -3,6 +3,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Search, Star } from "lucide-react";
 import { reviewApi } from "../../api/engagement";
 import { adminServiceCenterApi, adminUserApi, staffDirectoryApi } from "../../api/admin";
+import { useVehicleTypeNames } from "../../lib/vehicleTypeNames";
 import { vehicleTypeApi } from "../../api/catalog";
 import { bookingApi } from "../../api/booking";
 import { Badge, DataTable, PageLoader, Select } from "../../components/ui";
@@ -33,7 +34,8 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
 
   const { data: centers } = useQuery({ queryKey: ["admin-centers-for-reviews"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }), enabled: role === "admin" });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
-  const typeNames = useMemo(() => new Map((vehicleTypes || []).map((t) => [t.id, t.name])), [vehicleTypes]);
+  const typeLookup = useVehicleTypeNames();
+  const typeNames = useMemo(() => ({ get: (id: string) => (id ? typeLookup.tagged(id) : "") }), [typeLookup]);
 
   const effectiveCenterId = role === "admin" ? centerFilter : ownCenterId;
   const { data: captains } = useQuery({

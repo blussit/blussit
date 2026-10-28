@@ -273,6 +273,10 @@ async def test_a_hatchback_pass_does_not_wash_an_xuv_and_its_car_cant_be_retyped
             vehicle_type=xuv7, address_id=address_id, service_ids=[star], scheduled_date=when, scheduled_slot=slot,
             payment_method=PaymentMethod.CASH, subscription_id=type_pass["id"]))
 
+    # A second hatchback is saved first so the live type pass has another car
+    # to serve (overlap rule: one car is never paid for twice); then the first
+    # car takes its own car-bound pass.
+    await make_vehicle(db, customer_id, hatch)
     vehicle_id = await make_vehicle(db, customer_id, hatch)
     await subs.subscribe(customer_id, SubscribeRequest(plan_id=plan_id, vehicle_id=vehicle_id, service_id=star))
     with pytest.raises(BadRequestException, match="active plan"):

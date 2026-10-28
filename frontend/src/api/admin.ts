@@ -49,8 +49,11 @@ export const adminComboOfferApi = {
 };
 
 export const adminUserApi = {
-  list: (params?: { role?: string; page?: number; page_size?: number; search?: string; period?: string; start?: string; end?: string }) =>
-    apiClient.get<ApiPaginated<User>>("/users", { params }).then((r) => r.data),
+  list: (params?: {
+    role?: string; page?: number; page_size?: number; search?: string; period?: string; start?: string; end?: string;
+    center_id?: string; city?: string; pincode?: string; sort_by?: string; sort_order?: 1 | -1;
+  }) => apiClient.get<ApiPaginated<User>>("/users", { params }).then((r) => r.data),
+  locationFacets: () => apiClient.get<ApiSuccess<{ cities: string[] }>>("/users/location-facets").then((r) => r.data.data),
   get: (id: string) => apiClient.get<ApiSuccess<User>>(`/users/${id}`).then((r) => r.data.data),
   update: (id: string, payload: Partial<User>) => apiClient.put<ApiSuccess<User>>(`/users/${id}`, payload).then((r) => r.data.data),
   suspend: (id: string) => apiClient.post<ApiSuccess<User>>(`/users/${id}/suspend`).then((r) => r.data.data),

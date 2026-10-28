@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import RemovedTypeTag from "../../components/shared/RemovedTypeTag";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, LogOut, Pencil, RotateCcw, ShieldCheck, Star, Trash2 } from "lucide-react";
@@ -365,13 +366,13 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
                   {slab.bookings.map((b, i) => (
                     <li key={b.id}>
                       <span className="font-mono-num mr-1 text-gray-400">{i + 1}.</span>
-                      {toTitle(b.vehicle_type_name) || vehicleLabel(b) || "—"} <span className="text-[var(--color-text-secondary)]">— {toTitle(bookingServiceLabel(b, "—"))}</span>
+                      {toTitle(b.vehicle_type_name) || vehicleLabel(b) || "—"}<RemovedTypeTag typeId={b.vehicle_type} /> <span className="text-[var(--color-text-secondary)]">— {toTitle(bookingServiceLabel(b, "—"))}</span>
                     </li>
                   ))}
                 </ul>
               ) : (
                 <span>
-                  {toTitle(slab.primary.vehicle_type_name) || vehicleLabel(slab.primary)}
+                  {toTitle(slab.primary.vehicle_type_name) || vehicleLabel(slab.primary)}<RemovedTypeTag typeId={slab.primary.vehicle_type} />
                   <span className="block text-xs text-[var(--color-text-secondary)]">{toTitle(slab.serviceLabel)}</span>
                 </span>
               ),

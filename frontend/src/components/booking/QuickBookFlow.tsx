@@ -250,7 +250,13 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // actually used — absent = default to true (use it). Reset whenever the
   // line list is reshuffled, so an index always means the same line.
   const [subscriptionOverride, setSubscriptionOverride] = useState<Record<number, boolean>>({});
-  useEffect(() => setSubscriptionOverride({}), [pickedCustomerId]);
+  // Which pass a line was told to use (id) when the customer has more than one
+  // that fits — absent = the server's deterministic default.
+  const [passPick, setPassPick] = useState<Record<number, string>>({});
+  useEffect(() => {
+    setSubscriptionOverride({});
+    setPassPick({});
+  }, [pickedCustomerId]);
   // Whether line i uses the customer's pass. Booking: on unless switched
   // off. Log A Done Job: OFF unless ticked — a pass is only used when the
   // manager says so (the server only draws on one when use_subscription is true).
@@ -702,12 +708,30 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     enabled: isManager && !!pickedCustomerId,
   });
   const passes = isCustomer ? myPasses : isManager && pickedCustomerId ? customerPasses : undefined;
+  // EVERY pass that can pay for a wash right now — standard, custom and
+  // society (the server marks the ones that can't with `usable: false` and
+  // a reason, which the manager sees under "Other Plans").
   const usablePasses = useMemo(
-    () => (passes || []).filter((p) => p.effective_status === "active" && (p.remaining_service_count ?? 0) > 0 && !!p.service_id),
+    () =>
+      (passes || []).filter(
+        (p) => p.usable !== false && p.effective_status === "active" && (p.remaining_service_count ?? 0) > 0 && (!!p.service_id || (p.covers?.length ?? 0) > 0)
+      ),
     [passes]
   );
+  // Auto-matching mirrors the server's: standard passes only — a custom or
+  // society pass is never applied on its own (SOC-4), only when chosen.
   const passFor = (typeId: string, serviceIds: string[], taken: Set<string>) =>
-    usablePasses.find((p) => !taken.has(p.id) && p.vehicle_type === typeId && serviceIds.includes(p.service_id as string));
+    usablePasses.find((p) => !taken.has(p.id) && !p.explicit_only && p.vehicle_type === typeId && serviceIds.includes(p.service_id as string));
+  /** Does this pass still have a wash of any of these services? */
+  const passCovers = (p: UserSubscription, serviceIds: string[]) =>
+    p.covers?.length ? p.covers.some((c) => c.remaining > 0 && serviceIds.includes(c.service_id)) : serviceIds.includes(p.service_id as string);
+  // The plans a line can choose between: one car at a time (a named car + pass
+  // is exactly one booking), every usable pass of the line's type that covers
+  // one of its services.
+  const passCandidates = (line: Line): UserSubscription[] =>
+    line.payload && line.payload.quantity === 1
+      ? usablePasses.filter((p) => p.vehicle_type === line.type.id && passCovers(p, line.payload!.service_ids))
+      : [];
   interface LineMatch {
     /** The passes this line would use, one per car. */
     subs: UserSubscription[];
@@ -724,15 +748,18 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     const taken = new Set<string>();
     lines.forEach((line, i) => {
       if (!line.payload) return;
-      const on = planOn(i);
+      const picked = passPick[i] ? passCandidates(line).find((p) => p.id === passPick[i] && !taken.has(p.id)) : undefined;
+      const on = picked ? subscriptionOverride[i] !== false : planOn(i);
       const mine = new Set(taken);
       const subs: UserSubscription[] = [];
-      for (let n = 0; n < line.payload.quantity; n++) {
-        const sub = passFor(line.type.id, line.payload.service_ids, mine);
-        if (!sub) break;
-        mine.add(sub.id);
-        subs.push(sub);
-      }
+      if (picked) subs.push(picked);
+      else
+        for (let n = 0; n < line.payload.quantity; n++) {
+          const sub = passFor(line.type.id, line.payload.service_ids, mine);
+          if (!sub) break;
+          mine.add(sub.id);
+          subs.push(sub);
+        }
       if (on) subs.forEach((sub) => taken.add(sub.id));
       if (subs.length) lineMatches[i] = { subs, coveredCount: subs.length, on };
     });
@@ -747,31 +774,95 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const billed = lines.flatMap((line, i) =>
     line.services.filter((s) => s.id !== line.base?.id || coveredUnits[i] < (line.payload?.quantity ?? 1))
   );
-  const otherPasses = isManager ? usablePasses.filter((p) => !lineMatches.some((m) => m?.subs.some((x) => x.id === p.id))) : [];
-
-  const planTogglesNode = lineMatches.some(Boolean) ? (
-    <div className="space-y-2">
-      {lines.map((line, i) => {
-        const match = lineMatches[i];
-        if (!match) return null;
-        const plan = titleCase(match.subs[0].plan_name) || "Plan";
-        const left = match.subs[0].remaining_service_count;
-        const units = line.payload?.quantity ?? 1;
+  // Plans that exist but can't pay for this visit — with the reason, so the
+  // manager never wonders where a plan went.
+  const otherPasses = isManager
+    ? (passes || []).filter((p) => p.unusable_reason !== "Cancelled" && p.unusable_reason !== "Refunded" && !lineMatches.some((m) => m?.subs.some((x) => x.id === p.id)) && !lines.some((l) => passCandidates(l).some((c) => c.id === p.id)))
+    : [];
+  const passTitle = (p: UserSubscription) => `${titleCase(p.plan_name) || "Plan"}${p.registration_number ? ` · ${p.registration_number}` : ""}`;
+  const passNote = (p: UserSubscription) => {
+    const covers = (p.covers || []).filter((c) => c.remaining > 0).map((c) => `${titleCase(c.service_name)} ${c.remaining}`).join(", ");
+    const last = p.last_booking_day_label ? ` · Last Booking Day: ${p.last_booking_day_label}` : "";
+    return `${covers || titleCase(p.service_name) || "Wash"} Left${last}${p.in_extension ? " · Extended" : ""}`;
+  };
+  /** The plans this one car can use: every usable pass of its type, with what
+   *  it covers, washes left and Last Booking Day — and "No Plan". */
+  const passList = (i: number, line: Line, cands: UserSubscription[], match: LineMatch | null) => (
+    <div key={i} role="radiogroup" aria-label={`Plan for ${lineLabel(line)}`} className="space-y-2" data-testid="pass-picker">
+      {lines.length > 1 && <p className="text-xs font-semibold text-[#5F6878]">{lineLabel(line)}</p>}
+      {cands.map((p) => {
+        const on = !!match?.on && match.subs[0]?.id === p.id;
         return (
-          <Switch
-            key={i}
-            checked={match.on}
-            onChange={(next) => setSubscriptionOverride((prev) => ({ ...prev, [i]: next }))}
-            label={`${isCustomer ? "Use My" : "Use Their"} ${plan} — ${left} Wash${left === 1 ? "" : "es"} Left`}
-            description={`${lineLabel(line)}${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`}
-          />
+          <button
+            key={p.id}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            onClick={() => {
+              setPassPick((prev) => ({ ...prev, [i]: p.id }));
+              setSubscriptionOverride((prev) => ({ ...prev, [i]: true }));
+            }}
+            className={`flex w-full items-center gap-3 rounded-[12px] p-3 text-left ${choiceClass(on)}`}
+          >
+            <span aria-hidden className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 ${on ? "border-[#0A66F0]" : "border-[#C3CBD8]"}`}>
+              {on && <span className="h-2 w-2 rounded-full bg-[#0A66F0]" />}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold">{passTitle(p)}</span>
+              <span className="block text-xs text-[#5F6878]">{passNote(p)}</span>
+            </span>
+          </button>
         );
       })}
-      {otherPasses.length > 0 && (
-        <p className="text-xs text-gray-500">Other plans: {otherPasses.map((p) => p.plan_name).filter(Boolean).join(", ")} — not for this booking.</p>
-      )}
+      <button
+        type="button"
+        role="radio"
+        aria-checked={!match?.on}
+        onClick={() => setSubscriptionOverride((prev) => ({ ...prev, [i]: false }))}
+        className={`flex w-full items-center gap-3 rounded-[12px] p-3 text-left ${choiceClass(!match?.on)}`}
+      >
+        <span aria-hidden className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 ${!match?.on ? "border-[#0A66F0]" : "border-[#C3CBD8]"}`}>
+          {!match?.on && <span className="h-2 w-2 rounded-full bg-[#0A66F0]" />}
+        </span>
+        <span className="text-sm font-semibold">{isCustomer ? "Pay For This Wash" : "No Plan — Charge This Wash"}</span>
+      </button>
     </div>
-  ) : null;
+  );
+
+  const planTogglesNode =
+    lineMatches.some(Boolean) || lines.some((l) => passCandidates(l).length > 0) || otherPasses.length > 0 ? (
+      <div className="space-y-3" data-testid="plan-picker">
+        {lines.map((line, i) => {
+          const match = lineMatches[i];
+          const cands = passCandidates(line);
+          if (cands.length > 0) return <div key={i}><p className={SECTION_LABEL}>Plan For This Wash</p>{passList(i, line, cands, match)}</div>;
+          if (!match) return null;
+          const plan = titleCase(match.subs[0].plan_name) || "Plan";
+          const left = match.subs[0].remaining_service_count;
+          const units = line.payload?.quantity ?? 1;
+          return (
+            <Switch
+              key={i}
+              checked={match.on}
+              onChange={(next) => setSubscriptionOverride((prev) => ({ ...prev, [i]: next }))}
+              label={`${isCustomer ? "Use My" : "Use Their"} ${plan} — ${left} Wash${left === 1 ? "" : "es"} Left`}
+              description={`${lineLabel(line)}${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`}
+            />
+          );
+        })}
+        {otherPasses.length > 0 && (
+          <div className="space-y-1 text-xs text-[#5F6878]" data-testid="other-plans">
+            <p className="font-semibold">Other Plans — Not For This Wash</p>
+            {otherPasses.slice(0, 6).map((p) => (
+              <p key={p.id}>
+                {passTitle(p)} — {p.unusable_reason || (p.vehicle_type && lines.every((l) => l.type.id !== p.vehicle_type) ? "Different car type" : "Covers a different service")}
+                {p.last_booking_day_label && p.usable !== false ? ` · Last Booking Day: ${p.last_booking_day_label}` : ""}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    ) : null;
 
   // Arrived from a pass's "Book now": the summary that replaces step 1 —
   // shown while that pass still covers what's on the visit.
@@ -798,7 +889,15 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // false only for a line whose "use the plan" switch was turned off.
   const linesForPayload = (): QuickBookingLine[] =>
     lines
-      .map((l, i) => (l.payload ? { ...l.payload, use_subscription: planOn(i) } : null))
+      .map((l, i) => {
+        if (!l.payload) return null;
+        const match = lineMatches[i];
+        const use = match ? match.on : planOn(i);
+        const sub = match?.on && passPick[i] && match.subs[0]?.id === passPick[i] ? match.subs[0] : undefined;
+        // A chosen pass is named together with its car (the server books
+        // exactly that pass on exactly that car).
+        return { ...l.payload, use_subscription: use, ...(sub ? { subscription_id: sub.id, ...(sub.vehicle_id ? { vehicle_id: sub.vehicle_id } : {}) } : {}) };
+      })
       .filter(Boolean) as QuickBookingLine[];
 
   // ---- the bill, from the server --------------------------------------------
@@ -2717,13 +2816,16 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   // paying instead is one tap. Same state as the server's use_subscription.
   const passLabel = (sub: UserSubscription) =>
     sub.society_id ? "Society Plan" : `${titleCase(sub.plan_name) || "Monthly"} Pass`.replace(/ Pass Pass$/, " Pass");
-  const planChoice = lineMatches.some(Boolean) ? (
+  const planChoice = lineMatches.some(Boolean) || lines.some((l) => passCandidates(l).length > 0) ? (
     <div className="mt-5" data-testid="plan-choice">
       <h3 className="mb-2.5 font-display text-[16px] font-bold text-[#0E1A33]">How Would You Like To Pay?</h3>
       <div className="space-y-3">
         {lines.map((line, i) => {
           const match = lineMatches[i];
-          if (!match) return null;
+          const cands = passCandidates(line);
+          // Only a custom / society plan fits: nothing is applied on its own,
+          // so offer it to pick.
+          if (!match) return cands.length ? <div key={i}>{passList(i, line, cands, null)}</div> : null;
           const sub = match.subs[0];
           const left = sub.remaining_service_count ?? 0;
           const total = sub.total_service_count ?? 0;
@@ -2765,6 +2867,12 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                 {option(false, "Pay For This Wash", isCustomer ? "Keep your plan wash for later" : "Keep the plan wash for later", INR(line.subtotal))}
               </div>
               {match.on && withPlan > 0 && <p className="mt-1.5 text-[12px] text-[#5F6878]">Extras aren't part of the plan, so they're charged.</p>}
+              {cands.length > 1 && (
+                <div className="mt-3">
+                  <p className="mb-1.5 text-[12px] font-semibold text-[#5F6878]">Which Plan?</p>
+                  {passList(i, line, cands, match)}
+                </div>
+              )}
             </div>
           );
         })}

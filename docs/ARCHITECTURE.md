@@ -439,6 +439,7 @@ Recurring patterns (look for them before inventing new ones):
 | Collection | Purpose | Key fields / invariants |
 |---|---|---|
 | `users` | every account | `role` (customer/captain/manager/admin), `status` (active/inactive/suspended/pending), `phone` (10-digit, unique sparse), `email` (unique sparse), `employee_id` (CAP-NNN, unique sparse), `service_center_id` (staff), `token_version`, `phone_verified`, `self_verified_phone` (staff), embedded `kyc` (captain KYC; numbers masked for managers), login lockout fields, notification toggles (`whatsapp_new_booking_alerts`, default on; `last_review_request_at`) |
+| `users` (customer location) | where each customer is — staff-only, flat | `home_center_id`, `home_city`, `home_state`, `home_pincode`, `home_lat`/`home_lng` (nullable, admin-only in responses), `location_source` (`address`/`booking`/`manual`), `location_updated_at`, `first_booking_center_id`, `last_booking_center_id`, `last_booking_at`, `bookings_count` (booking rows ever created). **Precedence**: default saved address (else newest) with a covering center (zones → nearest within radius → pincode) → latest booking's center (+ its address snapshot) → none; `manual` (admin `PUT /users/{id}/home-center`) is never overwritten. Maintained by `AddressService` create/update/delete (`refresh_customer_location`) and one hook in `create_booking` (`note_booking_created`); boot task `customer locations` backfills unstamped customers (500/batch, 20 s budget, resumes by itself; script `app/scripts/backfill_customer_location.py [--all]`). Indexes `(role, home_center_id)`, `(role, home_city)`, `(role, home_pincode)`. Admin `GET /users?center_id=&city=&pincode=&sort_by=` and `GET /crm/customers` (manager: only customers their center has dealt with — filters never widen it; centre/city/pincode but no coordinates). Never in customer/WhatsApp text. |
 | `counters` | atomic sequences | `booking_number` (BK10000+), `captain_employee_id` |
 | `otp_requests` | OTP codes | hashed code, `purpose`, attempts (5 guesses), 10-min TTL; send caps per (phone, requester) and per phone |
 | `used_widget_tokens` | MSG91 widget tokens are single-use | `_id` = sha256(token), TTL |
@@ -453,7 +454,7 @@ Recurring patterns (look for them before inventing new ones):
 |---|---|---|
 | `vehicles` | customer cars/bikes | `registration_number_normalized` (same plate allowed on ≤ 2 accounts), `vehicle_type_id` |
 | `addresses` | saved addresses | lat/lng; editing one never moves a live booking (bookings keep `address_snapshot`, written at create and on edit, backfilled at boot by `backfill_address_snapshots`) |
-| `vehicle_types` | hatchback/sedan/SUV/…/bike | admin-managed, `slug` unique |
+| `vehicle_types` | hatchback/sedan/SUV/…/bike | admin-managed, `slug` unique. Delete is a **soft delete** (doc kept with `is_deleted`, `deleted_at`, `deleted_by`; slug freed) so the doc is the tombstone for historical records. `VehicleTypeNames` (`vehicle_type_names.py`, 60 s cache) resolves every id to its original name — never a raw id; unknown → `Removed Car Type`. `GET /vehicle-types/lookup` lists all types with `removed`. Boot task `vehicle type tombstones` rebuilds soft-deleted stubs (`tombstone: true`) for ids that bookings/vehicles/passes/orders/services still reference but whose doc is gone (name from stored `vehicle_label`s). Admin/staff screens add a "Removed" tag; customers don't. New bookings can't use a deleted type (`find_by_id` hides it). |
 | `categories`, `services`, `combo_offers` | catalogue | per-vehicle-type prices; `original_price` = display-only MRP; `is_addon`; `variant_group` (bike counts); 4-digit service codes for quick booking |
 | `service_centers` | hubs | `code`, location + radius, `service_pincodes`, working hours, per-slot and per-day capacity; `is_active` (stored `true` on create; every lookup treats a missing field as active — `ACTIVE_CENTER = {"is_active": {"$ne": False}}` in `service_center_repository.py`) |
 | `service_zones` | coverage polygons | 2dsphere; address → center: zones → nearest center → pincode |
@@ -789,6 +790,27 @@ reached, stuck on the way, idle after arrival, left site, overrun.
   refunded cart is Past. Customers never renew themselves: within 3 days
   of the plan's last booking day, with no renewal, the card offers "Ask Us
   To Renew" (WhatsApp, prefilled).
+- **Overlapping plans (PLANS-AUDIT 2026-10-28).** One car carries ONE live
+  car-bound pass (standard, custom or society — the `vehicle:` claim). A
+  type pass (`type:`, no car) and a car-bound pass never pay for the same
+  service twice: a car-bound pass / custom cart whose service a live type
+  pass of the car's type already covers is refused **unless another car of
+  that type is free for the type pass to serve** (`refuse_overlapping_type_pass`,
+  also checked at custom-plan activation). A different service never
+  overlaps. Buying a type pass is never refused for a car pass (SOC-4).
+- **Plan picker data.** Every pass view (`/subscriptions/my`,
+  `/subscriptions/customer/{id}`, extend) carries `covers[]` (service, total,
+  remaining), `usable`, `unusable_reason` ("All washes used", "Ended — Last
+  Booking Day was …", "Starts …", "Its car was removed", "Its car type
+  changed", "Renewing on auto-pay"), `explicit_only` (society / custom) and
+  `auto_applies` (`pass_usability`). `/bookings/quote` lines carry
+  `subscription_ids` (which pass paid). The type-only paths still auto-apply
+  standard passes only (`_usable_passes`, now counting `extended_until` — an
+  extended pass was silently dropped before); `QuickBookFlow` lists every
+  usable pass per car (`Plan For This Wash`, plate, covers, Last Booking Day)
+  and sends the chosen one as `vehicle_id` + `subscription_id`; Log A Done
+  Job stays explicit (default "No Plan"), with unusable plans listed under
+  "Other Plans — Not For This Wash".
 - **Last Booking Day:** every pass screen and message names the last day a
   booking can use the pass as "Last Booking Day: 18 Oct 2026"
   (`last_booking_day_text`; extension included). Pass dates have no
@@ -1001,6 +1023,55 @@ the start (default 2) → `notice_from`.
   offered day is closed. Manager dashboard: a "Holiday: {dates}" banner for
   their center.
 
+
+### 7.9 Finance ledger (expenses and other sales — admin only)
+
+A simple credit/debit book for money that is **not** a booking: salary,
+marketing, rent, product purchases, product sales. It is a separate module
+(`finance_service.py`, `finance_repository.py`, `routes/v1/finance_routes.py`,
+admin page `/admin/finance`, nav item "Finance"); it never writes to any
+booking, payment or KPI collection.
+
+- **Collection `finance_entries`** (flat, PostgreSQL-friendly): `title` (1–120),
+  `type` credit|debit, `amount_paise` (int, > 0, ≤ ₹1 crore), `entry_date`
+  (IST day `YYYY-MM-DD`; default today, at most 1 day ahead, at most 5 years
+  back), `category` (optional free text ≤ 50 — a suggested list plus the ones
+  already used), `description` (≤ 500), `done_by` (name, 1–100, required),
+  `reference` (≤ 80), `created_by`, `created_at/updated_at` (UTC),
+  `is_deleted/deleted_by/deleted_at/delete_reason`. Indexes (built in
+  `create_indexes`): (is_deleted, entry_date↓), (type, entry_date),
+  (category, entry_date).
+- **Soft and audited.** Edit = `PATCH` with a before/after diff
+  (`FINANCE_ENTRY_UPDATE`); remove = `POST …/void {reason}` (soft delete,
+  `FINANCE_ENTRY_VOID`); create = `FINANCE_ENTRY_CREATE`; CSV export =
+  `FINANCE_EXPORT`. A voided entry can't be edited again and is ignored by
+  every total. Nothing is hard-deleted through the API.
+- **Routes (admin only — managers/captains/customers get 403, no token 401):**
+  `GET /admin/finance/entries` (type, category, from, to, q, done_by,
+  include_voided, page, page_size ≤ 100; newest first), `POST …/entries`,
+  `PATCH …/entries/{id}`, `POST …/entries/{id}/void`, `GET …/summary?from=&to=`,
+  `GET …/entries.csv` (same filters; cells starting `= + - @ tab CR LF` get a
+  leading `'` — `utils/csv_safe_finance.py`), `GET …/categories`.
+- **Summary** (`from`/`to` default to this month, IST): `bookings_earning`,
+  `credits`, `debits`, `net_other` (credits − debits), `net_period`
+  (bookings earning + net_other), `total_balance` (all time = bookings earning
+  + all credits − all debits), `by_category`, and a `series` (per day up to 62
+  days, else per month). Every `*_paise` has a rupee mirror.
+- **Bookings earning = money actually received, not billed value:** it calls
+  `PaymentService.admin_collections` (read-only — the admin Collections page's
+  own roll-up) and takes `totals.net_collected` = cash collected + paid online
+  for non-cancelled bookings (window = the bookings' scheduled day), minus the
+  paybacks managers made to customers. Customer-wallet spends are not
+  earning. Plan, society and custom-plan sales are separate lines on that
+  page; the ledger shows them as `plan_sales_*` for information only and does
+  **not** add them to the balance. The result is cached 60 s in-process per
+  window (`finance_service.clear_cache()` in tests).
+- **UI:** StatCards for the period (presets Today / 7 Days / This Month / Last
+  Month / This Year / Custom): Bookings Earning, Other Credits, Debits, Net
+  For Period, plus a hero "Total In Blussit Account"; By Category breakdown;
+  entries table (cards at phone width) with filters, Show Voided, Export CSV;
+  Add/Edit dialog ("Done By" remembered per admin in `localStorage`) and a
+  Void dialog with a reason. Tests: `tests/test_feat_finance_*.py`.
 
 ---
 
@@ -1294,6 +1365,10 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Plans audit: extended passes now usable on every auto-apply path (`_usable_passes` honours `extended_until`); plan picker data (`covers`, `usable`, `unusable_reason`, `explicit_only`) on all pass lists + `subscription_ids` on quote lines; per-car plan chooser in QuickBookFlow (manager Log A Done Job + booking, customer booking); overlap rule type-pass vs car-bound (§7.3); tests `test_feat_planfix_*`. |
+| 2026-10-28 | Names + customer location: deleted vehicle types keep their name (soft delete, `VehicleTypeNames` resolver, `/vehicle-types/lookup`, tombstone backfill boot task, "Removed" tag in admin, no raw ids in CRM/garage/KPI); customer home center/city/pincode on `users` (derivation precedence, address + booking hooks, resumable boot backfill + script, `/users` and `/crm/customers` filters/sort, new indexes, admin Users Center/City columns). |
+| 2026-10-28 | Finance ledger: admin-only `finance_entries` (credit/debit, paise, IST day, soft-void + audit), `/admin/finance/*` (entries, summary, CSV, categories), bookings earning read from `admin_collections.net_collected` (received money, 60 s cache), admin page "Expenses & Sales" (§7.9). Tests: `tests/test_feat_finance_*.py`. |
+| 2026-10-28 | Reconcile: sweeps and views use the USABLE pass end (`pass_usable_until` = later of `end_date`/`extended_until`) — the "ends soon" sweep, wash reminder, pass-ending date text, KPI expiring count/`days_left`, society card counts — so an extended pass is never reported ended or "ends today"; vehicle delete (and retype, now incl. paused) refused while a pass is inside its extension; `refuse_overlapping_type_pass` kept (one car is never paid for twice; test setup gained a second car for the type pass to serve); customers see "Removed Car Type" instead of a blank type name; sitemap.xml stays a build artifact (revert after build). Tests: `test_reconcile_extension_sweeps.py`. |
 | 2026-10-19 | Holiday system: `holidays` collection + `HolidayService` (30 s in-process cache), one HOLIDAY check in `_reserve_slot_capacity` / `hold_slot` / `precheck_quick_booking`, holiday-marked `available_slots`, admin `/admin/holidays` (list/create/edit/end/preview, audited, affected bookings — never auto-cancelled), public `/public/holidays` (60 s cache) and `/holidays/mine`; website popup (lazy, once per session, beats the offer popup), slot-picker notice + Holiday chips, `/book?date=`, bot holiday reply, manager banner (§7.8). Tests: `tests/test_feat_holidays_*.py`. |
 | 2026-10-13 | Contact Card: activity/logs/reports spec — anonymous callers (hash only, per-card owner labels), owner activity log, admin overview + per-user table (purchased, activated, last used, daily calls/alerts/scans/notifications), daily roll-ups, managers see no logs. |
 | 2026-10-13 | Contact Card: quiet hours owner-managed (default 10 PM–7 AM), mandatory admin-managed call limits, ExoPhone number as an admin setting (changeable, read live). |

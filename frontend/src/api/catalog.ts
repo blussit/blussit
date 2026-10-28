@@ -14,6 +14,9 @@ export const catalogApi = {
 export const vehicleTypeApi = {
   list: (activeOnly = true) =>
     apiClient.get<ApiSuccess<VehicleTypeOption[]>>("/vehicle-types", { params: { active_only: activeOnly } }).then((r) => r.data.data),
+  /** Every type incl. deleted ones (flagged `removed`) — display names only, never for pickers. */
+  lookup: () =>
+    apiClient.get<ApiSuccess<{ id: string; name: string; removed: boolean; is_active: boolean }[]>>("/vehicle-types/lookup").then((r) => r.data.data),
 };
 
 export const comboOfferApi = {

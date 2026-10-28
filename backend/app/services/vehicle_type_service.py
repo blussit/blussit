@@ -4,6 +4,7 @@ from app.core.exceptions import ConflictException, NotFoundException
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.vehicle_type_schema import VehicleTypeCreateRequest, VehicleTypeUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
+from app.services.vehicle_type_names import VehicleTypeNames
 from app.utils.text import slugify
 
 
@@ -23,6 +24,7 @@ class VehicleTypeService:
         doc = payload.model_dump()
         doc["slug"] = slug
         created = await self.repo.create(doc)
+        VehicleTypeNames.invalidate(self.repo.db)
         return serialize_doc(created)
 
     async def update(self, vehicle_type_id: str, payload: VehicleTypeUpdateRequest) -> dict:
@@ -32,6 +34,7 @@ class VehicleTypeService:
         updated = await self.repo.update_by_id(vehicle_type_id, data)
         if not updated:
             raise NotFoundException("Vehicle type not found")
+        VehicleTypeNames.invalidate(self.repo.db)
         return serialize_doc(updated)
 
     async def uses(self, vehicle_type_id: str) -> list[str]:
@@ -60,13 +63,27 @@ class VehicleTypeService:
             uses.append(f"{cars} customer car(s) saved as this type")
         return uses
 
-    async def delete(self, vehicle_type_id: str) -> None:
-        if not await self.repo.find_by_id(vehicle_type_id):
+    async def lookup(self) -> list[dict]:
+        """Every type, removed ones included and flagged — so a screen that
+        shows an old booking / pass / service can still print the name."""
+        return await VehicleTypeNames(self.repo.db).entries()
+
+    async def delete(self, vehicle_type_id: str, deleted_by: str | None = None) -> None:
+        current = await self.repo.find_by_id(vehicle_type_id)
+        if not current:
             raise NotFoundException("Vehicle type not found")
         uses = await self.uses(vehicle_type_id)
         if uses:
             from app.services.catalog_service import in_use_refusal
 
             raise in_use_refusal("vehicle type", uses)
-        if not await self.repo.soft_delete(vehicle_type_id):
+        # SOFT delete on purpose: the doc (with its name) stays as the
+        # tombstone every historical record resolves against.
+        if not await self.repo.soft_delete(vehicle_type_id, deleted_by):
             raise NotFoundException("Vehicle type not found")
+        await self.repo.collection.update_one(
+            {"_id": self.repo._oid(vehicle_type_id)},
+            # The slug is unique: free it so the same name can be created again.
+            {"$set": {"deleted_by": deleted_by, "slug": f"{current.get('slug') or 'type'}--removed-{vehicle_type_id}"}},
+        )
+        VehicleTypeNames.invalidate(self.repo.db)

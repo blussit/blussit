@@ -77,6 +77,11 @@ export function CustomerDetailDrawer({ customerId, onClose }: { customerId: stri
                       <Phone className="h-3.5 w-3.5" /> {data.profile.phone}
                     </a>
                   )}
+                  {(data.profile.home_center_name || data.profile.home_city || data.profile.home_pincode) && (
+                    <span className="flex items-center gap-1" title="Home center, city and pincode">
+                      <MapPin className="h-3.5 w-3.5" /> {[data.profile.home_center_name, data.profile.home_city, data.profile.home_pincode].filter(Boolean).join(" · ")}
+                    </span>
+                  )}
                   {data.preferred_service_center_name && (
                     <span className="flex items-center gap-1">
                       <MapPin className="h-3.5 w-3.5" /> {data.preferred_service_center_name}

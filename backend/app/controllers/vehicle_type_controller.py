@@ -15,6 +15,9 @@ class VehicleTypeController:
     async def list(self, active_only: bool):
         return success(await self.service.list_all(active_only))
 
+    async def lookup(self):
+        return success(await self.service.lookup())
+
     async def create(self, current_user: CurrentUser, payload: VehicleTypeCreateRequest):
         result = await self.service.create(payload)
         await self.audit.log_action(current_user.id, current_user.role, "CREATE_VEHICLE_TYPE", "vehicle_types", result["id"])
@@ -30,7 +33,7 @@ class VehicleTypeController:
 
     async def delete(self, current_user: CurrentUser, vehicle_type_id: str):
         before = await self.service.repo.find_by_id(vehicle_type_id)
-        await self.service.delete(vehicle_type_id)
+        await self.service.delete(vehicle_type_id, current_user.id)
         await self.audit.log_action(
             current_user.id, current_user.role, "DELETE_VEHICLE_TYPE", "vehicle_types", vehicle_type_id, {"name": (before or {}).get("name")},
         )

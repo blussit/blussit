@@ -38,6 +38,30 @@ async def search_customers_typeahead(
     return success(await CRMService(db).search_customers(q, limit, current_user.role, current_user.service_center_id))
 
 
+@router.get("/customers")
+async def list_customers(
+    center_id: str | None = None,
+    city: str | None = None,
+    pincode: str | None = None,
+    search: str | None = Query(None, max_length=100),
+    sort_by: str = Query("created_at", max_length=30),
+    sort_order: int = Query(-1),
+    page: int = Query(1, ge=1, le=10_000),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Customers filtered/sorted by home center, city and pincode. A manager
+    only ever sees customers their own center has dealt with."""
+    from app.core.responses import paginated
+
+    items, total = await CRMService(db).list_customers(
+        current_user.role, current_user.service_center_id, center_id=center_id, city=city, pincode=pincode,
+        search=search, sort_by=sort_by, sort_order=sort_order, page=page, page_size=page_size,
+    )
+    return paginated(items, page, page_size, total)
+
+
 @router.get("/customers/{customer_id}")
 async def get_customer_360(customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """A manager only opens a customer their center has dealt with, and

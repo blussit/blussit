@@ -606,6 +606,66 @@ def _extension_columns(view: dict) -> dict:
     }
 
 
+def pass_covers_rows(view: dict) -> list[dict]:
+    """What a pass pays for, as rows {service_id, service_name, total,
+    remaining}: a custom pass's per-service quotas, else the one service a
+    standard pass was bought for (its flat count is the remaining washes)."""
+    if view.get("services"):
+        return [dict(r) for r in view["services"]]
+    if view.get("service_id"):
+        return [{
+            "service_id": view["service_id"], "service_name": view.get("service_name"),
+            "total": int(view.get("total_service_count") or 0), "remaining": int(view.get("remaining_service_count") or 0),
+        }]
+    return []
+
+
+def pass_usability(view: dict, car: dict | None) -> dict:
+    """Can this pass pay for a booking right now, and if not why not — the
+    one answer every picker shows (PLANS-AUDIT 2026-10-28), instead of each
+    screen re-deriving it and silently dropping the pass.
+
+    - `usable`: active (an extension counts), started, washes left, and its
+      car (when it names one) still the customer's, live and of the pass's
+      type.
+    - `unusable_reason`: the short words for a pass that isn't (None when
+      usable).
+    - `explicit_only`: a society or custom pass is never applied on its own
+      (SOC-4); the picker must name it together with its car.
+    - `auto_applies`: a standard pass the type-only paths apply by
+      themselves."""
+    status = view.get("effective_status") or view.get("status")
+    left = int(view.get("remaining_service_count") or 0)
+    last = view.get("last_booking_day_label")
+    reason: str | None = None
+    if view.get("is_deleted") or view.get("status") == SubscriptionStatus.CANCELLED.value:
+        reason = "Cancelled"
+    elif view.get("refund"):
+        reason = "Refunded"
+    elif status == PASS_SCHEDULED:
+        reason = f"Starts {view.get('starts_on_label')}" if view.get("starts_on_label") else "Not started yet"
+    elif view.get("renewal_pending"):
+        reason = "Renewing on auto-pay"
+    elif status != SubscriptionStatus.ACTIVE.value:
+        reason = "All washes used" if left < 1 else (f"Ended — Last Booking Day was {last}" if last else "Ended")
+    elif left < 1:
+        reason = "Refills when auto-pay renews" if renews_automatically(view) else "All washes used"
+    elif view.get("vehicle_id"):
+        if car is None or car.get("is_deleted"):
+            reason = "Its car was removed"
+        elif view.get("customer_id") and car.get("owner_id") != view.get("customer_id"):
+            reason = "Its car is not on this account"
+        elif view.get("vehicle_type") and car.get("vehicle_type") != view.get("vehicle_type"):
+            reason = "Its car type changed"
+    explicit = bool(view.get("society_id")) or view.get("plan_kind") in HIDDEN_PLAN_TYPES or view.get("total_by_service") is not None
+    return {
+        "usable": reason is None,
+        "unusable_reason": reason,
+        "explicit_only": explicit,
+        "auto_applies": reason is None and not explicit and bool(view.get("service_id")),
+    }
+
+
 # Society plans (docs/SOCIETY_PLANS.md) live in subscription_plans with
 # plan_type "society". They're sold ONLY through a society enrollment —
 # never listed on the website and never bought through any general path.
@@ -787,28 +847,40 @@ class UserSubscriptionService:
         return await self._with_pass_details(await self._with_society_labels(await self._with_plan_names(views)))
 
     async def _with_pass_details(self, subs: list[dict]) -> list[dict]:
-        """The car's plate on every car-bound pass, and on a custom pass its
-        per-service quotas as rows ({service_id, service_name, total,
-        remaining}) — two batched lookups for the whole list."""
+        """The car's plate on every car-bound pass, what each pass COVERS
+        ({service_id, service_name, total, remaining} rows — a custom pass's
+        per-service quotas, a standard pass's one service) and whether it
+        can be used for a booking right now (`usable` / `unusable_reason` /
+        `explicit_only`, see pass_usability) — the picker data the manager's
+        Log A Done Job and the customer's plan lists read. Two batched
+        lookups for the whole list."""
         vehicle_ids = [ObjectId(v) for v in {s.get("vehicle_id") for s in subs} if isinstance(v, str) and ObjectId.is_valid(v)]
-        service_ids = [ObjectId(x) for x in {sid for s in subs for sid in (s.get("total_by_service") or {})} if ObjectId.is_valid(x)]
+        wanted = {sid for s in subs for sid in (s.get("total_by_service") or {})} | {s.get("service_id") for s in subs if s.get("service_id")}
+        service_ids = [ObjectId(x) for x in wanted if isinstance(x, str) and ObjectId.is_valid(x)]
         vehicles, services = await asyncio.gather(
-            self.vehicle_repo.collection.find({"_id": {"$in": vehicle_ids}}, {"registration_number": 1}).to_list(length=len(vehicle_ids))
+            self.vehicle_repo.collection.find(
+                {"_id": {"$in": vehicle_ids}}, {"registration_number": 1, "vehicle_type": 1, "owner_id": 1, "is_deleted": 1},
+            ).to_list(length=len(vehicle_ids))
             if vehicle_ids else asyncio.sleep(0, []),
             self.service_repo.collection.find({"_id": {"$in": service_ids}}, {"name": 1}).to_list(length=len(service_ids))
             if service_ids else asyncio.sleep(0, []),
         )
-        plates = {str(v["_id"]): v.get("registration_number") for v in vehicles}
+        cars = {str(v["_id"]): v for v in vehicles}
         names = {str(d["_id"]): d.get("name") for d in services}
         for s in subs:
-            if s.get("vehicle_id") in plates:
-                s.setdefault("registration_number", plates[s["vehicle_id"]])
+            car = cars.get(s.get("vehicle_id") or "")
+            if car and car.get("registration_number"):
+                s.setdefault("registration_number", car["registration_number"])
             if s.get("total_by_service") is not None:
                 left = s.get("remaining_by_service") or {}
                 s["services"] = [
                     {"service_id": sid, "service_name": names.get(sid) or "Service", "total": int(total), "remaining": int(left.get(sid, 0))}
                     for sid, total in (s.get("total_by_service") or {}).items()
                 ]
+            if s.get("service_id"):
+                s["service_name"] = names.get(s["service_id"]) or s.get("service_name")
+            s["covers"] = pass_covers_rows(s)
+            s.update(pass_usability(s, car))
         return subs
 
     async def _with_society_labels(self, subs: list[dict]) -> list[dict]:
@@ -1737,6 +1809,58 @@ class UserSubscriptionService:
         subs.sort(key=lambda c: c.get("status") != SubscriptionStatus.ACTIVE.value)
         return next((c for c in subs if pass_blocks_new(c, now)), None)
 
+    async def _type_pass_covering(self, customer_id: str, vehicle_type: str | None, service_ids: list[str]) -> dict | None:
+        """OVERLAP RULE (PLANS-AUDIT 2026-10-28), half 1: a live TYPE pass
+        (no car named) of this vehicle type that covers any of these
+        services. A car of that type with its own pass for the same service
+        would be paid for twice."""
+        if not vehicle_type or not service_ids:
+            return None
+        subs = await self.repo.collection.find(
+            {
+                "customer_id": customer_id, "vehicle_type": vehicle_type, "service_id": {"$in": list(service_ids)},
+                "vehicle_id": {"$in": [None, ""]}, "status": {"$in": list(LIVE_PASS_STATUSES)}, "is_deleted": {"$ne": True},
+            }
+        ).to_list(length=50)
+        now = now_ist()
+        return next((c for c in subs if pass_blocks_new(c, now)), None)
+
+    async def refuse_overlapping_type_pass(
+        self, customer_id: str, vehicle_type: str | None, service_ids: list[str], plate: str | None = None, *, vehicle_id: str | None = None,
+    ) -> None:
+        """OVERLAP RULE half 2: a car-bound pass (standard or custom) for
+        this car may not start when a live TYPE pass of the car's type
+        already covers the same service AND there is no other car of that
+        type for the type pass to serve — then the two would pay for the
+        same car twice. A customer with a second car of the type may hold
+        both (the type pass floats to the other car). Cars the customer
+        has not saved cannot be counted, so only known cars are credited."""
+        other = await self._type_pass_covering(customer_id, vehicle_type, service_ids)
+        if other is None:
+            return
+        n_type = await self.repo.collection.count_documents({
+            "customer_id": customer_id, "vehicle_type": vehicle_type, "service_id": other["service_id"],
+            "vehicle_id": {"$in": [None, ""]}, "status": {"$in": list(LIVE_PASS_STATUSES)}, "is_deleted": {"$ne": True},
+        })
+        cars = await self.vehicle_repo.collection.find(
+            {"owner_id": customer_id, "vehicle_type": vehicle_type, "is_deleted": {"$ne": True}}, {"_id": 1},
+        ).to_list(length=50)
+        covered = {s.get("vehicle_id") for s in await self.repo.collection.find(
+            {"customer_id": customer_id, "vehicle_id": {"$nin": [None, ""]}, "status": {"$in": list(LIVE_PASS_STATUSES)}, "is_deleted": {"$ne": True},
+             "$or": [{"service_id": other["service_id"]}, {f"remaining_by_service.{other['service_id']}": {"$gt": 0}}]},
+            {"vehicle_id": 1},
+        ).to_list(length=100)}
+        free = [c for c in cars if str(c["_id"]) != vehicle_id and str(c["_id"]) not in covered]
+        if len(free) >= max(1, n_type):
+            return
+        left = int(other.get("remaining_service_count") or 0)
+        last = last_booking_day_text(other)
+        names = await self._service_name_map([other["service_id"]]) if other.get("service_id") else {}
+        raise BadRequestException(
+            f"{plate or 'This car'} is already covered by a running {names.get(other.get('service_id'), 'plan')} plan for its vehicle type "
+            f"({left} wash{'' if left == 1 else 'es'} left{', ' + last if last else ''}). Use it up first, or pick a different service."
+        )
+
     async def _active_same_plan(self, customer_id: str, plan_id: str) -> dict | None:
         """The still-usable copy of `plan_id` this customer already holds, if
         any. "Still usable" = stored status active AND end_date in the future:
@@ -1784,10 +1908,12 @@ class UserSubscriptionService:
             )
         if vehicle_id:
             existing = await self._active_pass_for_vehicle(customer_id, vehicle_id)
-            if not existing:
-                return
             vehicle = await self.vehicle_repo.find_by_id(vehicle_id)
             plate = (vehicle or {}).get("registration_number") or "this car"
+            if not existing:
+                if service_id:
+                    await self.refuse_overlapping_type_pass(customer_id, (vehicle or {}).get("vehicle_type") or vehicle_type, [service_id], plate, vehicle_id=vehicle_id)
+                return
             last = last_booking_day_text(existing)
             until = f" ({last})" if last else ""
             raise BadRequestException(
@@ -2100,7 +2226,9 @@ class UserSubscriptionService:
             return {"status": PASS_SCHEDULED, "start_date": {"$gt": now}}
         if status == "expiring":
             # days_left = (end - now).days <= 14  <=>  end < now + 15 days
-            return {"status": active, "end_date": {"$gte": now, "$lt": now + timedelta(days=15)}}
+            return {"status": active, "$expr": {"$and": [
+                {"$gte": [_USABLE_END_EXPR, now]}, {"$lt": [_USABLE_END_EXPR, now + timedelta(days=15)]},
+            ]}}
         if status == "expired":
             return {"$or": [
                 {"status": SubscriptionStatus.EXPIRED.value},
@@ -2156,7 +2284,7 @@ class UserSubscriptionService:
                 "expired": {"$sum": {"$cond": [{"$eq": ["$eff", SubscriptionStatus.EXPIRED.value]}, 1, 0]}},
                 "scheduled": {"$sum": {"$cond": [{"$eq": ["$eff", PASS_SCHEDULED]}, 1, 0]}},
                 "expiring": {"$sum": {"$cond": [{"$and": [
-                    {"$eq": ["$eff", active]}, {"$ifNull": ["$end_date", False]}, {"$lt": ["$end_date", now + timedelta(days=15)]},
+                    {"$eq": ["$eff", active]}, {"$ifNull": ["$end_date", False]}, {"$lt": [_USABLE_END_EXPR, now + timedelta(days=15)]},
                 ]}, 1, 0]}},
                 "revenue": {"$sum": "$paid"},
             }},
@@ -2283,6 +2411,12 @@ class UserSubscriptionService:
                 end = datetime.fromisoformat(end_date) if isinstance(end_date, str) else end_date
                 if end.tzinfo is None:
                     end = end.replace(tzinfo=timezone.utc)
+                ext = s.get("extended_until")
+                if ext:
+                    ext = datetime.fromisoformat(ext) if isinstance(ext, str) else ext
+                    if ext.tzinfo is None:
+                        ext = ext.replace(tzinfo=timezone.utc)
+                    end = max(end, ext)  # inside an extension, days left count to its Last Booking Day
                 days_left = (end - now).days
             rows.append({
                 "subscription_id": s["id"],
@@ -2618,6 +2752,10 @@ class UserSubscriptionService:
 # Live bookings — a pass with one of these already has its next wash on the way.
 _LIVE_BOOKING_STATUSES = ["awaiting_payment", "pending", "assigned", "captain_on_the_way", "service_started", "rescheduled"]
 
+# Mongo twin of pass_usable_until(): the later of end_date and extended_until
+# ($max ignores a missing/null extended_until; no end_date = open-ended).
+_USABLE_END_EXPR = {"$max": ["$end_date", "$extended_until"]}
+
 # Mongo twin of renews_automatically(): auto-pay on and a mandate on file.
 _NOT_AUTO_RENEWING = {"$or": [{"auto_renew": {"$ne": True}}, {"razorpay_subscription_id": {"$in": [None, ""]}}]}
 
@@ -2633,7 +2771,12 @@ async def find_subscriptions_expiring_soon(db, days: int = 2, limit: int = 200) 
             "status": SubscriptionStatus.ACTIVE.value,
             "is_deleted": {"$ne": True},
             "expiry_reminder_sent": {"$ne": True},
-            "end_date": {"$gt": now, "$lte": now + timedelta(days=days)},
+            # The USABLE end (period end, or a granted extension when later):
+            # a pass inside its extension is not "ending today".
+            "$expr": {"$and": [
+                {"$gt": [_USABLE_END_EXPR, now]},
+                {"$lte": [_USABLE_END_EXPR, now + timedelta(days=days)]},
+            ]},
             **_NOT_AUTO_RENEWING,
         }
     ).sort("end_date", 1).limit(limit).to_list(length=limit)
@@ -2739,7 +2882,7 @@ async def find_passes_due_wash_reminder(db, limit: int = 200, expiring_days: int
     pipeline = [
         {"$match": {
             "status": SubscriptionStatus.ACTIVE.value,
-            "end_date": {"$gt": now + timedelta(days=expiring_days)},
+            "$expr": {"$gt": [_USABLE_END_EXPR, now + timedelta(days=expiring_days)]},
             "is_deleted": {"$ne": True},
             "remaining_service_count": {"$gt": 0},
             "start_date": {"$lte": quiet_floor},

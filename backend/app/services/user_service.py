@@ -68,8 +68,16 @@ class UserService:
     async def list_users(
         self, role: str | None, page: int, page_size: int, search: str | None,
         period: str | None = None, start: str | None = None, end: str | None = None,
+        center_id: str | None = None, city: str | None = None, pincode: str | None = None,
+        sort_by: str = "created_at", sort_order: int = -1,
     ):
+        from app.services.customer_location_service import SORTABLE, attach_center_names, location_filters, location_view
+
         filters = {"role": role} if role else {}
+        loc = location_filters(center_id, city, pincode)
+        if loc:
+            filters["role"] = "customer"  # location lives on customers only
+            filters.update(loc)
         if search:
             from app.repositories.base_repository import build_search_filter
             filters.update(build_search_filter(search, ["full_name", "email", "phone"]))
@@ -78,8 +86,18 @@ class UserService:
 
             s, e, _ps, _pe = resolve_period(period, start, end)
             filters["created_at"] = {"$gte": s, "$lt": e}
-        items, total = await self.repo.find_many(filters, page=page, page_size=page_size)
-        return [UserPublic.from_doc(u).model_dump() for u in items], total
+        items, total = await self.repo.find_many(
+            filters, page=page, page_size=page_size,
+            sort_by=SORTABLE.get(sort_by, "created_at"), sort_order=1 if sort_order == 1 else -1,
+        )
+        rows = []
+        for u in items:
+            row = UserPublic.from_doc(u).model_dump()
+            if u.get("role") == "customer":  # admin-only endpoint: coordinates included
+                row.update(location_view(u, include_coordinates=True))
+            rows.append(row)
+        await attach_center_names(self.repo.db, [r for r in rows if r.get("role") == "customer"])
+        return rows, total
 
     async def ensure_not_last_admin(self, user_id: str) -> None:
         """Refuses to suspend / demote / delete the only active admin — the
