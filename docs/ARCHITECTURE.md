@@ -1282,6 +1282,27 @@ the worker fails.
 - **Audit:** every staff/admin change in `audit_logs` (actor, before/after).
 - Repository hygiene and the historic data exposure: see
   [SECURITY_REPO_CLEANUP.md](SECURITY_REPO_CLEANUP.md).
+- **2026-10-28 red-team pass** (local dev stack only, see change log):
+  confirmed-safe under live attack — role/center always re-read from the
+  database (a JWT with an edited `role` or `alg: none` is rejected), OTP
+  single-use under a parallel-verify race (atomic increment + delete),
+  Razorpay/WhatsApp webhooks fail closed with no secret outside `development`,
+  `/admin/finance/*` is admin-only with CSV formula-injection neutralised,
+  `/crm/customers` and `/users` give a manager only customers their own
+  center has served and never coordinates, mass-assignment fields
+  (`role`, `total_amount`, `is_deleted`, …) are silently dropped by every
+  write schema, uploads are sniffed by magic bytes (no SVG, 8 MB cap) and
+  KYC downloads check an ownership record, plan/wallet double-spend races
+  are closed by atomic ledger writes. One real gap found and left as a
+  recommendation (not fixed — touches the recycle-bin restore transaction):
+  `restore_booking` intentionally skips the holiday check
+  (`holiday_check=False`) when putting a deleted booking's seat back, so a
+  booking deleted before a holiday was declared on its date can be restored
+  into it; low exposure (admin/manager-only, recycle bin) but worth an
+  explicit "this date is now a holiday — restore anyway?" confirmation.
+  Known, already-documented limitation unchanged: rate limits are
+  per-instance (`core/rate_limit.py`), so N Cloud Run instances allow
+  roughly N× one instance's limit.
 
 ## 14. Testing
 
@@ -1365,6 +1386,7 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | Red-team pass (local dev stack): auth/session, authz/IDOR matrix, money/booking-logic, injection/XSS/upload, infra/config and insider-abuse checks against every router — see §13. No code change (nothing low-risk-and-clear to fix was found; one finding — `restore_booking`'s deliberate holiday-check skip — reported, not fixed). Full backend suite run on a fresh local DB. |
 | 2026-10-28 | Plans audit: extended passes now usable on every auto-apply path (`_usable_passes` honours `extended_until`); plan picker data (`covers`, `usable`, `unusable_reason`, `explicit_only`) on all pass lists + `subscription_ids` on quote lines; per-car plan chooser in QuickBookFlow (manager Log A Done Job + booking, customer booking); overlap rule type-pass vs car-bound (§7.3); tests `test_feat_planfix_*`. |
 | 2026-10-28 | Names + customer location: deleted vehicle types keep their name (soft delete, `VehicleTypeNames` resolver, `/vehicle-types/lookup`, tombstone backfill boot task, "Removed" tag in admin, no raw ids in CRM/garage/KPI); customer home center/city/pincode on `users` (derivation precedence, address + booking hooks, resumable boot backfill + script, `/users` and `/crm/customers` filters/sort, new indexes, admin Users Center/City columns). |
 | 2026-10-28 | Finance ledger: admin-only `finance_entries` (credit/debit, paise, IST day, soft-void + audit), `/admin/finance/*` (entries, summary, CSV, categories), bookings earning read from `admin_collections.net_collected` (received money, 60 s cache), admin page "Expenses & Sales" (§7.9). Tests: `tests/test_feat_finance_*.py`. |
