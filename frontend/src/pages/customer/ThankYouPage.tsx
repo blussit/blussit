@@ -204,7 +204,7 @@ export default function ThankYouPage() {
       : when || "We'll message you when a captain is assigned.";
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white p-4">
+    <main className="flex min-h-screen items-center justify-center bg-white p-4">
       <motion.div
         initial={shouldReduceMotion ? false : { opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -369,7 +369,7 @@ export default function ThankYouPage() {
               variants={contentVariants}
               initial={shouldReduceMotion ? false : "hidden"}
               animate="show"
-              className="mt-7 flex flex-col gap-2.5"
+              className="mt-7 flex min-h-[90px] flex-col gap-2.5"
             >
               {authLoading ? (
                 // A fresh page load (e.g. opened straight from a WhatsApp
@@ -377,7 +377,9 @@ export default function ThankYouPage() {
                 // button set is correct — briefly showing "guest" actions to
                 // an actually-logged-in customer (or vice versa) would be
                 // wrong, so wait the one beat this normally takes.
-                <div className="flex justify-center py-2">
+                // min-h holds the room the two buttons take, so the centred card
+                // doesn't re-centre (layout shift) once the session check ends.
+                <div className="flex min-h-[90px] items-center justify-center">
                   <Spinner />
                 </div>
               ) : user ? (
@@ -415,6 +417,6 @@ export default function ThankYouPage() {
           </CardBody>
         </Card>
       </motion.div>
-    </div>
+    </main>
   );
 }

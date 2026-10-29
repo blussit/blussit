@@ -79,7 +79,7 @@ class BookingCreateRequest(BaseModel):
     scheduled_date: datetime
     scheduled_slot: str
     payment_method: PaymentMethod = PaymentMethod.CASH
-    coupon_code: Optional[str] = None
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     subscription_id: Optional[str] = None
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
@@ -124,8 +124,8 @@ class QuickAddress(BaseModel):
     @model_validator(mode="after")
     def _pin_or_pincode(self) -> "QuickAddress":
         pin = (self.pincode or "").strip()
-        if pin and len(pin) < 4:
-            raise ValueError("Enter a valid pincode")
+        if pin and not re.fullmatch(r"[0-9]{6}", pin):
+            raise ValueError("Enter a valid 6-digit pincode")
         if not pin and (self.latitude is None or self.longitude is None):
             raise ValueError("Enter the pincode or pin the location on the map")
         self.pincode = pin or None
@@ -180,7 +180,7 @@ class QuickBookingRequest(BaseModel):
     scheduled_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     scheduled_slot: str = Field(max_length=20)
     payment_method: PaymentMethod = PaymentMethod.CASH
-    coupon_code: Optional[str] = Field(default=None, max_length=20)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     customer_notes: Optional[str] = Field(default=None, max_length=500)
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
     alternate_contact_phone: Optional[str] = Field(default=None, max_length=20)
@@ -246,7 +246,7 @@ class BookingQuoteRequest(BaseModel):
     lines: list[QuickBookingLine] = Field(min_length=1)
     address_id: Optional[str] = None
     address: Optional[QuoteAddress] = None
-    coupon_code: Optional[str] = Field(default=None, max_length=20)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     # "log" = a manager-logged done job (no distance charge / prepaid rule /
     # coupon); scheduled_date + service_time then say when it happened.
     mode: str = Field(default="book", pattern=r"^(book|log)$")
@@ -399,7 +399,7 @@ class ManagerBookingCreateRequest(BaseModel):
     scheduled_date: datetime
     scheduled_slot: str
     payment_method: PaymentMethod = PaymentMethod.CASH
-    coupon_code: Optional[str] = None
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     subscription_id: Optional[str] = None
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = Field(default=None, max_length=100)
@@ -487,7 +487,7 @@ class BookingGroupCreateRequest(BaseModel):
     scheduled_slot: str
     hold_key: Optional[str] = None
     payment_method: Optional[PaymentMethod] = None
-    coupon_code: Optional[str] = None
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     customer_notes: Optional[str] = None
     alternate_contact_name: Optional[str] = None
     alternate_contact_phone: Optional[str] = None

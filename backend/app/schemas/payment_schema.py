@@ -16,7 +16,7 @@ class CreateOrderRequest(BaseModel):
     society_renewal: bool = False
     # Renewal only: a coupon the resident applied (validated server-side;
     # a first payment uses the coupon frozen on the request).
-    society_coupon_code: Optional[str] = Field(default=None, max_length=30)
+    society_coupon_code: Optional[str] = Field(default=None, max_length=32)
     # A multi-vehicle visit is paid for ONCE — the order covers every car on
     # it, and one verified signature settles them all.
     booking_group_id: Optional[str] = None

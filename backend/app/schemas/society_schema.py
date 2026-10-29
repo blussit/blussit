@@ -128,7 +128,7 @@ class PlanChoice(BaseModel):
 class SocietyQuoteRequest(PlanChoice):
     vehicle_types: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(min_length=1, max_length=10)
     # Optional coupon: the quote shows its discount (or why it can't apply).
-    coupon_code: Optional[str] = Field(default=None, max_length=30)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
 
     _c = field_validator("coupon_code")(_coupon)
 
@@ -151,7 +151,7 @@ class SocietyEnrollRequest(PlanChoice):
     phone_otp: Optional[str] = Field(default=None, max_length=10)
     phone_access_token: Optional[str] = Field(default=None, max_length=4000)
     # An existing coupon (CouponService rules); counted on activation.
-    coupon_code: Optional[str] = Field(default=None, max_length=30)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
 
     _p = field_validator("phone")(_phone)
     _n = field_validator("resident_name", "flat")(_clean)
@@ -192,7 +192,7 @@ class ActivateEnrollmentRequest(BaseModel):
     expected_revision: Optional[int] = Field(default=None, ge=1)
     # Mark paid / renew with a coupon: a code applies (or replaces the
     # resident's) coupon; remove_coupon drops the resident's one.
-    coupon_code: Optional[str] = Field(default=None, max_length=30)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     remove_coupon: bool = False
 
     _c = field_validator("coupon_code")(_coupon)
@@ -201,7 +201,7 @@ class ActivateEnrollmentRequest(BaseModel):
 class CouponPreviewRequest(BaseModel):
     """What a coupon takes off this enrollment's activation (or renewal)."""
 
-    coupon_code: Optional[str] = Field(default=None, max_length=30)
+    coupon_code: Optional[str] = Field(default=None, max_length=32)
     renewal: bool = False
 
     _c = field_validator("coupon_code")(_coupon)

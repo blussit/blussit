@@ -81,7 +81,9 @@ class AuthController:
 
     async def verify_otp(self, payload: VerifyOtpRequest):
         verified = await self.auth_service.verify_otp(payload.identifier, payload.otp)
-        return success({"verified": verified}, "OTP verified" if verified else "OTP verification failed")
+        result = success({"verified": verified}, "OTP verified" if verified else "OTP verification failed")
+        result["success"] = verified
+        return result
 
     async def forgot_password(self, payload: ForgotPasswordRequest):
         channel = await self.auth_service.request_otp(payload.identifier, purpose="password_reset", channel=payload.channel)

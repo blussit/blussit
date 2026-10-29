@@ -123,7 +123,7 @@ def test_dry_run_validates_both_modes_and_prints_both_commands(rig):
                  "RUN_MODE=worker"):
         assert flag in worker, flag
     for flag in ("--allow-unauthenticated", "--ingress all", "--startup-probe=httpGet.path=/api/ready",
-                 "--max-instances 10", "--concurrency 250", "--timeout 3600", "RUN_MODE=api"):
+                 "--max-instances 10", "--concurrency 80", "--timeout 3600", "RUN_MODE=api"):
         assert flag in api, flag
     assert "--no-allow-unauthenticated" not in api and "--liveness-probe" not in api
     assert "Would build ONE image" in out

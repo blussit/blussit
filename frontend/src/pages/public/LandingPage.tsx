@@ -65,6 +65,7 @@ export default function LandingPage() {
       {/* Not over a visitor headed for a section (/#how-it-works from the
           footer) — the popup locks scrolling, so they'd be stuck at the top. */}
       {offer && !location.hash && <LaunchOfferPopup offer={offer} onClaim={claimOffer} />}
+      <main>
       <div className="relative">
         {/* Desktop: the offer floats over the photo's sky. Phones/tablets: the
             hero floats it above the features row instead. */}
@@ -79,6 +80,7 @@ export default function LandingPage() {
       <VideoReviews id="reviews" />
       <ReviewsShowcase />
       <FaqSection />
+      </main>
       <PublicFooter />
     </div>
   );

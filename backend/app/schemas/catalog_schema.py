@@ -10,7 +10,7 @@ def _clean_offer_tag(value):
 
 
 class CategoryCreateRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     description: Optional[str] = None
     icon: Optional[str] = None
     display_order: int = 0
@@ -27,7 +27,7 @@ class CategoryUpdateRequest(BaseModel):
 
 class ServiceCreateRequest(BaseModel):
     category_id: str
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     description: Optional[str] = None
     vehicle_types: list[str] = Field(default_factory=list)
     price: float = Field(gt=0)

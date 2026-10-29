@@ -578,15 +578,17 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           <ClipboardCheck className="h-3.5 w-3.5" /> Mark Done
         </Button>
       )}
+      {/* Any booking that hasn't started can be moved (the same rules as
+          the customer's own move; the money doesn't change). */}
+      {["awaiting_payment", "pending", "assigned", "rescheduled"].includes(b.status) && (
+        <Button size="sm" variant="outline" onClick={() => setReschedulingBooking(b)}>
+          <CalendarClock className="h-3.5 w-3.5" /> Reschedule
+        </Button>
+      )}
       {isOpenIssue(b) && (
-        <>
-          <Button size="sm" variant="outline" onClick={() => setReschedulingBooking(b)}>
-            Reschedule
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setResolvingBooking(b)}>
-            <CheckCircle2 className="h-3.5 w-3.5" /> Resolve
-          </Button>
-        </>
+        <Button size="sm" variant="ghost" onClick={() => setResolvingBooking(b)}>
+          <CheckCircle2 className="h-3.5 w-3.5" /> Resolve
+        </Button>
       )}
       {canCancel(b) && (
         <Button size="sm" variant="outline" onClick={() => setEditingBooking(b)}>

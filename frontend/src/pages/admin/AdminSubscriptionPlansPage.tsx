@@ -260,13 +260,25 @@ export default function AdminSubscriptionPlansPage() {
             header: "",
             accessor: (p) => (
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => openEdit(p)}>
+                <Button size="sm" variant="outline" aria-label={`Edit ${toTitle(p.name)}`} title="Edit" onClick={() => openEdit(p)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(p)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={p.is_active ? `Deactivate ${toTitle(p.name)}` : `Activate ${toTitle(p.name)}`}
+                  title={p.is_active ? "Deactivate" : "Activate"}
+                  isLoading={toggleActiveMutation.isPending}
+                  onClick={async () => {
+                    if (p.is_active && !(await confirm({ title: `Deactivate "${toTitle(p.name)}"?`, message: "It disappears from the booking pages until you activate it again.", confirmLabel: "Deactivate", tone: "danger" }))) return;
+                    toggleActiveMutation.mutate(p);
+                  }}
+                >
                   <Power className={`h-3.5 w-3.5 ${p.is_active ? "" : "opacity-40"}`} />
                 </Button>
                 <Button
+                  aria-label={`Delete ${toTitle(p.name)}`}
+                  title="Delete"
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}

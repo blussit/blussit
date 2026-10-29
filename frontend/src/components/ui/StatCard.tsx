@@ -54,7 +54,7 @@ export function StatCard({
   const body = (
     <div
       className={cn(
-        "group relative flex h-full flex-col rounded-2xl border border-[var(--color-card-border)] bg-white p-5 transition-colors",
+        "group relative flex h-full min-w-0 flex-col rounded-2xl border border-[var(--color-card-border)] bg-white p-5 transition-colors",
         clickable && "hover:border-[var(--ui-hover-line,#0A66F0)]",
         className
       )}
@@ -72,20 +72,20 @@ export function StatCard({
         )}
       </div>
       <p className={cn("font-mono-num mt-3 text-[28px] font-bold leading-none", valueTone)}>{value}</p>
-      {hint && <p className="mt-1.5 text-xs text-[var(--ui-muted,#5F6878)]">{hint}</p>}
+      {hint && <p className="mt-1.5 break-words text-xs text-[var(--ui-muted,#5F6878)]">{hint}</p>}
     </div>
   );
 
   if (to) {
     return (
-      <Link to={to} className="block h-full">
+      <Link to={to} className="block h-full min-w-0">
         {body}
       </Link>
     );
   }
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className="block h-full w-full text-left">
+      <button type="button" onClick={onClick} className="block h-full w-full min-w-0 text-left">
         {body}
       </button>
     );

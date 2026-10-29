@@ -273,13 +273,25 @@ export default function AdminServicesPage() {
             header: "",
             accessor: (s) => (
               <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-                <Button size="sm" variant="outline" onClick={() => openEdit(s)}>
+                <Button size="sm" variant="outline" aria-label={`Edit ${toTitle(s.name)}`} title="Edit" onClick={() => openEdit(s)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(s)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={s.is_active ? `Deactivate ${toTitle(s.name)}` : `Activate ${toTitle(s.name)}`}
+                  title={s.is_active ? "Deactivate" : "Activate"}
+                  isLoading={toggleActiveMutation.isPending}
+                  onClick={async () => {
+                    if (s.is_active && !(await confirm({ title: `Deactivate "${toTitle(s.name)}"?`, message: "It disappears from the booking pages until you activate it again.", confirmLabel: "Deactivate", tone: "danger" }))) return;
+                    toggleActiveMutation.mutate(s);
+                  }}
+                >
                   <Power className={`h-3.5 w-3.5 ${s.is_active ? "" : "opacity-40"}`} />
                 </Button>
                 <Button
+                  aria-label={`Delete ${toTitle(s.name)}`}
+                  title="Delete"
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}

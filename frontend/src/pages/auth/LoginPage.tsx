@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Helmet } from "react-helmet-async";
 import { motion, useReducedMotion } from "framer-motion";
 import { PublicNavbar } from "../../components/layout/PublicNavbar";
 import { OtpInput } from "../../components/ui";
@@ -188,6 +189,9 @@ export default function LoginPage() {
       transition={{ duration: 0.35, ease: "easeOut" }}
       className="flex min-h-dvh flex-col bg-[#F6FAFF] text-[#0B1F4B]"
     >
+      <Helmet>
+        <title>Log In | Blussit</title>
+      </Helmet>
       <PublicNavbar />
 
       <section className="flex flex-1 items-center justify-center px-4 py-10">

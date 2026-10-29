@@ -14,7 +14,7 @@ def _canonical_phone(v: str) -> str:
 
 
 class SubscriptionPlanCreateRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     description: Optional[str] = None
     billing_cycle: BillingCycle
     price: float = Field(gt=0)

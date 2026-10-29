@@ -58,6 +58,7 @@ from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.schemas.booking_schema import BookingCancelRequest, BookingRescheduleRequest, QuickBookingLine, QuickBookingRequest
 from app.schemas.profile_schema import AddressCreateRequest
 from app.services.booking_service import BookingService
+from app.services.coupon_service import ignore_ip_scope
 from app.services.holiday_service import HolidayException, HolidayService, friendly_message, friendly_refusal
 from app.services.profile_service import AddressService
 from app.services.whatsapp_service import (
@@ -135,6 +136,10 @@ class WhatsAppBotService:
         swallowed (logged + apologetic chat reply) rather than turned into
         an endless redelivery loop of the same crashing message."""
         processed = 0
+        with ignore_ip_scope():
+            return await self._handle_webhook(payload, processed)
+
+    async def _handle_webhook(self, payload: dict, processed: int) -> dict:
         for entry in payload.get("entry") or []:
             for change in entry.get("changes") or []:
                 value = change.get("value") or {}
@@ -561,6 +566,7 @@ class WhatsAppBotService:
             "await_addr_pincode": self._on_await_addr_pincode,
             "q_when": self._on_when,
             "confirm": self._on_confirm,
+            "q_coupon": self._on_coupon,
             "bookings_list": self._on_bookings_list,
             "booking_detail": self._on_booking_detail,
             "resched_date": self._on_resched_date,
@@ -1595,15 +1601,27 @@ class WhatsAppBotService:
             await self.wa.send_text(phone, f"{exc.message} Let's pick again.")
             await self._start_type_step(wa_id, phone, customer_id, {"lines": []})
             return
+        await self._send_confirm(wa_id, phone, data, quote)
+
+    async def _send_confirm(self, wa_id, phone, data, quote, header: str = "Confirm your booking:") -> None:
+        """The final summary with THREE buttons: Confirm / Have A Coupon Code
+        (or Remove Coupon once one is applied) / Cancel."""
+        lines = data.get("lines") or []
         summary = (
-            "Confirm your booking:\n\n"
+            f"{header}\n\n"
             f"{self._lines_summary(lines)}\n\n"
             f"📍 {data.get('address_label') or 'your address'}\n"
             f"📅 {data.get('date')} · {format_slot_12h(data.get('slot'))}\n"
             f"{self._bill_extras(quote)}"
             f"💰 ₹{self._quote_total(lines, quote):g}"
         )
-        await self.wa.send_buttons(phone, summary, [{"id": "confirm:yes", "title": "✅ Confirm"}, {"id": "confirm:no", "title": "❌ Cancel"}])
+        coupon_button = (
+            {"id": "confirm:remove", "title": "Remove Coupon"} if data.get("coupon_code") else {"id": "confirm:coupon", "title": "Have A Coupon Code"}
+        )
+        await self.wa.send_buttons(
+            phone, summary, [{"id": "confirm:yes", "title": "✅ Confirm"}, coupon_button, {"id": "confirm:no", "title": "❌ Cancel"}],
+        )
+        data.pop("strikes", None)
         await self._set_state(wa_id, "confirm", data)
 
     @staticmethod
@@ -1620,6 +1638,8 @@ class WhatsAppBotService:
     def _bill_extras(quote: dict) -> str:
         """The rows between the vehicles and the total — only what moves it."""
         out = ""
+        if quote.get("coupon_discount"):
+            out += f"🏷 Coupon {quote.get('coupon_code') or ''}: −₹{quote['coupon_discount']:g}\n".replace("Coupon :", "Coupon:")
         if quote.get("plan_discount"):
             out += f"✅ Your plan covers: −₹{quote['plan_discount']:g}\n"
         travel = quote.get("travel")
@@ -1674,6 +1694,8 @@ class WhatsAppBotService:
                 # The chosen day: a pass covers only washes inside its own
                 # period, exactly as the booking will check it.
                 scheduled_date=data.get("date"),
+                # A code the customer typed at the summary (previewed, not used).
+                coupon_code=data.get("coupon_code") or None,
             )
         except AppException:
             raise
@@ -1954,9 +1976,71 @@ class WhatsAppBotService:
             sort=[("created_at", -1)],
         )
 
+    async def _on_coupon_button(self, wa_id, phone, customer_id, data, value: str) -> None:
+        """"Have A Coupon Code" asks for the code; "Remove Coupon" drops it."""
+        if value == "confirm:remove":
+            data.pop("coupon_code", None)
+            try:
+                quote = await self._visit_quote(customer_id, data)
+            except AppException as exc:
+                await self.wa.send_text(phone, f"{exc.message} Type *hi* to start again.")
+                await self._set_state(wa_id, None, {})
+                return
+            await self._send_confirm(wa_id, phone, data, quote, header="Coupon removed. Confirm your booking:")
+            return
+        data.pop("strikes", None)
+        await self._set_state(wa_id, "q_coupon", data)
+        await self.wa.send_text(phone, "Please type your coupon code 🏷\n\n(Or type *cancel* to stop.)")
+
+    async def _on_coupon(self, wa_id, phone, customer_id, data, kind, value):
+        """The typed code (any case or spacing). Valid -> the summary again
+        with the discount and the new total; invalid -> "Invalid Coupon
+        Code" with the three buttons. Checked by the same quote the booking
+        uses; nothing is consumed until Confirm creates the booking."""
+        if kind == "reply" and str(value).startswith("confirm:"):
+            # A stale button from the summary above: treat it as that tap.
+            await self._on_confirm(wa_id, phone, customer_id, data, kind, value)
+            return
+        if kind != "text":
+            await self._nudge(wa_id, phone, "q_coupon", data, "Please *type* your coupon code, or type *cancel* to stop.", str(value))
+            return
+        code = "".join(str(value).split()).upper()
+        if not code or len(code) > 40:
+            await self._coupon_invalid(wa_id, phone, data, "Invalid Coupon Code")
+            return
+        trial = {**data, "coupon_code": code}
+        try:
+            quote = await self._visit_quote(customer_id, trial)
+        except AppException as exc:
+            await self.wa.send_text(phone, f"{exc.message} Type *hi* to start again.")
+            await self._set_state(wa_id, None, {})
+            return
+        if quote.get("coupon_error") or not quote.get("coupon_code"):
+            reason = quote.get("coupon_error") or ""
+            generic = not reason or reason.lower().startswith("invalid coupon")
+            await self._coupon_invalid(wa_id, phone, data, "Invalid Coupon Code" if generic else f"Invalid Coupon Code\n{reason}")
+            return
+        data["coupon_code"] = quote["coupon_code"]
+        await self._send_confirm(
+            wa_id, phone, data, quote,
+            header=f"Coupon applied ✅ You save ₹{float(quote.get('coupon_discount') or 0):g}.\nConfirm your booking:",
+        )
+
+    async def _coupon_invalid(self, wa_id, phone, data, text: str) -> None:
+        data.pop("coupon_code", None)
+        data.pop("strikes", None)
+        await self.wa.send_buttons(
+            phone, text,
+            [{"id": "confirm:coupon", "title": "Have A Coupon Code"}, {"id": "confirm:yes", "title": "✅ Confirm"}, {"id": "confirm:no", "title": "❌ Cancel"}],
+        )
+        await self._set_state(wa_id, "confirm", data)
+
     async def _on_confirm(self, wa_id, phone, customer_id, data, kind, value):
         if kind != "reply" or not value.startswith("confirm:"):
             await self._nudge(wa_id, phone, "confirm", data, "Tap *Confirm* or *Cancel* above 👆", str(value))
+            return
+        if value in ("confirm:coupon", "confirm:remove"):
+            await self._on_coupon_button(wa_id, phone, customer_id, data, value)
             return
         if value == "confirm:no":
             # Give the held seat back immediately instead of waiting for expiry.
@@ -1989,6 +2073,7 @@ class WhatsAppBotService:
                         scheduled_date=data["date"],
                         scheduled_slot=data["slot"],
                         customer_notes="Booked via WhatsApp",
+                        coupon_code=data.get("coupon_code") or None,
                     ),
                     customer=customer,
                     # The bot confirms first and offers a pay link right after —
@@ -2023,6 +2108,20 @@ class WhatsAppBotService:
                     f"{format_slot_12h(data.get('slot'))}. Type *hi* for the menu.",
                 )
                 return
+            # The coupon stopped working between the preview and the tap (the
+            # last use was taken, it expired): say so and show the summary
+            # again without it, the seat still held.
+            if data.get("coupon_code"):
+                dropped = data.pop("coupon_code")
+                try:
+                    requote = await self._visit_quote(customer_id, data)
+                except AppException:
+                    requote = {}
+                if requote:
+                    await self._send_confirm(
+                        wa_id, phone, data, requote, header=f"Coupon {dropped} can't be used any more ({exc.message.rstrip('.')}).\nConfirm your booking:",
+                    )
+                    return
             # Most common real cause: the slot filled up (web + WhatsApp
             # draw from the same capacity pool) between listing and
             # confirming — offer a fresh pick rather than dead-ending.

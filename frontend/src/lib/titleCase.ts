@@ -10,7 +10,10 @@
  */
 export function toTitle(value: string | null | undefined): string {
   if (!value) return "";
-  return value.replace(/_/g, " ").replace(/(^|[\s(/-])(\p{Ll})/gu, (_m, lead: string, ch: string) => lead + ch.toUpperCase());
+  // A <tag> / </tag> token is matched first and passed through untouched, so "</b>" never becomes "</B>".
+  return value
+    .replace(/_/g, " ")
+    .replace(/<[^<>]*>|(^|[\s(/-])(\p{Ll})/gu, (m, lead?: string, ch?: string) => (ch === undefined ? m : (lead ?? "") + ch.toUpperCase()));
 }
 
 /** "Hatchback · Star Wash" from whichever of the two is known (empty when neither). */

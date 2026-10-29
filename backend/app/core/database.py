@@ -205,6 +205,10 @@ _CRITICAL_INDEXES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     # Manager paybacks (MONEY-2): one record per idempotency key — a
     # double submit / retried request never pays back twice.
     ("customer_paybacks", ("key",), "uniq_customer_payback_key"),
+    # Booking money-change history (discounts, admin edits): one immutable row
+    # per change, idempotent on its key; a booking's rows are numbered.
+    ("booking_adjustments", ("key",), "uniq_booking_adjustment_key"),
+    ("booking_adjustments", ("booking_id", "seq"), "uniq_booking_adjustment_seq"),
 )
 
 
@@ -415,6 +419,15 @@ async def create_indexes() -> None:
             logger.warning("Unique index build skipped: %s", exc)
 
     await db.coupons.create_index("code", unique=True, sparse=True)
+    # Coupon bundles (services/coupon_bundle_service.py): `code` is globally
+    # unique — the final word on duplicates, and the redemption lookup — and
+    # the rest serve the admin table (status = is_active + used_count ranges,
+    # sorted by date added / date used, all inside one bundle).
+    await db.coupon_codes.create_index("code", unique=True)
+    await db.coupon_codes.create_index([("bundle_id", 1), ("used_count", 1), ("is_active", 1)])
+    await db.coupon_codes.create_index([("bundle_id", 1), ("added_at", -1), ("_id", -1)])
+    await db.coupon_codes.create_index([("bundle_id", 1), ("last_used_at", -1)])
+    await db.coupon_bundles.create_index([("is_deleted", 1), ("created_at", -1)])
 
     await db.notifications.create_index("user_id")
     await db.notifications.create_index("is_read")
@@ -630,6 +643,11 @@ async def create_indexes() -> None:
     await db.customer_paybacks.create_index([("service_center_id", 1), ("created_at", -1)])
     await db.customer_paybacks.create_index("booking_id")
     await db.customer_paybacks.create_index([("customer_id", 1), ("created_at", -1)])
+    # Booking money-change history (BookingAdjustService / admin edit).
+    await db.booking_adjustments.create_index("key", unique=True, name="uniq_booking_adjustment_key")
+    await db.booking_adjustments.create_index([("booking_id", 1), ("seq", 1)], unique=True, name="uniq_booking_adjustment_seq")
+    await db.booking_adjustments.create_index([("service_center_id", 1), ("created_at", -1)])
+    await db.booking_adjustments.create_index([("actor_id", 1), ("created_at", -1)])
     # NOTIFY: once-per-event notification claims expire after 60 days; the
     # WhatsApp queue's delivery-failure view (failed rows, newest first).
     await db.notification_claims.create_index("created_at", expireAfterSeconds=60 * 24 * 3600)

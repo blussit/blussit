@@ -192,7 +192,15 @@ async def ws_endpoint(websocket: WebSocket, token: str = ""):
 
     try:
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except ValueError:
+                # Not JSON: a clean 1003 close, not a logged traceback.
+                await websocket.close(code=1003)
+                return
+            if not isinstance(data, dict):
+                await websocket.send_json({"type": "error", "message": "Send a JSON object"})
+                continue
             action = data.get("action")
             channel = data.get("channel")
             if not isinstance(channel, str) or not channel:

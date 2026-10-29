@@ -51,7 +51,7 @@ export function CustomerLookup() {
 
   return (
     <>
-      <div ref={boxRef} className="relative w-36 sm:w-64">
+      <div ref={boxRef} className="relative w-40 sm:w-64">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5F6878]" />
         <input
           type="search"
@@ -63,7 +63,7 @@ export function CustomerLookup() {
           onFocus={() => setOpen(true)}
           placeholder="Find customer"
           aria-label="Find a customer by name or phone"
-          className="w-full rounded-full border border-[#E4E9F1] bg-white py-1.5 pl-9 pr-3 text-sm text-[#0E1A33] placeholder:text-[#9AA3B2] transition-[border-color,box-shadow] hover:border-[#C9D6EA] focus:border-[#0A66F0] focus:outline-none focus:ring-[3px] focus:ring-[#0A66F0]/15 focus-visible:outline-none"
+          className="min-h-10 w-full text-ellipsis rounded-full border border-[#E4E9F1] bg-white py-1.5 pl-9 pr-3 text-sm text-[#0E1A33] placeholder:text-[#9AA3B2] transition-[border-color,box-shadow] hover:border-[#C9D6EA] focus:border-[#0A66F0] focus:outline-none focus:ring-[3px] focus:ring-[#0A66F0]/15 focus-visible:outline-none"
         />
         {showList && (
           <div

@@ -20,6 +20,22 @@ const emptyForm = {
   is_default: false,
 };
 
+/** "75, New Palasia, Indore, Madhya Pradesh - 452001": the saved line1 already
+ *  carries the pin's area and city, so a city/state that is already one of its
+ *  comma-separated parts (any case) isn't repeated. */
+function addressLine(a: { line1: string; city: string; state: string; pincode: string }) {
+  const parts = a.line1.split(",").map((p) => p.trim()).filter(Boolean);
+  const seen = new Set(parts.map((p) => p.toLowerCase()));
+  for (const extra of [a.city, a.state]) {
+    const t = (extra || "").trim();
+    if (t && !seen.has(t.toLowerCase())) {
+      parts.push(t);
+      seen.add(t.toLowerCase());
+    }
+  }
+  return `${parts.join(", ")}${a.pincode ? ` - ${a.pincode}` : ""}`;
+}
+
 export default function AddressesPage() {
   const queryClient = useQueryClient();
   const confirm = useConfirm();
@@ -111,6 +127,7 @@ export default function AddressesPage() {
                   {a.is_default && <Badge>Default</Badge>}
                   <button
                     title="Edit"
+                    aria-label={`Edit ${a.label}`}
                     onClick={() => {
                       setEditingId(a.id);
                       setLocation(null);
@@ -132,14 +149,14 @@ export default function AddressesPage() {
                   >
                     <Pencil className="h-4 w-4" />
                   </button>
-                  <button onClick={() => handleDelete(a.id, a.label)} className="text-gray-400 hover:text-[var(--color-error)]">
+                  <button title="Remove" aria-label={`Remove ${a.label}`} onClick={() => handleDelete(a.id, a.label)} className="text-gray-400 hover:text-[var(--color-error)]">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               </div>
               <h3 className="mt-3 font-semibold text-[#0E1A33]">{a.label}</h3>
               <p className="mt-0.5 text-sm text-gray-600">
-                {a.line1}, {a.city}, {a.state} - {a.pincode}
+                {addressLine(a)}
               </p>
               {a.latitude == null && (
                 <p className="mt-1.5 text-xs text-amber-700">No map pin — edit to add one.</p>
@@ -165,6 +182,12 @@ export default function AddressesPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
+            // The pincode box (shown when the map is unavailable) takes exactly 6 digits;
+            // a pincode that came from the map pin is checked the same way when present.
+            if ((mapsDown || form.pincode) && !/^\d{6}$/.test(form.pincode.trim())) {
+              setError("Enter a valid 6-digit pincode.");
+              return;
+            }
             createMutation.mutate();
           }}
         >
@@ -195,7 +218,17 @@ export default function AddressesPage() {
                 <Input label="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required />
                 <Input label="State" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} required />
               </div>
-              <Input label="Pincode" value={form.pincode} onChange={(e) => setForm({ ...form, pincode: e.target.value })} required />
+              <Input
+                label="Pincode"
+                value={form.pincode}
+                onChange={(e) => setForm({ ...form, pincode: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+                inputMode="numeric"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                autoComplete="postal-code"
+                title="6-digit pincode"
+                required
+              />
             </>
           )}
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">

@@ -32,7 +32,7 @@ class CouponController:
         return success(None, "Coupon deleted successfully")
 
     async def validate(self, current_user: CurrentUser, payload: CouponValidateRequest):
-        coupon, discount = await self.service.validate_and_compute_discount(payload.code, payload.order_value, current_user.id)
+        coupon, discount = await self.service.validate_and_compute_discount(payload.code, payload.order_value, current_user.id, use=payload.use)
         return success({"valid": True, "discount_amount": discount, "coupon_code": coupon["code"]}, "Coupon is valid")
 
     async def public_offer(self, code: str):

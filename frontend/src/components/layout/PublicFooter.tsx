@@ -78,7 +78,7 @@ export function PublicFooter() {
         <div className="grid grid-cols-2 gap-x-6 gap-y-9 py-10 sm:py-14 lg:grid-cols-[1.6fr_1fr_1fr_1fr_1fr] lg:gap-8">
           {/* Brand */}
           <div className="col-span-2 lg:col-span-1 lg:pr-10">
-            <a href="/" className="inline-flex items-center" aria-label="BLUSSIT Home">
+            <a href="/" className="-my-2.5 inline-flex min-h-11 items-center" aria-label="BLUSSIT Home">
               <img src="/img/blussit-logo-480.webp" width={480} height={63} alt="Blussit" className="h-[24px] w-auto object-contain" />
             </a>
 
@@ -102,7 +102,7 @@ export function PublicFooter() {
                   target="_blank"
                   rel="noreferrer"
                   aria-label={social.label}
-                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[#D6DEEA] bg-white text-[#0E1A33] transition-colors hover:border-[#0A66F0] hover:bg-[#0A66F0] hover:text-white"
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-[#D6DEEA] bg-white text-[#0E1A33] transition-colors hover:border-[#0A66F0] hover:bg-[#0A66F0] hover:text-white"
                 >
                   <social.icon className="h-4 w-4" />
                 </a>
@@ -129,13 +129,13 @@ export function PublicFooter() {
 
         {/* Bottom */}
         <div className="flex flex-col gap-4 border-t border-[#E4EBF5] py-6 md:flex-row md:items-center md:justify-between">
-          <ul className="flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7">
+          <ul className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7">
             {CONTACT.map(({ icon: Icon, label, href, external }) => (
               <li key={label}>
                 <a
                   href={href}
                   {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-                  className="flex items-center gap-2 text-[13.5px] font-medium transition-colors hover:text-[#0A66F0]"
+                  className="flex min-h-10 items-center gap-2 text-[13.5px] font-medium transition-colors hover:text-[#0A66F0]"
                 >
                   <Icon className="h-4 w-4 shrink-0 text-[#0A66F0]" aria-hidden="true" />
                   {label}

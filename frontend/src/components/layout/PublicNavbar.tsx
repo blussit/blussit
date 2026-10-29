@@ -37,7 +37,7 @@ function BlussitLogo({ onClick }: { onClick?: (e: React.MouseEvent) => void }) {
     <Link
       to="/"
       onClick={onClick}
-      className="flex flex-col items-start group cursor-pointer"
+      className="flex min-h-10 flex-col items-start justify-center group cursor-pointer"
     >
       <img
         src="/img/blussit-logo-480.webp"

@@ -100,6 +100,9 @@ const AdminPricingPage = lazy(() => import("./pages/admin/AdminPricingPage"));
 const AdminSubscriptionPlansPage = lazy(() => import("./pages/admin/AdminSubscriptionPlansPage"));
 const AdminPurchasedPlansPage = lazy(() => import("./pages/admin/AdminPurchasedPlansPage"));
 const AdminCouponsPage = lazy(() => import("./pages/admin/AdminCouponsPage"));
+const AdminCouponBundlesPage = lazy(() => import("./pages/admin/AdminCouponBundlesPage"));
+const AdminCouponBundleImportPage = lazy(() => import("./pages/admin/AdminCouponBundleImportPage"));
+const AdminCouponBundleDetailPage = lazy(() => import("./pages/admin/AdminCouponBundleDetailPage"));
 const AdminComplaintsPage = lazy(() => import("./pages/admin/AdminComplaintsPage"));
 const AdminReviewsPage = lazy(() => import("./pages/admin/AdminReviewsPage"));
 const AdminAuditLogsPage = lazy(() => import("./pages/admin/AdminAuditLogsPage"));
@@ -279,6 +282,10 @@ export default function App() {
                 <Route path="purchased-plans" element={<AdminPurchasedPlansPage />} />
                 <Route path="custom-plans" element={<AdminCustomPlansPage />} />
                 <Route path="coupons" element={<AdminCouponsPage />} />
+                <Route path="coupons/bundles" element={<AdminCouponBundlesPage />} />
+                <Route path="coupons/bundles/new" element={<AdminCouponBundleImportPage />} />
+                <Route path="coupons/bundles/:id" element={<AdminCouponBundleDetailPage />} />
+                <Route path="coupons/bundles/:id/add" element={<AdminCouponBundleImportPage />} />
                 <Route path="complaints" element={<AdminComplaintsPage />} />
                 <Route path="reviews" element={<AdminReviewsPage />} />
                 <Route path="audit-logs" element={<AdminAuditLogsPage />} />

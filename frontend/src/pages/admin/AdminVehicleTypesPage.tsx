@@ -115,13 +115,25 @@ export default function AdminVehicleTypesPage() {
             header: "",
             accessor: (t) => (
               <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-                <Button size="sm" variant="outline" onClick={() => openEdit(t)}>
+                <Button size="sm" variant="outline" aria-label={`Edit ${toTitle(t.name)}`} title="Edit" onClick={() => openEdit(t)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(t)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={t.is_active ? `Deactivate ${toTitle(t.name)}` : `Activate ${toTitle(t.name)}`}
+                  title={t.is_active ? "Deactivate" : "Activate"}
+                  isLoading={toggleActiveMutation.isPending}
+                  onClick={async () => {
+                    if (t.is_active && !(await confirm({ title: `Deactivate "${toTitle(t.name)}"?`, message: "It disappears from the booking pages until you activate it again.", confirmLabel: "Deactivate", tone: "danger" }))) return;
+                    toggleActiveMutation.mutate(t);
+                  }}
+                >
                   <Power className={`h-3.5 w-3.5 ${t.is_active ? "" : "opacity-40"}`} />
                 </Button>
                 <Button
+                  aria-label={`Delete ${toTitle(t.name)}`}
+                  title="Delete"
                   size="sm"
                   variant="ghost"
                   isLoading={deleteMutation.isPending}

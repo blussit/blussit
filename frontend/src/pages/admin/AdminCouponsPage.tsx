@@ -6,6 +6,9 @@ import { Badge, Button, DataTable, Input, Modal, Select } from "../../components
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { Pager } from "../../components/shared/ListControls";
+import { CouponTabs } from "../../components/admin/CouponTabs";
+import { CouponRulesFields, emptyRules, rulesFromRecord, rulesToPayload, type RulesForm } from "../../components/admin/CouponRulesFields";
+import { appliesText } from "./AdminCouponBundlesPage";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
 import type { Coupon } from "../../types";
@@ -21,6 +24,9 @@ const emptyForm = {
   free_addon_keywords: "",
   valid_from: "",
   valid_until: "",
+  max_discount_amount: "",
+  total_usage_limit: "",
+  usage_limit_per_user: "1",
 };
 
 export default function AdminCouponsPage() {
@@ -36,18 +42,21 @@ export default function AdminCouponsPage() {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [rules, setRules] = useState<RulesForm>(emptyRules);
   const [error, setError] = useState("");
 
   const closeModal = () => {
     setOpen(false);
     setEditingId(null);
     setForm(emptyForm);
+    setRules(emptyRules);
     setError("");
   };
 
   const openCreate = () => {
     setEditingId(null);
     setForm(emptyForm);
+    setRules(emptyRules);
     setOpen(true);
   };
 
@@ -68,11 +77,19 @@ export default function AdminCouponsPage() {
       free_addon_keywords: (c.free_addon_keywords || []).join(", "),
       valid_from: c.valid_from.slice(0, 10),
       valid_until: c.valid_until.slice(0, 10),
+      max_discount_amount: c.max_discount_amount != null ? String(c.max_discount_amount) : "",
+      total_usage_limit: c.total_usage_limit != null ? String(c.total_usage_limit) : "",
+      usage_limit_per_user: String(c.usage_limit_per_user ?? 1),
     });
+    setRules(rulesFromRecord(c));
     setOpen(true);
   };
 
   const buildPayload = () => ({
+    ...(rulesToPayload(rules).fields ?? {}),
+    max_discount_amount: form.coupon_type === "percentage" && form.max_discount_amount ? Number(form.max_discount_amount) : null,
+    total_usage_limit: form.total_usage_limit ? Number(form.total_usage_limit) : null,
+    usage_limit_per_user: Math.max(1, Number(form.usage_limit_per_user) || 1),
     // null (not omitted) so a cleared description actually clears.
     description: form.description.trim() || null,
     offer_kind: form.offer_kind,
@@ -137,6 +154,7 @@ export default function AdminCouponsPage() {
           <Plus className="h-4 w-4" /> Add Coupon
         </Button>
       </div>
+      <CouponTabs />
 
       <DataTable<Coupon>
         isLoading={isLoading}
@@ -150,6 +168,22 @@ export default function AdminCouponsPage() {
           { header: "Type", accessor: (c) => <span className="capitalize">{c.coupon_type}</span> },
           { header: "Value", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Configured" : c.coupon_type === "percentage" ? `${c.value}%` : `₹${c.value}`) },
           { header: "Min Order", accessor: (c) => `₹${c.min_order_value}` },
+          { header: "Applies To", accessor: (c) => appliesText(c.applies_to ?? ["services", "plans", "society"]) },
+          {
+            header: "Restrictions",
+            accessor: (c) => {
+              const bits = [
+                c.new_customers_only ? "New Customers" : c.first_booking_only ? "First Booking" : "",
+                c.applicable_service_ids?.length ? `${c.applicable_service_ids.length} Services` : "",
+                c.applicable_vehicle_types?.length ? `${c.applicable_vehicle_types.length} Car Types` : "",
+                c.applicable_center_ids?.length ? `${c.applicable_center_ids.length} Centers` : "",
+                c.allowed_customer_phones?.length ? `${c.allowed_customer_phones.length} Customers` : "",
+                c.allowed_weekdays?.length || c.time_window_start ? "Days / Hours" : "",
+              ].filter(Boolean);
+              return bits.length ? bits.join(" · ") : "None";
+            },
+          },
+          { header: "Used", accessor: (c) => <span className="font-mono-num">{c.total_used ?? 0}{c.total_usage_limit ? ` / ${c.total_usage_limit}` : ""}</span> },
           { header: "Valid Until", accessor: (c) => format(c.valid_until) },
           { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
           {
@@ -188,12 +222,14 @@ export default function AdminCouponsPage() {
       />
       {data?.meta && <Pager page={page} totalPages={data.meta.total_pages} total={data.meta.total} onPage={setPage} busy={isFetching} />}
 
-      <Modal open={open} onClose={closeModal} title={editingId ? `Edit ${form.code}` : "Add Coupon"}>
+      <Modal open={open} onClose={closeModal} title={editingId ? `Edit ${form.code}` : "Add Coupon"} maxWidth="max-w-2xl">
         <form
           className="space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
+            const check = rulesToPayload(rules);
+            if (!check.fields) return setError(check.error || "Check the rules.");
             if (editingId) updateMutation.mutate();
             else createMutation.mutate();
           }}
@@ -245,10 +281,18 @@ export default function AdminCouponsPage() {
               />
             </div>
           )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {form.offer_kind === "standard" && form.coupon_type === "percentage" && (
+              <Input label="Max Discount (₹)" type="number" min={0} value={form.max_discount_amount} placeholder="No Cap" onChange={(e) => setForm({ ...form, max_discount_amount: e.target.value })} />
+            )}
+            <Input label="Total Uses (All Customers)" type="number" min={1} value={form.total_usage_limit} placeholder="Unlimited" onChange={(e) => setForm({ ...form, total_usage_limit: e.target.value })} />
+            <Input label="Uses Per Customer" type="number" min={1} value={form.usage_limit_per_user} onChange={(e) => setForm({ ...form, usage_limit_per_user: e.target.value })} />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <Input label="Valid From" type="date" value={form.valid_from} onChange={(e) => setForm({ ...form, valid_from: e.target.value })} required />
             <Input label="Valid Until" type="date" value={form.valid_until} onChange={(e) => setForm({ ...form, valid_until: e.target.value })} required />
           </div>
+          <CouponRulesFields rules={rules} setRules={setRules} />
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={editingId ? updateMutation.isPending : createMutation.isPending}>
             {editingId ? "Save Changes" : "Add Coupon"}

@@ -74,7 +74,7 @@ function Breadcrumbs({ crumbs }: { crumbs: Crumb[] }) {
                 {c.label}
               </span>
             ) : (
-              <Link to={c.path} className="hover:underline">
+              <Link to={c.path} className="-my-2.5 py-2.5 hover:underline">
                 {c.label}
               </Link>
             )}

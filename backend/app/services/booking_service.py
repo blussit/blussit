@@ -26,6 +26,7 @@ from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
 from app.repositories.vehicle_type_repository import VehicleTypeRepository
 from app.services.customer_location_service import note_booking_created
+from app.utils.coupon_codes import mask_code
 from app.utils.slots import format_slot_12h, generate_slots
 from app.utils.text import normalize_plate
 from app.schemas.booking_schema import (
@@ -445,9 +446,18 @@ _CUSTOMER_HIDDEN_FIELDS = (
     # captain_wallet_posted is his earning minus the cash he holds — the
     # captain's pay by another name (security review 2026-10-07).
     "captain_wallet_posted", "captain_cash_collected", "captain_wallet_captain_id", "captain_wallet_rev",
+    # Who discounted / edited the booking and why, and the admin's notes and
+    # payment corrections: between the staff and the books.
+    "manager_discount_by", "manager_discount_reason", "manager_discount_by_name", "admin_notes", "admin_edit_rev",
+    "admin_edited_at", "admin_edited_by", "payment_adjustments", "version",
+    # The payment rows carry internal keys and who recorded each one.
+    "payments", "payment_keys", "cash_collected_by",
 )
 _CAPTAIN_HIDDEN_FIELDS = (
     "platform_earning",
+    "manager_discount", "manager_discount_by", "manager_discount_reason", "manager_discount_by_name", "manager_discount_at",
+    "admin_notes", "admin_edit_rev", "admin_edited_at", "admin_edited_by", "payment_adjustments", "version",
+    "payments", "payment_keys",
     # Money a manager paid BACK to the customer for this booking (MONEY-2):
     # between the center and the customer — the captain never sees it. The
     # customer's own view keeps it (it's their money).
@@ -604,7 +614,7 @@ class _HeldCouponCheck(CouponService):
         super().__init__(db)
         self._held = coupon
 
-    async def _valid_coupon(self, code: str, order_value: float, user_id: str | None = None) -> dict:
+    async def _valid_coupon(self, code: str, order_value: float, user_id: str | None = None, **_ignored) -> dict:
         minimum = float(self._held.get("min_order_value", 0) or 0)
         if order_value < minimum:
             raise BadRequestException(f"Minimum order value of ₹{minimum:g} required for this coupon")
@@ -994,6 +1004,8 @@ class BookingService:
             coupon_code=payload.coupon_code,
             as_of=_completed_by["service_at"] if _completed_by else None,
             scheduled_date=payload.scheduled_date,
+            center_id=str(service_center["_id"]),
+            scheduled_slot=payload.scheduled_slot,
         )
         subtotal = priced["subtotal"]
         discount_amount = priced["discount_amount"]
@@ -1201,7 +1213,7 @@ class BookingService:
             # balance as wallet_due_carried instead.
             "cancellation_charge": 0.0,
             "cancellation_charge_ids": [],
-            "coupon_code": payload.coupon_code if not payload.subscription_id else None,
+            "coupon_code": coupon["code"] if coupon is not None and not payload.subscription_id else None,
             "subscription_consumption": subscription_consumption,
             "customer_notes": payload.customer_notes,
             "alternate_contact_name": payload.alternate_contact_name,
@@ -1495,7 +1507,7 @@ class BookingService:
         try:
             await self.coupon_service.reverse_usage(coupon["code"], customer_id, booking_id)
         except Exception:  # noqa: BLE001
-            logger.exception("Could not release coupon %s reserved for booking %s", coupon.get("code"), booking_id)
+            logger.exception("Could not release coupon %s reserved for booking %s", mask_code(coupon.get("code")), booking_id)
 
     async def _announce_confirmed_booking(self, booking: dict, manager_id: str | None, date_str: str, background: bool = True) -> None:
         """The two messages a REAL booking sends: the customer's confirmation
@@ -1951,6 +1963,11 @@ class BookingService:
         # distance charge on one made a plan car payable (audit PRICE-05/06).
         # quote_visit picks the same car.
         paying = self._paying_index(cars)
+        # A coupon on a visit where a plan pays for some (not all) cars only
+        # when the coupon allows combining with plans (coupon_rules).
+        await self.coupon_service.check_visit_plan_mix(
+            payload.coupon_code, sum(1 for c in cars if c.subscription_id), len(cars),
+        )
         if apply_charges is None:
             apply_charges = source == "app"
         try:
@@ -3324,6 +3341,8 @@ class BookingService:
         coupon_code: str | None,
         as_of: datetime | None = None,
         scheduled_date=None,
+        center_id: str | None = None,
+        scheduled_slot: str | None = None,
     ) -> dict:
         """THE price of one car: per-vehicle-type price (or the first-time
         price), then EITHER its plan's waiver OR a coupon. create_booking
@@ -3360,6 +3379,13 @@ class BookingService:
                 vehicle_type=vehicle_type,
                 first_time_eligible=first_time_eligible,
                 price_resolver=self._resolve_price,
+                # What the coupon rules look at beyond the cart: where, when
+                # (the booking's own day / slot) and whether a first-wash
+                # price already cut this bill (coupon_rules: stackable).
+                center_id=center_id,
+                scheduled_date=scheduled_date,
+                scheduled_slot=scheduled_slot,
+                offer_applied=subtotal < subtotal_at(False),
             )
         # A discount can legitimately be computed above the subtotal (a combo
         # priced below the sum of its parts under a full-waive legacy plan) —
@@ -3494,6 +3520,13 @@ class BookingService:
         paying = self._paying_index([car for _line, car in units])
         if coupon_code and not log_mode and all(car.subscription_id for _line, car in units):
             coupon_error = "Your plan already covers this wash — a coupon can't be used on it."
+        elif coupon_code and not log_mode and any(car.subscription_id for _line, car in units):
+            try:
+                await self.coupon_service.check_visit_plan_mix(
+                    coupon_code, sum(1 for _line, car in units if car.subscription_id), len(units),
+                )
+            except BadRequestException as exc:
+                coupon_error, coupon_code = exc.message, None
         line_rows = [
             {"line_index": i, "vehicle_type": vehicle_type, "quantity": quantity, "subtotal": 0.0,
              "regular_subtotal": 0.0, "plan_discount": 0.0, "coupon_discount": 0.0, "plan_covered": 0, "total": 0.0,
@@ -4573,6 +4606,9 @@ class BookingService:
                 ]
             doc["tip_updated_by_name"] = (captains.get(booking.get("tip_updated_by") or "") or {}).get("full_name")
             doc["manager_discount_by_name"] = (captains.get(booking.get("manager_discount_by") or "") or {}).get("full_name")
+            from app.services.booking_adjust_service import booking_version
+
+            doc["version"] = booking_version(booking)
             results.append(doc)
         return results
 
@@ -6991,6 +7027,22 @@ class BookingService:
             )
         return data
 
+    MAX_RESCHEDULES_PER_HOUR = 8
+
+    async def _ensure_reschedule_rate(self, booking_id: str) -> None:
+        """A booking can be moved at most MAX_RESCHEDULES_PER_HOUR times an
+        hour, by anyone: a loop of moves would churn the seat counters, the
+        captain's alerts and the customer's WhatsApp. Counted from the audit
+        rows every reschedule leaves."""
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
+        moved = await self.db.audit_logs.count_documents(
+            {"action": "RESCHEDULE_BOOKING", "target_id": booking_id, "created_at": {"$gte": since}}
+        )
+        if moved >= self.MAX_RESCHEDULES_PER_HOUR:
+            from app.core.exceptions import TooManyRequestsException
+
+            raise TooManyRequestsException("This booking was moved many times in the last hour — wait a while before moving it again.")
+
     async def reschedule_booking(
         self,
         booking_id: str,
@@ -7044,7 +7096,11 @@ class BookingService:
             # the captain not on the way. An assigned captain is released.
             self._ensure_customer_may_edit(cars)
         for car in movers:
-            _ensure_transition_allowed(car["status"], BookingStatus.RESCHEDULED.value)
+            # A still-unpaid booking moves but stays "awaiting payment" (like
+            # a customer edit); every other live state steps to "rescheduled".
+            if car["status"] != BookingStatus.AWAITING_PAYMENT.value:
+                _ensure_transition_allowed(car["status"], BookingStatus.RESCHEDULED.value)
+        await self._ensure_reschedule_rate(booking_id)
 
         policy = await self.policy_service.get_policy()
         service_center = await self.center_repo.find_by_id(booking["service_center_id"])
@@ -7068,6 +7124,9 @@ class BookingService:
 
         for car in movers:
             await ensure_subscription_covers_date(self.db, car.get("subscription_id"), payload.scheduled_date)
+            # The coupon travels with the booking, but its weekday / time
+            # window must hold for the NEW time (coupon_rules).
+            await self.coupon_service.check_held_when(car.get("coupon_code"), payload.scheduled_date, payload.scheduled_slot)
         new_slot_start, new_slot_end = _resolve_slot_window(service_center, payload.scheduled_date, payload.scheduled_slot, policy)
         if _slot_cutoff_passed(new_slot_end, policy):
             raise BadRequestException("This slot is no longer available to book — please pick another slot.")
@@ -7101,10 +7160,13 @@ class BookingService:
                 # Guarded on what was just read in this transaction — the
                 # DATE too: a double-submitted move to a new day with the
                 # same slot key passed a status+slot guard twice.
+                moved_fields = self._reschedule_fields(car, payload, new_slot_start, new_slot_end)
+                if car["status"] == BookingStatus.AWAITING_PAYMENT.value:
+                    moved_fields.update({"status": BookingStatus.AWAITING_PAYMENT.value, "awaiting_assignment_since": None})
                 result = await self.repo.update_if(
                     car_id,
                     {"status": car["status"], "scheduled_slot": car["scheduled_slot"], "scheduled_date": car["scheduled_date"]},
-                    self._reschedule_fields(car, payload, new_slot_start, new_slot_end),
+                    moved_fields,
                     session=session,
                 )
                 if result is None:
@@ -7127,7 +7189,7 @@ class BookingService:
             {"field": "scheduled_slot", "from": booking["scheduled_slot"], "to": payload.scheduled_slot},
         ]
         for car_id in mover_ids:
-            await self._record_history(car_id, BookingStatus.RESCHEDULED, actor_id, note, changes=changes)
+            await self._record_history(car_id, BookingStatus((moved.get(car_id) or {}).get("status") or BookingStatus.RESCHEDULED.value), actor_id, note, changes=changes)
         # The audit row is written HERE so every channel leaves one (the
         # WhatsApp bot's reschedule used to leave none).
         from app.services.audit_service import AuditService
@@ -7234,6 +7296,8 @@ class BookingService:
             _c, discount = await _HeldCouponCheck(self.db, coupon).validate_and_compute_booking_discount(
                 code, subtotal, None, services=services, quantities=quantities, vehicle_type=vehicle_type,
                 first_time_eligible=first_time, price_resolver=self._resolve_price,
+                center_id=car.get("service_center_id"), scheduled_date=car.get("scheduled_date"),
+                scheduled_slot=car.get("scheduled_slot"),
             )
         except BadRequestException as exc:
             return 0.0, exc.message
@@ -7372,6 +7436,7 @@ class BookingService:
             await ensure_society_lead_time(self.db, lead.get("subscription_id"), payload.scheduled_date, "app" if actor_role == "customer" else "staff")
             for car in visit:
                 await ensure_subscription_covers_date(self.db, car.get("subscription_id"), payload.scheduled_date)
+                await self.coupon_service.check_held_when(car.get("coupon_code"), payload.scheduled_date, new_slot)
             new_start, new_end = _resolve_slot_window(center, payload.scheduled_date, new_slot, policy)
             if _slot_cutoff_passed(new_end, policy):
                 raise BadRequestException("This slot is no longer available to book — please pick another slot.")
@@ -7493,6 +7558,14 @@ class BookingService:
                         dropped_coupons.append(car)
                         fields["coupon_code"] = None
                 discount = min(discount, subtotal)
+                # A manager's discount on the booking (BookingAdjustService)
+                # survives the customer re-pricing it — as far as the new
+                # price can still bear it.
+                kept_md = min(float(car.get("manager_discount") or 0), max(0.0, subtotal - discount))
+                kept_md = float(int(kept_md + 1e-9))
+                if kept_md != float(car.get("manager_discount") or 0):
+                    fields["manager_discount"] = kept_md
+                discount = round(discount + kept_md, 2)
                 fields.update({
                     "vehicle_id": plan["vehicle_id"], "vehicle_type": plan["vehicle_type"], "vehicle_label": plan["vehicle_label"],
                     "vehicle_registration_number": plan["vehicle_registration_number"], "visit_line_key": plan["visit_line_key"],

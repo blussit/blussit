@@ -172,6 +172,19 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100
 
+    # ---- Coupon bundles (single-use code imports; services/coupon_bundle_service)
+    # CSV upload ceiling (bytes) and rows; codes are written in batches.
+    COUPON_BUNDLE_MAX_BYTES: int = 2 * 1024 * 1024
+    COUPON_BUNDLE_MAX_ROWS: int = 100_000
+    COUPON_BUNDLE_BATCH_SIZE: int = 5000
+    # Code-guessing guard: refused-code attempts (unknown / switched off /
+    # expired / used up) per user and per device, and (roomier, shared
+    # carrier IPs) per IP, inside the window; past it every coupon check
+    # from that source is held until the window ends. 0 switches it off.
+    COUPON_MISS_LIMIT: int = 10
+    COUPON_MISS_IP_LIMIT: int = 40
+    COUPON_MISS_WINDOW_SECONDS: int = 600
+
     # WhatsApp messaging (OTPs, temp passwords, purchase/booking updates) —
     # same provider-abstraction shape as STORAGE_PROVIDER above.
     # "log" (default) never calls a real API: it writes every message to

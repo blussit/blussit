@@ -39,8 +39,9 @@ export function WizardShell({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[220px_1fr] lg:gap-10">
         {/* Rail — a real list on desktop, a compact tick strip on phones. */}
         <div className="lg:sticky lg:top-24 lg:self-start">
+          {/* One h1 for both layouts (it used to be rendered twice, once per breakpoint). */}
+          <h1 className="font-display text-2xl font-bold text-[#0E1A33] lg:text-xl lg:leading-tight">{title}</h1>
           <div className="hidden lg:block">
-            <h1 className="font-display text-xl font-bold leading-tight text-[#0E1A33]">{title}</h1>
             <ol className="mt-6 space-y-1">
               {steps.map((label, i) => {
                 const done = i < current;
@@ -80,7 +81,6 @@ export function WizardShell({
 
           {/* Mobile: title + a progress strip, nothing else. */}
           <div className="lg:hidden">
-            <h1 className="font-display text-2xl font-bold text-[#0E1A33]">{title}</h1>
             <div className="mt-3 flex items-center gap-3">
               <div className="flex flex-1 items-center gap-1.5">
                 {steps.map((label, i) => (

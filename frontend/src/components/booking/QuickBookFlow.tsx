@@ -278,7 +278,10 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [date, setDate] = useState(todayIST());
   const [slot, setSlot] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "online">("cash");
+  // The coupon the customer APPLIED (sent with the quote and the booking) and
+  // the text they are still typing — so half-typed codes are never quoted.
   const [couponCode, setCouponCode] = useState("");
+  const [couponDraft, setCouponDraft] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [altName, setAltName] = useState("");
@@ -922,7 +925,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         lines: quoteLines,
         customer_phone: quotePhone,
         ...quoteAddress,
-        coupon_code: isManager && !isLog && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
+        coupon_code: !isLog && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
         ...(isLog ? { mode: "log" as const, scheduled_date: date, service_time: logTime || undefined } : {}),
       }
     : null;
@@ -1328,7 +1331,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     if (coverage !== "covered") next.location = next.location || "We need a serviceable address to continue.";
     if (!date) next.date = "Choose a date.";
     if (!slot) next.slot = "Choose a time slot.";
-    if (couponCode.trim().length > 20) next.couponCode = "Coupon code can be up to 20 characters.";
+    if (couponCode.trim().length > 32) next.couponCode = "Coupon code can be up to 32 characters.";
     if (altPhone.trim() && !validateIndianMobile(altPhone)) next.altPhone = "Enter a valid 10-digit mobile number.";
     setFieldErrors(next);
     return Object.keys(next).length === 0;
@@ -1429,7 +1432,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         scheduled_date: date,
         scheduled_slot: slot,
         payment_method: payable > 0 ? payMethod : "cash",
-        coupon_code: isManager && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
+        coupon_code: !isLog && couponCode.trim() ? couponCode.trim().toUpperCase() : undefined,
         customer_notes: notes.trim() || undefined,
         alternate_contact_name: altName.trim() || undefined,
         alternate_contact_phone: altPhone.trim() ? validateIndianMobile(altPhone) || undefined : undefined,
@@ -2745,15 +2748,58 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     </div>
                   )}
 
-                  {payable > 0 && (
-                    <div className="max-w-sm">
-                      <Input
-                        label="Coupon Code (Optional)"
-                        value={couponCode}
-                        maxLength={20}
-                        onChange={(e) => setCouponCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                        error={fieldErrors.couponCode || liveQuote?.coupon_error || undefined}
-                      />
+                  {!isLog && (payable > 0 || !!couponCode) && (
+                    <div className="max-w-sm" data-testid="coupon-box">
+                      <p className={SECTION_LABEL}>Have A Coupon Code?</p>
+                      {couponCode ? (
+                        <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-mono-num text-sm font-semibold text-[#0E1A33]">{couponCode}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCouponCode("");
+                                setCouponDraft("");
+                              }}
+                              className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0E1A33]"
+                            >
+                              Remove Coupon
+                            </button>
+                          </div>
+                          {liveQuote?.coupon_error ? (
+                            <p className="mt-1 text-xs text-[var(--color-error)]" role="alert">{liveQuote.coupon_error}</p>
+                          ) : liveQuote && liveQuote.coupon_discount > 0 ? (
+                            <p className="mt-1 text-xs font-semibold text-[var(--color-success)]">You Save ₹{liveQuote.coupon_discount} With This Coupon</p>
+                          ) : (
+                            <p className="mt-1 text-xs text-[#5F6878]">Checking This Coupon…</p>
+                          )}
+                        </div>
+                      ) : (
+                        <form
+                          className="flex items-start gap-2"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            const code = couponDraft.replace(/\s/g, "").toUpperCase();
+                            if (code) setCouponCode(code);
+                          }}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <Input
+                              aria-label="Coupon Code"
+                              value={couponDraft}
+                              maxLength={40}
+                              placeholder="Enter Coupon Code"
+                              autoCapitalize="characters"
+                              autoComplete="off"
+                              onChange={(e) => setCouponDraft(e.target.value.toUpperCase().replace(/\s/g, ""))}
+                              error={fieldErrors.couponCode || undefined}
+                            />
+                          </div>
+                          <Button type="submit" variant="outline" disabled={!couponDraft.trim()}>
+                            Apply
+                          </Button>
+                        </form>
+                      )}
                     </div>
                   )}
 

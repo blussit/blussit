@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./staffTheme.css";
-import { Link, NavLink, useNavigate } from "react-router-dom";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Helmet } from "react-helmet-async";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import {
   Bell,
@@ -49,8 +50,14 @@ export function DashboardShell({
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const toast = useToast();
+  // Tab title: "Booking Queue | Manager | Blussit" (the longest matching nav item wins).
+  const here = [...navItems]
+    .sort((a, b) => b.to.length - a.to.length)
+    .find((i) => (i.end ? pathname === i.to : pathname === i.to || pathname.startsWith(`${i.to}/`)));
+  const pageTitle = [here?.label, portalLabel, "Blussit"].filter(Boolean).join(" | ");
 
   // "Last seen" is persisted per-user so switching accounts on the same
   // browser doesn't replay stale toasts, and survives a page reload.
@@ -246,17 +253,20 @@ export function DashboardShell({
       className="min-h-screen bg-[var(--color-surface)] [&_a]:cursor-pointer [&_button]:cursor-pointer"
       style={staffVars}
     >
+      <Helmet>
+        <title>{pageTitle}</title>
+      </Helmet>
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[248px] transform flex-col border-r border-[#E4E9F1] bg-white transition-transform duration-200 md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[248px] transform flex-col border-r border-[#E4E9F1] bg-white transition-transform duration-200 lg:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
         <div className="flex h-16 shrink-0 items-center justify-between border-b border-[#E4E9F1] px-5">
-          <Link to="/" className="flex w-full flex-col items-start" aria-label="Blussit home">
+          <Link to="/" className="flex min-h-10 w-full flex-col items-start justify-center" aria-label="Blussit home">
             <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[158px] object-contain object-left" />
           </Link>
-          <button className="md:hidden" onClick={() => setSidebarOpen(false)}>
+          <button className="-m-2.5 p-2.5 lg:hidden" aria-label="Close menu" onClick={() => setSidebarOpen(false)}>
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -305,20 +315,20 @@ export function DashboardShell({
 
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-30 bg-gray-900/30 md:hidden"
+          className="fixed inset-0 z-30 bg-gray-900/30 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* Main content */}
-      <div className="md:pl-[248px]">
+      <div className="lg:pl-[248px]">
         <header
           className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-[#E4E9F1] bg-white px-4 sm:px-6 md:px-8"
         >
-          <button className="shrink-0 rounded-lg p-1.5 md:hidden" aria-label="Open menu" onClick={() => setSidebarOpen(true)}>
+          <button className="-m-1 shrink-0 rounded-lg p-2.5 lg:hidden" aria-label="Open menu" onClick={() => setSidebarOpen(true)}>
             <Menu className="h-5 w-5" />
           </button>
-          <div className="hidden md:block" />
+          <div className="hidden lg:block" />
           <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {headerRight}
             {isStaff && notifPermission === "default" && (
@@ -336,7 +346,7 @@ export function DashboardShell({
                   requestNotificationPermission();
                   navigate("notifications");
                 }}
-                className="relative rounded-full p-2 text-gray-500 hover:bg-gray-100"
+                className="relative rounded-full p-2.5 text-gray-500 hover:bg-gray-100"
                 aria-label="Notifications"
               >
                 {notifPermission === "denied" ? (
@@ -345,7 +355,7 @@ export function DashboardShell({
                   <Bell className="h-5 w-5" />
                 )}
                 {!!notifData?.unread_count && (
-                  <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-[var(--color-error)]" />
+                  <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[var(--color-error)]" />
                 )}
               </button>
               {notifPermission === "denied" && (
@@ -358,7 +368,7 @@ export function DashboardShell({
             </div>
             <button
               onClick={() => navigate("profile")}
-              className={`flex shrink-0 items-center gap-2.5 rounded-full border py-1 pl-1 pr-1 sm:pr-3 ${
+              className={`flex min-h-10 shrink-0 items-center gap-2.5 rounded-full border py-1 pl-1 pr-1 sm:pr-3 ${
                 "border-[#E4E9F1] hover:border-[#C9D6EA]"
               }`}
             >

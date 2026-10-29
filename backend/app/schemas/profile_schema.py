@@ -69,7 +69,7 @@ class AddressCreateRequest(BaseModel):
     landmark: Optional[str] = Field(default=None, max_length=200)
     city: str = Field(max_length=100)
     state: str = Field(max_length=100)
-    pincode: str = Field(min_length=4, max_length=10)
+    pincode: str = Field(pattern=r"^[0-9]{6}$")
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     is_default: bool = False
@@ -82,7 +82,7 @@ class AddressUpdateRequest(BaseModel):
     landmark: Optional[str] = Field(default=None, max_length=200)
     city: Optional[str] = Field(default=None, max_length=100)
     state: Optional[str] = Field(default=None, max_length=100)
-    pincode: Optional[str] = Field(default=None, min_length=4, max_length=10)
+    pincode: Optional[str] = Field(default=None, pattern=r"^[0-9]{6}$")
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     is_default: Optional[bool] = None

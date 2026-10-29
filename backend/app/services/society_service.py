@@ -30,6 +30,7 @@ from app.repositories.society_repository import (
     SocietyRepository,
 )
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
+from app.utils.coupon_codes import mask_code
 from app.utils.geo import haversine_km
 from app.utils.money import round_rupees, split_whole_rupees
 from app.utils.slots import format_slot_12h
@@ -1109,10 +1110,10 @@ class SocietyService:
         from app.services.coupon_service import CouponService
 
         coupons = CouponService(self.db)
-        coupon = await coupons._valid_coupon(code, float(amount), customer_id or None)
-        if coupon.get("offer_kind", "standard") != "standard":
-            raise BadRequestException("This offer works on bookings only, not on society plans.")
-        discount = min(round_rupees(coupons._standard_discount(coupon, float(amount))), int(amount))
+        # The one central check (use "society"): active, dates, limits, who
+        # may use it, and the plan floor of ₹1.
+        coupon, discount = await coupons.validate_and_compute_discount(code, float(amount), customer_id or None, use="society")
+        discount = min(round_rupees(discount), int(amount))
         return {"code": coupon["code"], "coupon_id": str(coupon["_id"]), "discount": int(discount)}
 
     async def coupon_preview(self, code: str | None, amount: int, customer_id: str | None) -> dict | None:
@@ -1139,7 +1140,7 @@ class SocietyService:
             await coupons.record_usage(str(coupon["_id"]), customer_id, ref)
             return True
         except Exception:  # noqa: BLE001
-            logger.exception("Could not count coupon %s for %s", code, ref)
+            logger.exception("Could not count coupon %s for %s", mask_code(code), ref)
             return False
 
     @staticmethod
@@ -1840,7 +1841,7 @@ class SocietyService:
         try:
             await CouponService(self.db).reverse_usage(code, customer_id, ref)
         except Exception:  # noqa: BLE001
-            logger.exception("Could not give back coupon %s for %s", code, ref)
+            logger.exception("Could not give back coupon %s for %s", mask_code(code), ref)
 
     async def _tell_resident(self, customer_id: str, title: str, message: str) -> None:
         from app.services.notification_service import NotificationService

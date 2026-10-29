@@ -409,7 +409,10 @@ class MoneyService:
     # Price changes (customer edit, on-site add-on, manager discount / tip)
     # ------------------------------------------------------------------
 
-    async def on_price_change(self, booking_before: dict, booking_after: dict, *, actor: dict | None = None, reason: str = "", session=None) -> dict:
+    async def on_price_change(
+        self, booking_before: dict, booking_after: dict, *, actor: dict | None = None, reason: str = "", session=None,
+        paid_adjust: float = 0.0, credit_cap: float | None = None, kind: Kind = Kind.PRICE_REDUCED, allow_cancelled: bool = False,
+    ) -> dict:
         """Inside BOOKING's edit / add-on transaction. `booking_after` carries
         the NEW total_amount (which must still include wallet_due_carried and
         any legacy cancellation_charge). Re-reads the booking in `session`
@@ -420,31 +423,46 @@ class MoneyService:
         Returns {"fields": {...to $set on the booking...}, "wallet_credit",
         "amount_due", "due_delta", "entry", "booking_id"}. BOOKING writes
         `fields` in the same transaction, guarded on its own before-state,
-        then calls after_price_change() once committed."""
+        then calls after_price_change() once committed.
+
+        Booking-edit extras (default off, so every older caller is unchanged):
+        `paid_adjust` — an admin's signed correction to the money received
+        (the surplus is worked out on paid + paid_adjust); `credit_cap` — the
+        wallet credit never exceeds this (a discount can return only what the
+        customer actually paid for THIS booking, less what a manager already
+        paid back; the rest of the surplus just stops counting as received);
+        `kind` — the ledger row's kind; `allow_cancelled` — read-only maths on
+        a cancelled booking (never used to move money)."""
         actor = actor or {"id": "system", "role": "system"}
         booking_id = str(booking_before.get("_id") or booking_before.get("id"))
 
         async def _do(s):
             fresh = await self.bookings.find_one({"_id": _oid(booking_id)}, session=s) or booking_before
-            if fresh.get("status") == "cancelled" or fresh.get("is_deleted"):
+            if not allow_cancelled and (fresh.get("status") == "cancelled" or fresh.get("is_deleted")):
                 raise BadRequestException("This booking was cancelled — it can't be changed.")
             old = bm.money_view(fresh)
             new_total = bm.total_of(booking_after)
             applied = old["wallet_applied"]
-            paid = old["amount_paid"]
+            paid = r2(old["amount_paid"] + paid_adjust)
+            if paid < -EPSILON:
+                raise BadRequestException("That would take more out of the payments than was ever received.")
+            paid = max(0.0, paid)
             excess = r2(applied + paid - new_total)
             entry = None
+            credited = 0.0
             if excess > EPSILON:
                 give_back = r2(min(applied, excess))
                 applied = r2(applied - give_back)
                 paid = r2(paid - (excess - give_back))
+                credited = excess if credit_cap is None else r2(min(excess, max(0.0, credit_cap)))
                 rev = int(fresh.get("money_rev") or 0)
-                entry = await self.wallet.post(
-                    fresh["customer_id"], excess, Kind.PRICE_REDUCED.value, key=f"price:{booking_id}:{rev}",
-                    booking_id=booking_id, booking_number=fresh.get("booking_number"),
-                    actor_id=actor.get("id"), actor_role=actor.get("role"), actor_name=actor.get("name"), session=s,
-                    note=f"{fresh.get('booking_number')}: ₹{old['total']:g} → ₹{new_total:g}" + (f" ({reason})" if reason else ""),
-                )
+                if credited > EPSILON:
+                    entry = await self.wallet.post(
+                        fresh["customer_id"], credited, kind.value, key=f"price:{booking_id}:{rev}",
+                        booking_id=booking_id, booking_number=fresh.get("booking_number"),
+                        actor_id=actor.get("id"), actor_role=actor.get("role"), actor_name=actor.get("name"), session=s,
+                        note=f"{fresh.get('booking_number')}: ₹{old['total']:g} → ₹{new_total:g}" + (f" ({reason})" if reason else ""),
+                    )
             else:
                 excess = 0.0
             status = bm.status_for(new_total, applied, paid)
@@ -462,7 +480,8 @@ class MoneyService:
             if fresh.get("paid_cash") is None and fresh.get("paid_online") is None:
                 fields["paid_cash"], fields["paid_online"] = received_by_method(fresh)
             return {
-                "booking_id": booking_id, "fields": fields, "wallet_credit": excess, "amount_due": due,
+                "booking_id": booking_id, "fields": fields, "wallet_credit": credited, "surplus": excess, "amount_due": due,
+                "amount_paid": paid, "wallet_applied": applied, "payment_status": status,
                 "due_delta": r2(due - old["amount_due"]), "entry": entry, "customer_id": fresh.get("customer_id"),
             }
 

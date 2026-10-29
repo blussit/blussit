@@ -3694,7 +3694,7 @@ class PaymentService:
 
             try:
                 _coupon, discount = await CouponService(self.db).validate_and_compute_discount(
-                    payload.coupon_code, base_price, customer_id or ""
+                    payload.coupon_code, base_price, customer_id or "", use="plans", vehicle_type=payload.vehicle_type
                 )
                 result["discount"] = discount
                 result["coupon_valid"] = True
@@ -3764,7 +3764,7 @@ class PaymentService:
             from app.services.coupon_service import CouponService
 
             _coupon, discount = await CouponService(self.db).validate_and_compute_discount(
-                payload.coupon_code, base_price, customer_id
+                payload.coupon_code, base_price, customer_id, use="plans", vehicle_type=payload.vehicle_type
             )
             # validate_and_compute_discount only checks past USAGE — a coupon
             # usage row is written at SETTLEMENT, not here, precisely so an

@@ -233,7 +233,7 @@ async def test_full_booking_flow_from_a_brand_new_whatsapp_number(rig, db, clean
     # for confirmation.
     out = await last_out(db, phone)
     assert out["interactive_kind"] == "buttons"
-    assert {b["id"] for b in out["options"]} == {"confirm:yes", "confirm:no"}
+    assert {b["id"] for b in out["options"]} == {"confirm:yes", "confirm:coupon", "confirm:no"}
     await bot.handle_webhook(wa_payload(wa_id, reply="confirm:yes"))
 
     booking = await db.bookings.find_one({"customer_id": str(user["_id"])})

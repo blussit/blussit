@@ -289,7 +289,7 @@ export function LaunchOfferPopup({
                   Book {name}
                   <ArrowRight className="h-[18px] w-[18px]" strokeWidth={2.4} />
                 </button>
-                <button type="button" onClick={close} className="mt-3 w-full text-center text-[13px] font-medium text-[#5F6878] hover:text-[#0A66F0]">
+                <button type="button" onClick={close} className="mt-1 min-h-10 w-full py-2.5 text-center text-[13px] font-medium text-[#5F6878] hover:text-[#0A66F0]">
                   Maybe Later
                 </button>
               </div>

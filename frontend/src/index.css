@@ -165,7 +165,8 @@ section[id] {
   to { transform: scale(1.08); }
 }
 .animate-hero-zoom {
-  animation: hero-zoom 8s ease-in-out infinite alternate;
+  /* Starts after the photo has painted so the zoom never holds up the first paint (LCP). */
+  animation: hero-zoom 8s ease-in-out 2.5s infinite alternate;
   will-change: transform;
 }
 @media (prefers-reduced-motion: reduce) {

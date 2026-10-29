@@ -869,7 +869,24 @@ export interface Coupon {
   offer_kind?: "standard" | "free_addon_with_service";
   eligible_service_keywords?: string[];
   free_addon_keywords?: string[];
+  max_discount_amount?: number | null;
+  usage_limit_per_user?: number;
+  total_usage_limit?: number | null;
+  total_used?: number;
   is_active: boolean;
   valid_from: string;
   valid_until: string;
+  // Use-type and restrictions (components/admin/CouponRulesFields.tsx).
+  applies_to?: ("services" | "plans" | "society" | "custom")[];
+  applicable_service_ids?: string[];
+  applicable_vehicle_types?: string[];
+  applicable_center_ids?: string[];
+  first_booking_only?: boolean;
+  new_customers_only?: boolean;
+  allowed_customer_phones?: string[];
+  allowed_weekdays?: number[];
+  time_window_start?: string | null;
+  time_window_end?: string | null;
+  stackable_with_offers?: boolean;
+  combine_with_plan?: boolean;
 }

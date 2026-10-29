@@ -312,6 +312,14 @@ class WhatsAppProvider(ABC):
         stores none) — the CRM route answers "Media unavailable", not a 500."""
         return None
 
+    async def create_template(self, payload: dict) -> dict:
+        """Template creation needs a Meta account. The log provider has none:
+        answer with the same {"error": ...} shape the Cloud provider uses so
+        callers raise a clean 400 — it used to be an AttributeError, i.e. a
+        500 on POST /whatsapp/crm/templates and /templates/bootstrap locally
+        (site-attack QA, 2026-10-29)."""
+        return {"error": "WhatsApp is in log-only mode — templates can only be created with the Meta Cloud provider"}
+
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"

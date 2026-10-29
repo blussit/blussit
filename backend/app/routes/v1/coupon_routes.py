@@ -2,10 +2,13 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.coupon_controller import CouponController
+from app.routes.v1.coupon_bundle_routes import router as bundle_router
 from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_admin, require_customer
 from app.schemas.coupon_schema import CouponCreateRequest, CouponUpdateRequest, CouponValidateRequest
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
+# Bulk single-use code bundles (admin only) — /coupons/bundles/...
+router.include_router(bundle_router)
 
 
 @router.get("", dependencies=[Depends(require_admin)])

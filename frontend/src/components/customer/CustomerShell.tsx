@@ -12,6 +12,7 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Helmet } from "react-helmet-async";
 import { Bell, Building2, CalendarDays, CarFront, Gift, Home, LifeBuoy, LogOut, Plus, Tag, User as UserIcon, Wallet, type LucideIcon } from "lucide-react";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import { notificationApi, subscriptionApi } from "../../api/engagement";
@@ -146,6 +147,8 @@ export function CustomerShell({ children }: { children: ReactNode }) {
   const societyPath = societySub ? societyPassPath(societySub) : null;
   const tabs = withSociety(TABS, societyPath, "Society");
   const sidebar = withSociety(SIDEBAR, societyPath, "My Society");
+  const here = sidebar.find((item) => isActive(item, pathname));
+  const pageTitle = `${here?.label || "My Account"} | Blussit`;
   // The booking flow is shared with the public /book page and styles itself;
   // it renders here exactly as it does there (no v2 re-pointing, no vars).
   const inBookingFlow = /^\/app\/book\/?$/.test(pathname);
@@ -161,6 +164,9 @@ export function CustomerShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen bg-white text-[#0E1A33] [&_a]:cursor-pointer [&_button]:cursor-pointer">
+      <Helmet>
+        <title>{pageTitle}</title>
+      </Helmet>
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[248px] flex-col border-r border-[#E4E9F1] bg-white lg:flex">
         <Link to="/" className="flex h-16 shrink-0 items-center px-6" aria-label="Blussit home">
@@ -200,7 +206,7 @@ export function CustomerShell({ children }: { children: ReactNode }) {
       <div className="lg:pl-[248px]">
         {/* Top bar */}
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-[#E4E9F1] bg-white/95 px-4 backdrop-blur sm:px-6 lg:h-16 lg:px-10">
-          <Link to="/app" className="lg:hidden" aria-label="Blussit home">
+          <Link to="/app" className="flex min-h-10 items-center lg:hidden" aria-label="Blussit home">
             <img src="/img/blussit-logo-480.webp" alt="BLUSSIT" className="h-auto w-[96px] object-contain" />
           </Link>
           <div className="hidden lg:block" />

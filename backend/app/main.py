@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import http_exception_handler as default_http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from pymongo.errors import DuplicateKeyError
 
@@ -20,6 +22,7 @@ from app.core.logging_setup import RedactingFilter, RequestIdMiddleware, configu
 from app.core.storage import MAX_UPLOAD_BYTES as STORAGE_MAX_UPLOAD_BYTES, upload_root
 from app.models.enums import NotificationType
 from app.routes.v1 import (
+    admin_booking_routes,
     analytics_routes,
     audit_log_routes,
     auth_routes,
@@ -241,6 +244,12 @@ _BODY_LIMITS: tuple[tuple[str, int], ...] = (
     (f"{settings.API_V1_PREFIX}/uploads/", STORAGE_MAX_UPLOAD_BYTES + _BODY_LIMIT_MARGIN),
     (f"{settings.API_V1_PREFIX}/whatsapp/crm/media", whatsapp_crm_routes.MAX_UPLOAD_BYTES + _BODY_LIMIT_MARGIN),
     (f"{settings.API_V1_PREFIX}/whatsapp/campaigns/image", whatsapp_campaign_routes.MAX_IMAGE_BYTES + _BODY_LIMIT_MARGIN),
+    # Coupon bundles: the CSV upload (+ framing) and the "add selected" JSON
+    # carrying up to COUPON_BUNDLE_MAX_ROWS codes of <= 32 characters.
+    (
+        f"{settings.API_V1_PREFIX}/coupons/bundles",
+        max(settings.COUPON_BUNDLE_MAX_BYTES, settings.COUPON_BUNDLE_MAX_ROWS * 48) + _BODY_LIMIT_MARGIN,
+    ),
 )
 
 
@@ -1593,6 +1602,19 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     )
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """A path no route matches answers in the app's own envelope instead of
+    the bare {"detail": "Not Found"}; every other HTTP error keeps FastAPI's
+    default shape (clients already read it)."""
+    if exc.status_code == 404 and exc.detail == "Not Found":
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error_code": "NOT_FOUND", "message": "That address does not exist.", "details": None},
+        )
+    return await default_http_exception_handler(request, exc)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     # pydantic v2 tucks the ORIGINAL exception object into ctx.error for any
@@ -1659,7 +1681,7 @@ async def robots_txt():
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
-@app.get("/api/health", tags=["Health"])
+@app.api_route("/api/health", methods=["GET", "HEAD"], tags=["Health"])
 async def health_check():
     """LIVENESS: the process is up and serving. Deliberately touches no
     dependency — a database blip must not get healthy containers restarted.
@@ -1709,7 +1731,7 @@ async def _missing_critical_indexes(db) -> list[str] | None:
     return [str(name) for name in (result or [])]
 
 
-@app.get("/api/ready", tags=["Health"])
+@app.api_route("/api/ready", methods=["GET", "HEAD"], tags=["Health"])
 async def readiness_check():
     """READINESS: 200 only when this instance can serve real requests — the
     database answers a ping within 2 s and the critical unique indexes (the
@@ -1778,6 +1800,7 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(service_center_routes.router, prefix=api_prefix)
     target.include_router(booking_routes.router, prefix=api_prefix)
     target.include_router(booking_routes.charge_router, prefix=api_prefix)
+    target.include_router(admin_booking_routes.router, prefix=api_prefix)
     target.include_router(subscription_routes.plan_router, prefix=api_prefix)
     target.include_router(subscription_routes.subscription_router, prefix=api_prefix)
     target.include_router(coupon_routes.router, prefix=api_prefix)

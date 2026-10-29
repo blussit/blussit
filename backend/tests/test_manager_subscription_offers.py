@@ -198,6 +198,7 @@ async def test_preview_applies_a_discount_or_a_coupon_never_both_at_once(rig):
     assert discounted["discount"] == 50 and discounted["final_price"] == rig["base_price"] - 50
 
     coupon = await CouponService(rig["db"]).create(CouponCreateRequest(
+        applies_to=["plans"],
         code=f"MGR{next(_seq)}", coupon_type="flat", value=30, valid_from=now_ist(), valid_until=now_ist().replace(year=2099),
     ))
     with_coupon = await svc.manager_subscription_preview(
@@ -332,6 +333,7 @@ async def test_coupon_discount_is_locked_in_at_creation_and_usage_recorded_only_
     phone = "9333300003"
     _track(cleanup, phone)
     coupon = await CouponService(rig["db"]).create(CouponCreateRequest(
+        applies_to=["plans"],
         code=f"MGRC{next(_seq)}", coupon_type="flat", value=25, usage_limit_per_user=1, total_usage_limit=1,
         valid_from=now_ist(), valid_until=now_ist().replace(year=2099),
     ))
@@ -677,6 +679,7 @@ async def test_hack_the_same_single_use_coupon_cannot_ride_two_different_pending
     phone = "9333300017"
     _track(cleanup, phone)
     coupon = await CouponService(rig["db"]).create(CouponCreateRequest(
+        applies_to=["plans"],
         code=f"MGRONE{next(_seq)}", coupon_type="flat", value=25, usage_limit_per_user=1,
         valid_from=now_ist(), valid_until=now_ist().replace(year=2099),
     ))

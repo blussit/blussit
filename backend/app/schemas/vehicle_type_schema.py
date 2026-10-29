@@ -1,10 +1,10 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VehicleTypeCreateRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     display_order: int = 0
     is_active: bool = True
 

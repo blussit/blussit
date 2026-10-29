@@ -1,0 +1,557 @@
+kind,method,path,allowed_roles
+frontend-public,GET,/,public
+frontend-public,GET,/services,public
+frontend-public,GET,/services/jet-wash,public
+frontend-public,GET,/services/star-wash,public
+frontend-public,GET,/services/waterless-car-wash,public
+frontend-public,GET,/services/car-deep-cleaning,public
+frontend-public,GET,/services/bike-wash,public
+frontend-public,GET,/services/does-not-exist,public
+frontend-public,GET,/plans,public
+frontend-public,GET,/doorstep-car-wash-indore,public
+frontend-public,GET,/cancellation-policy,public
+frontend-public,GET,/service-policy,public
+frontend-public,GET,/privacy-policy,public
+frontend-public,GET,/terms,public
+frontend-public,GET,/book,public
+frontend-public,GET,/society/sometoken,public
+frontend-public,GET,/thank-you,public
+frontend-public,GET,/about,public
+frontend-public,GET,/this-route-does-not-exist,public
+frontend-public,GET,/_pages/services.html,public
+frontend-public,GET,/spa.html,public
+frontend-public,GET,/sitemap.xml,public
+frontend-public,GET,/robots.txt,public
+frontend-guest-only,GET,/login,guest
+frontend-guest-only,GET,/forgot-password,guest
+frontend-customer,GET,/app,customer
+frontend-customer,GET,/app/book,customer
+frontend-customer,GET,/app/bookings,customer
+frontend-customer,GET,/app/bookings/6ae324fb9cd6b4a74e33a7da,customer
+frontend-customer,GET,/app/subscriptions,customer
+frontend-customer,GET,/app/society/sometoken,customer
+frontend-customer,GET,/app/addresses,customer
+frontend-customer,GET,/app/support,customer
+frontend-customer,GET,/app/profile,customer
+frontend-customer,GET,/app/garage,customer
+frontend-customer,GET,/app/settings,customer
+frontend-customer,GET,/app/offers,customer
+frontend-customer,GET,/app/wallet,customer
+frontend-customer,GET,/app/notifications,customer
+frontend-customer,GET,/app/bookings/000000000000000000000000,customer
+frontend-customer,GET,/app/nope,customer
+frontend-captain,GET,/captain,captain
+frontend-captain,GET,/captain/jobs,captain
+frontend-captain,GET,/captain/jobs/6ae324fb9cd6b4a74e33a7da,captain
+frontend-captain,GET,/captain/jobs/000000000000000000000000,captain
+frontend-captain,GET,/captain/attendance,captain
+frontend-captain,GET,/captain/societies,captain
+frontend-captain,GET,/captain/earnings,captain
+frontend-captain,GET,/captain/profile,captain
+frontend-captain,GET,/captain/notifications,captain
+frontend-captain,GET,/captain/nope,captain
+frontend-manager,GET,/manager,manager
+frontend-manager,GET,/manager/kpi,manager
+frontend-manager,GET,/manager/new-booking,manager
+frontend-manager,GET,/manager/log-job,manager
+frontend-manager,GET,/manager/bookings,manager
+frontend-manager,GET,/manager/bookings/6ae324fb9cd6b4a74e33a7da,manager
+frontend-manager,GET,/manager/captains,manager
+frontend-manager,GET,/manager/subscribers,manager
+frontend-manager,GET,/manager/sell-plan,manager
+frontend-manager,GET,/manager/custom-plans,manager
+frontend-manager,GET,/manager/inventory,manager
+frontend-manager,GET,/manager/complaints,manager
+frontend-manager,GET,/manager/reviews,manager
+frontend-manager,GET,/manager/societies,manager
+frontend-manager,GET,/manager/societies/000000000000000000000000,manager
+frontend-manager,GET,/manager/society-planner,manager
+frontend-manager,GET,/manager/charges,manager
+frontend-manager,GET,/manager/profile,manager
+frontend-manager,GET,/manager/notifications,manager
+frontend-manager,GET,/manager/nope,manager
+frontend-admin,GET,/admin,admin
+frontend-admin,GET,/admin/bookings,admin
+frontend-admin,GET,/admin/bookings/6ae324fb9cd6b4a74e33a7da,admin
+frontend-admin,GET,/admin/users,admin
+frontend-admin,GET,/admin/service-centers,admin
+frontend-admin,GET,/admin/service-zones,admin
+frontend-admin,GET,/admin/service-centers/6ae323d887975e963f3d2b93/capacity,admin
+frontend-admin,GET,/admin/services,admin
+frontend-admin,GET,/admin/vehicle-types,admin
+frontend-admin,GET,/admin/combo-offers,admin
+frontend-admin,GET,/admin/homepage,admin
+frontend-admin,GET,/admin/whatsapp,admin
+frontend-admin,GET,/admin/contact-messages,admin
+frontend-admin,GET,/admin/plan-enquiries,admin
+frontend-admin,GET,/admin/coverage-requests,admin
+frontend-admin,GET,/admin/pricing,admin
+frontend-admin,GET,/admin/subscription-plans,admin
+frontend-admin,GET,/admin/purchased-plans,admin
+frontend-admin,GET,/admin/custom-plans,admin
+frontend-admin,GET,/admin/coupons,admin
+frontend-admin,GET,/admin/coupons/bundles,admin
+frontend-admin,GET,/admin/coupons/bundles/new,admin
+frontend-admin,GET,/admin/coupons/bundles/000000000000000000000000,admin
+frontend-admin,GET,/admin/coupons/bundles/000000000000000000000000/add,admin
+frontend-admin,GET,/admin/complaints,admin
+frontend-admin,GET,/admin/reviews,admin
+frontend-admin,GET,/admin/audit-logs,admin
+frontend-admin,GET,/admin/societies,admin
+frontend-admin,GET,/admin/societies/000000000000000000000000,admin
+frontend-admin,GET,/admin/society-plans,admin
+frontend-admin,GET,/admin/society-planner,admin
+frontend-admin,GET,/admin/charges,admin
+frontend-admin,GET,/admin/holidays,admin
+frontend-admin,GET,/admin/finance,admin
+frontend-admin,GET,/admin/profile,admin
+frontend-admin,GET,/admin/notifications,admin
+frontend-admin,GET,/admin/nope,admin
+backend,GET,/api/health,Health Check
+backend,GET,/api/ready,Readiness Check
+backend,POST,/api/v1/auth/register,Register
+backend,POST,/api/v1/auth/login,Login
+backend,POST,/api/v1/auth/refresh,Refresh
+backend,POST,/api/v1/auth/logout,Logout
+backend,GET,/api/v1/auth/me,Me
+backend,POST,/api/v1/auth/change-password,Change Password
+backend,POST,/api/v1/auth/otp/request,Request Otp
+backend,POST,/api/v1/auth/otp/verify,Verify Otp
+backend,POST,/api/v1/auth/forgot-password,Forgot Password
+backend,POST,/api/v1/auth/reset-password,Reset Password
+backend,POST,/api/v1/auth/staff,Create Staff
+backend,POST,/api/v1/auth/staff/{user_id}/reset-password,Staff Reset Staff Password
+backend,POST,/api/v1/auth/customers,Create Customer
+backend,POST,/api/v1/auth/verify-phone/request,Request Phone Verification
+backend,POST,/api/v1/auth/verify-phone/confirm,Confirm Phone Verification
+backend,POST,/api/v1/auth/customers/{customer_id}/reset-password,Staff Reset Customer Password
+backend,GET,/api/v1/auth/otp-widget-config,Otp Widget Config
+backend,POST,/api/v1/auth/verify-phone/widget,Verify Phone Via Widget
+backend,POST,/api/v1/auth/reset-password/widget,Reset Password Via Widget
+backend,POST,/api/v1/auth/booking-access,Booking Access
+backend,POST,/api/v1/auth/otp-login,Otp Login
+backend,POST,/api/v1/auth/set-password,Set Password
+backend,GET,/api/v1/auth/google-config,Google Config
+backend,GET,/api/v1/auth/maps-config,Maps Config
+backend,POST,/api/v1/auth/google,Google Login
+backend,POST,/api/v1/auth/add-phone/request,Add Phone Request
+backend,POST,/api/v1/auth/add-phone/confirm,Add Phone Confirm
+backend,PUT,/api/v1/users/me,Update My Profile
+backend,GET,/api/v1/users,List Users
+backend,GET,/api/v1/users/location-facets,Location Facets
+backend,PUT,/api/v1/users/{user_id}/home-center,Set Home Center
+backend,GET,/api/v1/users/{user_id},Get User
+backend,PUT,/api/v1/users/{user_id},Admin Update User
+backend,DELETE,/api/v1/users/{user_id},Delete User
+backend,POST,/api/v1/users/{user_id}/suspend,Suspend User
+backend,GET,/api/v1/vehicles,List Vehicles
+backend,POST,/api/v1/vehicles,Create Vehicle
+backend,GET,/api/v1/vehicles/garage,My Garage
+backend,POST,/api/v1/vehicles/check-registration,Check Vehicle Registration
+backend,PUT,/api/v1/vehicles/{vehicle_id},Update Vehicle
+backend,DELETE,/api/v1/vehicles/{vehicle_id},Delete Vehicle
+backend,GET,/api/v1/addresses,List Addresses
+backend,POST,/api/v1/addresses,Create Address
+backend,GET,/api/v1/addresses/customer/{customer_id},List Customer Addresses
+backend,PUT,/api/v1/addresses/{address_id},Update Address
+backend,DELETE,/api/v1/addresses/{address_id},Delete Address
+backend,GET,/api/v1/categories,List Categories
+backend,POST,/api/v1/categories,Create Category
+backend,PUT,/api/v1/categories/{category_id},Update Category
+backend,DELETE,/api/v1/categories/{category_id},Delete Category
+backend,GET,/api/v1/services,List Services
+backend,POST,/api/v1/services,Create Service
+backend,GET,/api/v1/services/{service_id},Get Service
+backend,PUT,/api/v1/services/{service_id},Update Service
+backend,DELETE,/api/v1/services/{service_id},Delete Service
+backend,GET,/api/v1/combo-offers,List Combo Offers
+backend,POST,/api/v1/combo-offers,Create Combo Offer
+backend,GET,/api/v1/combo-offers/{combo_id},Get Combo Offer
+backend,PUT,/api/v1/combo-offers/{combo_id},Update Combo Offer
+backend,DELETE,/api/v1/combo-offers/{combo_id},Delete Combo Offer
+backend,GET,/api/v1/service-centers,List Centers
+backend,POST,/api/v1/service-centers,Create Center
+backend,GET,/api/v1/service-centers/lookup,Lookup By Pincode
+backend,GET,/api/v1/service-centers/{center_id}/slots,Available Slots
+backend,GET,/api/v1/service-centers/{center_id}/slot-capacity,Admin Slot Capacity
+backend,PUT,/api/v1/service-centers/{center_id}/slot-capacity,Set Slot Capacity
+backend,GET,/api/v1/service-centers/{center_id}/capacity-policy,Capacity Policy Overview
+backend,POST,/api/v1/service-centers/{center_id}/capacity-policy,Schedule Capacity Policy
+backend,GET,/api/v1/service-centers/{center_id}/capacity-policy/history,Capacity Policy History
+backend,DELETE,/api/v1/service-centers/{center_id}/capacity-policy/{change_id},Cancel Capacity Policy
+backend,GET,/api/v1/service-centers/{center_id},Get Center
+backend,PUT,/api/v1/service-centers/{center_id},Update Center
+backend,DELETE,/api/v1/service-centers/{center_id},Delete Center
+backend,POST,/api/v1/bookings,Create Booking
+backend,GET,/api/v1/bookings,List All
+backend,POST,/api/v1/bookings/verify-phone/request,Request Booking Phone Otp
+backend,POST,/api/v1/bookings/quick,Quick Create Booking
+backend,POST,/api/v1/bookings/quote,Quote Booking
+backend,POST,/api/v1/bookings/manager-quick,Manager Quick Create Booking
+backend,POST,/api/v1/bookings/manager-log-completed,Manager Log Completed Booking
+backend,POST,/api/v1/bookings/manager-create,Manager Create Booking
+backend,GET,/api/v1/bookings/my,List My Bookings
+backend,GET,/api/v1/bookings/my-jobs,List My Jobs
+backend,GET,/api/v1/bookings/center/{service_center_id},List For Center
+backend,GET,/api/v1/bookings/center/{service_center_id}/subscribers,List Subscribers For Center
+backend,POST,/api/v1/bookings/admin/reconcile-slot-counters,Reconcile Slot Counters
+backend,GET,/api/v1/bookings/recycle-bin,List Recycle Bin
+backend,POST,/api/v1/bookings/{booking_id}/delete,Soft Delete Booking
+backend,POST,/api/v1/bookings/{booking_id}/restore,Restore Booking
+backend,DELETE,/api/v1/bookings/{booking_id}/permanent,Permanently Delete Booking
+backend,GET,/api/v1/bookings/{booking_id},Get Booking
+backend,PATCH,/api/v1/bookings/{booking_id},Edit Booking
+backend,GET,/api/v1/bookings/{booking_id}/cancellation-charge-preview,Cancellation Charge Preview
+backend,POST,/api/v1/bookings/{booking_id}/unlock-arrival-code,Unlock Arrival Code
+backend,POST,/api/v1/bookings/{booking_id}/assign-captain,Assign Captain
+backend,POST,/api/v1/bookings/{booking_id}/mark-done,Mark Booking Done
+backend,POST,/api/v1/bookings/{booking_id}/reassign-captain,Reassign Captain
+backend,POST,/api/v1/bookings/{booking_id}/self-assign,Self Assign Booking
+backend,POST,/api/v1/bookings/{booking_id}/captain-cancel,Captain Cancel
+backend,POST,/api/v1/bookings/{booking_id}/heading,Start Heading
+backend,POST,/api/v1/bookings/{booking_id}/verify-vehicle,Verify Vehicle
+backend,POST,/api/v1/bookings/{booking_id}/geo-approval-request,Geo Approval Request
+backend,POST,/api/v1/bookings/{booking_id}/geo-override,Geo Override
+backend,GET,/api/v1/bookings/{booking_id}/geo-status,Geo Status
+backend,GET,/api/v1/bookings/{booking_id}/eligible-captains,Eligible Captains
+backend,POST,/api/v1/bookings/{booking_id}/report-risk,Report Risk
+backend,POST,/api/v1/bookings/{booking_id}/resolve-issue,Resolve Issue
+backend,PATCH,/api/v1/bookings/{booking_id}/priority,Update Priority
+backend,POST,/api/v1/bookings/{booking_id}/before-photo,Capture Before Photo
+backend,POST,/api/v1/bookings/{booking_id}/after-photo,Capture After Photo
+backend,GET,/api/v1/bookings/group/{booking_group_id},Get Booking Group
+backend,PATCH,/api/v1/bookings/group/{booking_group_id},Edit Booking Group
+backend,POST,/api/v1/bookings/group/{booking_group_id}/switch-to-cash,Switch Group To Cash
+backend,POST,/api/v1/bookings/group/{booking_group_id}/cancel,Cancel Booking Group
+backend,POST,/api/v1/bookings/group/{booking_group_id}/assign-captain,Assign Captain To Group
+backend,POST,/api/v1/bookings/group,Create Booking Group
+backend,POST,/api/v1/bookings/{booking_id}/switch-to-cash,Switch To Cash
+backend,POST,/api/v1/bookings/{booking_id}/cancel,Cancel Booking
+backend,POST,/api/v1/bookings/{booking_id}/reschedule,Reschedule Booking
+backend,POST,/api/v1/bookings/{booking_id}/add-services,Add Services On Site
+backend,PATCH,/api/v1/bookings/{booking_id}/tip,Set Booking Tip
+backend,POST,/api/v1/bookings/{booking_id}/discount,Give Booking Discount
+backend,GET,/api/v1/bookings/{booking_id}/adjustments,Booking Adjustments
+backend,PATCH,/api/v1/bookings/{booking_id}/details,Update Booking Details
+backend,POST,/api/v1/bookings/hold,Hold Slot
+backend,POST,/api/v1/bookings/hold/release,Release Hold
+backend,GET,/api/v1/bookings/{booking_id}/travel-status,Travel Status
+backend,GET,/api/v1/charges,List Charges
+backend,GET,/api/v1/charges/my,My Charges
+backend,POST,/api/v1/charges/{charge_id}/adjust,Adjust Charge
+backend,PATCH,/api/v1/admin/bookings/{booking_id},Admin Edit Booking
+backend,GET,/api/v1/admin/bookings/{booking_id}/history,Admin Booking History
+backend,GET,/api/v1/subscription-plans,List Plans
+backend,POST,/api/v1/subscription-plans,Create Plan
+backend,GET,/api/v1/subscription-plans/{plan_id},Get Plan
+backend,PUT,/api/v1/subscription-plans/{plan_id},Update Plan
+backend,DELETE,/api/v1/subscription-plans/{plan_id},Delete Plan
+backend,POST,/api/v1/subscription-plans/{plan_id}/discontinue,Discontinue Plan
+backend,POST,/api/v1/subscriptions/quote,Quote Pass
+backend,POST,/api/v1/subscriptions/enquiries,Submit Plan Enquiry
+backend,GET,/api/v1/subscriptions/enquiries,List Plan Enquiries
+backend,POST,/api/v1/subscriptions/enquiries/{enquiry_id}/status,Set Plan Enquiry Status
+backend,GET,/api/v1/subscriptions/my,List My Subscriptions
+backend,GET,/api/v1/subscriptions/customer/{customer_id},List Customer Subscriptions
+backend,GET,/api/v1/subscriptions/center/{service_center_id}/overview,Center Subscription Overview
+backend,GET,/api/v1/subscriptions/{subscription_id}/usage,Subscription Usage History
+backend,POST,/api/v1/subscriptions,Subscribe
+backend,POST,/api/v1/subscriptions/assign,Assign Subscription
+backend,POST,/api/v1/subscriptions/manager-offers/preview,Manager Offer Preview
+backend,POST,/api/v1/subscriptions/manager-offers,Manager Offer Create
+backend,POST,/api/v1/subscriptions/manager-offers/{order_id}/void,Manager Offer Void
+backend,POST,/api/v1/subscriptions/{subscription_id}/extend,Extend Subscription
+backend,POST,/api/v1/subscriptions/{subscription_id}/cancel,Cancel Subscription
+backend,POST,/api/v1/subscriptions/{subscription_id}/auto-pay,Set Auto Pay
+backend,POST,/api/v1/subscriptions/{subscription_id}/upgrade,Upgrade Subscription
+backend,GET,/api/v1/subscriptions/admin/all,List All Subscriptions
+backend,GET,/api/v1/subscriptions/admin/overview,Subscriptions Admin Overview
+backend,GET,/api/v1/subscriptions/admin/plan-purchases,Subscriptions Admin Plan Purchases
+backend,GET,/api/v1/subscriptions/center/{service_center_id}/plan-purchases,Center Plan Purchases
+backend,POST,/api/v1/subscriptions/custom-plans/preview,Preview Custom Plan
+backend,POST,/api/v1/subscriptions/custom-plans,Create Custom Plan
+backend,GET,/api/v1/subscriptions/custom-plans,List Custom Plans
+backend,GET,/api/v1/subscriptions/custom-plans/my,My Custom Plans
+backend,GET,/api/v1/subscriptions/custom-plans/{cart_id},Get Custom Plan
+backend,PUT,/api/v1/subscriptions/custom-plans/{cart_id},Revise Custom Plan
+backend,POST,/api/v1/subscriptions/custom-plans/{cart_id}/link,Send Custom Plan Link
+backend,POST,/api/v1/subscriptions/custom-plans/{cart_id}/cash,Mark Custom Plan Cash
+backend,POST,/api/v1/subscriptions/custom-plans/{cart_id}/cancel,Cancel Custom Plan
+backend,POST,/api/v1/subscriptions/custom-plans/{cart_id}/renew,Renew Custom Plan
+backend,POST,/api/v1/subscriptions/custom-plans/{cart_id}/cars/{car_ref}/refund,Refund Custom Plan Car
+backend,GET,/api/v1/coupons/bundles/sample.csv,Sample Csv
+backend,POST,/api/v1/coupons/bundles/preview,Preview
+backend,POST,/api/v1/coupons/bundles,Create Bundle
+backend,GET,/api/v1/coupons/bundles,List Bundles
+backend,GET,/api/v1/coupons/bundles/{bundle_id},Get Bundle
+backend,PUT,/api/v1/coupons/bundles/{bundle_id},Update Bundle
+backend,DELETE,/api/v1/coupons/bundles/{bundle_id},Delete Bundle
+backend,POST,/api/v1/coupons/bundles/{bundle_id}/codes,Add Codes
+backend,GET,/api/v1/coupons/bundles/{bundle_id}/codes,List Codes
+backend,GET,/api/v1/coupons/bundles/{bundle_id}/export.csv,Export Codes
+backend,PUT,/api/v1/coupons/bundles/{bundle_id}/codes/{code_id},Set Code Active
+backend,GET,/api/v1/coupons/bundles/{bundle_id}/codes/{code_id}/uses,Code Uses
+backend,GET,/api/v1/coupons,List Coupons
+backend,POST,/api/v1/coupons,Create Coupon
+backend,GET,/api/v1/coupons/public/{code},Public Offer
+backend,PUT,/api/v1/coupons/{coupon_id},Update Coupon
+backend,DELETE,/api/v1/coupons/{coupon_id},Delete Coupon
+backend,POST,/api/v1/coupons/validate,Validate Coupon
+backend,POST,/api/v1/complaints,Create Complaint
+backend,GET,/api/v1/complaints,List All
+backend,GET,/api/v1/complaints/my,List My Complaints
+backend,GET,/api/v1/complaints/center/{service_center_id},List For Center
+backend,GET,/api/v1/complaints/{complaint_id},Get Complaint
+backend,PUT,/api/v1/complaints/{complaint_id},Update Complaint
+backend,POST,/api/v1/complaints/{complaint_id}/reply,Reply To Complaint
+backend,GET,/api/v1/reviews,List Public Reviews
+backend,POST,/api/v1/reviews,Create Review
+backend,GET,/api/v1/reviews/my,List My Reviews
+backend,GET,/api/v1/reviews/admin/all,List All Reviews For Admin
+backend,PUT,/api/v1/reviews/{review_id},Update Review
+backend,DELETE,/api/v1/reviews/{review_id},Delete Review
+backend,GET,/api/v1/reviews/captain/{captain_id}/summary,Captain Rating Summary
+backend,GET,/api/v1/reviews/captain/{captain_id},List Captain Reviews
+backend,GET,/api/v1/reviews/booking/{booking_id},Get Review For Booking
+backend,GET,/api/v1/reviews/center/{service_center_id},List Center Reviews
+backend,GET,/api/v1/inventory/my-center,List My Center Inventory
+backend,GET,/api/v1/inventory/center/{service_center_id},List For Center
+backend,POST,/api/v1/inventory,Create Item
+backend,PUT,/api/v1/inventory/{item_id},Update Item
+backend,DELETE,/api/v1/inventory/{item_id},Delete Item
+backend,POST,/api/v1/inventory/{item_id}/adjust,Adjust Item
+backend,GET,/api/v1/notifications,List Notifications
+backend,GET,/api/v1/notifications/preferences,Get Preferences
+backend,PUT,/api/v1/notifications/preferences,Update Preferences
+backend,POST,/api/v1/notifications/universal-message,Send Universal Message
+backend,POST,/api/v1/notifications/{notification_id}/read,Mark Read
+backend,POST,/api/v1/notifications/read-all,Mark All Read
+backend,POST,/api/v1/attendance/check-in,Check In
+backend,POST,/api/v1/attendance/check-out,Check Out
+backend,GET,/api/v1/attendance/my,List My Attendance
+backend,POST,/api/v1/leave-requests,Request Leave
+backend,GET,/api/v1/leave-requests/my,List My Leave Requests
+backend,GET,/api/v1/leave-requests/center/{service_center_id},List Pending Leave Requests
+backend,PUT,/api/v1/leave-requests/{leave_id}/review,Review Leave Request
+backend,GET,/api/v1/staff/my-kyc,My Kyc
+backend,PUT,/api/v1/staff/my-kyc,Submit My Kyc
+backend,GET,/api/v1/staff/captains/{captain_id}/kyc,Captain Kyc
+backend,POST,/api/v1/staff/captains/{captain_id}/kyc/request-reverification,Request Kyc Reverification
+backend,GET,/api/v1/staff/captains/{captain_id}/kyc/versions,Captain Kyc Versions
+backend,POST,/api/v1/staff/captains/{captain_id}/kyc/review,Review Captain Kyc
+backend,GET,/api/v1/staff/captains/{captain_id}/locations,Captain Location Trail
+backend,POST,/api/v1/staff/captains/location,Ping Captain Location
+backend,GET,/api/v1/staff/captains/center/{service_center_id},List Captains For Center
+backend,GET,/api/v1/staff/captains/{captain_id}/attendance,Captain Attendance
+backend,GET,/api/v1/staff/captains/{captain_id}/performance,Captain Performance
+backend,GET,/api/v1/staff/my-performance,My Performance
+backend,GET,/api/v1/staff/captains/center/{service_center_id}/performance,Captains Performance For Center
+backend,POST,/api/v1/staff/captains/{captain_id}/status,Set Captain Status
+backend,GET,/api/v1/crm/customers/search,Search Customer By Phone
+backend,GET,/api/v1/crm/customers/typeahead,Search Customers Typeahead
+backend,GET,/api/v1/crm/customers,List Customers
+backend,GET,/api/v1/crm/customers/{customer_id},Get Customer 360
+backend,POST,/api/v1/analytics/visit,Record Site Visit
+backend,GET,/api/v1/analytics/visitors,Site Visitors
+backend,GET,/api/v1/analytics/manager-summary/{service_center_id},Manager Summary
+backend,GET,/api/v1/analytics/kpis/manager-overview/{service_center_id},Manager Kpi Overview
+backend,GET,/api/v1/analytics/manager-dashboard/{service_center_id},Manager Dashboard
+backend,GET,/api/v1/analytics/dashboard,Dashboard Summary
+backend,GET,/api/v1/analytics/booking-trends,Booking Trends
+backend,GET,/api/v1/analytics/service-centers,Service Center Summaries
+backend,GET,/api/v1/analytics/vehicle-types,Vehicle Type Breakdown
+backend,GET,/api/v1/analytics/services,Service Breakdown
+backend,GET,/api/v1/analytics/kpis-explorer,Kpi Explorer
+backend,GET,/api/v1/analytics/kpis/{section},Kpi Section
+backend,GET,/api/v1/analytics/business-settings,Get Business Settings
+backend,PUT,/api/v1/analytics/business-settings,Update Business Settings
+backend,GET,/api/v1/faqs,List Faqs
+backend,POST,/api/v1/faqs,Create Faq
+backend,PUT,/api/v1/faqs/{faq_id},Update Faq
+backend,DELETE,/api/v1/faqs/{faq_id},Delete Faq
+backend,GET,/api/v1/testimonials,List Testimonials
+backend,POST,/api/v1/testimonials,Create Testimonial
+backend,PUT,/api/v1/testimonials/{testimonial_id},Update Testimonial
+backend,DELETE,/api/v1/testimonials/{testimonial_id},Delete Testimonial
+backend,GET,/api/v1/settings,List Settings
+backend,PUT,/api/v1/settings,Upsert Setting
+backend,GET,/api/v1/settings/{key},Get Setting
+backend,POST,/api/v1/contact,Submit Contact Message
+backend,GET,/api/v1/contact,List Contact Messages
+backend,GET,/api/v1/audit-logs,List Audit Logs
+backend,GET,/api/v1/wallet/my,My Wallet
+backend,GET,/api/v1/wallet/captain/{captain_id},Captain Wallet
+backend,PUT,/api/v1/wallet/bank-details,Update Bank Details
+backend,GET,/api/v1/wallet/my/transactions,My Transactions
+backend,POST,/api/v1/wallet/withdrawals,Request Withdrawal
+backend,GET,/api/v1/wallet/withdrawals/my,My Withdrawals
+backend,GET,/api/v1/wallet/withdrawals/pending,Pending Withdrawals
+backend,PUT,/api/v1/wallet/withdrawals/{withdrawal_id}/review,Review Withdrawal
+backend,POST,/api/v1/wallet/captain/{captain_id}/adjust,Admin Adjust
+backend,GET,/api/v1/wallet/me,My Wallet
+backend,GET,/api/v1/wallet/payouts,List Payouts
+backend,GET,/api/v1/customers/{customer_id}/wallet,Customer Wallet
+backend,POST,/api/v1/customers/{customer_id}/wallet/payout,Record Payout
+backend,POST,/api/v1/customers/{customer_id}/wallet/adjust,Adjust Wallet
+backend,POST,/api/v1/payments/create-order,Create Order
+backend,GET,/api/v1/payments/collections/center/{service_center_id},Center Collections
+backend,GET,/api/v1/payments/collections/admin,Admin Collections
+backend,POST,/api/v1/payments/collect/cash,Collect Cash
+backend,POST,/api/v1/payments/collect/link,Collect Link
+backend,GET,/api/v1/payments/collect/status/{booking_id},Collect Status
+backend,POST,/api/v1/payments/verify,Verify Payment
+backend,POST,/api/v1/payments/failure,Report Payment Failure
+backend,GET,/api/v1/payments/status,Payment Status
+backend,GET,/api/v1/payments/bookings/{booking_id}/state,Booking Payment State
+backend,POST,/api/v1/payments/attention/{order_id}/resolve,Resolve Payment Attention
+backend,POST,/api/v1/uploads/photo,Upload Photo
+backend,POST,/api/v1/uploads/document,Upload Document
+backend,GET,/api/v1/uploads/document/{key},Download Document
+backend,GET,/api/v1/vehicle-types,List Vehicle Types
+backend,POST,/api/v1/vehicle-types,Create Vehicle Type
+backend,GET,/api/v1/vehicle-types/lookup,Lookup Vehicle Types
+backend,PUT,/api/v1/vehicle-types/{vehicle_type_id},Update Vehicle Type
+backend,DELETE,/api/v1/vehicle-types/{vehicle_type_id},Delete Vehicle Type
+backend,GET,/api/v1/pricing-config,Get Pricing Config
+backend,PUT,/api/v1/pricing-config,Set Pricing Config
+backend,GET,/api/v1/booking-policy,Get Booking Policy
+backend,PUT,/api/v1/booking-policy,Set Booking Policy
+backend,GET,/api/v1/homepage-config,Get Homepage Config
+backend,PUT,/api/v1/homepage-config,Set Homepage Config
+backend,GET,/api/v1/settings-history/{key},Settings History
+backend,GET,/api/v1/purchase-confirmations/{token},Get Confirmation
+backend,GET,/api/v1/whatsapp/webhook,Verify Subscription
+backend,POST,/api/v1/whatsapp/webhook,Receive Events
+backend,GET,/api/v1/whatsapp/crm/conversations,List Conversations
+backend,GET,/api/v1/whatsapp/crm/conversations/{wa_id}/messages,Get Thread
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/read,Mark Read
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/send,Send Text
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/send-template,Send Template
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/send-media,Send Media
+backend,POST,/api/v1/whatsapp/crm/conversations/start,Start Conversation
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/assign,Assign
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/status,Set Status
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/tags,Set Tags
+backend,POST,/api/v1/whatsapp/crm/conversations/{wa_id}/bot,Set Bot Paused
+backend,GET,/api/v1/whatsapp/crm/contacts/{wa_id},Contact Profile
+backend,GET,/api/v1/whatsapp/crm/contacts,Contacts
+backend,GET,/api/v1/whatsapp/crm/agents,Agents
+backend,GET,/api/v1/whatsapp/crm/badge,Badge
+backend,GET,/api/v1/whatsapp/crm/tags,Default Tags
+backend,GET,/api/v1/whatsapp/crm/analytics,Analytics
+backend,GET,/api/v1/whatsapp/crm/delivery-health,Delivery Health
+backend,GET,/api/v1/whatsapp/crm/settings,Get Settings
+backend,PUT,/api/v1/whatsapp/crm/settings,Update Settings
+backend,POST,/api/v1/whatsapp/crm/media,Upload Media
+backend,GET,/api/v1/whatsapp/crm/media/{media_id},Fetch Media
+backend,GET,/api/v1/whatsapp/crm/templates,List Templates
+backend,POST,/api/v1/whatsapp/crm/templates,Create Template
+backend,POST,/api/v1/whatsapp/crm/templates/sync,Sync Templates
+backend,GET,/api/v1/whatsapp/crm/templates/catalogue,Template Catalogue
+backend,POST,/api/v1/whatsapp/crm/templates/catalogue/{key}/submit,Submit Catalogue Template
+backend,POST,/api/v1/whatsapp/crm/templates/bootstrap,Bootstrap Templates
+backend,PATCH,/api/v1/whatsapp/crm/templates/{name}/disabled,Set Template Disabled
+backend,GET,/api/v1/whatsapp/campaigns,List Campaigns
+backend,POST,/api/v1/whatsapp/campaigns,Create Campaign
+backend,GET,/api/v1/whatsapp/campaigns/limits,Get Limits
+backend,PUT,/api/v1/whatsapp/campaigns/limits,Update Limits
+backend,GET,/api/v1/whatsapp/campaigns/audience,Audience
+backend,POST,/api/v1/whatsapp/campaigns/audience/selection,Audience Page With Selection
+backend,POST,/api/v1/whatsapp/campaigns/audience/count,Audience Count
+backend,POST,/api/v1/whatsapp/campaigns/image,Upload Image
+backend,POST,/api/v1/whatsapp/campaigns/sanitize,Sanitize
+backend,GET,/api/v1/whatsapp/campaigns/{campaign_id},Get Campaign
+backend,PUT,/api/v1/whatsapp/campaigns/{campaign_id},Update Campaign
+backend,DELETE,/api/v1/whatsapp/campaigns/{campaign_id},Delete Campaign
+backend,POST,/api/v1/whatsapp/campaigns/{campaign_id}/preview,Preview
+backend,POST,/api/v1/whatsapp/campaigns/{campaign_id}/test,Test Send
+backend,POST,/api/v1/whatsapp/campaigns/{campaign_id}/send,Send
+backend,POST,/api/v1/whatsapp/campaigns/{campaign_id}/cancel,Cancel
+backend,GET,/api/v1/whatsapp/campaigns/{campaign_id}/recipients,Recipients
+backend,GET,/api/v1/service-zones,List Zones
+backend,POST,/api/v1/service-zones,Create Zone
+backend,PUT,/api/v1/service-zones/{zone_id},Update Zone
+backend,DELETE,/api/v1/service-zones/{zone_id},Delete Zone
+backend,POST,/api/v1/service-zones/coverage-check,Coverage Check
+backend,POST,/api/v1/coverage-leads,Capture Lead
+backend,GET,/api/v1/coverage-leads,List Leads
+backend,GET,/api/v1/coverage-leads/summary,Leads Summary
+backend,GET,/api/v1/society-forms/{token},Society Form
+backend,POST,/api/v1/society-forms/{token}/quote,Society Form Quote
+backend,POST,/api/v1/society-forms/{token}/enroll,Society Form Enroll
+backend,GET,/api/v1/society-forms/{token}/me,Society Form Me
+backend,POST,/api/v1/society-forms/{token}/me/enrollments/{enrollment_id}/withdraw,Society Form Withdraw
+backend,POST,/api/v1/society-forms/{token}/me/enrollments/{enrollment_id}/coupon-preview,Society Form Coupon Preview
+backend,POST,/api/v1/societies/my/premium-bookings,My Premium Booking
+backend,GET,/api/v1/societies/captain/today,Captain Societies Today
+backend,POST,/api/v1/societies/captain/{society_id}/arrive,Captain Arrive
+backend,PUT,/api/v1/societies/captain/{society_id}/washed,Captain Washed
+backend,GET,/api/v1/societies,List Societies
+backend,POST,/api/v1/societies,Create Society
+backend,GET,/api/v1/societies/captains,Society Captains
+backend,GET,/api/v1/societies/{society_id},Get Society
+backend,PUT,/api/v1/societies/{society_id},Update Society
+backend,POST,/api/v1/societies/{society_id}/rotate-link,Rotate Society Link
+backend,PUT,/api/v1/societies/{society_id}/captain,Set Society Captain
+backend,GET,/api/v1/societies/{society_id}/enrollments,Society Enrollments
+backend,POST,/api/v1/societies/{society_id}/enrollments,Add Society Resident
+backend,GET,/api/v1/societies/{society_id}/plans,Society Plans Offered
+backend,POST,/api/v1/societies/{society_id}/quote,Society Staff Quote
+backend,GET,/api/v1/societies/{society_id}/attendance,Society Attendance
+backend,POST,/api/v1/societies/{society_id}/premium-bookings,Staff Premium Booking
+backend,POST,/api/v1/societies/{society_id}/passes/{subscription_id}/extend,Extend Society Pass
+backend,POST,/api/v1/society-enrollments/{enrollment_id}/activate,Activate Enrollment
+backend,POST,/api/v1/society-enrollments/{enrollment_id}/renew,Renew Enrollment
+backend,POST,/api/v1/society-enrollments/{enrollment_id}/coupon-preview,Enrollment Coupon Preview
+backend,POST,/api/v1/society-enrollments/{enrollment_id}/cancel,Cancel Enrollment
+backend,POST,/api/v1/society-enrollments/{enrollment_id}/payment-link,Society Payment Link
+backend,GET,/api/v1/society-plans,List Society Plans
+backend,POST,/api/v1/society-plans,Create Society Plan
+backend,GET,/api/v1/society-plans/rate-card,Get Rate Card
+backend,PUT,/api/v1/society-plans/rate-card,Save Rate Card
+backend,PUT,/api/v1/society-plans/{plan_id},Update Society Plan
+backend,GET,/api/v1/society-schedule/settings,Get Settings
+backend,PUT,/api/v1/society-schedule/settings,Save Settings
+backend,GET,/api/v1/society-schedule/captain/visits,Captain Visits
+backend,GET,/api/v1/society-schedule/captain/visits/{visit_id},Captain Visit
+backend,GET,/api/v1/society-schedule/my,My Schedule
+backend,POST,/api/v1/society-schedule/my/requests,My Change Request
+backend,GET,/api/v1/society-schedule/planner,Planner
+backend,POST,/api/v1/society-schedule/rotation,Build Rotation
+backend,GET,/api/v1/society-schedule/requests,List Requests
+backend,POST,/api/v1/society-schedule/requests/{request_id}/approve,Approve Request
+backend,POST,/api/v1/society-schedule/requests/{request_id}/decline,Decline Request
+backend,GET,/api/v1/society-schedule/societies/{society_id},Society Schedule
+backend,POST,/api/v1/society-schedule/societies/{society_id}/rules,Create Society Rule
+backend,POST,/api/v1/society-schedule/societies/{society_id}/resident-rules,Create Resident Rule
+backend,POST,/api/v1/society-schedule/societies/{society_id}/visits,Create Visit
+backend,PUT,/api/v1/society-schedule/rules/{rule_id},Update Rule
+backend,DELETE,/api/v1/society-schedule/rules/{rule_id},Delete Rule
+backend,PATCH,/api/v1/society-schedule/visits/{visit_id},Update Visit
+backend,DELETE,/api/v1/society-schedule/visits/{visit_id},Delete Visit
+backend,POST,/api/v1/society-schedule/visits/{visit_id}/skip,Skip Visit
+backend,POST,/api/v1/society-schedule/visits/{visit_id}/restore,Restore Visit
+backend,POST,/api/v1/society-schedule/visits/{visit_id}/exclude,Exclude Cars
+backend,POST,/api/v1/society-schedule/visits/{visit_id}/book,Book Visit Now
+backend,POST,/api/v1/society-issues,Raise Society Issue
+backend,GET,/api/v1/society-issues/my,My Society Issues
+backend,GET,/api/v1/society-issues/society/{society_id},Society Issues
+backend,POST,/api/v1/society-leads,Request For Society
+backend,GET,/api/v1/society-leads,List Society Requests
+backend,GET,/api/v1/society-leads/info,Society Pitch Info
+backend,PUT,/api/v1/society-leads/{lead_id},Update Society Request
+backend,GET,/api/v1/admin/holidays,List Holidays
+backend,POST,/api/v1/admin/holidays,Create Holiday
+backend,POST,/api/v1/admin/holidays/preview,Preview Holiday
+backend,PATCH,/api/v1/admin/holidays/{holiday_id},Update Holiday
+backend,POST,/api/v1/admin/holidays/{holiday_id}/end,End Holiday
+backend,GET,/api/v1/public/holidays,Public Holidays
+backend,GET,/api/v1/holidays/mine,My Holidays
+backend,GET,/api/v1/admin/finance/entries,List Entries
+backend,POST,/api/v1/admin/finance/entries,Create Entry
+backend,GET,/api/v1/admin/finance/entries.csv,Export Entries
+backend,PATCH,/api/v1/admin/finance/entries/{entry_id},Update Entry
+backend,POST,/api/v1/admin/finance/entries/{entry_id}/void,Void Entry
+backend,GET,/api/v1/admin/finance/summary,Summary
+backend,GET,/api/v1/admin/finance/categories,Categories
+backend-ws,WS,/api/v1/ws?token=,any authenticated; channels slots/booking/center-bookings/user/captain-location

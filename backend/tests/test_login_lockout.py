@@ -167,14 +167,18 @@ async def test_account_wide_failures_only_slow_unknown_devices(db, cleanup, monk
         _as(f"192.0.2.{i + 1}", f"{i}" * 20)
         await _fail(auth, user, 1)
 
+    # Compare the two logins rather than a fixed time: bcrypt alone can take
+    # ~1 s on a busy machine, so an absolute ceiling measures the hardware.
+    _as("203.0.113.80", DEV_T)  # the trusted device is not slowed at all
+    started = time.monotonic()
+    await auth.login(user["email"], TEST_PASSWORD)
+    trusted_took = time.monotonic() - started
+
     _as("198.51.100.5", DEV_B)  # an unknown device: slowed, but let in with the right password
     started = time.monotonic()
     assert (await auth.login(user["email"], TEST_PASSWORD))["user"] is not None
-    assert time.monotonic() - started >= 0.4
-    _as("203.0.113.80", DEV_T)  # the trusted one is not slowed at all
-    started = time.monotonic()
-    await auth.login(user["email"], TEST_PASSWORD)
-    assert time.monotonic() - started < 0.4
+    unknown_took = time.monotonic() - started
+    assert unknown_took - trusted_took >= 0.25
 
 
 async def test_an_unknown_identifier_is_throttled_exactly_like_a_real_one(db, cleanup):

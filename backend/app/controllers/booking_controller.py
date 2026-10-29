@@ -6,6 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.exceptions import ForbiddenException
 from app.core.responses import paginated, success
+from app.schemas.booking_adjust_schema import BookingDiscountRequest
 from app.schemas.booking_schema import (
     AddServicesRequest,
     BookingEditRequest,
@@ -559,6 +560,22 @@ class BookingController:
             },
         )
         return success(result, "Tip saved" if payload.tip_amount > 0 else "Tip removed")
+
+    async def give_discount(self, current_user: CurrentUser, booking_id: str, payload: BookingDiscountRequest):
+        """Audited, noticed and recorded by BookingAdjustService."""
+        from app.services.booking_adjust_service import BookingAdjustService
+
+        actor = {"id": current_user.id, "role": current_user.role, "center": current_user.service_center_id}
+        result = await BookingAdjustService(self.db).set_discount(booking_id, payload, actor)
+        if result.get("dry_run"):
+            return success(result, "Preview — nothing saved")
+        return success(result, result["message"] if result.get("changed") else "Nothing changed")
+
+    async def adjustments(self, current_user: CurrentUser, booking_id: str):
+        from app.services.booking_adjust_service import BookingAdjustService
+
+        actor = {"id": current_user.id, "role": current_user.role, "center": current_user.service_center_id}
+        return success(await BookingAdjustService(self.db).list_adjustments(booking_id, actor))
 
     async def update_details(self, current_user: CurrentUser, booking_id: str, payload: BookingUpdateDetailsRequest):
         result = await self.service.update_details(booking_id, payload, current_user.role, current_user.service_center_id)

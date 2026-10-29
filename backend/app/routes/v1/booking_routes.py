@@ -23,6 +23,7 @@ from app.core.dependencies import (
     require_staff,
 )
 from app.services.auth_service import AuthService
+from app.schemas.booking_adjust_schema import BookingDiscountRequest
 from app.schemas.booking_schema import (
     AddServicesRequest,
     BookingEditRequest,
@@ -536,6 +537,36 @@ async def set_booking_tip(
     revenue (never a captain's pay); who set it and when is on the booking
     (tip_updated_by / tip_updated_at) and in the audit log, before/after."""
     return await BookingController(db).set_tip(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/discount", dependencies=[Depends(require_manager_or_admin)])
+async def give_booking_discount(
+    payload: BookingDiscountRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Give, raise, lower or remove a discount on an existing booking
+    (founder 2026-10-28). The manager of the booking's center (any state
+    before completion) or an admin (any state, completed included). `amount`
+    (whole rupees) or `percent` of the bill, a short `reason`, optional
+    `scope` ("visit" spreads it over every car of the visit),
+    `idempotency_key`, `expected_version` (409 when the booking moved on) and
+    `dry_run` (the exact numbers, nothing saved). The total drops, so the
+    amount due drops; money the customer already paid beyond the new total
+    goes back to their wallet, never more than they paid for this booking."""
+    return await BookingController(db).give_discount(current_user, booking_id, payload)
+
+
+@router.get("/{booking_id}/adjustments", dependencies=[Depends(require_manager_or_admin)])
+async def booking_adjustments(
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The booking's money-change history (discounts, admin edits) — newest
+    first. Staff only; a manager sees his own center's bookings."""
+    return await BookingController(db).adjustments(current_user, booking_id)
 
 
 @router.patch("/{booking_id}/details", dependencies=[Depends(require_manager_or_admin)])

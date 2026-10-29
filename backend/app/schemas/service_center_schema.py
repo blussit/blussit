@@ -39,7 +39,7 @@ class ServiceCenterLocationSchema(BaseModel):
 
 
 class ServiceCenterCreateRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     location: ServiceCenterLocationSchema
     manager_id: Optional[str] = None
     contact_phone: Optional[str] = None

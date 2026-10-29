@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Ban, Calendar, Car, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, Navigation, Pencil, Plus, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
+import { AlertTriangle, BadgePercent, Ban, Calendar, CalendarClock, Car, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, Navigation, Pencil, Plus, ShieldCheck, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
@@ -9,6 +9,10 @@ import { AddedOnSiteLines, AddServiceDialog, CustomerEditedChip, HistoryChanges,
 import { moneyOf, staffBookingApi, TIP_METHOD_LABELS, type ManagerPayback, type StaffBooking, type TipMethod } from "../../api/staffBookings";
 import { PAYBACK_REASON_LABELS, PAYOUT_METHOD_LABELS, type PaybackReason, type PayoutMethod } from "../../api/customerWallet";
 import { PaybackDialog, paybackOption } from "./PaybackDialog";
+import { DiscountDialog } from "./DiscountDialog";
+import { RescheduleDialog } from "./RescheduleDialog";
+import { AdminEditPanel } from "./AdminEditPanel";
+import { AdjustmentTimeline } from "./AdjustmentTimeline";
 import { Badge, Button, ErrorState, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
 import { bookingApi, travelStatusApi } from "../../api/booking";
@@ -170,6 +174,14 @@ export function BookingDetailDrawer({
   // booking (the server decides; this just hides it where it can't apply).
   const paybackChoices = cars.map((c) => paybackOption(c, hasComplaint)).filter((o) => o.signals.length > 0);
   const [paybackOpen, setPaybackOpen] = useState(false);
+  // Founder 2026-10-28: a manager (own center) or admin can discount and
+  // reschedule an existing booking; only an admin edits everything.
+  const isAdmin = user?.role === "admin";
+  const [discountOpen, setDiscountOpen] = useState(false);
+  const [rescheduleOpen, setRescheduleOpen] = useState(false);
+  const [adminEditOpen, setAdminEditOpen] = useState(false);
+  const discountable = isStaff && !!car && car.status !== "cancelled" && (isAdmin || car.status !== "completed");
+  const reschedulable = isStaff && !!car && ["awaiting_payment", "pending", "assigned", "rescheduled"].includes(car.status);
   const refundCars = cars.filter((c) => c.payment_status === "refund_due" || c.payment_status === "refunded");
   const refundAmount = refundCars.reduce((sum, c) => sum + (Number(c.refunded_amount) || c.total_amount || 0), 0);
   const refundDone = refundCars.length > 0 && refundCars.every((c) => c.payment_status === "refunded");
@@ -200,11 +212,26 @@ export function BookingDetailDrawer({
     >
       {booking && car && (
         <div className="space-y-5">
-          {(onEdit || onDelete || (onCancel && editableCar) || (isStaff && lockedCar) || (isStaff && car.status !== "cancelled") || (isStaff && paybackChoices.length > 0)) && (
+          {(onEdit || onDelete || (onCancel && editableCar) || (isStaff && lockedCar) || (isStaff && car.status !== "cancelled") || (isStaff && paybackChoices.length > 0) || isAdmin) && (
             <div className="flex flex-wrap justify-end gap-2 border-b border-gray-100 pb-3">
               {isStaff && paybackChoices.length > 0 && booking.customer_id && (
                 <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setPaybackOpen(true)} data-testid="drawer-payback">
                   <HandCoins className="h-3.5 w-3.5" /> Pay Back To Customer
+                </Button>
+              )}
+              {discountable && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setDiscountOpen(true)} data-testid="drawer-discount">
+                  <BadgePercent className="h-3.5 w-3.5" /> {managerDiscount > 0 ? "Change Discount" : "Give Discount"}
+                </Button>
+              )}
+              {reschedulable && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setRescheduleOpen(true)} data-testid="drawer-reschedule">
+                  <CalendarClock className="h-3.5 w-3.5" /> Reschedule
+                </Button>
+              )}
+              {isAdmin && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setAdminEditOpen(true)} data-testid="drawer-admin-edit">
+                  <ShieldCheck className="h-3.5 w-3.5" /> Edit Booking (Admin)
                 </Button>
               )}
               {isStaff && car.status !== "cancelled" && (
@@ -532,6 +559,8 @@ export function BookingDetailDrawer({
             )}
           </Section>
 
+          {isStaff && <AdjustmentTimeline bookingIds={cars.map((c) => c.id)} />}
+
           {/* Below this line everything is about ONE car: its own plate
               check, its own photos, its own clock. A visit has several, so
               the manager picks which one to look at rather than being shown
@@ -658,6 +687,9 @@ export function BookingDetailDrawer({
         onClose={() => setTipOpen(false)}
         onSaved={(tip, method) => setTipSaved({ tip, method })}
       />
+      {discountable && car && <DiscountDialog open={discountOpen} onClose={() => setDiscountOpen(false)} car={car} cars={cars.filter((c) => c.status !== "cancelled")} />}
+      {reschedulable && car && <RescheduleDialog open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} booking={car} />}
+      {isAdmin && car && <AdminEditPanel open={adminEditOpen} onClose={() => setAdminEditOpen(false)} car={car} cars={cars} />}
       {isStaff && booking?.customer_id && (
         <PaybackDialog
           open={paybackOpen}

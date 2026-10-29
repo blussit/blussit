@@ -315,6 +315,7 @@ secrets.
 | Payments | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_LIVE_KEY_ID`/`_SECRET` (parking only) | `rzp_live_` key + secret + webhook secret |
 | Google | `GOOGLE_MAPS_BROWSER_KEY`, `GOOGLE_MAPS_SERVER_KEY`, `GOOGLE_OAUTH_CLIENT_ID` | optional |
 | Other | `META_PIXEL_ID`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`, `DEV_TOOLS_ENABLED`, `DEV_OTP_CODE` | dev tools refused in production |
+| Coupon bundles | `COUPON_BUNDLE_MAX_BYTES` (2 MB), `COUPON_BUNDLE_MAX_ROWS` (100,000), `COUPON_BUNDLE_BATCH_SIZE` (5,000), `COUPON_MISS_LIMIT` (10 per user/device per window; 0 = off), `COUPON_MISS_IP_LIMIT` (40 per IP), `COUPON_MISS_WINDOW_SECONDS` (600) | defaults are fine; see §7.11 |
 | Location check | `GEOFENCE_ENFORCE` (true), `GEOFENCE_MIN_SERVICE_SECONDS` (120) | on; `false` is the emergency kill switch (see §7.10) |
 
 Dev tools (fixed OTP `123456`, "log in as") work only with
@@ -532,6 +533,7 @@ Recurring patterns (look for them before inventing new ones):
 | `service_zones` | coverage polygons | 2dsphere; address → center: zones → nearest center → pincode |
 | `capacity_policy_changes` | effective-dated capacity per center | unique (center, effective_date) |
 | `coupons`, `coupon_usages`, `coupon_user_usage` | discount codes | per-user use counted atomically (`{coupon}:{user}` counter) |
+| `coupon_bundles`, `coupon_codes` | single-use / N-use codes imported in bulk (§7.11) | bundle = benefit + one expiry + uses per code; code = unique normalised `code`, `used_count`, `is_active`, `last_use`; usage rows live in `coupon_usages` (`_id` = `{code}:{booking}`) |
 | `faqs`, `testimonials`, `contact_messages`, `settings` (+ `settings_history`), `business_settings` | content and admin settings | `PUT /settings` refuses keys that have dedicated endpoints |
 | `coverage_leads`, `site_visits`, `plan_enquiries`, `road_distance_cache` | marketing/ops data, distance cache | |
 
@@ -586,6 +588,7 @@ pending, assigned, captain_on_the_way, service_started, rescheduled.
 | `customer_wallets` | one balance per customer — **can be negative**; `carried_due` reserves debt riding on an unpaid booking | unique `customer_id`; posted only by `CustomerWalletService.post` (one transaction: guarded `$inc` + ledger row) |
 | `customer_wallet_ledger` | immutable rows: signed amount, kind, balance after, actor, booking, note, `meta` | unique idempotency `key`; kinds (`CustomerWalletEntryKind`) include cancellation, cancellation charge, overpayment, booking spend, payout, adjustment and `refund` ("Plan Refund": one custom-plan car, `meta.custom_plan_id`, key `cp-refund:{cart}:{vehicle}`) |
 | `customer_paybacks` | one row per manager payback (MONEY-2): customer, booking + number, center, amount split into `wallet_amount` / `goodwill_amount`, method, reference, reason, note, signals, paid by (id/name/role), `created_at` | unique idempotency `key`; (center, created_at); booking_id; (customer, created_at). Mirrored on the booking as `manager_paybacks[]` + `paid_back_total` (≤ what the customer paid for it) |
+| `booking_adjustments` | immutable history of post-booking money changes (2026-10-29): one row per manager / admin discount change or admin edit | `booking_id`, `seq` (per booking, unique), `key` (unique idempotency), `kind` (`discount` / `admin_edit`), actor, `reason`, `before` / `after` money snapshots (discount, total, paid, due, platform earning, tip), `changes[]` (field-level before / after), `payment_adjustments`, `wallet_credit`; no route updates or deletes a row |
 | `captain_wallets` | captain balance + `minimum_balance` (₹50; below it no new jobs) | unique `captain_id` |
 | `wallet_transactions` | captain ledger | unique `key` (`cw:{booking}:{rev}`): delta-based posting |
 | `withdrawal_requests` | captain payouts: pending → approved/rejected, approved → paid/rejected | one pending per captain |
@@ -615,6 +618,58 @@ it is added to `total_amount` / `platform_earning` / `amount_paid` and to the
 field existed is cash (`migrate_legacy_tip_method`, run by the boot
 `backfill_booking_money`, moves it out of `paid_online`). Collections count
 `tips_cash` / `tips_online`.
+
+**Discounts and admin edits (founder 2026-10-28, built 2026-10-29).** The
+customer has no discount button; once a booking exists, `POST
+/bookings/{id}/discount` (the booking's center manager before completion; an
+admin in any state) sets the booking's **manager discount** — a target in whole
+rupees or a percent of the bill, with a required reason (`BookingAdjustService`,
+`services/booking_adjust_service.py`). Per car, in one transaction serialised
+with every other change to the customer's visit: `total_amount −Δ`,
+`discount_amount +Δ` (coupon / offer / plan lines untouched), `platform_earning
+−Δ` (the captain's earning is a share of the price, never of a discount, so the
+platform bears it and it can go negative), then `MoneyService.on_price_change`
+recomputes `amount_due` / `amount_paid` / `wallet_applied` / `payment_status`.
+The discountable bill excludes the tip and a carried previous balance, so a total
+never goes below ₹0. Surplus rule: a discount first lowers what is due; only
+money the customer **already paid** for this booking beyond the new total goes
+back — to their wallet (ledger kind `price_reduced`, booking-linked, notified),
+capped at `paid_by_customer − paid_back_total`; it never mints wallet money. This
+reuses the booking-linked payback rules (cap = what the customer actually paid)
+but writes no `customer_paybacks` row, because that table is the center's cash
+paid out and feeds `net_collected` (a wallet credit moves no cash). Cash already
+taken by the captain stays on his wallet bookkeeping; only the platform side
+changes. A plan-covered wash has nothing to discount (`NOTHING_TO_DISCOUNT`).
+Idempotent on `idempotency_key`; `expected_version` (a hash of money, status,
+schedule, captain — `version` on staff booking reads) and guarded writes give 409
+`STALE_BOOKING`; a late payment of the old amount lands as an overpayment in the
+wallet (existing rule). KPI revenue / finance read `total_amount` and received
+money, so a discount after payment lowers revenue and creates a wallet liability,
+never phantom revenue. History: `GET /bookings/{id}/adjustments` (manager of that
+center, admin) and an "Edited By Admin" / discount timeline in the booking drawer.
+At most 60 money changes per staff account per 5 minutes.
+
+**Admin full edit** (`PATCH /admin/bookings/{id}`, admin only,
+`services/booking_admin_edit_service.py`): customer (existing customers; not for a
+booking tied to the customer's wallet or plan), address + map pin (lat/lng
+validated; optionally re-resolve the center and recompute the distance charge),
+services / car type / quantities (re-priced by the same pricing code), coupon
+removal, on-site add-on lines, date and slot (open bookings move the visit's one
+seat with the normal capacity / holiday / pass rules; completed or cancelled ones
+just change), captain (clears or sets; the captain wallet moves by delta rows),
+discount, tip (completed jobs), payment corrections and status (with
+`force_status` to skip the legal-transition table; cancel runs the normal cancel
+flow; a cancelled booking is never re-opened). Every edit needs a `reason`, is
+planned first and applied in one transaction, recomputes the money once and
+incrementally from the changed components (so history in a stored total is never
+rewritten by a formula), supports `dry_run` (the real transaction, aborted —
+what the customer owes, what returns to the wallet, the captain's wallet change),
+`expected_version`, `idempotency_key`, and writes a `booking_adjustments` row +
+audit entry (`ADMIN_EDIT_BOOKING`). Payment rows (`payments[]`, `payment_keys[]`)
+are append-only: a correction is a signed `payment_adjustments[]` entry linked to
+the payment it corrects. Money edits are refused on a cancelled booking (its money
+already went back to the wallet; use the wallet adjustment) and nothing is edited
+in the recycle bin. The center's manager gets a bell notice.
 
 ### 6.5 Plans, passes and societies
 
@@ -785,6 +840,17 @@ reached, stuck on the way, idle after arrival, left site, overrun.
   mix fingerprint it validated against. The response carries the enriched booking and
   `next_job_conflict` — if the longer job runs into the captain's next
   assigned job, managers get an in-app warning (never blocked).
+- **Manager discount / reschedule / admin edit (2026-10-29).** In the booking
+  drawer a manager (own center) or admin sees **Give Discount** (before/after
+  preview, confirm showing total and amount due, one idempotency key per dialog)
+  and **Reschedule** (the existing `POST /bookings/{id}/reschedule` — the same
+  slot capacity, holiday, working-hours, booking-window and pass-last-day rules,
+  money unchanged, captain released and told, customer told; a still-unpaid
+  booking keeps `awaiting_payment`; at most 8 moves per booking per hour); an
+  admin also sees **Edit Booking (Admin)** with Customer & Location, Services &
+  Prices, Schedule & Captain, Money and Status groups and a live money-impact
+  preview. See §6.4 for the money rules. A customer's own edit keeps a manager's
+  discount (re-priced down only as far as the new price can bear it).
 - **Recycle bin** (admin): soft delete returns seat, pass wash and coupon
   use; restore re-takes them or is refused; hard delete is refused when
   captain-wallet money references the booking; auto-purge after 30 days.
@@ -1302,6 +1368,203 @@ pinging as if present); photos' EXIF GPS/time are not compared (no image
 library installed — a native app or `Pillow` would add it); a phone that sleeps
 all trip produces a sparse trail, which needs a manager approval at *Arrived*.
 
+### 7.11 Coupon bundles (bulk single-use codes — admin only)
+
+An admin imports a CSV of codes as one **bundle**; every code in it gives the
+same discount and can be used a set number of times in total (1 = one-time).
+
+**Data.** `coupon_bundles` holds what the codes share: `name`, the benefit
+(the same fields a regular coupon has — `offer_kind`, `coupon_type`, `value`,
+`min_order_value`, `max_discount_amount`, keywords), `uses_per_coupon`,
+`usage_limit_per_user` (default 1), ONE expiry `valid_until` (null = none; a
+zone-less time is read as IST), `is_active`, soft-delete flags. `coupon_codes`
+holds one document per code: `bundle_id`, `code` (stored upper-case, unique
+across ALL codes and, checked on import and on creating a regular coupon,
+across `coupons` too — pattern `[A-Z0-9_-]{4,32}`), `used_count`, `is_active`,
+`last_use {user_id, booking_id, at}`, `last_used_at`, `added_at`. Editing a
+bundle is **one write** to its document; codes only point at it. Indexes:
+unique `code`; `(bundle_id, used_count, is_active)` (status counts and
+filters), `(bundle_id, added_at, _id)`, `(bundle_id, last_used_at)`.
+
+**CSV rule (shown to the admin).** *One column only. Put a header (for example
+Code) in the first row, then one coupon code on every row below it. Codes use
+letters, numbers, dash and underscore, 4 to 32 characters. Up to 2 MB or
+100,000 codes per file.* UTF-8 with/without BOM, CRLF/LF, quotes and blank
+lines are fine; a second column, a non-UTF-8 file, > 2 MB, > 100,000 rows or no
+codes is refused with that text. Invisible/control characters are stripped,
+codes trimmed and upper-cased (`utils/coupon_codes.py`).
+
+**Import flow.** `POST /coupons/bundles/preview` (multipart) parses the file and
+flags each row (Empty / Too Short / Too Long / Invalid Characters / Duplicate In
+File / Already Exists — checked against `coupon_codes` and `coupons`); nothing is
+written. The UI lists every row with a checkbox (usable rows ticked, problem rows
+off and locked), select all/none, search. **Add Selected To Database** is
+`POST /coupons/bundles` (bundle fields + the selected codes; the server
+re-validates everything and the unique index is the last word, so a parallel
+import can't slip a duplicate in). Codes go in with `insert_many` in batches of
+`COUPON_BUNDLE_BATCH_SIZE`; the result is `added / skipped_duplicates / invalid`.
+More codes later: `POST /coupons/bundles/{id}/codes`. The request-body ceiling
+for `/coupons/bundles*` is raised in `main.py` (`_BODY_LIMITS`) to fit 100,000
+codes.
+
+**Redemption (the one-time guarantee).** Bundle codes go through the same
+`CouponService` calls every booking / plan / society path already uses —
+`find_by_code` falls back to `coupon_codes` and returns an *effective coupon*
+(bundle benefit + the code's `used_count` as `total_used`), so no booking code
+changed. Validation (quote, preview, `POST /coupons/validate`) only READS.
+`record_usage` — called at the existing commit points (reserved before the
+booking insert, released if the create fails; plan activation on payment) —
+spends a use with three guarded writes: (1) insert the usage row with `_id =
+"{code}:{booking}"` (a retry of the same booking is a no-op), (2) the customer's
+own `coupon_user_usage` counter (`usage_limit_per_user`), (3) one `update_one`
+with `used_count < uses_per_coupon` — of any number of parallel requests for the
+last use exactly one matches. Each failure undoes the earlier steps.
+`reverse_usage` (cancel, recycle-bin delete, unpaid-visit sweep, failed
+create) deletes that usage row and only the call that actually deleted it hands
+the use back, so a use is never restored twice; restoring a deleted booking
+claims it again (and is refused if someone else took the single use). A booking
+paid by a plan carries no coupon, so nothing is consumed. The bundle's expiry
+instant itself is already expired; times compare in IST.
+
+**Status of a code** (first match wins): Disabled (bundle or code off), Used
+(`used_count ≥ uses`), Expired (bundle expiry passed, uses left), Partly Used,
+Unused. Each is a plain indexed range in `status_filter`, so the table is
+filtered/sorted/paginated on the server for a 100,000-code bundle.
+
+**Errors.** Unknown / switched-off: "Invalid coupon code"; expired: "This Coupon
+Has Expired"; used up by someone else: "This Coupon Has Already Been Used"; by
+the same customer: "You have already used this coupon the maximum number of
+times". Nothing about other customers is ever returned to a customer. The
+anonymous `GET /coupons/public/{code}` never confirms a bundle code.
+
+**Guessing guard.** A refused code (unknown / off / expired / used up — not a
+minimum-order or own-reuse error) counts ONCE per distinct code against the
+user, the `X-Device-Id` device and the IP in `rate_counters` (shared by every
+instance). At `COUPON_MISS_LIMIT` (10) per user/device, or `COUPON_MISS_IP_LIMIT`
+(40) per IP, inside `COUPON_MISS_WINDOW_SECONDS` (10 min), every coupon check
+from that source answers 429 `COUPON_HELD` ("Too Many Coupon Attempts…") until
+the window ends. Codes are logged by their first 3 characters only.
+
+**Admin API** (all `require_admin`; mounted under `/coupons/bundles` by
+`routes/v1/coupon_bundle_routes.py`): `GET sample.csv`, `POST preview`, `POST /`
+(create), `GET /` (list: name search, counts per bundle from one aggregation),
+`GET /{id}`, `PUT /{id}` (edit as one unit), `DELETE /{id}`, `POST /{id}/codes`,
+`GET /{id}/codes` (status, code-prefix search, sort `added|used|code|uses`, date
+added / date used ranges, pages ≤ 100), `GET /{id}/export.csv` (streamed 1,000
+rows at a time; every cell neutralised with `csv_safe_cell`; audited),
+`PUT /{id}/codes/{code}` (switch one code off/on), `GET /{id}/codes/{code}/uses`.
+
+**Editing rules.** Name, description, benefit, expiry (null = none),
+`usage_limit_per_user` and `is_active` change freely and apply to every code at
+once (a booking already made keeps the discount it got). `uses_per_coupon` can
+rise any time but **cannot drop below what any code has already used** — the
+edit is refused (409) with how many codes are over and what the lowest allowed
+value is; to stop further use, switch the bundle off. Delete: if no code was
+ever used the bundle and its codes are deleted for good; otherwise the bundle
+is only switched off and hidden (codes and history stay, and a booking holding
+one can still give it back). Every import / edit / code switch / delete /
+export writes an audit entry (`CREATE_COUPON_BUNDLE`, `ADD_COUPON_BUNDLE_CODES`,
+`UPDATE_COUPON_BUNDLE` with before/after, `DISABLE_COUPON_CODE`,
+`DISABLE_COUPON_BUNDLE`/`DELETE_COUPON_BUNDLE`, `EXPORT_COUPON_BUNDLE`) — never
+with the codes themselves.
+
+### 7.12 Coupon system — rules, flows and attack log
+
+One coupon model for everything: a regular coupon (`coupons`, shared promo
+code, usable by many, once per user by default) and a bundle code
+(`coupon_codes`, unique single-use) carry the SAME benefit and rule fields.
+**One function decides validity** — `CouponService._valid_coupon(code,
+order_value, user, use=..., first_time_eligible=...)` (who / when / how often)
+followed by `check_applicability` (what is being bought) — and every flow goes
+through it; there is no second implementation to drift.
+
+**Rules table** (`services/coupon_rules.py`; admin form `CouponRulesFields`,
+shared by the coupon form and the bundle form with a live "This Coupon Applies
+To: …" sentence; bundles store them once and every code inherits them):
+
+| Field | Meaning | Default (new) | Old coupon |
+|---|---|---|---|
+| `coupon_type` / `value` / `max_discount_amount` | percent (optional ₹ cap) or fixed ₹ off; always whole rupees, never above the bill, never negative | — | same |
+| `min_order_value` | bill before the coupon must reach this | 0 | same |
+| `total_usage_limit` / `usage_limit_per_user` | overall uses (null = unlimited) / uses per customer (default 1) — "shared promo, once per user" | null / 1 | same |
+| bundle `uses_per_coupon` | uses of ONE code in total (1 = single-use) | 1 | — |
+| `valid_from` / `valid_until` (bundle: one expiry) | validity window (IST) | — | same |
+| `applies_to` | `services` (bookings), `plans`, `society`, `custom` — refused with "This Coupon Is Not Valid For Plans" etc. in any flow not ticked | `["services"]` | explicit after migration: services, +plans/society if it was ever used there |
+| `applicable_service_ids` | bookings: the cart must contain one | any | any |
+| `applicable_vehicle_types` | bookings and plans: the car type must be listed | any | any |
+| `applicable_center_ids` | bookings: the center must be listed (checked when the booking is created, the quote doesn't know the center) | any | any |
+| `first_booking_only` | no earlier non-cancelled booking on the customer's phone OR plate, platform-wide | off | off |
+| `new_customers_only` | stricter: no booking of ANY status, no plan, no society enrolment | off | off |
+| `allowed_customer_phones` | only these 10-digit numbers | everyone | everyone |
+| `allowed_weekdays` / `time_window_start`–`_end` | bookings: the service day / slot start (also re-checked on reschedule and edit-move) | any | any |
+| `stackable_with_offers` | may sit on a first-wash / launch price (`offer_applied` = the bill is below the regular price) | **off** | on (as it behaved) |
+| `combine_with_plan` | may be used on a visit where a plan pays for some (not all) cars; a fully plan-covered visit never carries or consumes a coupon | off | on |
+
+A coupon written before these fields has no `applies_to` and keeps working
+exactly as before until `CouponService.migrate_legacy_rules` (run at startup,
+idempotent) gives it explicit values. Plan, society and custom sales also keep
+a net price of at least ₹1 (`MIN_NET_PLAN_PRICE`). `custom` exists in the model
+and the central check but admins can't tick it yet (`CUSTOM_COUPONS_ENABLED`):
+custom plan carts take a manager discount, not a coupon, and their refund maths
+splits that discount per car.
+
+**Flow per path** (all end in the same quote → create):
+- *Web, logged-in* (`/app/book`): the review step has "Have A Coupon Code?" —
+  type, **Apply**, see "You Save ₹X" + the discount line and new total, or an
+  inline reason; **Remove Coupon** drops it. The quote (`POST /bookings/quote`)
+  previews it (never consumes); `POST /bookings[/group|/quick]` re-validates and
+  reserves it atomically with `expected_total` as the guard.
+- *Web, no login* (`/book`): same box; the anonymous quote applies the code
+  without looking at the customer (nothing about an account is revealed); the
+  verified phone/OTP booking re-runs every customer rule at create.
+- *WhatsApp bot*: the final summary has **Confirm / Have A Coupon Code /
+  Cancel**. The code is read in any case and spacing; valid → "Coupon applied"
+  with the discount, new total and **Confirm / Remove Coupon / Cancel**; invalid
+  → "Invalid Coupon Code" (+ the reason when it is a rule) with **Have A Coupon
+  Code / Confirm / Cancel**. Same quote, same create. A code typed when not asked
+  is a nudge; stale buttons after booking land on the menu; refused codes are
+  counted against the WhatsApp number, never the shared Meta address.
+- *Manager Sell Plan* (`use="plans"`), *society enrol / renew / mark paid*
+  (`use="society"`), *custom plan cart* (refused, see above), *edit booking*
+  (held coupon re-checked for service, car, minimum and cap; a reschedule or
+  edit-move re-checks day/time), *admin edit / manager discount* (the manager
+  discount is applied after the coupon and the total never goes below ₹0).
+- Money: the coupon is part of the booking's discount → total, `amount_due`,
+  partial payments, wallet, earnings and the Razorpay order (always rebuilt
+  server-side from the stored booking) all use the net figure; cancel / delete
+  returns the use and credits only what was paid.
+
+**Attack log** (all pinned in `tests/test_coupon_attacks.py` unless noted;
+attacks ran in-process over ASGI against a real MongoDB, not a live server):
+
+| ID | Attack | Result | Severity | Status |
+|---|---|---|---|---|
+| AT-01 | services-only coupon on a plan / society / custom | refused by use-type | High | held |
+| AT-02 | first-booking coupon on a 2nd booking, new account on the same car, phone written differently | refused (platform-wide phone+plate check; phone is normalised to one account) | High | held |
+| AT-03 | change car / service after the quote | create re-prices and re-checks every rule | Med | held |
+| AT-05 | parallel redemptions past the total / per-user limit | exactly the limit, nobody twice | High | held |
+| AT-06 | cancel + delete + restore double-restore; stale reversal frees someone else's use | usage-row delete is the gate; never negative | High | held |
+| AT-08/09 | edit to add services past the cap / drop a service below the minimum | re-capped; coupon dropped and released | Med | held |
+| AT-10–13 | percent > 100, negative, huge fixed, paise | clamped; admin form refuses | Med | held (negative clamp added) |
+| AT-14 | manager discount stacked on a coupon below zero | refused; total floors at ₹0; cancel returns coupon | Med | held |
+| AT-15 | tamper the Razorpay amount; refund more than paid | order amount server-built from the net total; wallet credit = paid | High | held |
+| AT-16 | restore from the recycle bin after the code expired | keeps its coupon (the price was granted while valid); new uses refused | Low | decision |
+| AT-17 | bundle expires while a booking is pending payment | booking keeps the code (claimed at create) and can still return it | Low | decision |
+| AT-18 | Cyrillic / dotless-i / full-width look-alikes, zero-width | never match (non-ASCII is never case-folded into a code); zero-width is dropped | Med | **FIXED** (`ı`.upper() == `I`) |
+| AT-19/20 | `{"$ne": ""}`, arrays, 5,000-character codes | 422 at the door; schemas cap codes at 32 | Med | **FIXED** (quote/manager/group schemas had no cap) |
+| AT-21 | brute force with rotating `X-Device-Id` | user and IP counters still hold | High | held |
+| AT-22 | enumerate codes through the anonymous quote | IP/device guard answers a hold, even to the right code | High | held |
+| AT-23 | customer / manager / anonymous on admin coupon endpoints; mass assignment of `total_used` | 401/403; counter ignored | High | held |
+| AT-24 | client-sent discount / total | no such request fields; `expected_total` is only a guard | High | held |
+| AT-25 | zip / binary renamed `.csv`, wrong content type | refused | Med | held |
+| AT-26 | the "plan visit" refusal as a code oracle | now counted as a guess | Med | **FIXED** |
+| AT-27 | edit that removes the qualifying service | coupon dropped | Med | held |
+| AT-28 | switch on the not-yet-wired custom use-type | refused | Low | held |
+| bundle suite | duplicate / parallel one-time code, reduce uses below used, delete with pending bookings, CSV formula / size / encoding, 100k rows | see `test_coupon_bundles_*` | — | held |
+| — | timing differences between "unknown" and "used" codes | not measurable offline; the guard bounds the number of probes | Low | **reported** |
+| — | webhook with a wrong amount / verify replay | not coupon-specific (payment suite, §7.7) | — | reported |
+| — | a distributed botnet rotating IP *and* device against the anonymous quote | each source is capped; nothing stops unlimited sources | Low | **reported** |
+
 ---
 
 ## 8. Frontend (blussit.com)
@@ -1345,7 +1608,7 @@ route; authenticated pages are lazy-loaded.
 | Customer app | `/app/*` (home, book, bookings + detail (Edit Booking sheet → PATCH /bookings/{id} or /group/{gid} with expected_total; cancel shows the cancellation-charge-preview wallet effect first; amount due + Pay Now), garage, addresses, subscriptions — incl. custom-plan carts; car-bound passes (custom-plan cars and monthly passes bought for one car) book through the "Book A Plan Wash" sheet with vehicle_id + subscription_id on the quick-booking line, since the server never auto-applies a car-bound pass to a by-type booking; the edit sheet previews with PATCH dry_run, `/app/wallet` (balance + ledger; WhatsApp wallet messages link here), offers, support, profile, settings, `/app/society/:token`) | customer |
 | Captain | `/captain/*` (today, jobs, job, societies, attendance, earnings, profile; English/Hindi) | captain |
 | Manager | `/manager/*` (dashboard, queue, new booking, log job, captains, sell plan, custom plans, subscribers, charges, societies + planner, complaints, reviews, inventory) | manager |
-| Admin | `/admin/*` (dashboard, bookings, users, services, vehicle types, combos, plans, purchased plans, custom plans (view + Renew Plan / Refund Car, and finishing a renewal), society plans/societies/planner, coupons, pricing, slot capacity, centers, zones, holidays, homepage, charges + wallet payouts, complaints, reviews, contact messages, coverage leads, plan enquiries, WhatsApp, audit logs) | admin |
+| Admin | `/admin/*` (dashboard, bookings, users, services, vehicle types, combos, plans, purchased plans, custom plans (view + Renew Plan / Refund Car, and finishing a renewal), society plans/societies/planner, coupons (+ `/admin/coupons/bundles`: bundle list, import, bundle detail), pricing, slot capacity, centers, zones, holidays, homepage, charges + wallet payouts, complaints, reviews, contact messages, coverage leads, plan enquiries, WhatsApp, audit logs) | admin |
 
 This round's staff/customer screens (2026-10-07/08): custom plan Renew Plan /
 Refund Car (manager + admin, `components/manager/CustomPlanCard` +
@@ -1454,10 +1717,10 @@ the worker fails.
 
 | Concern | Today | Limit / recommendation |
 |---|---|---|
-| API instances | stateless; 1–10 (`CLOUD_RUN_MAX_INSTANCES`) | raise freely within the Mongo budget below |
+| API instances | stateless; 1–10 (`CLOUD_RUN_MAX_INSTANCES`), 80 concurrent requests each (`CLOUD_RUN_CONCURRENCY`) | raise freely within the Mongo budget below |
 | Mongo connections | 30 per instance (`maxPoolSize`, URI can override); timeouts set | `(API max + 1 worker) × 30 × 2` (deploy overlap) ≤ Atlas cap: 10 instances → 660; M10 allows 1,500, M0/M2/M5 500 |
 | Websocket fan-out | `ws_events` + change stream on every instance (PERF-01 fixed) | one change-stream cursor per instance; TTL 300 s keeps it small |
-| Rate limits | in memory **per API instance** (`core/rate_limit.py`) | N instances = up to N× a limit; OTP/login/coupon/money caps are database-backed. Add a shared store (Redis/Memorystore) if abuse appears |
+| Rate limits | in memory **per API instance** (`core/rate_limit.py`) | N instances = up to N× a limit; OTP/login/coupon/money caps are database-backed (coupon-code guessing: §7.11). Add a shared store (Redis/Memorystore) if abuse appears |
 | Background work | one worker, lease single-flight, per-pass (70 s) and per-sweep (15 s / 60 s hard) budgets | backlog spills to the next pass by design; split a heavy sweep out, or shard by center, if a sweep regularly hits its budget |
 | Capacity correctness | guarded counters + seat ownership + unique indexes in transactions | verified with 100 concurrent buyers for 5 seats |
 | Outbound APIs | pooled clients, timeouts, Razorpay on its own thread pool, WhatsApp via durable queue | Meta/Razorpay/R2 outages degrade one feature, not the API |
@@ -1579,6 +1842,46 @@ the worker fails.
     dev DB dump and dev logs (see
     [SECURITY_REPO_CLEANUP.md](SECURITY_REPO_CLEANUP.md), still to do).
 
+- **2026-10-29 booking-money red-team** (live, local stack; two centers, two
+  managers / captains, customers, admin; scripts kept with the build notes):
+  *confirmed-safe* — every discount / admin-edit / adjustments route refuses a
+  customer, captain, anonymous caller and another center's manager (404, no
+  existence leak on the new routes); `extra="forbid"` bodies turn mass assignment
+  (`total_amount`, `amount_paid`, `platform_earning`, `captain_earning`, `status`
+  on a discount, `center_id`, `customer_id`) into 422 and the older PATCH/POST
+  bodies ignore them (state diffed in the database); NaN / Infinity / negative /
+  paise / string / boolean / overflow discounts and percents (>100, <0) are 422,
+  a 100% percent never takes the total below ₹0; 40 parallel different discounts
+  leave one consistent state (contiguous `seq`, chained before/after,
+  `platform + captain = total`); discount, undo, raise, cancel returns exactly what
+  was paid and no more (also racing a cancel); a completed booking cannot be
+  edited, cancelled, moved, tipped or discounted by a manager, captain or customer;
+  stale `expected_version` is 409; reschedule into a holiday, a full slot, the
+  past, beyond the window or a fake slot is refused for managers and admins; JWTs
+  with an edited role, `alg: none`, empty signature, suspended account or old
+  `token_version` are 401 and the role is re-read from the database; no CORS
+  reflection, no auth cookies (no CSRF surface), the payment link callback does not
+  reflect input, no open redirects, no user-supplied URL is ever fetched (no SSRF),
+  forged `/payments/verify` and unsigned webhooks fail, websocket channels of other
+  parties refuse, SVG / HTML / spoofed / oversize uploads are refused, search
+  strings are `re.escape`d, page sizes are capped (422), React renders every
+  stored string as text (no `dangerouslySetInnerHTML` except static JSON-LD), and
+  the only CSV export (finance) neutralises formulas. *Fixed:* (1) the admin edit
+  created the customer's saved address inside its transaction and hung until the
+  lock timed out (found live; regression test asserts it finishes at once); (2)
+  `payments[]` / `payment_keys[]` (internal keys, who recorded each payment) were
+  in the customer's and captain's booking reads; (3) string amounts such as
+  "٣٠" or "1e3" were parsed by `float()` — only plain ASCII digits are accepted;
+  (4) a booking could be rescheduled without limit — now 8 per booking per hour;
+  (5) a staff account could change money on unlimited bookings — now 60 per 5
+  minutes (120 for admin edits). *Reported:* a compromised admin session can still
+  move free money (`PATCH /admin/bookings` payment corrections beyond the total
+  and the existing `wallet/adjust`) — both are audited, throttled and notify the
+  center; a second-person approval or a daily cap is a founder decision. The old
+  403 (not 404) for another center's manager on the older booking routes still
+  confirms an id exists (ObjectIds are not enumerable). Online payment settlement
+  is recorded in `payment_orders`, not `audit_logs`.
+
 ## 14. Testing
 
 - **Backend:** pytest + pytest-asyncio + httpx `ASGITransport`, against a
@@ -1672,6 +1975,10 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | Site attack / QA pass (`docs/SITE_ATTACK_QA_REPORT_2026-10-29.md`: 108 routes × 3 widths, 446 API routes × 8 roles, short load tests, read-only production smoke) and its fixes: admin Vehicle Types / Services / Plans switches are labelled and confirm before deactivating; `HEAD` works on `/api/health` and `/api/ready`; unknown API paths answer `NOT_FOUND` in the app envelope (other HTTP errors keep FastAPI's shape); wrong `/auth/otp/verify` code is `success:false`; address pincodes (profile + quick-booking) must be exactly 6 digits and vehicle-type / category / service / center / plan names at least 2 characters; a non-JSON WebSocket frame closes with 1003 (no traceback); CSP `connect-src` allows `analytics.google.com`; hero zoom starts after first paint; `/index.html` redirects to `/`; Cloud Run default concurrency 250 → 80 (one instance queued requests up to 7 s at 200 concurrent; raise with `CLOUD_RUN_CONCURRENCY`); frontend: manager-dashboard and thank-you layout-shift skeletons, ≥40 px tap targets, `<main>` landmark and page titles, staff sidebar drawer below 1024 px, duplicate-city address line, 6-digit pincode input. Not changed: login lock is per account+device+IP (the report's lockout was its own single-device load test). |
+| 2026-10-29 | Complete coupon system (§7.12): coupon box on every booking path (web logged-in, no-login, WhatsApp bot with Confirm / Have A Coupon Code / Cancel); use-type (`applies_to`) enforced in every flow; restrictions (services, car types, centers, first booking, new customers, specific customers, weekday / time window, stackable with offers, combine with plan) on coupons AND bundles; one central validity function; legacy coupons migrated at startup; admin forms + list show use-type and restrictions; plan floor ₹1; attack pass (28 cases) with 3 fixes (look-alike folding, uncapped code length in 3 schemas, plan-visit oracle). |
+| 2026-10-29 | Booking money tools: manager / admin **Give Discount** on an existing booking (`POST /bookings/{id}/discount`, whole-rupee target or percent, reason, idempotency key, `expected_version`, dry run, visit scope; total / due / platform earning move once, surplus of money already paid goes back to the wallet capped at what was paid), manager Reschedule exposed for every not-started booking (unpaid stays `awaiting_payment`, 8/h per booking), admin full edit `PATCH /admin/bookings/{id}` (every field, any status, dry run + money impact, append-only payment adjustments, captain-wallet delta rows) with the immutable `booking_adjustments` history, drawer UI (Give Discount, Reschedule, Edit Booking (Admin), history timeline), customer discount message, manager bell on admin edits; red-team of the booking surface (§13) with five fixes. |
+| 2026-10-29 | Coupon bundles (§7.11): admin bulk-imports single-use / N-use codes from a one-column CSV with a per-row preview, manages them as one unit (benefit, one expiry, uses per code, switch off, delete rules), a server-paginated status table + CSV export for 100k-code bundles, atomic one-time redemption with release on cancel/delete/failed create, a code-guessing guard (`COUPON_MISS_*`), audit entries. New collections `coupon_bundles`, `coupon_codes`; regular coupons unchanged. |
 | 2026-10-28 | Auth hardening: login throttle per (account + device + IP) with escalating locks, hashed trusted devices and an IP credential-stuffing ceiling (no account-wide lockout); OTP requests 60 s per phone re-sending the SAME live code, per-source escalating holds, per-phone reserve, platform message budget + bell alert; WhatsApp-first with SMS fallback (send error or `failed` status webhook, detect-and-fall-back — Meta can't pre-check numbers) and a Send Code By SMS Instead button in every OTP popup; no account enumeration (identical answers for customer / unknown / staff, `new_account` removed, booking-access constant, staff numbers get a pretend send); proxy trust 0 / >1 refused at boot (`ALLOW_PROXY_COUNT_GT_1`); Razorpay webhook checks captured amount + currency; temp-password template key documented. New collections `rate_counters`, `abuse_holds`; env `LOGIN_*`, `OTP_*`. Tests `test_login_lockout.py`, `test_auth_hardening_*.py`. |
 | 2026-10-28 | GPS integrity (§7.10): arrived / start / complete are refused outside the geofence (accuracy-aware), on a missing, stale, future, weak or replayed fix, or when the stored breadcrumb trail teleports / freezes / has constant accuracy / is missing; refusals are 409 `GEO_CHECK_FAILED` with an Ask-Manager-To-Approve flow (single-use, expiring, audit-logged manager/admin override of one step of one job); minimum wash time; `geo_checks` / `geo_suspect` / `geo_override` evidence, `geo_events`, flag counts, staff Location Verdict; captain app sends fix metadata, queues pings, wake lock, Location Check chip. Kill switch `GEOFENCE_ENFORCE`. Tests `test_gps_integrity.py`; the old flag-only arrival tests were rewritten. |
 | 2026-10-28 | WhatsApp bot alignment: holidays (warm `holiday_service.friendly_message`, next open days from `_scan_days` over the booking window, stale-tap/hold/confirm/reschedule paths), "Use My Plan" step `q_plan` (own plans via `list_my_subscriptions` judged by `pass_usability`; one plan = Use My Plan / Pay Normal Price buttons, two or more = chooser; the pick is named on the line as `subscription_id` (+ car) so quote and booking consume it through the one BookingService path; Last Booking Day respected; exhausted/scheduled plan → one-line reason and normal price), cancel prompt shows `cancellation_charge_preview` (charge, plan wash, wallet) and the wallet line after, chat linked to an account whose phone is not the sender's is dropped (`_live_customer_id`). The bot has no OTP step and does not sell plans (nothing to align there). Tests `test_whatsapp_bot_alignment.py`. |

@@ -82,6 +82,10 @@ export interface BookingMoneyFields {
   /** Money a manager paid back for this booking, and the running total. */
   manager_paybacks?: ManagerPayback[] | null;
   paid_back_total?: number | null;
+  /** Staff reads only: changes whenever the booking's money, schedule or status does (the edit's `expected_version`). */
+  version?: string;
+  manager_discount_reason?: string | null;
+  admin_notes?: string | null;
 }
 
 export type StaffBooking = Booking & BookingMoneyFields;
@@ -150,6 +154,125 @@ export function moneyOf(b: StaffBooking): { total: number; wallet: number; paid:
 }
 
 export const TIP_METHOD_LABELS: Record<TipMethod, string> = { cash: "Cash", online: "Online" };
+
+// -- Discounts and admin edits (founder 2026-10-28) -----------------------
+
+export interface DiscountCar {
+  booking_id: string;
+  booking_number: string;
+  discount_before: number;
+  discount_after: number;
+  total_before: number;
+  total_after: number;
+  amount_due_before: number;
+  amount_due_after: number;
+  amount_paid_after: number;
+  payment_status: string;
+  wallet_credit: number;
+}
+
+export interface DiscountResult {
+  booking_id: string;
+  booking_number: string;
+  scope: "booking" | "visit";
+  changed: boolean;
+  dry_run: boolean;
+  already_applied: boolean;
+  discount_before: number;
+  discount_after: number;
+  total_after: number;
+  amount_due_after: number;
+  wallet_credit: number;
+  cars: DiscountCar[];
+  message: string;
+  version: string;
+}
+
+export interface DiscountInput {
+  amount?: number;
+  percent?: number;
+  reason: string;
+  scope?: "booking" | "visit";
+  idempotency_key?: string;
+  expected_version?: string;
+  dry_run?: boolean;
+}
+
+export interface MoneySnapshot {
+  manager_discount: number;
+  total: number;
+  amount_paid: number;
+  wallet_applied: number;
+  amount_due: number;
+  payment_status: string;
+  platform_earning: number;
+  tip_amount: number;
+}
+
+export interface AdjustmentChange {
+  booking_id: string;
+  booking_number?: string | null;
+  field: string;
+  label: string;
+  from?: unknown;
+  to?: unknown;
+}
+
+/** One immutable row of a booking's money-change history. */
+export interface BookingAdjustment {
+  id: string;
+  booking_id: string;
+  booking_number?: string | null;
+  kind: "discount" | "admin_edit";
+  seq: number;
+  actor_id?: string | null;
+  actor_role?: string | null;
+  actor_name?: string | null;
+  reason: string;
+  before: MoneySnapshot;
+  after: MoneySnapshot;
+  wallet_credit?: number | null;
+  changes?: AdjustmentChange[] | null;
+  fields?: string[] | null;
+  created_at: string;
+}
+
+export interface AdminEditResult {
+  booking_id: string;
+  booking_number: string;
+  dry_run: boolean;
+  already_applied: boolean;
+  changes: AdjustmentChange[];
+  warnings: string[];
+  money: {
+    before: MoneySnapshot;
+    after: MoneySnapshot;
+    customer_owes: number;
+    wallet_credit: number;
+    wallet_refund_on_cancel: number;
+    captain_wallet_delta: number;
+  };
+  version: string;
+  message: string;
+}
+
+export type AdminEditInput = Record<string, unknown> & { reason: string; dry_run?: boolean; expected_version?: string; idempotency_key?: string };
+
+export const adjustmentApi = {
+  discount: (bookingId: string, input: DiscountInput) =>
+    apiClient.post<ApiSuccess<DiscountResult>>(`/bookings/${bookingId}/discount`, input).then((r) => r.data.data),
+  /** The booking's money-change history, newest first (manager: own center; admin: any). */
+  history: (bookingId: string) => apiClient.get<ApiSuccess<BookingAdjustment[]>>(`/bookings/${bookingId}/adjustments`).then((r) => r.data.data),
+  adminEdit: (bookingId: string, input: AdminEditInput) =>
+    apiClient.patch<ApiSuccess<AdminEditResult>>(`/admin/bookings/${bookingId}`, input).then((r) => r.data.data),
+};
+
+/** A fresh idempotency key for one dialog session (a retry reuses it). */
+export function newIdempotencyKey(): string {
+  const bytes = new Uint8Array(12);
+  (globalThis.crypto || ({} as Crypto)).getRandomValues?.(bytes);
+  return "k" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 export const EDITED_FIELD_LABELS: Record<string, string> = {
   scheduled_date: "Date",

@@ -166,7 +166,7 @@ export default function ManagerDashboardPage() {
           />
         </div>
         {failed ? null : isLoading || !data ? (
-          <SkeletonRow tall />
+          <SalesSkeleton />
         ) : (
           <SalesBlock
             data={data}
@@ -180,6 +180,9 @@ export default function ManagerDashboardPage() {
           />
         )}
       </section>
+
+      {/* While loading, hold the height of sections 3-4 so the collections card below doesn't jump down when data lands. */}
+      {failed || data ? null : <BelowFoldSkeleton />}
 
       {/* 3. What was washed */}
       {data && (
@@ -318,12 +321,39 @@ export default function ManagerDashboardPage() {
 
 /* ------------------------------------------------------------------ */
 
-function SkeletonRow({ tall = false }: { tall?: boolean }) {
+/** One quiet row: the usual "All clear" strip height (alert cards, when there are any, are the exception). */
+function SkeletonRow() {
+  return <div aria-hidden="true" className="h-[54px] animate-pulse rounded-[14px] border border-[#E4E9F1] bg-[#F7F9FC]" />;
+}
+
+/** Same grid + approximate heights as SalesBlock, so nothing jumps on load. */
+function SalesSkeleton() {
+  const box = "animate-pulse rounded-[16px] border border-[#E4E9F1] bg-[#F7F9FC]";
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {[0, 1, 2, 3].map((i) => (
-        <div key={i} className={`${tall ? "h-[120px]" : "h-[84px]"} animate-pulse rounded-[14px] border border-[#E4E9F1] bg-[#F7F9FC]`} />
-      ))}
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-hidden="true">
+      <div className={`${box} col-span-2 min-h-[232px] lg:row-span-2`} />
+      <div className={`${box} min-h-[112px] sm:min-h-[120px]`} />
+      <div className={`${box} min-h-[112px] sm:min-h-[120px]`} />
+      <div className={`${box} min-h-[112px] sm:min-h-[120px]`} />
+      <div className={`${box} min-h-[112px] sm:min-h-[120px]`} />
+    </div>
+  );
+}
+
+/** Placeholder for "Washes By ...", "Plans Sold" and "Today" while the first read is in flight. */
+function BelowFoldSkeleton() {
+  const box = "animate-pulse rounded-[16px] border border-[#E4E9F1] bg-[#F7F9FC]";
+  return (
+    <div className="space-y-4" aria-hidden="true">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className={`${box} min-h-[220px]`} />
+        <div className={`${box} min-h-[220px]`} />
+      </div>
+      <div className={`${box} min-h-[140px]`} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
+        <div className={`${box} min-h-[260px] xl:col-span-3`} />
+        <div className={`${box} min-h-[260px] xl:col-span-2`} />
+      </div>
     </div>
   );
 }

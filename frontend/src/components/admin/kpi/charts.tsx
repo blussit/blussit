@@ -48,7 +48,7 @@ export function TargetChip({ actual, target, unit = "", higherIsBetter = true }:
   const gap = actual - target;
   const met = higherIsBetter ? gap >= 0 : gap <= 0;
   return (
-    <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${met ? "bg-green-50 text-[var(--color-success)]" : "bg-amber-50 text-amber-700"}`}>
+    <span className={`mt-1 inline-block max-w-full break-words rounded-full px-2 py-0.5 text-[10px] font-medium ${met ? "bg-green-50 text-[var(--color-success)]" : "bg-amber-50 text-amber-700"}`}>
       Target {target}{unit} · {gap >= 0 ? "+" : ""}{Math.round(gap * 10) / 10}{unit}
     </span>
   );

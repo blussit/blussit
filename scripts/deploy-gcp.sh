@@ -55,9 +55,12 @@ IMAGE_NAME="${CLOUD_RUN_IMAGE_NAME:-blussit-backend}"
 # several seconds of a blank booking screen). It costs a small always-on
 # instance; set CLOUD_RUN_MIN_INSTANCES=0 to go back to scale-to-zero.
 MIN_INSTANCES="${CLOUD_RUN_MIN_INSTANCES:-1}"
-# Requests (incl. open WebSockets) per instance. Most requests wait on Mongo,
-# so one async worker handles far more than Cloud Run's default of 80.
-CONCURRENCY="${CLOUD_RUN_CONCURRENCY:-250}"
+# Requests (incl. open WebSockets) per instance. One instance measured about
+# 33-135 requests/s depending on the route (site QA 2026-10-29): at 200
+# concurrent, requests queued for up to 7 s before a second instance started.
+# 80 (Cloud Run's default) lets the autoscaler add instances sooner; raise it
+# with CLOUD_RUN_CONCURRENCY if the bill matters more than tail latency.
+CONCURRENCY="${CLOUD_RUN_CONCURRENCY:-80}"
 # Cloud Run closes every request, WebSockets included, at this timeout
 # (default 300 s would drop every live socket every 5 minutes). 3600 is the max.
 TIMEOUT="${CLOUD_RUN_TIMEOUT:-3600}"
