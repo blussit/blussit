@@ -39,6 +39,11 @@ const statusToneMap: Record<string, Tone> = {
   in_progress: "info",
   resolved: "success",
   closed: "neutral",
+  partially_paid: "warning",
+  refund_due: "warning",
+  refunded: "neutral",
+  scheduled: "info",
+  paused: "warning",
 };
 
 /** Statuses whose raw value doesn't read well to a customer. */

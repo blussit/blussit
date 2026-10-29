@@ -363,23 +363,6 @@ async def test_manager_overview_matches_legacy(db, dataset, period):
         assert_same(legacy, new)
 
 
-def _without_tie_order(summary: dict) -> dict:
-    # Top-5 lists break ties in natural order on both sides; compare the
-    # ranked values, not which of two equal rows came first.
-    out = dict(summary)
-    out["top_services"] = sorted(r["bookings"] for r in summary["top_services"])
-    out["best_performing_captains"] = sorted(r["jobs_completed"] for r in summary["best_performing_captains"])
-    out["best_service_centers"] = sorted(r["revenue"] for r in summary["best_service_centers"])
-    return out
-
-
-@pytest.mark.asyncio
-async def test_dashboard_summary_matches_legacy(db, dataset):
-    legacy = await LegacyAnalyticsService(db).dashboard_summary()
-    new = await AnalyticsService(db).dashboard_summary()
-    assert_same(_without_tie_order(legacy), _without_tie_order(new))
-
-
 @pytest.mark.asyncio
 async def test_service_center_summaries_match_legacy(db, dataset):
     legacy = await LegacyAnalyticsService(db).service_center_summaries()

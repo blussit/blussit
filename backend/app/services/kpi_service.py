@@ -246,7 +246,7 @@ class KpiService:
                 "captain_cancelled": _count_if({"$and": [created, {"$eq": ["$cancelled_by_role", "captain"]}]}),
                 "started": _count_if({"$and": [created, _truthy("$captain_start_stage")]}),
                 "on_time": _count_if({"$and": [created, {"$in": ["$captain_start_stage", ["early", "on_time"]]}]}),
-                "subscription_revenue": _sum_if({"$and": [completed, {"$eq": ["$payment_method", "subscription"]}]}, "$subtotal"),
+                "subscription_revenue": _sum_if({"$and": [completed, {"$eq": ["$payment_method", "subscription"]}]}, {"$ifNull": ["$discount_amount", "$subtotal"]}),
                 "subscription_charged": _sum_if({"$and": [completed, {"$eq": ["$payment_method", "subscription"]}]}, "$total_amount"),
                 "travel_sum": _sum_if(has_travel, _minutes_between("$heading_at", "$vehicle_verified_at")),
                 "travel_n": _count_if(has_travel),
@@ -615,6 +615,9 @@ class KpiService:
                 "repeat_customer_revenue": repeat_rev,
                 "repeat_revenue_pct": _pct(repeat_rev, revenue),
                 "subscription_revenue": sub_rev,
+                # What plan bookings charged on top of the plan (paid add-ons,
+                # on site or booked): paid revenue, not plan revenue.
+                "plan_addon_revenue": _rupees(cur["subscription_charged"]),
                 # Plan bookings add only what they charged (paid add-ons) to
                 # revenue, so that — not their pre-discount subtotal — is what
                 # comes back out.

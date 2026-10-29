@@ -7,6 +7,7 @@ import { AutoRail } from "./AutoRail";
 interface ReviewItem {
   id: string;
   customer_name: string;
+  customer_image?: string | null;
   rating: number;
   comment: string;
 }
@@ -44,8 +45,8 @@ export function ReviewsShowcase({ id = "reviews" }: { id?: string }) {
             </div>
             <blockquote className="mt-4 flex-1 text-[15px] leading-relaxed text-[#0E1A33]">“{r.comment}”</blockquote>
             <figcaption className="mt-5 flex items-center gap-3">
-              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#E8F0FE] text-[13px] font-bold text-[#0A66F0]">
-                {initials(r.customer_name)}
+              <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-[#E8F0FE] text-[13px] font-bold text-[#0A66F0]">
+                {r.customer_image ? <img src={r.customer_image} alt="" loading="lazy" className="h-full w-full object-cover" /> : initials(r.customer_name)}
               </span>
               <span className="text-[14px] font-semibold text-[#0E1A33]">{r.customer_name}</span>
             </figcaption>

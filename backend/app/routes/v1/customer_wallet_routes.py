@@ -29,6 +29,7 @@ from app.core.dependencies import (
 from app.core.responses import paginated, success
 from app.schemas.customer_wallet_schema import WalletAdjustRequest, WalletPayoutRequest
 from app.services.customer_wallet_service import CustomerWalletService
+from app.utils.response_text import rupees
 
 router = APIRouter(tags=["Customer Wallet"])
 
@@ -102,7 +103,8 @@ async def record_payout(
         reference=payload.reference, note=payload.note, idempotency_key=payload.idempotency_key,
         actor={"id": current_user.id, "role": current_user.role}, center=current_user.service_center_id,
     )
-    return success(record, "Payback recorded" if record.get("created") else "This payback was already recorded")
+    paid = rupees(record.get("amount"))
+    return success(record, f"Payback of {paid} recorded." if record.get("created") else f"This payback ({paid}) was already recorded — nothing was paid twice.")
 
 
 @router.post("/customers/{customer_id}/wallet/adjust", dependencies=[Depends(require_admin)])
@@ -116,4 +118,7 @@ async def adjust_wallet(
         customer_id, payload.amount, payload.note, {"id": current_user.id, "role": current_user.role},
         idempotency_key=payload.idempotency_key,
     )
-    return success(entry, "Wallet adjusted" if entry.get("created") else "This adjustment was already applied")
+    if not entry.get("created"):
+        return success(entry, f"This adjustment was already applied. Wallet balance: {rupees(entry.get('balance'))}.")
+    direction = "added to" if payload.amount > 0 else "taken from"
+    return success(entry, f"{rupees(abs(payload.amount))} {direction} the customer's wallet. New balance: {rupees(entry.get('balance'))}.")

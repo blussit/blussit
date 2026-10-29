@@ -1,4 +1,4 @@
-import { API_BASE_URL, apiClient, UPLOAD_TIMEOUT_MS, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
+import { apiClient, UPLOAD_TIMEOUT_MS, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
 import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
 
@@ -54,17 +54,11 @@ export const adminUserApi = {
     center_id?: string; city?: string; pincode?: string; sort_by?: string; sort_order?: 1 | -1;
   }) => apiClient.get<ApiPaginated<User>>("/users", { params }).then((r) => r.data),
   locationFacets: () => apiClient.get<ApiSuccess<{ cities: string[] }>>("/users/location-facets").then((r) => r.data.data),
-  get: (id: string) => apiClient.get<ApiSuccess<User>>(`/users/${id}`).then((r) => r.data.data),
   update: (id: string, payload: Partial<User>) => apiClient.put<ApiSuccess<User>>(`/users/${id}`, payload).then((r) => r.data.data),
   suspend: (id: string) => apiClient.post<ApiSuccess<User>>(`/users/${id}/suspend`).then((r) => r.data.data),
   remove: (id: string) => apiClient.delete(`/users/${id}`).then((r) => r.data),
   createStaff: (payload: { full_name: string; email?: string; phone?: string; password: string; role: string; service_center_id?: string; photo_url?: string }) =>
     apiClient.post<ApiSuccess<User>>("/auth/staff", payload).then((r) => r.data.data),
-  // Manager/admin creating a customer on their behalf (e.g. a phone/walk-in
-  // booking) — the account gets a temp password the customer must change on
-  // first login, see User.must_change_password.
-  createCustomer: (payload: { full_name: string; phone: string; email?: string; temp_password: string }) =>
-    apiClient.post<ApiSuccess<User>>("/auth/customers", payload).then((r) => r.data.data),
 };
 
 export const adminServiceCenterApi = {
@@ -75,7 +69,6 @@ export const adminServiceCenterApi = {
     apiClient.post<ApiSuccess<ServiceCenter>>("/service-centers", payload).then((r) => r.data.data),
   update: (id: string, payload: { [K in keyof ServiceCenter]?: ServiceCenter[K] | null }) =>
     apiClient.put<ApiSuccess<ServiceCenter>>(`/service-centers/${id}`, payload).then((r) => r.data.data),
-  remove: (id: string) => apiClient.delete(`/service-centers/${id}`).then((r) => r.data),
 };
 
 export const adminSlotCapacityApi = {
@@ -146,8 +139,6 @@ export const inventoryApi = {
   create: (payload: Partial<InventoryItem>) => apiClient.post<ApiSuccess<InventoryItem>>("/inventory", payload).then((r) => r.data.data),
   update: (id: string, payload: Partial<InventoryItem>) =>
     apiClient.put<ApiSuccess<InventoryItem>>(`/inventory/${id}`, payload).then((r) => r.data.data),
-  adjust: (id: string, delta: number, reason?: string) =>
-    apiClient.post<ApiSuccess<InventoryItem>>(`/inventory/${id}/adjust`, { delta, reason }).then((r) => r.data.data),
   remove: (id: string) => apiClient.delete(`/inventory/${id}`).then((r) => r.data),
 };
 
@@ -183,10 +174,6 @@ export const staffDirectoryApi = {
   captainPerformance: (captainId: string, params?: { date_from?: string; date_to?: string; service_center_id?: string }) =>
     apiClient.get<ApiSuccess<CaptainPerformance>>(`/staff/captains/${captainId}/performance`, { params }).then((r) => r.data.data),
   myPerformance: () => apiClient.get<ApiSuccess<CaptainPerformance>>("/staff/my-performance").then((r) => r.data.data),
-  performanceForCenter: (serviceCenterId: string, params?: { date_from?: string; date_to?: string }) =>
-    apiClient
-      .get<ApiSuccess<(CaptainPerformance & { captain_id: string; full_name: string })[]>>(`/staff/captains/center/${serviceCenterId}/performance`, { params })
-      .then((r) => r.data.data),
   // Captain-side location ping while an active job is in progress — see
   // BookingService.update_captain_location/has_active_job. Rejected with a
   // normal error if the captain has no active job right now, which callers
@@ -217,11 +204,6 @@ export interface ServiceCenterSummary {
 }
 
 export const analyticsApi = {
-  dashboard: () => apiClient.get<ApiSuccess<Record<string, unknown>>>("/analytics/dashboard").then((r) => r.data.data),
-  bookingTrends: (days = 30) =>
-    apiClient
-      .get<ApiSuccess<{ date: string; bookings: number; revenue: number }[]>>("/analytics/booking-trends", { params: { days } })
-      .then((r) => r.data.data),
   serviceCenterSummaries: () => apiClient.get<ApiSuccess<ServiceCenterSummary[]>>("/analytics/service-centers").then((r) => r.data.data),
   managerSummary: (serviceCenterId: string) => apiClient.get<ApiSuccess<Record<string, number | null>>>(`/analytics/manager-summary/${serviceCenterId}`).then((r) => r.data.data),
   vehicleTypeBreakdown: (serviceCenterId?: string) =>
@@ -419,10 +401,6 @@ export const kpiApi = {
    *  type, plans sold, today's slot load, captains, alarms. One center. */
   managerDashboard: (serviceCenterId: string, params: KpiPeriodParams) =>
     apiClient.get<ApiSuccess<ManagerDashboard>>(`/analytics/manager-dashboard/${serviceCenterId}`, { params }).then((r) => r.data.data),
-  managerOverview: (serviceCenterId: string, params: KpiPeriodParams) =>
-    apiClient
-      .get<ApiSuccess<{ current: ManagerOverviewBlock; previous: ManagerOverviewBlock }>>(`/analytics/kpis/manager-overview/${serviceCenterId}`, { params })
-      .then((r) => r.data.data),
   getSettings: () => apiClient.get<ApiSuccess<BusinessSettings>>("/analytics/business-settings").then((r) => r.data.data),
   updateSettings: (payload: Partial<BusinessSettings>) =>
     apiClient.put<ApiSuccess<BusinessSettings>>("/analytics/business-settings", payload).then((r) => r.data.data),
@@ -607,7 +585,6 @@ export const whatsappCrmApi = {
     form.append("file", file);
     return apiClient.post<ApiSuccess<{ media_id: string; media_type: string; filename: string; size: number }>>("/whatsapp/crm/media", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: UPLOAD_TIMEOUT_MS }).then((r) => r.data.data);
   },
-  mediaUrl: (mediaId: string) => `${API_BASE_URL}/whatsapp/crm/media/${mediaId}`,
   /** The attachment itself, fetched WITH the admin's bearer token (a bare
    *  URL in an <img>/<a> can't carry it — the route is admin-only). */
   mediaBlob: (mediaId: string) =>

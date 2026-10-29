@@ -24,8 +24,8 @@ const emptyForm = {
   contact_phone: "",
   contact_email: "",
   manager_id: "",
-  working_hours_start: "08:00",
-  working_hours_end: "20:00",
+  working_hours_start: "07:00",
+  working_hours_end: "19:00",
   slot_duration_minutes: "",
 };
 
@@ -111,8 +111,8 @@ export default function AdminServiceCentersPage() {
       contact_phone: center.contact_phone || "",
       contact_email: center.contact_email || "",
       manager_id: center.manager_id || "",
-      working_hours_start: center.working_hours_start || "08:00",
-      working_hours_end: center.working_hours_end || "20:00",
+      working_hours_start: center.working_hours_start || "07:00",
+      working_hours_end: center.working_hours_end || "19:00",
       slot_duration_minutes: center.slot_duration_minutes != null ? String(center.slot_duration_minutes) : "",
     });
     setOpen(true);
@@ -177,7 +177,7 @@ export default function AdminServiceCentersPage() {
             header: "",
             accessor: (c) => (
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                <Button size="sm" variant="outline" aria-label={`Edit ${c.name}`} title="Edit" onClick={() => openEdit(c)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => navigate(`/admin/service-centers/${c.id}/capacity`)}>
@@ -275,7 +275,7 @@ export default function AdminServiceCentersPage() {
           <div className="rounded-xl border border-dashed border-gray-300 p-4">
             <p className="mb-1 text-sm font-medium text-[var(--color-text-primary)]">Booking Slot Duration</p>
             <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-              Customers book into admin-generated slots (e.g. 09:00-12:00) within the hours above — this only controls how
+              Customers book into admin-generated slots (e.g. 9:00 AM – 12:00 PM) within the hours above — this only controls how
               long each slot is. Leave blank to use the platform-wide default from Pricing &amp; wallets.
             </p>
             <Input

@@ -44,7 +44,8 @@ from app.schemas.society_schema import (
 )
 from app.services.audit_service import AuditService
 from app.services.payment_service import PaymentService
-from app.services.society_service import SocietyService
+from app.services.society_service import OPEN_STATUSES, SocietyService
+from app.utils.response_text import plural
 
 form_router = APIRouter(prefix="/society-forms", tags=["Society form (public)"])
 society_router = APIRouter(prefix="/societies", tags=["Societies"])
@@ -434,10 +435,17 @@ async def enrollment_coupon_preview(enrollment_id: str, payload: CouponPreviewRe
 async def cancel_enrollment(enrollment_id: str, payload: CancelEnrollmentRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     service = SocietyService(db)
     enrollment = await service.enrollment_for_actor(enrollment_id, current_user.role, current_user.service_center_id)
+    was_open = enrollment.get("status") in OPEN_STATUSES
+    targets = set(payload.vehicle_ids or [c.get("vehicle_id") for c in enrollment.get("cars") or []])
+    live_cars = sum(1 for c in enrollment.get("cars") or [] if c.get("vehicle_id") in targets and c.get("status") == "active")
     result = await service.cancel(enrollment, vehicle_ids=payload.vehicle_ids, actor_id=current_user.id, reason=payload.reason)
     await PaymentService(db).void_society_links(enrollment_id, "plan cancelled or changed")
     await _audit(db, current_user, "CANCEL_SOCIETY_ENROLLMENT", "society_enrollments", enrollment_id, payload.model_dump())
-    return success(result, "Cancelled")
+    message = (
+        "Plan request cancelled — any unpaid payment link is voided."
+        if was_open else f"{plural(live_cars, 'car')} taken off the plan — {'its pass is' if live_cars == 1 else 'their passes are'} cancelled."
+    )
+    return success(result, message)
 
 
 @enrollment_router.post("/{enrollment_id}/payment-link")

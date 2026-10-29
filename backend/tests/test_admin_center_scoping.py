@@ -144,7 +144,6 @@ def _cross_center_requests(r: dict) -> list[tuple[str, str, dict | None]]:
         ("PATCH", f"/api/v1/bookings/{b}/details", {"customer_notes": "x"}),
         ("POST", f"/api/v1/bookings/{b}/cancel", {"reason": "customer asked"}),
         ("GET", f"/api/v1/analytics/manager-summary/{cb}", None),
-        ("GET", f"/api/v1/analytics/kpis/manager-overview/{cb}?period=30d", None),
         ("GET", f"/api/v1/analytics/manager-dashboard/{cb}?period=30d", None),
         ("GET", f"/api/v1/subscriptions/center/{cb}/overview", None),
         ("GET", f"/api/v1/subscriptions/center/{cb}/plan-purchases?period=30d", None),

@@ -44,14 +44,6 @@ export function garagePlate(car: GarageCar): string {
 /** "Next Wash 5 Oct · Star Wash" — the date, then that visit's service when known. */
 const withService = (text: string, service?: string) => (service ? `${text} · ${service}` : text);
 
-/** "Next Wash 5 Oct · Last Washed 3 Oct" — whichever of the two exist. */
-export function garageWashLine(car: GarageCar): string {
-  const parts: string[] = [];
-  if (car.next_wash_on) parts.push(`Next Wash ${formatShortDate(car.next_wash_on)}`);
-  if (car.last_washed_on) parts.push(`Last Washed ${formatShortDate(car.last_washed_on)}`);
-  return parts.join(" · ");
-}
-
 /** Per garage car, the service on its next visit and on its last wash (see useGarageServices). */
 export type GarageServices = Record<string, { next?: string; last?: string }>;
 

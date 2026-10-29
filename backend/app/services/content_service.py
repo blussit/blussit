@@ -28,6 +28,8 @@ class FaqService:
 
     async def update(self, faq_id: str, payload: FaqUpdateRequest) -> dict:
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        if not data:
+            raise BadRequestException("Nothing to change")
         updated = await self.repo.update_by_id(faq_id, data)
         if not updated:
             raise NotFoundException("FAQ not found")
@@ -51,7 +53,11 @@ class TestimonialService:
         return serialize_doc(await self.repo.create(payload.model_dump()))
 
     async def update(self, testimonial_id: str, payload: TestimonialUpdateRequest) -> dict:
-        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+        # None means "leave it" for every field except the photo, where an
+        # explicit null/blank is how admin removes it.
+        data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k == "customer_image"}
+        if not data:
+            raise BadRequestException("Nothing to change")
         updated = await self.repo.update_by_id(testimonial_id, data)
         if not updated:
             raise NotFoundException("Testimonial not found")
@@ -100,12 +106,6 @@ class SettingService:
             first = exc.errors()[0] if exc.errors() else {}
             where = ".".join(str(p) for p in first.get("loc", ()))
             raise BadRequestException(f"Invalid value for '{key}'{f' ({where})' if where else ''}: {first.get('msg', 'not allowed')}.") from exc
-
-    async def get(self, key: str) -> dict:
-        setting = await self.repo.get_by_key(key)
-        if not setting:
-            raise NotFoundException("Setting not found")
-        return serialize_doc(setting)
 
     async def upsert(self, payload: SettingUpsertRequest, updated_by: str | None = None) -> tuple[dict, dict]:
         """(saved setting, {field: {before, after}}) — the caller audits the

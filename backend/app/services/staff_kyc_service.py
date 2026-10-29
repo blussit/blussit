@@ -159,25 +159,6 @@ class StaffKycService:
             "reason": reason, "archived_by": actor_id, "archived_at": now_ist(),
         })
 
-    async def list_versions(self, captain_id: str, actor_role: str, actor_center_id: str | None) -> list[dict]:
-        """Earlier packets (numbers masked to the last 4 for everyone —
-        the full value is only ever on the live packet's admin view)."""
-        await self._own_center_captain(captain_id, actor_role, actor_center_id, allow_deleted=actor_role == "admin")
-        rows = await self.user_repo.collection.database[KYC_VERSIONS].find({"captain_id": captain_id}).sort("version", 1).to_list(length=200)
-        out = []
-        for r in rows:
-            snap = _serialized(dict(r.get("snapshot") or {}))
-            for key in ("aadhaar_number", "pan_number"):
-                if snap.get(key):
-                    snap[key] = _mask_tail(str(snap[key]))
-            at = r.get("archived_at")
-            out.append({
-                "version": r.get("version"), "reason": r.get("reason"), "archived_by": r.get("archived_by"),
-                "archived_at": from_stored(at).isoformat() if at is not None and not isinstance(at, str) else at,
-                "packet": snap,
-            })
-        return out
-
     async def get_for_review(self, captain_id: str, actor_role: str, actor_center_id: str | None, actor_id: str | None = None, ip: str | None = None) -> dict:
         captain = await self._own_center_captain(captain_id, actor_role, actor_center_id)
         if actor_id:

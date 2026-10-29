@@ -327,8 +327,8 @@ async def test_inventory_and_content_edits_are_audited(db, cleanup, admin_h):
         })).json()["data"]
         upd = await c.put(f"/api/v1/inventory/{item['id']}", headers=MA, json={"quantity_available": 3})
         dele = await c.delete(f"/api/v1/inventory/{item['id']}", headers=MA)
-        faq = (await c.post("/api/v1/faqs", headers=admin_h, json={"question": "Q?", "answer": "A."})).json()["data"]
-        fu = await c.put(f"/api/v1/faqs/{faq['id']}", headers=admin_h, json={"answer": "Better A."})
+        faq = (await c.post("/api/v1/faqs", headers=admin_h, json={"question": "How does it work?", "answer": "It works well."})).json()["data"]
+        fu = await c.put(f"/api/v1/faqs/{faq['id']}", headers=admin_h, json={"answer": "It works even better."})
         fd = await c.delete(f"/api/v1/faqs/{faq['id']}", headers=admin_h)
         t = (await c.post("/api/v1/testimonials", headers=admin_h, json={"customer_name": "Ravi", "comment": "Great"})).json()["data"]
         tu = await c.put(f"/api/v1/testimonials/{t['id']}", headers=admin_h, json={"rating": 4})
@@ -345,7 +345,7 @@ async def test_inventory_and_content_edits_are_audited(db, cleanup, admin_h):
     assert inv.get("service_center_id") == center and inv["actor_id"] == mgr
     assert await db.audit_logs.find_one({"target_id": item["id"], "action": "DELETE_INVENTORY_ITEM"})
     fa = await db.audit_logs.find_one({"target_id": faq["id"], "action": "UPDATE_FAQ"})
-    assert fa["details"]["changes"] == {"answer": {"before": "A.", "after": "Better A."}}
+    assert fa["details"]["changes"] == {"answer": {"before": "It works well.", "after": "It works even better."}}
     assert await db.audit_logs.find_one({"target_id": faq["id"], "action": "DELETE_FAQ"})
     for action in ("CREATE_TESTIMONIAL", "UPDATE_TESTIMONIAL", "DELETE_TESTIMONIAL"):
         assert await db.audit_logs.find_one({"target_id": t["id"], "action": action}), action

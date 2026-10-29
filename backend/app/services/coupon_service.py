@@ -268,7 +268,7 @@ class CouponService:
                 await self._refuse(user_id, coupon["code"], "This coupon has expired or is not yet active")
 
             if order_value < coupon.get("min_order_value", 0):
-                await self._refuse(user_id, coupon["code"], f"Minimum order value of ₹{coupon['min_order_value']} required for this coupon")
+                await self._refuse(user_id, coupon["code"], f"Minimum order value of ₹{coupon['min_order_value']:g} required for this coupon")
 
             if coupon.get("total_usage_limit") and coupon.get("total_used", 0) >= coupon["total_usage_limit"]:
                 await self._refuse(user_id, coupon["code"], "This coupon has reached its usage limit")
@@ -329,7 +329,7 @@ class CouponService:
         if coupon["total_used"] >= coupon["total_usage_limit"]:
             await self._refuse(user_id, code, BUNDLE_USED)
         if order_value < coupon.get("min_order_value", 0):
-            await self._refuse(user_id, code, f"Minimum order value of ₹{coupon['min_order_value']} required for this coupon")
+            await self._refuse(user_id, code, f"Minimum order value of ₹{coupon['min_order_value']:g} required for this coupon")
         return coupon
 
     # ------------------------------------------------------------------

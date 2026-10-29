@@ -19,6 +19,7 @@ import { useToast, type ToastTone } from "../../context/ToastContext";
 import { notificationTargetPath } from "../../lib/notifications";
 import { playNotificationChime } from "../../lib/notificationSound";
 import { useLiveChannel } from "../../lib/socket";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import type { Notification } from "../../types";
 
 export interface NavItem {
@@ -97,13 +98,14 @@ export function DashboardShell({
     refetchOnWindowFocus: true,
   });
 
-  // Staff only: every open socket holds a server slot, and a customer's
-  // notifications are fine on the visible-tab poll above. Customers get a
-  // socket only on the pages where live updates matter (an active
-  // booking's detail page, the slot picker).
+  // The bell for staff (customers' and captains' shells subscribe the same
+  // `user:{id}` channel for their own screens).
   useLiveChannel(user && isStaff ? `user:${user.id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: notifQueryKey });
   });
+  // Dashboards, KPIs, queues, plans sold and lists refresh on every change
+  // pinged to this user / their center / the admin feed.
+  useLiveRefresh();
 
   // Only ever from a click (the bell, or the "Enable alerts" chip below):
   // browsers penalize sites that prompt on page load.

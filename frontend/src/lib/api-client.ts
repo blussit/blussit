@@ -202,11 +202,43 @@ apiClient.interceptors.request.use(async (config: InternalAxiosRequestConfig) =>
   return config;
 });
 
+// Every successful action (POST/PUT/PATCH/DELETE) — through a react-query
+// mutation or a bare call — tells the app "data changed", so each screen
+// that shows it refetches (hooks/useLiveRefresh.ts, registered in App.tsx).
+// Writes that change nothing anyone sees are left out: sign-in and OTP
+// calls, uploads, location pings, slot holds, quotes / previews / dry runs,
+// coverage checks, the WhatsApp inbox.
+type WriteListener = (info: { failed: boolean }) => void;
+let writeListener: WriteListener | null = null;
+export function onApiWrite(listener: WriteListener | null) {
+  writeListener = listener;
+}
+const NOT_A_CHANGE = /\/(auth|uploads?|staff\/captains\/location|bookings\/hold|slot-holds?|coverage|analytics\/visit|whatsapp)\b|\/(quote|preview|coupon-preview|check-registration)\b/;
+function announceWrite(config: InternalAxiosRequestConfig | undefined, failed: boolean) {
+  if (!writeListener || !config) return;
+  const method = (config.method || "get").toLowerCase();
+  if (method === "get" || method === "head" || method === "options") return;
+  if (NOT_A_CHANGE.test(config.url || "")) return;
+  if (typeof config.data === "string" && /"dry_run"\s*:\s*true/.test(config.data)) return;
+  try {
+    writeListener({ failed });
+  } catch {
+    // a listener must never break the request
+  }
+}
+
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    announceWrite(response.config, false);
+    return response;
+  },
   async (error: AxiosError) => {
     const originalRequest = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
     const isAuthAttempt = AUTH_ATTEMPT.test(originalRequest?.url || "");
+    // "It changed under you" (conflict / gone / not found): what the screen
+    // shows is stale, so refetch it — the server's message still reaches the user.
+    const status = error.response?.status;
+    if (status === 409 || status === 404 || status === 410) announceWrite(originalRequest, true);
 
     if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isAuthAttempt) {
       originalRequest._retry = true;
@@ -293,6 +325,13 @@ export function getErrorMessage(error: unknown): string {
     const status = error.response.status;
     if (status === 429) return (typeof data?.message === "string" && data.message) || "Too many requests — please wait a moment and try again.";
     if (typeof data?.message === "string" && data.message) return data.message;
+    // FastAPI's own errors (HTTPException, 401/403 from a dependency) are
+    // {detail: "…"} — show that text rather than a generic shrug.
+    const detail = (raw as { detail?: unknown } | undefined)?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail) && typeof (detail[0] as { msg?: unknown } | undefined)?.msg === "string") {
+      return (detail[0] as { msg: string }).msg;
+    }
     if (status >= 500) return "Something went wrong on our side — please try again in a moment.";
     return "Something went wrong — please try again.";
   }

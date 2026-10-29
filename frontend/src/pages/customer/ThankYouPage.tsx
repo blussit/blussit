@@ -188,6 +188,10 @@ export default function ThankYouPage() {
           ? "Paid from your Blussit wallet — nothing to pay."
           : awaitingPayment
           ? "Pay online to confirm this booking."
+          : paymentMethod === "subscription"
+            ? amountDue === 0
+              ? "Your plan covers the wash and the add-ons are paid."
+              : `Your plan covers the wash — pay ₹${Math.round(amountDue ?? totalAmount)} for the add-ons after the wash.`
           : paymentMethod === "online"
             ? "Paid online."
             : paymentMethod === "cash"

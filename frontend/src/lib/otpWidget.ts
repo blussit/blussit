@@ -191,13 +191,6 @@ export function widgetVerifyOtp(otp: string): Promise<string> {
   return withTimeout(verify, VERIFY_TIMEOUT_MS, "Couldn't check the code — please try again.");
 }
 
-export function widgetRetryOtp(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!window.retryOtp) return reject(new Error("OTP service unavailable"));
-    window.retryOtp(null, () => resolve(), () => reject(new Error("Couldn't resend — try again in a minute.")));
-  });
-}
-
 // Server refusals after which the other channel must NOT be tried — it
 // would dodge a limit or can't help (no account, staff number, hourly cap).
 const FINAL_SEND_ERROR = /no account|staff account|suspended|too many codes/i;

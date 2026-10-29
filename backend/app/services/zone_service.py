@@ -43,7 +43,7 @@ def _validate_ring(ring: list) -> list:
             raise BadRequestException("Zone corners must be [longitude, latitude] pairs")
         lng, lat = float(point[0]), float(point[1])
         if not (-180 <= lng <= 180 and -90 <= lat <= 90):
-            raise BadRequestException("Zone corner out of range")
+            raise BadRequestException("A zone corner is off the map — longitude must be -180 to 180 and latitude -90 to 90.")
         if not cleaned or [lng, lat] != cleaned[-1]:  # drop double-clicked corners
             cleaned.append([lng, lat])
     if cleaned[0] != cleaned[-1]:
@@ -100,7 +100,7 @@ class ZoneService:
         if is_active is not None:
             update["is_active"] = is_active
         if not update:
-            raise BadRequestException("Nothing to update")
+            raise BadRequestException("Nothing to update — change at least one field.")
         if not ObjectId.is_valid(zone_id):
             raise NotFoundException("Zone not found")
         try:

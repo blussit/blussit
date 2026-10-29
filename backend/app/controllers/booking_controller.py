@@ -6,6 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.exceptions import ForbiddenException
 from app.core.responses import paginated, success
+from app.utils.response_text import customer_wallet_line, plural, rupees, when_text
 from app.schemas.booking_adjust_schema import BookingDiscountRequest
 from app.schemas.booking_schema import (
     AddServicesRequest,
@@ -139,6 +140,14 @@ class BookingController:
                 )
                 customer["phone"] = payload.customer_phone
         else:
+            # A guest was quoted the neutral price and never shown any plan
+            # (a quote must not reveal one): a wash on a plan the number
+            # happens to own must not be spent silently. Plan holders log in
+            # to use their plan; a guest booking is always the normal price.
+            payload = payload.model_copy(update={"lines": [
+                line.model_copy(update={"use_subscription": False, "subscription_id": None, "vehicle_id": None})
+                for line in payload.lines
+            ]})
             if not (payload.phone_otp or payload.phone_access_token):
                 await auth.require_phone_proof(payload.customer_phone, None, None)  # the "verify your number" refusal
             # Checking a code spends it — refuse what we can first, so a
@@ -358,7 +367,8 @@ class BookingController:
     async def soft_delete(self, current_user: CurrentUser, booking_id: str):
         result = await self.service.soft_delete_booking(booking_id, current_user.id)
         await self.audit.log_action(current_user.id, current_user.role, "DELETE_BOOKING", "bookings", booking_id, result)
-        return success(result, "Moved to recycle bin")
+        count = int(result.get("deleted_count") or 1)
+        return success(result, f"{plural(count, 'booking')} moved to the recycle bin — you can restore {'it' if count == 1 else 'them'} for 30 days.")
 
     async def reconcile_slot_counters(self, current_user: CurrentUser, repair: bool):
         result = await self.service.reconcile_slot_counters(repair=repair, actor_id=current_user.id, actor_role=current_user.role)
@@ -372,22 +382,27 @@ class BookingController:
     async def restore(self, current_user: CurrentUser, booking_id: str):
         result = await self.service.restore_booking(booking_id)
         await self.audit.log_action(current_user.id, current_user.role, "RESTORE_BOOKING", "bookings", booking_id, result)
-        return success(result, "Restored")
+        count = int(result.get("restored_count") or 1)
+        return success(result, f"{plural(count, 'booking')} restored from the recycle bin.")
 
     async def permanently_delete(self, current_user: CurrentUser, booking_id: str, force: bool):
         result = await self.service.permanently_delete_booking(booking_id, force=force)
         await self.audit.log_action(current_user.id, current_user.role, "PERMANENTLY_DELETE_BOOKING", "bookings", booking_id, {**result, "force": force})
-        return success(result, "Permanently deleted")
+        count = int(result.get("deleted_count") or 1)
+        return success(result, f"{plural(count, 'booking')} permanently deleted — this cannot be undone.")
 
     async def assign_captain(self, current_user: CurrentUser, booking_id: str, payload: BookingAssignCaptainRequest):
         result = await self.service.assign_captain(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "ASSIGN_CAPTAIN", "bookings", booking_id, {"captain_id": payload.captain_id})
-        return success(result, "Captain assigned successfully")
+        who = await self._captain_name(payload.captain_id)
+        visit = " Every car on the visit goes with them." if result.get("booking_group_id") else ""
+        return success(result, f"{who or 'Captain'} assigned to {result.get('booking_number') or 'the booking'}.{visit}")
 
     async def reassign_captain(self, current_user: CurrentUser, booking_id: str, payload: ReassignCaptainRequest):
         result = await self.service.reassign_captain(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "REASSIGN_CAPTAIN", "bookings", booking_id, {"captain_id": payload.captain_id})
-        return success(result, "Booking reassigned successfully")
+        who = await self._captain_name(payload.captain_id)
+        return success(result, f"{result.get('booking_number') or 'The booking'} reassigned{f' to {who}' if who else ''}.")
 
     async def self_assign(self, current_user: CurrentUser, booking_id: str):
         result = await self.service.self_assign(booking_id, current_user.id, current_user.role, current_user.service_center_id)
@@ -471,7 +486,8 @@ class BookingController:
         result = await self.service.cancel_booking_group(
             booking_group_id, payload, current_user.id, current_user.role, current_user.service_center_id
         )
-        return success(result, "Visit cancelled")
+        cars = int(result.get("cancelled_count") or 0)
+        return success(result, self._cancel_text(None, result, current_user.role, f"Visit ({plural(cars, 'car')})"))
 
     async def assign_group(self, current_user: CurrentUser, booking_group_id: str, payload: BookingAssignCaptainRequest):
         result = await self.service.assign_captain_to_group(
@@ -481,7 +497,7 @@ class BookingController:
             current_user.id, current_user.role, "ASSIGN_CAPTAIN_GROUP", "bookings", booking_group_id,
             {"captain_id": payload.captain_id, "vehicles": result["assigned_count"]},
         )
-        return success(result, f"{result['assigned_count']} vehicles assigned")
+        return success(result, f"{plural(int(result['assigned_count']), 'vehicle')} assigned")
 
     async def create_group(self, current_user: CurrentUser, payload: BookingGroupCreateRequest):
         result = await self.service.create_self_service_group(current_user.id, payload)
@@ -515,7 +531,7 @@ class BookingController:
             current_user.id, current_user.role, "CREATE_BOOKING_GROUP", "bookings",
             result["booking_group_id"], {"vehicles": result["vehicle_count"]},
         )
-        return success(result, f"{result['vehicle_count']} vehicles booked for one visit")
+        return success(result, f"{plural(int(result['vehicle_count']), 'vehicle')} booked for one visit")
 
     async def switch_to_cash(self, current_user: CurrentUser, booking_id: str):
         result = await self.service.switch_to_cash(booking_id, current_user.id)
@@ -527,7 +543,36 @@ class BookingController:
     async def cancel(self, current_user: CurrentUser, booking_id: str, payload: BookingCancelRequest):
         # CANCEL_BOOKING audit: written by the service (every channel).
         result = await self.service.cancel_booking(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)
-        return success(result, "Booking cancelled successfully")
+        return success(result, self._cancel_text(result.get("booking_number"), result, current_user.role, "Booking"))
+
+    async def _captain_name(self, captain_id: str | None) -> str | None:
+        from bson import ObjectId
+
+        if not captain_id or not ObjectId.is_valid(captain_id):
+            return None
+        doc = await self.db.users.find_one({"_id": ObjectId(captain_id)}, {"full_name": 1})
+        return (doc or {}).get("full_name")
+
+    @staticmethod
+    def _cancel_text(number: str | None, result: dict, role: str, noun: str) -> str:
+        """What a cancel actually did: the booking, the late-cancellation
+        charge, the plan wash, and the wallet movement — not just
+        "cancelled"."""
+        head = f"{noun} {number} cancelled." if number else f"{noun} cancelled."
+        charge = result.get("late_cancellation_charge") or {}
+        wallet = result.get("wallet") or {}
+        line = customer_wallet_line(wallet.get("wallet_line"), role != "customer")
+        parts = [head]
+        if charge.get("amount"):
+            parts.append(f"Late-cancellation charge: {rupees(charge['amount'])}.")
+        if line:
+            parts.append(line)
+        elif not charge.get("amount"):
+            parts.append("No charge.")
+        forfeited = result.get("plan_wash_forfeited")
+        if forfeited is True or (isinstance(forfeited, int) and not isinstance(forfeited, bool) and forfeited > 0):
+            parts.append("The plan wash was used up because the slot was less than an hour away.")
+        return " ".join(parts)
 
     async def cancellation_charge_preview(self, current_user: CurrentUser, booking_id: str, whole_visit: bool):
         return success(await self.service.cancellation_charge_preview(
@@ -542,7 +587,9 @@ class BookingController:
     async def reschedule(self, current_user: CurrentUser, booking_id: str, payload: BookingRescheduleRequest):
         # RESCHEDULE_BOOKING audit: written by the service (every channel).
         result = await self.service.reschedule_booking(booking_id, payload, current_user.id, current_user.role, current_user.service_center_id)
-        return success(result, "Booking rescheduled successfully")
+        where = when_text(payload.scheduled_date, payload.scheduled_slot)
+        tail = " It is still waiting for payment." if result.get("status") == "awaiting_payment" else " A captain will be assigned shortly."
+        return success(result, f"{result.get('booking_number') or 'Booking'} moved to {where}.{tail}")
 
     async def set_tip(self, current_user: CurrentUser, booking_id: str, payload: BookingTipRequest):
         before = await self.service.repo.find_by_id(booking_id)
@@ -583,7 +630,11 @@ class BookingController:
             current_user.id, current_user.role, "UPDATE_BOOKING_DETAILS", "bookings", booking_id,
             payload.model_dump(exclude_unset=True),
         )
-        return success(result, "Booking updated")
+        sent = payload.model_dump(exclude_unset=True)
+        if not sent:
+            return success(result, "Nothing changed — send the notes or alternate contact you want to update.")
+        fields = " and ".join(k.replace("_", " ") for k in sent)
+        return success(result, f"{result.get('booking_number') or 'Booking'} updated: {fields} saved.")
 
     async def edit(self, current_user: CurrentUser, booking_id: str | None, payload: BookingEditRequest, *, group_id: str | None = None):
         """The customer's own edit (spec 1.3) — the service writes the history

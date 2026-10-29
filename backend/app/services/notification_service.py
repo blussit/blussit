@@ -17,6 +17,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, TooManyRequestsException
+from app.core.ws_manager import manager as ws_manager
 from app.models.enums import NotificationType
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.user_repository import UserRepository
@@ -236,6 +237,9 @@ class NotificationService:
                 "is_read": False,
             }
         )
+        # The bell (and, as a catch-all, every live screen of that user)
+        # refreshes the moment the row exists — before any WhatsApp wait.
+        await ws_manager.notify_changed("notification", users=[user_id], admin=False)
         user = await self.user_repo.find_by_id(user_id)
         phone = (user or {}).get("phone")
         if wa_marketing and (user or {}).get("marketing_opt_out"):

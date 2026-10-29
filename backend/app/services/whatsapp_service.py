@@ -321,6 +321,10 @@ class WhatsAppProvider(ABC):
         return {"error": "WhatsApp is in log-only mode — templates can only be created with the Meta Cloud provider"}
 
 
+# Meta rejects an interactive message whose body is over 1024 characters.
+INTERACTIVE_BODY_LIMIT = 1024
+
+
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -551,7 +555,7 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             "type": "interactive",
             "interactive": {
                 "type": "list",
-                "body": {"text": body},
+                "body": {"text": _clip(body, INTERACTIVE_BODY_LIMIT)},
                 "action": {"button": _clip(button, 20), "sections": [{"title": "Options", "rows": rows}]},
             },
         }
@@ -565,7 +569,7 @@ class MetaCloudWhatsAppProvider(WhatsAppProvider):
             "type": "interactive",
             "interactive": {
                 "type": "button",
-                "body": {"text": body},
+                "body": {"text": _clip(body, INTERACTIVE_BODY_LIMIT)},
                 "action": {"buttons": [{"type": "reply", "reply": b} for b in buttons]},
             },
         }

@@ -592,7 +592,6 @@ async def test_charge_lists_are_scoped(db):
         theirs = (await c.get("/api/v1/charges", headers=stranger["h"])).json()
         everyone = (await c.get(f"/api/v1/charges?customer_id={s['cu']['id']}", headers=adm["h"])).json()
         cust = await c.get("/api/v1/charges", headers=s["cu"]["h"])
-        my = (await c.get("/api/v1/charges/my", headers=s["cu"]["h"])).json()["data"]
         settled = (await c.get("/api/v1/charges?status=settled", headers=s["mgr"]["h"])).json()
     row = next(x for x in mine["data"] if x["id"] == str(charge["_id"]))
     assert row["customer_name"] and row["customer_phone"] and row["created_by_name"] and row["history"]
@@ -602,7 +601,6 @@ async def test_charge_lists_are_scoped(db):
     assert [x["id"] for x in everyone["data"]] == [str(charge["_id"])]
     assert any(x["id"] == str(charge["_id"]) for x in settled["data"])
     assert cust.status_code == 403
-    assert my["items"][0]["amount"] == 50 and my["items"][0]["status"] == "settled"
 
 
 async def test_preview_endpoint_authz_and_amount(db):

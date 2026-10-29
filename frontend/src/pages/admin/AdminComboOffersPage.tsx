@@ -125,15 +125,17 @@ export default function AdminComboOffersPage() {
             header: "",
             accessor: (c) => (
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                <Button size="sm" variant="outline" aria-label={`Edit ${toTitle(c.name)}`} title="Edit" onClick={() => openEdit(c)}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(c)}>
+                <Button size="sm" variant="ghost" aria-label={c.is_active ? `Turn Off ${toTitle(c.name)}` : `Turn On ${toTitle(c.name)}`} title={c.is_active ? "Turn Off" : "Turn On"} isLoading={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(c)}>
                   <Power className={`h-3.5 w-3.5 ${c.is_active ? "" : "opacity-40"}`} />
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
+                  aria-label={`Delete ${toTitle(c.name)}`}
+                  title="Delete"
                   isLoading={deleteMutation.isPending}
                   onClick={async () => {
                     if (await confirm({ title: `Delete "${toTitle(c.name)}"?`, tone: "danger" })) deleteMutation.mutate(c.id);

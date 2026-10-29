@@ -39,7 +39,12 @@ class InventoryController:
     async def adjust(self, current_user: CurrentUser, item_id: str, payload: InventoryAdjustRequest):
         result = await self.service.adjust(item_id, payload, current_user.role, current_user.service_center_id)
         await self.audit.log_action(current_user.id, current_user.role, "ADJUST_INVENTORY", "inventory", item_id, {"delta": payload.delta, "reason": payload.reason})
-        return success(result, "Inventory adjusted successfully")
+        delta = float(payload.delta)
+        verb = "added to" if delta > 0 else "taken from"
+        return success(
+            result,
+            f"{abs(delta):g} {verb} {result.get('item_name') or 'the item'}. In stock now: {float(result.get('quantity_available') or 0):g}.",
+        )
 
     async def delete(self, current_user: CurrentUser, item_id: str):
         before = await self.service.repo.find_by_id(item_id)

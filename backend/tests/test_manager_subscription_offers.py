@@ -424,19 +424,15 @@ async def test_manager_discount_is_capped_at_half_the_price(rig, cleanup):
 
 
 async def test_manager_cannot_grant_a_free_plan_or_stop_selling_one_over_http(rig, cleanup):
-    """/subscriptions/assign (a FREE grant) would be an uncapped discount,
-    and /discontinue is platform-wide — both are admin-only now."""
+    """/discontinue is platform-wide — admin-only. (The old admin-only
+    /subscriptions/assign free grant was removed: it was an uncapped
+    discount around the manager-offer cap and no screen used it.)"""
     from httpx import ASGITransport, AsyncClient
 
     from app.main import app
 
-    customer_id = await make_customer(rig["db"])
-    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
     manager = _auth(rig["manager_id"], "manager", rig["center_id"])
-    body = {"customer_id": customer_id, "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"]}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.post("/api/v1/subscriptions/assign", json=body, headers=manager)
-        assert res.status_code == 403
         res = await client.post(f"/api/v1/subscription-plans/{rig['plan_id']}/discontinue", headers=manager)
         assert res.status_code == 403
         # Over HTTP the manager's role reaches the cap too.
@@ -444,7 +440,6 @@ async def test_manager_cannot_grant_a_free_plan_or_stop_selling_one_over_http(ri
             "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"], "discount_amount": rig["base_price"],
         }, headers=manager)
         assert res.status_code == 400 and "50%" in res.json()["message"]
-    assert await rig["db"].user_subscriptions.count_documents({"customer_id": customer_id}) == 0
     assert (await rig["db"].subscription_plans.find_one({"_id": ObjectId(rig["plan_id"])}))["is_active"] is True
 
 
@@ -909,24 +904,6 @@ async def test_manager_with_no_center_is_refused_not_silently_granted_with_nowhe
     # Refused before the customer account, the subscription, or the ledger
     # row were ever created — not just before it was tagged.
     assert not await rig["db"].users.find_one({"phone": phone})
-
-
-async def test_assign_with_no_manager_center_is_also_refused(rig, cleanup):
-    from httpx import ASGITransport, AsyncClient
-
-    from app.main import app
-
-    centerless_manager = await make_manager(rig["db"], service_center_id=None)
-    cleanup.append(("users", {"_id": ObjectId(centerless_manager)}))
-    customer_id = await make_customer(rig["db"])
-    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
-    body = {"customer_id": customer_id, "plan_id": rig["plan_id"], "vehicle_type": rig["hatchback"], "service_id": rig["star"]}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # The free grant is admin-only now — a manager (centerless or not)
-        # is refused at the door.
-        res = await client.post("/api/v1/subscriptions/assign", json=body, headers=_auth(centerless_manager, "manager", None))
-        assert res.status_code == 403
-    assert await rig["db"].user_subscriptions.count_documents({"customer_id": customer_id}) == 0
 
 
 async def test_admin_can_explicitly_pick_a_center_when_granting_but_manager_cannot_spoof_one(rig, cleanup):

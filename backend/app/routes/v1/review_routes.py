@@ -13,11 +13,6 @@ from app.schemas.review_schema import ReviewCreateRequest, ReviewUpdateRequest
 router = APIRouter(prefix="/reviews", tags=["Reviews"])
 
 
-@router.get("")
-async def list_public_reviews(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await ReviewController(db).list_public(pagination)
-
-
 @router.get("/my", dependencies=[Depends(require_customer)])
 async def list_my_reviews(
     booking_ids: str | None = None, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)

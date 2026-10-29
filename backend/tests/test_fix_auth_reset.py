@@ -24,7 +24,7 @@ from bson import ObjectId
 from app.core.config import settings
 from app.core.security import create_access_token, hash_password
 from app.services.msg91_widget_service import Msg91WidgetService
-from tests.factories import make_customer, TEST_PASSWORD
+from tests.factories import make_customer
 
 pytestmark = pytest.mark.asyncio
 _RealAsyncClient = httpx.AsyncClient
@@ -290,33 +290,3 @@ async def test_staff_temporary_password_reset_is_the_recovery_path(db, cleanup):
         assert (await c.post(f"/api/v1/auth/staff/{admin['id']}/reset-password", headers=ah, json=body)).status_code == 400
         audit = await db.audit_logs.find_one({"action": "RESET_STAFF_PASSWORD", "target_id": captain["id"]})
         assert audit and audit["actor_id"] == manager["id"]
-
-
-@pytest.mark.parametrize("deliverable", [False, True])
-async def test_customer_temp_password_reset_never_locks_the_customer_out(db, cleanup, monkeypatch, deliverable):
-    """DEP-04 follow-up: the manager's "reset customer password" checks the
-    message can reach the customer BEFORE changing anything; if the send
-    still fails, the old password is put back."""
-    from app.services.whatsapp_service import WhatsAppService
-
-    customer_id = await make_customer(db)
-    cleanup.append(("users", {"_id": ObjectId(customer_id)}))
-    user = await db.users.find_one({"_id": ObjectId(customer_id)})
-    _track(cleanup, user["phone"])
-    admin = await _staff(db, cleanup, "admin")
-
-    async def can_deliver(self, phone):
-        return deliverable
-
-    async def send_fails(self, phone, pw):
-        return False
-
-    monkeypatch.setattr(WhatsAppService, "can_deliver_temp_password", can_deliver)
-    monkeypatch.setattr(WhatsAppService, "send_temp_password", send_fails)
-    async with _client() as c:
-        r = await c.post(f"/api/v1/auth/customers/{customer_id}/reset-password", headers=_auth(admin["id"], "admin"))
-        assert r.status_code == 400, r.text
-        assert ("can't be sent" if not deliverable else "unchanged") in r.json()["message"]
-        assert await _login(c, user["phone"], TEST_PASSWORD) == 200
-    stored = await db.users.find_one({"_id": ObjectId(customer_id)})
-    assert stored["password_hash"] == user["password_hash"] and not stored.get("must_change_password")

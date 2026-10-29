@@ -83,7 +83,7 @@ async def test_manager_reads_only_own_center_customers(db, cleanup):
             assert (await c.get(path.format(mgr_a), headers=ha)).status_code == 404
 
 
-async def test_the_360_view_and_reset_use_the_same_rule(db, cleanup):
+async def test_the_360_view_uses_the_shared_center_relationship_rule(db, cleanup):
     from app.core.authz import customers_known_to_center
 
     A = await make_center(db, cleanup, 2)
@@ -97,4 +97,3 @@ async def test_the_360_view_and_reset_use_the_same_rule(db, cleanup):
     async with _client() as c:
         assert (await c.get(f"/api/v1/crm/customers/{other}", headers=ha)).status_code == 404
         assert (await c.get(f"/api/v1/crm/customers/{own}", headers=ha)).status_code == 200
-        assert (await c.post(f"/api/v1/auth/customers/{other}/reset-password", headers=ha)).status_code == 404

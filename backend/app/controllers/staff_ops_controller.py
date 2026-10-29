@@ -46,4 +46,5 @@ class LeaveController:
             actor_role=current_user.role, actor_center_id=current_user.service_center_id,
         )
         await self.audit.log_action(current_user.id, current_user.role, "REVIEW_LEAVE_REQUEST", "leave_requests", leave_id, {"status": payload.status})
-        return success(result, "Leave request reviewed")
+        verdict = "approved" if payload.status.value == "approved" else "rejected"
+        return success(result, f"Leave request {verdict}. The captain has been told.")

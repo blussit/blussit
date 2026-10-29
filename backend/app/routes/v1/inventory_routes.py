@@ -2,23 +2,10 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.inventory_controller import InventoryController
-from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_captain, require_manager_or_admin
+from app.core.dependencies import CurrentUser, PaginationParams, get_current_user, get_db, require_manager_or_admin
 from app.schemas.inventory_schema import InventoryAdjustRequest, InventoryCreateRequest, InventoryUpdateRequest
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
-
-
-@router.get("/my-center", dependencies=[Depends(require_captain)])
-async def list_my_center_inventory(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    from app.repositories.user_repository import UserRepository
-    from app.core.exceptions import BadRequestException
-
-    user = await UserRepository(db).find_by_id(current_user.id)
-    if not user or not user.get("service_center_id"):
-        raise BadRequestException("You are not assigned to a service center")
-    items, total = await InventoryController(db).service.list_for_center(user["service_center_id"], 1, 100)
-    from app.core.responses import success
-    return success(items)
 
 
 @router.get("/center/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])

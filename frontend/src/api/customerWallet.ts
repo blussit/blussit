@@ -154,9 +154,6 @@ export function newIdempotencyKey(prefix = "w"): string {
 }
 
 export const customerWalletApi = {
-  /** Customer: own balance + ledger. */
-  me: (params?: { page?: number; page_size?: number }) =>
-    apiClient.get<ApiSuccess<WalletView>>("/wallet/me", { params }).then((r) => r.data.data),
   /** Manager (customer known to their center) / admin. */
   forCustomer: (customerId: string, params?: { page?: number; page_size?: number }) =>
     apiClient.get<ApiSuccess<WalletView>>(`/customers/${customerId}/wallet`, { params }).then((r) => r.data.data),

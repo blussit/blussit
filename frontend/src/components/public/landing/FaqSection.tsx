@@ -1,14 +1,20 @@
 import { Helmet } from "react-helmet-async";
+import { useQuery } from "@tanstack/react-query";
+import { contentApi } from "../../../api/catalog";
 import { FAQS } from "../../../data/faqs";
 import { SectionShell, headingCase } from "./shared";
 
 /**
- * FAQ section. The questions and answers live in src/data/faqs.ts; the same
- * list feeds the visible accordion and the FAQPage JSON-LD.
+ * FAQ section. The list is whatever admin keeps showing under Website
+ * Reviews & FAQs (fetched live, so an edit appears without a deploy). The
+ * built-in answers in src/data/faqs.ts are the fallback while none are
+ * showing or the request fails, so the section is never empty. The same list
+ * feeds the visible accordion and the FAQPage JSON-LD.
  */
 
 export function FaqSection({ id = "faq" }: { id?: string }) {
-  const faqs = FAQS;
+  const { data } = useQuery({ queryKey: ["public-faqs"], queryFn: contentApi.faqs });
+  const faqs = data?.length ? data : FAQS;
 
   const jsonLd = {
     "@context": "https://schema.org",

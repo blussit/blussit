@@ -17,13 +17,11 @@ from app.schemas.whatsapp_campaign_schema import (
     AudienceFilter,
     CampaignCreate,
     CampaignUpdate,
-    LimitsUpdate,
     SelectionBody,
     SendBody,
 )
 from app.services import whatsapp_campaign_service as svc
 from app.services.audit_service import AuditService
-from app.services.whatsapp_campaign_template import MAX_MESSAGE_CHARS, sanitize_message
 
 router = APIRouter(prefix="/whatsapp/campaigns", tags=["WhatsApp Campaigns"])
 
@@ -47,25 +45,13 @@ def _filter(
 
 
 @router.get("")
-async def list_campaigns(page: int = 1, page_size: int = 20, admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
+async def list_campaigns(page: int = Query(1, ge=1, le=10_000), page_size: int = 20, admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await svc.list_campaigns(db, page, page_size))
-
-
-@router.get("/limits")
-async def get_limits(admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success({**await svc.get_limits(db), "max_message_chars": MAX_MESSAGE_CHARS, "template": await svc.template_state(db)})
-
-
-@router.put("/limits")
-async def update_limits(body: LimitsUpdate, admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
-    limits = await svc.update_limits(db, body.whatsapp_marketing_cost_paise, admin.id)
-    await _audit(db).log_action(admin.id, admin.role, "UPDATE_CAMPAIGN_SETTINGS", "whatsapp", None, {"cost_paise": body.whatsapp_marketing_cost_paise})
-    return success(limits, "Saved")
 
 
 @router.get("/audience")
 async def audience(
-    page: int = 1, page_size: int = 25, after: str | None = None, f: AudienceFilter = Depends(_filter),
+    page: int = Query(1, ge=1, le=10_000), page_size: int = 25, after: str | None = None, f: AudienceFilter = Depends(_filter),
     admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     return success(await svc.list_audience(db, f, None, page, page_size, after))
@@ -73,7 +59,7 @@ async def audience(
 
 @router.post("/audience/selection")
 async def audience_page_with_selection(
-    body: SelectionBody, page: int = 1, page_size: int = 25, after: str | None = None,
+    body: SelectionBody, page: int = Query(1, ge=1, le=10_000), page_size: int = 25, after: str | None = None,
     admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """One page of the filtered audience with each row's `selected` flag
@@ -82,13 +68,6 @@ async def audience_page_with_selection(
     data = await svc.list_audience(db, sel.filter, sel, page, page_size, after)
     data["selected_count"] = await svc.count_selection(db, sel)
     return success(data)
-
-
-@router.post("/audience/count")
-async def audience_count(body: SelectionBody, admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
-    sel = body.selection
-    matching = await svc.list_audience(db, sel.filter, sel, 1, 1)
-    return success({"selected": await svc.count_selection(db, sel), "matching_total": matching["total"]})
 
 
 @router.post("/image")
@@ -121,13 +100,6 @@ async def create_campaign(body: CampaignCreate, admin: CurrentUser = Depends(req
     c = await svc.create_draft(db, admin, body.name, body.message, body.image_url)
     await _audit(db).log_action(admin.id, admin.role, "CREATE_CAMPAIGN", "whatsapp", str(c["_id"]), {"name": c["name"]})
     return success(svc._public(c), "Campaign saved")
-
-
-@router.post("/sanitize")
-async def sanitize(body: dict, admin: CurrentUser = Depends(require_admin)):
-    """What the customer will actually receive for this text."""
-    text = sanitize_message(str((body or {}).get("message") or ""))
-    return success({"message": text, "length": len(text), "max": MAX_MESSAGE_CHARS})
 
 
 @router.get("/{campaign_id}")
@@ -182,7 +154,7 @@ async def cancel(campaign_id: str, admin: CurrentUser = Depends(require_admin), 
 
 @router.get("/{campaign_id}/recipients")
 async def recipients(
-    campaign_id: str, status: str | None = None, page: int = 1, page_size: int = 50,
+    campaign_id: str, status: str | None = None, page: int = Query(1, ge=1, le=10_000), page_size: int = 50,
     admin: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     return success(await svc.list_recipients(db, campaign_id, status, page, page_size))

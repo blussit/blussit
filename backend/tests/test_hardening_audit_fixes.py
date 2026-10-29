@@ -102,37 +102,7 @@ async def test_manager_customer_360_requires_a_relationship_with_their_center(ri
     assert admin.status_code == 200
 
 
-async def test_phone_search_gives_a_manager_the_minimal_row_only(rig):
-    phone = (await rig["db"].users.find_one({"_id": ObjectId(rig["stranger"])}))["phone"]
-    async with _client() as client:
-        manager = await client.get("/api/v1/crm/customers/search", params={"phone": phone}, headers=_auth(rig["manager_a"], "manager", rig["center_a"]))
-        unlinked = await client.get("/api/v1/crm/customers/search", params={"phone": phone}, headers=_auth(rig["unlinked"], "manager"))
-        admin = await client.get("/api/v1/crm/customers/search", params={"phone": phone}, headers=_auth(rig["admin"], "admin"))
-    row = manager.json()["data"]
-    assert set(row) == {"id", "full_name", "phone", "role"} and row["id"] == rig["stranger"]
-    assert unlinked.json()["data"] is None
-    assert admin.json()["data"]["email"], "admin keeps the full profile"
-
-
 # ------------------------------------------------- 2. public catalogue
-
-
-async def test_public_reviews_show_ratings_and_words_only(rig, cleanup):
-    review = await rig["db"].reviews.insert_one({
-        "booking_id": str(ObjectId()), "customer_id": rig["known"], "captain_id": rig["captain_a"],
-        "service_center_id": rig["center_a"], "service_rating": 5, "service_comment": "Spotless",
-        "original_review": {"service_comment": "first draft"}, "is_published": True, "is_deleted": False,
-        "created_at": datetime.now(timezone.utc),
-    })
-    cleanup.append(("reviews", {"_id": review.inserted_id}))
-    async with _client() as client:
-        res = await client.get("/api/v1/reviews", params={"page_size": 100})
-    assert res.status_code == 200
-    rows = res.json()["data"]
-    mine = next(r for r in rows if r["id"] == str(review.inserted_id))
-    assert mine["service_comment"] == "Spotless"
-    for row in rows:
-        assert not {"customer_id", "captain_id", "booking_id", "service_center_id", "original_review", "deleted_by"} & set(row)
 
 
 async def test_captain_fee_and_switched_off_rows_are_for_catalogue_editors(rig, cleanup):
@@ -446,7 +416,7 @@ async def test_center_detail_is_own_center_only_and_public_lookup_is_minimal(rig
 async def test_absurd_page_numbers_are_a_422_not_a_500(db):
     async with _client() as client:
         for page in ("10001", "99999999999999999999"):
-            res = await client.get("/api/v1/reviews", params={"page": page})
+            res = await client.get("/api/v1/services", params={"page": page})
             assert res.status_code == 422, (page, res.status_code)
 
 

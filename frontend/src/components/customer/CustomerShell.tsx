@@ -18,6 +18,7 @@ import { MandatoryGates } from "../shared/MandatoryGates";
 import { notificationApi, subscriptionApi } from "../../api/engagement";
 import { isSocietyPass, societyPassPath } from "../../lib/passState";
 import { useAuth } from "../../context/AuthContext";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { notificationTargetPath } from "../../lib/notifications";
@@ -140,6 +141,10 @@ export function CustomerShell({ children }: { children: ReactNode }) {
   const confirm = useConfirm();
   const { pathname } = useLocation();
   const unread = useNotificationToasts();
+  // Bookings, plans, wallet, payments and the bell refresh the moment the
+  // server says they changed (cancel/reschedule on web or WhatsApp, a
+  // manager's edit or discount, a payment settling, a plan bought or used).
+  useLiveRefresh();
   const { data: subs } = useQuery({ queryKey: ["my-subscriptions"], queryFn: subscriptionApi.mySubscriptions, staleTime: 60_000 });
   const societySub = (subs || [])
     .filter((s) => isSocietyPass(s) && societyPassPath(s))

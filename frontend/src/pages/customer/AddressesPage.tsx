@@ -182,9 +182,9 @@ export default function AddressesPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
-            // The pincode box (shown when the map is unavailable) takes exactly 6 digits;
-            // a pincode that came from the map pin is checked the same way when present.
-            if ((mapsDown || form.pincode) && !/^\d{6}$/.test(form.pincode.trim())) {
+            // The API needs a 6-digit pincode on every address. It comes from the map
+            // pin; when the pin has none (or the map is down) the box below asks for it.
+            if (!/^\d{6}$/.test(form.pincode.trim())) {
               setError("Enter a valid 6-digit pincode.");
               return;
             }
@@ -213,23 +213,23 @@ export default function AddressesPage() {
           <Input label="House / Flat, Gali No." placeholder="e.g. 75, Gali No. 2" value={form.line1} onChange={(e) => setForm({ ...form, line1: e.target.value })} required />
           <Input label="Landmark (Optional)" value={form.landmark} onChange={(e) => setForm({ ...form, landmark: e.target.value })} />
           {mapsDown && (
-            <>
-              <div className="grid grid-cols-2 gap-3">
-                <Input label="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required />
-                <Input label="State" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} required />
-              </div>
-              <Input
-                label="Pincode"
-                value={form.pincode}
-                onChange={(e) => setForm({ ...form, pincode: e.target.value.replace(/\D/g, "").slice(0, 6) })}
-                inputMode="numeric"
-                pattern="[0-9]{6}"
-                maxLength={6}
-                autoComplete="postal-code"
-                title="6-digit pincode"
-                required
-              />
-            </>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} required />
+              <Input label="State" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} required />
+            </div>
+          )}
+          {(mapsDown || !!editingId || (form.latitude != null && !location?.pincode)) && (
+            <Input
+              label="Pincode"
+              value={form.pincode}
+              onChange={(e) => setForm({ ...form, pincode: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              autoComplete="postal-code"
+              title="6-digit pincode"
+              required
+            />
           )}
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
             <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} />

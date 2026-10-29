@@ -23,6 +23,7 @@ import { openBlussitWhatsApp } from "../../components/public/WhatsAppFloatingBut
 import { visitCarDetail, visitTypeServiceLabel } from "../../components/customer/cars";
 import { addedByLine, paymentStatusLabel, visitDue, visitMoney, type BookingMoney } from "../../components/customer/money";
 import { toTitle } from "../../lib/titleCase";
+import { planSplitTotals } from "../../lib/planSplit";
 import { paymentApi } from "../../api/payment";
 import { complaintApi, reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
@@ -206,6 +207,8 @@ export default function BookingDetailPage() {
   // Wallet credit used on this visit, money already received, a previous
   // wallet balance carried in, and services added on site (spec 2026-10-07).
   const money = visitMoney(pricedCars);
+  // A plan wash: the plan's part and the paid add-ons as separate lines.
+  const planSplit = !visit && booking ? planSplitTotals([booking as BookingMoney]) : null;
   // Charged once per visit (on its first car) and already inside total_amount.
   const travelCharge = pricedCars.reduce((sum, b) => sum + (b.travel_charge || 0), 0);
   const travelKm = trailCars.find((b) => (b.travel_charge || 0) > 0)?.travel_charge_km;
@@ -771,15 +774,35 @@ export default function BookingDetailPage() {
           })
         ) : (
           <>
-            <div className="flex justify-between">
-              <span className="text-[#5F6878]">Subtotal</span>
-              <span className="tabular-nums text-[#0E1A33]">₹{Math.round(booking.subtotal)}</span>
-            </div>
-            {booking.discount_amount > 0 && (
-              <div className="flex justify-between text-[#1E7B3C]">
-                <span>Discount</span>
-                <span className="tabular-nums">-₹{Math.round(booking.discount_amount)}</span>
+            {planSplit ? (
+              <div className="space-y-1.5" data-testid="booking-plan-split">
+                <div className="flex justify-between gap-3 text-[#1E7B3C]">
+                  <span className="min-w-0">Covered By Your Plan{planSplit.coveredNames.length ? ` — ${planSplit.coveredNames.join(", ")}` : ""}</span>
+                  <span className="shrink-0 tabular-nums">₹0</span>
+                </div>
+                {planSplit.extraLines.map((l, i) => (
+                  <div key={i} className="flex justify-between gap-3">
+                    <span className="min-w-0 text-[#5F6878]">
+                      Add-On (Paid) — {l.name}
+                      {l.onSite ? <span className="text-xs"> · Added On Site</span> : null}
+                    </span>
+                    <span className="tabular-nums text-[#0E1A33]">₹{Math.round(l.amount)}</span>
+                  </div>
+                ))}
               </div>
+            ) : (
+              <>
+                <div className="flex justify-between">
+                  <span className="text-[#5F6878]">Subtotal</span>
+                  <span className="tabular-nums text-[#0E1A33]">₹{Math.round(booking.subtotal)}</span>
+                </div>
+                {booking.discount_amount > 0 && (
+                  <div className="flex justify-between text-[#1E7B3C]">
+                    <span>Discount</span>
+                    <span className="tabular-nums">-₹{Math.round(booking.discount_amount)}</span>
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
@@ -789,7 +812,7 @@ export default function BookingDetailPage() {
             <span className="tabular-nums text-[#0E1A33]">₹{Math.round(travelCharge)}</span>
           </div>
         )}
-        {!visit && money.addedServices > 0 && (
+        {!visit && !planSplit && money.addedServices > 0 && (
           <div className="space-y-1.5" data-testid="booking-added-services">
             {((booking as BookingMoney).added_services || []).length ? (
               ((booking as BookingMoney).added_services || []).map((a, i) => (

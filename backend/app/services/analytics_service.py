@@ -15,7 +15,7 @@ from app.services.vehicle_type_names import REMOVED_LABEL, VehicleTypeNames
 from app.utils.timezone import now_ist
 
 # Shared by every per-group KPI breakdown below (vehicle-type, service) —
-# same travel/total-time formulas as dashboard_summary/manager_summary,
+# same travel/total-time formulas as manager_summary,
 # expressible directly inside a $group accumulator without a separate
 # $project stage.
 _TRAVEL_MINUTES_EXPR = {
@@ -66,139 +66,6 @@ class AnalyticsService:
         self.vehicle_type_repo = VehicleTypeRepository(db)
         self.vehicle_repo = VehicleRepository(db)
 
-    async def dashboard_summary(self) -> dict:
-        """All-time headline numbers. Every booking-derived figure comes out
-        of ONE pass over the bookings collection ($facet), and the repeat-
-        customer rate is counted on the server — this used to be ~17
-        queries, two of which shipped one row per customer to Python."""
-        now = now_ist()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        # Section 14's explicitly-requested operational KPIs — computed the
-        # same way as everywhere else in this codebase: real stored
-        # timestamps, never a second manually-tracked counter. The
-        # subtraction-based averages are timezone-label-agnostic (a
-        # duration between two equally-naive-but-really-UTC instants is
-        # correct without from_stored() converting either side first —
-        # see StaffDirectoryService.captain_performance for the identical
-        # per-captain formulas this mirrors, kept consistent on purpose).
-        facet_pipeline = [
-            {"$match": _NOT_DELETED},
-            {"$facet": {
-                "totals": [{"$group": {
-                    "_id": None,
-                    "total": {"$sum": 1},
-                    "completed": _count_if(_COMPLETED),
-                    "cancelled": _count_if({"$eq": ["$status", "cancelled"]}),
-                    "revenue": _sum_if(_COMPLETED, "$total_amount"),
-                    "subscription_revenue": _sum_if({"$and": [_COMPLETED, {"$eq": ["$payment_method", "subscription"]}]}, "$subtotal"),
-                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
-                    "avg_service_minutes": {"$avg": {"$cond": [_COMPLETED, "$actual_duration_minutes", None]}},
-                    "avg_travel_minutes": {"$avg": {"$cond": [_COMPLETED, _TRAVEL_MINUTES_EXPR, None]}},
-                    "avg_completion_minutes": {"$avg": {"$cond": [_COMPLETED, _TOTAL_MINUTES_EXPR, None]}},
-                }}],
-                "customers": [
-                    {"$group": {"_id": "$customer_id", "n": {"$sum": 1}}},
-                    {"$group": {"_id": None, "distinct": {"$sum": 1}, "repeat": _count_if({"$gt": ["$n", 1]})}},
-                ],
-                "top_services": [
-                    {"$unwind": "$service_ids"},
-                    {"$group": {"_id": "$service_ids", "bookings": {"$sum": 1}}},
-                    {"$sort": {"bookings": -1}},
-                    {"$limit": 5},
-                ],
-                "best_captains": [
-                    {"$match": {"status": "completed", "captain_id": {"$ne": None}}},
-                    {"$group": {"_id": "$captain_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
-                    {"$sort": {"jobs_completed": -1}},
-                    {"$limit": 5},
-                ],
-                "best_centers": [
-                    {"$match": {"status": "completed"}},
-                    {"$group": {"_id": "$service_center_id", "jobs_completed": {"$sum": 1}, "revenue": {"$sum": "$total_amount"}}},
-                    {"$sort": {"revenue": -1}},
-                    {"$limit": 5},
-                ],
-            }},
-        ]
-        facet_rows, today_orders, monthly_orders, active_customers, pending_bookings, rating_result, today_capacity_result = await asyncio.gather(
-            self.db.bookings.aggregate(facet_pipeline, allowDiskUse=True).to_list(length=1),
-            self.booking_repo.count({"created_at": {"$gte": today_start}}),
-            self.booking_repo.count({"created_at": {"$gte": month_start}}),
-            self.user_repo.count({"role": "customer", "status": "active"}),
-            self.booking_repo.count({"status": {"$in": ["pending", "rescheduled"]}}),
-            self.db.reviews.aggregate([
-                {"$match": _NOT_DELETED},
-                {"$group": {"_id": None, "avg": {"$avg": {"$ifNull": ["$captain_rating", "$rating"]}}}},
-            ]).to_list(length=1),
-            self.db.slot_capacity.aggregate([
-                {"$match": {"date": today_start.strftime("%Y-%m-%d")}},
-                {"$group": {"_id": None, "capacity": {"$sum": "$capacity"}, "booked": {"$sum": "$booked_count"}}},
-            ]).to_list(length=1),
-        )
-        facet = facet_rows[0] if facet_rows else {}
-        totals = (facet.get("totals") or [{}])[0]
-        customers = (facet.get("customers") or [{}])[0]
-        total_bookings = totals.get("total", 0)
-        completed = totals.get("completed", 0)
-        cancelled = totals.get("cancelled", 0)
-        distinct_customers = customers.get("distinct", 0)
-        repeat_rate = (customers.get("repeat", 0) / distinct_customers * 100) if distinct_customers else 0
-        avg_rating = round(rating_result[0]["avg"], 2) if rating_result and rating_result[0].get("avg") is not None else None
-        today_capacity = today_capacity_result[0]["capacity"] if today_capacity_result else 0
-        today_booked = today_capacity_result[0]["booked"] if today_capacity_result else 0
-        utilization_pct = round((today_booked / today_capacity) * 100, 1) if today_capacity else None
-
-        def _avg(key: str):
-            return round(totals[key], 1) if totals.get(key) is not None else None
-
-        return {
-            "total_revenue": round(totals.get("revenue") or 0, 2),
-            "todays_orders": today_orders,
-            "monthly_orders": monthly_orders,
-            "active_customers": active_customers,
-            "repeat_customer_rate": round(repeat_rate, 2),
-            "subscription_revenue": round(totals.get("subscription_revenue") or 0, 2),
-            "top_services": [{"service_id": s["_id"], "bookings": s["bookings"]} for s in facet.get("top_services", [])],
-            "best_performing_captains": [{"captain_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in facet.get("best_captains", [])],
-            "best_service_centers": [{"service_center_id": c["_id"], "jobs_completed": c["jobs_completed"], "revenue": round(c["revenue"], 2)} for c in facet.get("best_centers", [])],
-            "cancellation_rate": round((cancelled / total_bookings * 100), 2) if total_bookings else 0,
-            "completion_rate": round((completed / total_bookings * 100), 2) if total_bookings else 0,
-            "total_bookings": total_bookings,
-            "completed_bookings": completed,
-            "pending_bookings": pending_bookings,
-            "cancelled_bookings": cancelled,
-            "delayed_bookings": totals.get("delayed", 0),
-            "avg_service_minutes": _avg("avg_service_minutes"),
-            "avg_travel_minutes": _avg("avg_travel_minutes"),
-            "avg_completion_minutes": _avg("avg_completion_minutes"),
-            "avg_rating": avg_rating,
-            # Only reflects dates already touched (lazily-initialized slot_capacity
-            # docs) — a day nobody has booked into or viewed the capacity admin
-            # page for yet shows as 0/None here rather than the full configured
-            # policy total, since that's never materialized until first touched.
-            "today_capacity": today_capacity,
-            "today_booked": today_booked,
-            "capacity_utilization_pct": utilization_pct,
-        }
-
-    async def booking_trends(self, days: int = 30) -> list[dict]:
-        start = now_ist() - timedelta(days=days)
-        pipeline = [
-            {"$match": {"created_at": {"$gte": start}, "is_deleted": {"$ne": True}}},
-            {
-                "$group": {
-                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at", "timezone": "+05:30"}},
-                    "bookings": {"$sum": 1},
-                    "revenue": {"$sum": "$total_amount"},
-                }
-            },
-            {"$sort": {"_id": 1}},
-        ]
-        results = await self.booking_repo.aggregate(pipeline)
-        return [{"date": r["_id"], "bookings": r["bookings"], "revenue": round(r["revenue"], 2)} for r in results]
-
     async def service_center_summaries(self) -> list[dict]:
         """Section 10 of the ops-UX update — the admin's FIRST screen
         before drilling into any one center's bookings: one row per
@@ -218,7 +85,7 @@ class AnalyticsService:
                     "bookings": {"$sum": 1},
                     "completed": _count_if(_COMPLETED),
                     "pending": _count_if({"$in": ["$status", ["pending", "rescheduled"]]}),
-                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
+                    "delayed": _count_if({"$and": [{"$ne": ["$status", "cancelled"]}, {"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}]}),
                 }},
             ]).to_list(length=None),
             self.db.reviews.aggregate([
@@ -248,7 +115,7 @@ class AnalyticsService:
     async def manager_summary(self, service_center_id: str) -> dict:
         """Section 20 — a manager's simplified daily operational view,
         scoped to their own center. Same real-timestamp-derived formulas
-        as service_center_summaries/dashboard_summary, just narrowed to
+        as service_center_summaries, just narrowed to
         one center and to "today" for the booking counts (a manager cares
         about right now, not all-time totals — that's the admin view)."""
         now = now_ist()
@@ -257,10 +124,11 @@ class AnalyticsService:
         base_match = {"service_center_id": service_center_id, "is_deleted": {"$ne": True}}
         today_match = {**base_match, "scheduled_date": {"$gte": today_start, "$lt": today_start + timedelta(days=1)}}
 
-        bookings_today = await self.booking_repo.count(today_match)
+        # A cancelled booking is not work for today.
+        bookings_today = await self.booking_repo.count({**today_match, "status": {"$ne": "cancelled"}})
         completed_today = await self.booking_repo.count({**today_match, "status": "completed"})
         pending_today = await self.booking_repo.count({**today_match, "status": {"$in": ["pending", "rescheduled"]}})
-        delayed_today = await self.booking_repo.count({**today_match, "delay_minutes": {"$gt": 0}})
+        delayed_today = await self.booking_repo.count({**today_match, "status": {"$ne": "cancelled"}, "delay_minutes": {"$gt": 0}})
         unassigned_today = await self.booking_repo.count({**today_match, "status": {"$in": ["pending", "rescheduled"]}, "captain_id": None})
 
         duration_pipeline = [
@@ -366,7 +234,7 @@ class AnalyticsService:
                     "travel_n": _count_if(_not_null(travel)),
                     "total_min_sum": _sum_if(_not_null(total), total),
                     "total_min_n": _count_if(_not_null(total)),
-                    "delayed": _count_if({"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}),
+                    "delayed": _count_if({"$and": [{"$ne": ["$status", "cancelled"]}, {"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}]}),
                 }},
             ], allowDiskUse=True).to_list(length=None),
             VehicleTypeNames(self.db).entries(),

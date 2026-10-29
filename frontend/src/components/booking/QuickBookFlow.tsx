@@ -2787,7 +2787,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                             <Input
                               aria-label="Coupon Code"
                               value={couponDraft}
-                              maxLength={40}
+                              maxLength={32}
                               placeholder="Enter Coupon Code"
                               autoCapitalize="characters"
                               autoComplete="off"
@@ -2908,11 +2908,45 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                   true,
                   `${isCustomer ? "Use My" : "Use Their"} ${passLabel(sub)}`,
                   `${where}${service} · ${left} of ${total} left${match.coveredCount < units ? ` · covers ${match.coveredCount} of ${units}` : ""}`,
-                  withPlan > 0 ? `${INR(withPlan)}` : "Covered",
+                  (match.on && liveQuote?.lines[i] ? liveQuote.lines[i].plan_extras_total ?? 0 : withPlan) > 0
+                    ? `${INR(match.on && liveQuote?.lines[i] ? liveQuote.lines[i].plan_extras_total ?? 0 : withPlan)}`
+                    : "Covered",
                 )}
                 {option(false, "Pay For This Wash", isCustomer ? "Keep your plan wash for later" : "Keep the plan wash for later", INR(line.subtotal))}
               </div>
-              {match.on && withPlan > 0 && <p className="mt-1.5 text-[12px] text-[#5F6878]">Extras aren't part of the plan, so they're charged.</p>}
+              {match.on && (
+                <div className="mt-2 rounded-[12px] bg-[#F6F8FB] p-3 text-[13px]" data-testid="plan-breakdown">
+                  {(() => {
+                    // The server's split of this line (plan part vs paid add-ons).
+                    const row = liveQuote?.lines[i];
+                    const covers = (row?.plan_covers || []).map((c) => titleCase(c.name)).join(", ") || service;
+                    const extras = row?.plan_extras || [];
+                    const extrasTotal = row ? row.plan_extras_total ?? 0 : Math.max(0, withPlan);
+                    return (
+                      <>
+                        <div className="flex justify-between gap-3">
+                          <span className="min-w-0 text-[#0E1A33]">Plan Covers · {covers}</span>
+                          <span className="shrink-0 font-semibold text-[#15803D]">₹0</span>
+                        </div>
+                        {extras.map((e) => (
+                          <div key={e.service_id} className="mt-1 flex justify-between gap-3 text-[#5F6878]">
+                            <span className="min-w-0">Add-On (Paid) · {titleCase(e.name)}{e.qty > 1 ? ` × ${e.qty}` : ""}</span>
+                            <span className="shrink-0 tabular-nums">{INR(e.amount)}</span>
+                          </div>
+                        ))}
+                        {extrasTotal > 0 ? (
+                          <div className="mt-1.5 flex justify-between gap-3 border-t border-[#E4E9F1] pt-1.5 font-semibold text-[#0E1A33]">
+                            <span>Add-Ons To Pay</span>
+                            <span className="tabular-nums">{INR(extrasTotal)}</span>
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-[12px] text-[#5F6878]">Want extras? Add them above — they're paid on top of your plan.</p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
               {cands.length > 1 && (
                 <div className="mt-3">
                   <p className="mb-1.5 text-[12px] font-semibold text-[#5F6878]">Which Plan?</p>
@@ -2925,6 +2959,24 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       </div>
     </div>
   ) : null;
+  // A plan exists but covers another car type / wash: the server says which
+  // (never to a guest — a quote must not reveal anyone's plans).
+  const planNotes = !isLog && liveQuote ? Array.from(new Set(liveQuote.lines.map((l) => l.plan_note).filter((n): n is string => !!n))) : [];
+  const planNoteNode =
+    planNotes.length > 0 ? (
+      <div className="mt-4 space-y-1.5" data-testid="plan-note">
+        {planNotes.map((n) => (
+          <p key={n} className="flex items-start gap-2 rounded-[12px] bg-[#F6F8FB] px-3 py-2 text-[12px] text-[#5F6878]">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0A66F0]" aria-hidden="true" />
+            <span>{n}</span>
+          </p>
+        ))}
+      </div>
+    ) : mode === "public" && !user ? (
+      <p className="mt-4 text-[12px] text-[#5F6878]" data-testid="plan-guest-hint">
+        Have a plan? Log in first to use it — a booking without logging in is charged at the normal price.
+      </p>
+    ) : null;
   const introSummary =
     isCustomer && introSub && introLine ? (
       <div className="flex items-center gap-3 rounded-[16px] border border-[#CFE0FD] bg-[#F3F7FF] p-3.5">
@@ -3240,6 +3292,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                       </div>
                       {addonsRow}
                       {isCustomer && planChoice}
+                      {isCustomer && planNoteNode}
                     </div>
 
                     {/* Phone / narrow: price + Continue right under the slots */}
@@ -3321,7 +3374,9 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                         </div>
                       )}
 
+                      {introSummary && lines.length === 1 && addonsRow}
                       {!(introSummary && lines.length === 1) && planChoice}
+                      {planNoteNode}
 
                       {amountToPay > 0 && (
                         <>

@@ -175,8 +175,8 @@ async def _two_strikes(bot, wa_id):
     """Out of the bot's depth twice at the vehicle-type step -> handoff."""
     await bot.handle_webhook(wa_payload(wa_id, text="hi"))
     await bot.handle_webhook(wa_payload(wa_id, reply="menu:book"))
-    await bot.handle_webhook(wa_payload(wa_id, text="when will captain come"))
-    await bot.handle_webhook(wa_payload(wa_id, text="hello??"))
+    await bot.handle_webhook(wa_payload(wa_id, text="what is the meaning of life"))  # (a captain/price question is now answered)
+    await bot.handle_webhook(wa_payload(wa_id, text="answer me!"))
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ async def test_free_text_pings_admins_once_per_conversation(db, cleanup, rig):
     await bot.handle_webhook(wa_payload(wa_id, text="do you clean sofas at home?"))
     first = await db.notifications.count_documents(pings)
     assert first >= 1
-    for text in ("and carpets?", "what about bikes?", "hello??"):
+    for text in ("and carpets?", "what about sofas?", "any other idea?"):
         await bot.handle_webhook(wa_payload(wa_id, text=text))
     assert await db.notifications.count_documents(pings) == first
     assert "team has been notified" in (await db.whatsapp_outbox.find({"phone": phone}).sort("_id", -1).to_list(2))[1]["message"]

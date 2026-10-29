@@ -1,38 +1,74 @@
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, StringConstraints, field_validator
+
+
+# FAQ + testimonial limits. They are what the landing page can show without
+# breaking its layout, and they refuse empty / whitespace-only text (a blank
+# row would render as an empty accordion or an empty quote).
+FAQ_QUESTION_MAX = 200
+FAQ_ANSWER_MAX = 1500
+REVIEW_NAME_MAX = 80
+REVIEW_COMMENT_MAX = 600
+ORDER_MAX = 10_000
+
+_Question = Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=FAQ_QUESTION_MAX)]
+_Answer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=FAQ_ANSWER_MAX)]
+_Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=REVIEW_NAME_MAX)]
+_Comment = Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=REVIEW_COMMENT_MAX)]
+_Order = Annotated[int, Field(ge=0, le=ORDER_MAX)]
+
+
+def _photo_url(value: Optional[str]) -> Optional[str]:
+    """A customer photo is a link to an uploaded picture (our own /uploads
+    path or an https URL) — never a script/data URI. Blank clears it."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > 500:
+        raise ValueError("The photo link is too long")
+    if not (value.startswith("https://") or value.startswith("http://") or value.startswith("/uploads/")):
+        raise ValueError("The photo must be an uploaded picture or an https link")
+    return value
 
 
 class FaqCreateRequest(BaseModel):
-    question: str
-    answer: str
-    display_order: int = 0
+    question: _Question
+    answer: _Answer
+    display_order: _Order = 0
     is_active: bool = True
 
 
 class FaqUpdateRequest(BaseModel):
-    question: Optional[str] = None
-    answer: Optional[str] = None
-    display_order: Optional[int] = None
+    question: Optional[_Question] = None
+    answer: Optional[_Answer] = None
+    display_order: Optional[_Order] = None
     is_active: Optional[bool] = None
 
 
 class TestimonialCreateRequest(BaseModel):
-    customer_name: str
+    customer_name: _Name
     customer_image: Optional[str] = None
     rating: int = Field(default=5, ge=1, le=5)
-    comment: str
+    comment: _Comment
     is_featured: bool = True
-    display_order: int = 0
+    display_order: _Order = 0
+
+    _photo = field_validator("customer_image")(_photo_url)
 
 
 class TestimonialUpdateRequest(BaseModel):
-    customer_name: Optional[str] = None
+    customer_name: Optional[_Name] = None
+    # "" / null clears the photo; leave the field out to keep it.
     customer_image: Optional[str] = None
-    rating: Optional[int] = None
-    comment: Optional[str] = None
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    comment: Optional[_Comment] = None
     is_featured: Optional[bool] = None
-    display_order: Optional[int] = None
+    display_order: Optional[_Order] = None
+
+    _photo = field_validator("customer_image")(_photo_url)
 
 
 class SettingUpsertRequest(BaseModel):

@@ -121,11 +121,40 @@ class SocietyScheduleService:
         doc = await self.db.society_settings.find_one({"_id": "schedule"}) or {}
         return {k: int(doc.get(k) or v) for k, v in DEFAULT_SETTINGS.items()}
 
-    async def save_settings(self, payload, actor_id: str) -> dict:
+    async def settings_view(self) -> dict:
+        """What the settings page shows: the two values plus how far ahead
+        bookings can open (the ceiling for `generate_days_ahead`) and who
+        saved them last. Planner payloads keep using plain `settings()`."""
+        doc = await self.db.society_settings.find_one({"_id": "schedule"}) or {}
+        policy = await self._policy()
+        updated_at = doc.get("updated_at")
+        by = (await self._people([doc.get("updated_by")])).get(doc.get("updated_by")) if doc.get("updated_by") else None
+        return {
+            **await self.settings(),
+            "max_advance_days": int(policy.get("max_advance_days", 7)),
+            "updated_at": to_ist(from_stored(updated_at)).isoformat() if updated_at else None,
+            "updated_by_name": by,
+        }
+
+    async def save_settings(self, payload, actor_id: str) -> tuple[dict, dict]:
+        """(saved settings, {field: {before, after}}). Visit days are booked
+        `generate_days_ahead` days before the day, and bookings only open
+        `max_advance_days` ahead (booking policy) — a lead longer than that
+        would fail every time, so it is refused here."""
+        policy = await self._policy()
+        ceiling = int(policy.get("max_advance_days", 7)) - 1
+        if payload.generate_days_ahead > ceiling:
+            raise BadRequestException(
+                f"Bookings only open {ceiling + 1} days ahead, so visit days can be booked at most {ceiling} day{'s' if ceiling != 1 else ''} before. "
+                "Lower this, or raise the advance-booking window in Settings & Pricing first."
+            )
+        before = await self.settings()
         await self.db.society_settings.update_one(
             {"_id": "schedule"}, {"$set": {**payload.model_dump(), "updated_by": actor_id, "updated_at": now_ist()}}, upsert=True
         )
-        return await self.settings()
+        after = await self.settings()
+        changes = {k: {"before": before[k], "after": after[k]} for k in after if before.get(k) != after[k]}
+        return after, changes
 
     # ------------------------------------------------------------------
     # Lookups + access
@@ -1360,17 +1389,6 @@ class SocietyScheduleService:
             "status": {"$in": list(OPEN)}, "is_deleted": {"$ne": True},
         }).sort("date", 1).to_list(length=50)
         return {"date": today.isoformat(), "visits": [await self._captain_card(v, captain_id) for v in rows]}
-
-    async def captain_visit(self, captain_id: str, visit_id: str) -> dict:
-        visit = await self.visits.find_by_id(visit_id) if ObjectId.is_valid(visit_id or "") else None
-        if not visit or not (
-            captain_id in (visit.get("captain_ids") or []) or any(a.get("captain_id") == captain_id for a in visit.get("allocations") or [])
-        ):
-            raise NotFoundException("Visit not found")
-        center_id = await self.society.captain_center(captain_id)
-        if not center_id or visit.get("service_center_id") != center_id:
-            raise NotFoundException("Visit not found")
-        return await self._captain_card(visit, captain_id)
 
     async def _captain_card(self, visit: dict, captain_id: str) -> dict:
         society = await self.db.societies.find_one({"_id": ObjectId(visit["society_id"])}) or {}

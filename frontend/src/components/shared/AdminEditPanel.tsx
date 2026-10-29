@@ -16,7 +16,7 @@ const REFRESH = /^(center-bookings|admin-center-bookings|admin-bookings|booking|
 const SECTIONS = ["Customer & Location", "Services & Prices", "Schedule & Captain", "Money", "Status"] as const;
 type Section = (typeof SECTIONS)[number];
 const STATUSES = ["awaiting_payment", "pending", "assigned", "rescheduled", "captain_on_the_way", "service_started", "completed", "cancelled"] as const;
-const rupees = (n: unknown) => `₹${Math.round((Number(n) || 0) * 100) / 100}`;
+const rupees = (n: unknown) => `₹${(Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
 interface Adj {
   delta: string;

@@ -263,12 +263,12 @@ async def test_verified_documents_cannot_be_changed_by_the_captain(rig):
         # Reopened: the captain may resubmit (a NEW packet), the verified one is kept as version 1.
         a2 = await _upload(c, rig["a"])
         assert (await _submit(c, rig["a"], a2, p)).status_code == 200
-        versions = (await c.get(f"/api/v1/staff/captains/{rig['cap_a']}/kyc/versions", headers=rig["m1"])).json()["data"]
-        deny = await c.get(f"/api/v1/staff/captains/{rig['cap_a']}/kyc/versions", headers=rig["m2"])
+        gone = await c.get(f"/api/v1/staff/captains/{rig['cap_a']}/kyc/versions", headers=rig["m1"])
+    assert gone.status_code in (404, 405)  # the unused history endpoint was removed
+    # Versions are archived in the collection (the history endpoint was unused and removed).
+    versions = await db.kyc_versions.find({"captain_id": rig["cap_a"]}).sort("version", 1).to_list(length=10)
     assert [v["version"] for v in versions] == [1, 2]
-    assert versions[0]["packet"]["status"] == "verified" and versions[0]["reason"] == "reverification_requested"
-    assert "123412341234" not in str(versions) and versions[0]["packet"]["aadhaar_number"].endswith("1234")
-    assert deny.status_code == 403
+    assert versions[0]["snapshot"]["status"] == "verified" and versions[0]["reason"] == "reverification_requested"
     # Old files still exist — nothing was deleted.
     assert await db.uploaded_documents.count_documents({"owner_id": rig["cap_a"]}) == 3
 

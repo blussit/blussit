@@ -3,7 +3,7 @@ import { History } from "lucide-react";
 import { adjustmentApi, type BookingAdjustment } from "../../api/staffBookings";
 import { asUtcInstant, formatDateTime } from "../../lib/date";
 
-const rupees = (n: unknown) => `₹${Math.round((Number(n) || 0) * 100) / 100}`;
+const rupees = (n: unknown) => `₹${(Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
 function show(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";

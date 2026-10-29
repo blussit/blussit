@@ -8,6 +8,7 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.wallet_schema import BankDetailsRequest, WalletAdjustmentRequest, WithdrawalCreateRequest, WithdrawalReviewRequest
 from app.services.audit_service import AuditService
 from app.services.wallet_service import WalletService
+from app.utils.response_text import rupees
 
 
 class WalletController:
@@ -42,13 +43,12 @@ class WalletController:
         )
         return success(result, "Bank details saved")
 
-    async def my_transactions(self, current_user: CurrentUser, pagination: PaginationParams):
-        items, total = await self.service.list_transactions(current_user.id, pagination.page, pagination.page_size)
-        return paginated(items, pagination.page, pagination.page_size, total)
-
     async def request_withdrawal(self, current_user: CurrentUser, payload: WithdrawalCreateRequest):
         result = await self.service.request_withdrawal(current_user.id, payload.amount)
-        return success(result, "Withdrawal request submitted")
+        return success(
+            result,
+            f"Withdrawal of {rupees(result.get('amount'))} requested. It is taken from your wallet when the admin approves it.",
+        )
 
     async def my_withdrawals(self, current_user: CurrentUser, pagination: PaginationParams):
         items, total = await self.service.list_my_withdrawals(current_user.id, pagination.page, pagination.page_size)
@@ -68,7 +68,16 @@ class WalletController:
                 "changes": {"status": {"before": (before or {}).get("status"), "after": result.get("status")}},
             },
         )
-        return success(result, "Withdrawal marked paid" if payload.status == "paid" else "Withdrawal request reviewed")
+        amount = rupees(result.get("amount"))
+        if payload.status == "paid":
+            message = f"Withdrawal of {amount} marked paid."
+        elif payload.status == "approved":
+            message = f"Withdrawal of {amount} approved and taken from the captain's wallet — mark it paid once the bank transfer is done."
+        elif (before or {}).get("status") == "approved":
+            message = f"Withdrawal of {amount} cancelled and returned to the captain's wallet."
+        else:
+            message = f"Withdrawal of {amount} rejected — nothing was taken from the captain's wallet."
+        return success(result, message)
 
     async def admin_adjust(self, current_user: CurrentUser, captain_id: str, payload: WalletAdjustmentRequest):
         # 404 for anything but an existing captain (ADM-09) — checked in the
@@ -82,4 +91,5 @@ class WalletController:
                 "balance_before": round(after - payload.amount, 2), "balance_after": after,
             },
         )
-        return success(result, "Wallet adjusted successfully")
+        direction = "added to" if payload.amount > 0 else "taken from"
+        return success(result, f"{rupees(abs(payload.amount))} {direction} the captain's wallet. New balance: {rupees(after)}.")

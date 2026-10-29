@@ -23,6 +23,7 @@ from app.core.dependencies import (
 )
 from app.core.exceptions import BadRequestException
 from app.core.responses import success
+from app.utils.timezone import day_label
 from app.schemas.society_schedule_schema import (
     ChangeRequestCreate,
     ChangeRequestResolve,
@@ -64,14 +65,24 @@ def _center(user: CurrentUser, center_id: Optional[str]) -> str:
 
 @router.get("/settings", dependencies=[Depends(require_manager_or_admin)])
 async def get_settings(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await SocietyScheduleService(db).settings())
+    """Global (all centers): a manager reads them, only an admin changes them."""
+    return success(await SocietyScheduleService(db).settings_view())
 
 
 @router.put("/settings", dependencies=[Depends(require_admin)])
 async def save_settings(payload: ScheduleSettingsRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    result = await SocietyScheduleService(db).save_settings(payload, current_user.id)
-    await _audit(db, current_user, "UPDATE_SOCIETY_SCHEDULE_SETTINGS", "schedule", payload.model_dump())
-    return success(result, "Saved")
+    result, changes = await SocietyScheduleService(db).save_settings(payload, current_user.id)
+    await _audit(db, current_user, "UPDATE_SOCIETY_SCHEDULE_SETTINGS", "schedule", {**payload.model_dump(), "changes": changes})
+    if not changes:
+        return success(result, "Nothing changed — those were already the settings.")
+    parts = []
+    if "generate_days_ahead" in changes:
+        n = result["generate_days_ahead"]
+        parts.append(f"Visit days now book {n} day{'s' if n != 1 else ''} ahead")
+    if "default_washes_per_captain" in changes:
+        n = result["default_washes_per_captain"]
+        parts.append(f"{n} wash{'es' if n != 1 else ''} per captain pre-filled for new visit days")
+    return success({**result, "changes": changes}, "Saved — " + "; ".join(parts) + ".")
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +93,6 @@ async def save_settings(payload: ScheduleSettingsRequest, current_user: CurrentU
 @router.get("/captain/visits", dependencies=[Depends(require_captain)])
 async def captain_visits(current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await SocietyScheduleService(db).captain_visits(current_user.id))
-
-
-@router.get("/captain/visits/{visit_id}", dependencies=[Depends(require_captain)])
-async def captain_visit(visit_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await SocietyScheduleService(db).captain_visit(current_user.id, visit_id))
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +249,11 @@ async def skip_visit(visit_id: str, current_user: CurrentUser = Depends(get_curr
     visit = await service.visit_for_staff(visit_id, current_user)
     result = await service.skip_visit(visit, current_user)
     await _audit(db, current_user, "SKIP_SOCIETY_VISIT", visit_id)
-    return success(result, "Skipped")
+    day = day_label(visit.get("date")) or "That day"
+    if visit.get("status") in ("skipped", "cancelled"):
+        return success(result, f"{day} was already skipped — nothing changed.")
+    warn = f" {len(result['warnings'])} warning(s) — check the details." if result.get("warnings") else ""
+    return success(result, f"{day} skipped — any washes booked for it were cancelled.{warn}")
 
 
 @router.post("/visits/{visit_id}/restore", dependencies=[Depends(require_manager_or_admin)])
@@ -252,7 +262,7 @@ async def restore_visit(visit_id: str, current_user: CurrentUser = Depends(get_c
     visit = await service.visit_for_staff(visit_id, current_user)
     result = await service.restore_visit(visit, current_user)
     await _audit(db, current_user, "RESTORE_SOCIETY_VISIT", visit_id)
-    return success(result, "Restored")
+    return success(result, f"{day_label(visit.get('date')) or 'That day'} restored — it will be planned again.")
 
 
 @router.delete("/visits/{visit_id}", dependencies=[Depends(require_manager_or_admin)])
@@ -261,7 +271,7 @@ async def delete_visit(visit_id: str, current_user: CurrentUser = Depends(get_cu
     visit = await service.visit_for_staff(visit_id, current_user)
     result = await service.delete_visit(visit, current_user)
     await _audit(db, current_user, "DELETE_SOCIETY_VISIT", visit_id)
-    return success(result, "Removed")
+    return success(result, f"{day_label(visit.get('date')) or 'That day'} removed from the schedule.")
 
 
 @router.post("/visits/{visit_id}/exclude", dependencies=[Depends(require_manager_or_admin)])

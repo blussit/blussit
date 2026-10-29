@@ -3,7 +3,8 @@ import { PageLoader } from "./components/ui";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { MutationCache, QueryClient, QueryClientProvider, hydrate, type DehydratedState } from "@tanstack/react-query";
-import { getErrorMessage } from "./lib/api-client";
+import { getErrorMessage, onApiWrite } from "./lib/api-client";
+import { refreshLiveData } from "./hooks/useLiveRefresh";
 import { toastBus } from "./context/ToastContext";
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
@@ -78,6 +79,7 @@ const ManagerReviewsPage = lazy(() => import("./pages/manager/ManagerReviewsPage
 const ManagerSocietiesPage = lazy(() => import("./pages/manager/ManagerSocietiesPage"));
 const ManagerSocietyDetailPage = lazy(() => import("./pages/manager/ManagerSocietyDetailPage"));
 const ManagerSocietyPlannerPage = lazy(() => import("./pages/manager/ManagerSocietyPlannerPage"));
+const ManagerSocietyScheduleSettingsPage = lazy(() => import("./pages/manager/ManagerSocietyScheduleSettingsPage"));
 const ManagerChargesPage = lazy(() => import("./pages/manager/ManagerChargesPage"));
 const ManagerCustomPlansPage = lazy(() => import("./pages/manager/ManagerCustomPlansPage"));
 
@@ -110,6 +112,8 @@ const AdminSocietiesPage = lazy(() => import("./pages/admin/AdminSocietiesPage")
 const AdminSocietyDetailPage = lazy(() => import("./pages/admin/AdminSocietyDetailPage"));
 const AdminSocietyPlansPage = lazy(() => import("./pages/admin/AdminSocietyPlansPage"));
 const AdminSocietyPlannerPage = lazy(() => import("./pages/admin/AdminSocietyPlannerPage"));
+const AdminSocietyScheduleSettingsPage = lazy(() => import("./pages/admin/AdminSocietyScheduleSettingsPage"));
+const AdminContentPage = lazy(() => import("./pages/admin/AdminContentPage"));
 const AdminChargesPage = lazy(() => import("./pages/admin/AdminChargesPage"));
 const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPage"));
 const AdminHolidaysPage = lazy(() => import("./pages/admin/AdminHolidaysPage"));
@@ -131,6 +135,13 @@ const queryClient = new QueryClient({
     },
   }),
 });
+
+// Whoever just did something (cancelled, rescheduled, paid, assigned, gave a
+// discount, bought a plan …) sees every screen it touched update — lists,
+// detail, dashboards, wallet, plans — even where an action's own onSuccess
+// forgot a key, and after a "changed under you" conflict. Debounced and
+// limited to live data (hooks/useLiveRefresh.ts).
+onApiWrite(() => refreshLiveData(queryClient));
 
 // A pre-rendered page ships the API data it was rendered with (see
 // scripts/prerender.mjs): start from it so the first render matches the HTML,
@@ -253,6 +264,7 @@ export default function App() {
                 <Route path="societies" element={<ManagerSocietiesPage />} />
                 <Route path="societies/:id" element={<ManagerSocietyDetailPage />} />
                 <Route path="society-planner" element={<ManagerSocietyPlannerPage />} />
+                <Route path="society-schedule-settings" element={<ManagerSocietyScheduleSettingsPage />} />
                 <Route path="charges" element={<ManagerChargesPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
@@ -288,11 +300,13 @@ export default function App() {
                 <Route path="coupons/bundles/:id/add" element={<AdminCouponBundleImportPage />} />
                 <Route path="complaints" element={<AdminComplaintsPage />} />
                 <Route path="reviews" element={<AdminReviewsPage />} />
+                <Route path="website-content" element={<AdminContentPage />} />
                 <Route path="audit-logs" element={<AdminAuditLogsPage />} />
                 <Route path="societies" element={<AdminSocietiesPage />} />
                 <Route path="societies/:id" element={<AdminSocietyDetailPage />} />
                 <Route path="society-plans" element={<AdminSocietyPlansPage />} />
                 <Route path="society-planner" element={<AdminSocietyPlannerPage />} />
+                <Route path="society-schedule-settings" element={<AdminSocietyScheduleSettingsPage />} />
                 <Route path="charges" element={<AdminChargesPage />} />
                 <Route path="holidays" element={<AdminHolidaysPage />} />
                 <Route path="finance" element={<AdminFinancePage />} />

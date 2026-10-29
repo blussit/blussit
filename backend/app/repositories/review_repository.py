@@ -4,9 +4,6 @@ from app.repositories.base_repository import BaseRepository
 class ReviewRepository(BaseRepository):
     collection_name = "reviews"
 
-    async def list_public(self, page: int, page_size: int):
-        return await self.find_many({"is_published": True}, page=page, page_size=page_size)
-
     # A captain's newest reviews — bounded (PERF-03): a busy captain's
     # lifetime of reviews is a page of history, never one unbounded list.
     CAPTAIN_REVIEWS_LIMIT = 200

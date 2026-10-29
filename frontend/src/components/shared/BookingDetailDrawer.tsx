@@ -5,6 +5,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
 import { TipModal } from "./TipModal";
+import { planSplitTotals } from "../../lib/planSplit";
 import { AddedOnSiteLines, AddServiceDialog, CustomerEditedChip, HistoryChanges, PAYMENT_STATUS_LABELS, paymentTone } from "./BookingStaffExtras";
 import { moneyOf, staffBookingApi, TIP_METHOD_LABELS, type ManagerPayback, type StaffBooking, type TipMethod } from "../../api/staffBookings";
 import { PAYBACK_REASON_LABELS, PAYOUT_METHOD_LABELS, type PaybackReason, type PayoutMethod } from "../../api/customerWallet";
@@ -104,6 +105,8 @@ export function BookingDetailDrawer({
   useEffect(() => setCarId(booking?.id || null), [booking?.id]);
   const car: StaffBooking | null = cars.find((c) => c.id === carId) || single;
   const [addFor, setAddFor] = useState<StaffBooking | null>(null);
+  // A plan booking's bill: what the plan covers, and the paid add-ons apart.
+  const planSplit = planSplitTotals(cars);
   // Money of the visit: wallet used, previous balance carried, paid, due.
   const money = cars.reduce(
     (acc, c) => {
@@ -440,6 +443,25 @@ export function BookingDetailDrawer({
                   <span className="font-mono-num">
                     ₹{travelCharge}
                     {travelKm != null && <span className="ml-1 text-xs font-normal text-[var(--color-text-secondary)]">· {travelKm} km, in the total</span>}
+                  </span>
+                }
+              />
+            )}
+            {planSplit && (
+              <Row
+                label="Covered By Plan"
+                value={<span data-testid="plan-covered">{planSplit.coveredNames.join(", ") || "Wash"} <span className="font-mono-num text-xs font-normal text-[var(--color-text-secondary)]">· ₹{Math.round(planSplit.covered)} value</span></span>}
+              />
+            )}
+            {planSplit && planSplit.extras > 0 && (
+              <Row
+                label="Add-Ons (Paid)"
+                value={
+                  <span data-testid="plan-addons">
+                    <span className="font-mono-num">₹{Math.round(planSplit.extras)}</span>
+                    <span className="block text-xs font-normal text-[var(--color-text-secondary)]">
+                      {planSplit.extraLines.map((l) => `${l.name}${l.onSite ? " (added on site)" : ""}`).join(", ")}
+                    </span>
                   </span>
                 }
               />

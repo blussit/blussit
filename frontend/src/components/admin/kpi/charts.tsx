@@ -55,50 +55,6 @@ export function TargetChip({ actual, target, unit = "", higherIsBetter = true }:
 }
 
 /* ------------------------------------------------------------------ */
-/* Revenue + bookings trend                                            */
-/* ------------------------------------------------------------------ */
-export function TrendChart({ data }: { data: { date: string; bookings: number; revenue: number }[] }) {
-  if (!data.length) return <p className="py-8 text-center text-sm text-[var(--color-text-secondary)]">No data in this period.</p>;
-  const W = 640, H = 180, PAD = 8;
-  const maxRev = Math.max(...data.map((d) => d.revenue), 1);
-  const maxBk = Math.max(...data.map((d) => d.bookings), 1);
-  const step = (W - PAD * 2) / Math.max(data.length - 1, 1);
-  const x = (i: number) => PAD + i * step;
-  const yRev = (v: number) => H - PAD - (v / maxRev) * (H - PAD * 2);
-  const yBk = (v: number) => H - PAD - (v / maxBk) * (H - PAD * 2);
-  const revPath = data.map((d, i) => `${i === 0 ? "M" : "L"}${x(i)},${yRev(d.revenue)}`).join(" ");
-  const area = `${revPath} L${x(data.length - 1)},${H - PAD} L${x(0)},${H - PAD} Z`;
-  const labelEvery = Math.ceil(data.length / 7);
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H + 18}`} className="w-full">
-        <path d={area} fill="var(--color-primary)" opacity={0.08} />
-        <path d={revPath} fill="none" stroke="var(--color-primary)" strokeWidth={2} strokeLinejoin="round" />
-        {data.map((d, i) => (
-          <g key={d.date}>
-            <rect x={x(i) - 2} y={yBk(d.bookings)} width={4} height={H - PAD - yBk(d.bookings)} rx={1.5} fill="var(--color-secondary)" opacity={0.55}>
-              <title>{`${d.date} · ${d.bookings} bookings · ${formatINR(d.revenue)}`}</title>
-            </rect>
-            <circle cx={x(i)} cy={yRev(d.revenue)} r={2.5} fill="var(--color-primary)">
-              <title>{`${d.date} · ${formatINR(d.revenue)}`}</title>
-            </circle>
-            {i % labelEvery === 0 && (
-              <text x={x(i)} y={H + 12} textAnchor="middle" className="fill-[var(--color-text-secondary)]" fontSize={9}>
-                {d.date.slice(5)}
-              </text>
-            )}
-          </g>
-        ))}
-      </svg>
-      <div className="mt-1 flex items-center gap-4 text-xs text-[var(--color-text-secondary)]">
-        <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4 rounded bg-[var(--color-primary)]" /> Revenue</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-1.5 rounded-sm bg-[var(--color-secondary)] opacity-60" /> Bookings</span>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /* Donut + horizontal bars                                             */
 /* ------------------------------------------------------------------ */
 export function Donut({ items, valueLabel }: { items: { name: string; value: number; sub?: string }[]; valueLabel?: (v: number) => string }) {
@@ -235,6 +191,3 @@ export function MiniStat({
   return <div className="rounded-xl border border-[#F3E5B5] bg-white p-4">{body}</div>;
 }
 
-export function SectionCaption({ children }: { children: ReactNode }) {
-  return <p className="mb-3 text-sm font-semibold text-black">{children}</p>;
-}

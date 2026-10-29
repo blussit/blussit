@@ -304,6 +304,7 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
         <div className="max-w-xs">
           <Select label="Filter By Status" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All Statuses</option>
+            <option value="awaiting_payment">Payment Pending</option>
             <option value="pending">Pending</option>
             <option value="assigned">Assigned</option>
             <option value="captain_on_the_way">On The Way</option>

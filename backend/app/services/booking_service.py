@@ -12,7 +12,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.authz import account_switched_off, ensure_own_center
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException
-from app.core.ws_manager import manager as ws_manager
+from app.core.ws_manager import ADMIN_CHANNEL, manager as ws_manager
 from app.models.enums import BookingStatus, NotificationType, PaymentMethod, PaymentStatus, UserStatus
 from app.models.service_center import DEFAULT_WORKING_HOURS_END, DEFAULT_WORKING_HOURS_START
 from app.repositories.address_repository import AddressRepository
@@ -1548,10 +1548,18 @@ class BookingService:
         # Worded like every other customer message — "12 Oct 2026", the car
         # type, the service once (audit NTF-07: it read "Star Wash booked,
         # Star Wash on 2026-10-08 at …", raw ISO date, no car).
+        plan_line = ""
+        if booking.get("subscription_id"):
+            # A plan wash says so, and names the paid extras beside it.
+            split = self._plan_split_view(booking, {
+                str(sv["_id"]): sv for sv in [await self.service_repo.find_by_id(i) for i in booking.get("service_ids") or []] if sv
+            }) or {}
+            extras = float(split.get("extras_total") or 0)
+            plan_line = " Your plan covers the wash" + (f"; add-ons ₹{extras:g} are paid extra." if extras > 0 else ".")
         await self.notifications.notify(
             booking["customer_id"],
             "Booking confirmed",
-            f"{wa_services} for your {wa_vehicle} on {wa_date}, {wa_slot} is confirmed. ({reference}){code_line}",
+            f"{wa_services} for your {wa_vehicle} on {wa_date}, {wa_slot} is confirmed. ({reference}){plan_line}{code_line}",
             NotificationType.BOOKING,
             booking_id,
             wa_event="booking_confirmed",
@@ -2062,6 +2070,9 @@ class BookingService:
                         "history row", confirmed, self._record_history(booking["id"], BookingStatus.PENDING, customer_id, "Booking created"),
                     )
                     created[index] = serialize_doc(confirmed)
+                    # Each car already pinged as it was created (waiting);
+                    # tell the screens it is now confirmed.
+                    await self._post_commit("broadcast", confirmed, self._broadcast_booking_changed(confirmed))
 
         # ONE confirmation for the visit. A cash/plan visit is real the
         # moment it exists; an online one announces itself from the payment
@@ -3359,6 +3370,7 @@ class BookingService:
         discount = 0.0
         coupon: dict | None = None
         consumption: dict | None = None
+        plan_split: dict | None = None
         if subscription_id:
             # The subscription must belong to exactly this booking's customer
             # (also the target customer when staff book on someone's behalf).
@@ -3368,6 +3380,9 @@ class BookingService:
             )
             discount = await self._subscription_discount(
                 subscription_id, services, vehicle_type, first_time_eligible, consumption=consumption, quantities=quantities,
+            )
+            plan_split = await self._plan_split(
+                subscription_id, services, quantities, vehicle_type, first_time_eligible, consumption, min(discount, subtotal), subtotal,
             )
         elif coupon_code:
             coupon, discount = await self.coupon_service.validate_and_compute_booking_discount(
@@ -3397,6 +3412,43 @@ class BookingService:
             "discount_amount": min(discount, subtotal),
             "coupon": coupon,
             "subscription_consumption": consumption,
+            "plan_split": plan_split,
+        }
+
+    async def _plan_split(
+        self, subscription_id: str, services: list[dict], quantities: dict[str, int], vehicle_type: str,
+        first_time_eligible: bool, consumption: dict | None, covered_amount: float, subtotal: float,
+    ) -> dict:
+        """What a plan car's bill is made of, for the quote and the booking
+        screens: `covers` — the services the plan pays for (their price is
+        the plan's) — and `extras` — everything the plan does NOT pay for
+        (add-ons, a wash outside the pass): charged to the customer.
+        `covered_amount` is the waiver, `extras_total` what is left to pay
+        for the services (before travel / carried balance)."""
+        covered_ids = (consumption or {}).get("covered_service_ids")
+        if covered_ids is None:
+            sub = await self.subscription_service.get_subscription(subscription_id)
+            if (sub or {}).get("service_id"):
+                covered_ids = [sub["service_id"]]
+            else:
+                plan = await self.subscription_service.get_plan(subscription_id)
+                included = set((plan or {}).get("included_service_ids") or [])
+                covered_ids = [str(s["_id"]) for s in services if str(s["_id"]) in included or (not included and not s.get("is_addon"))]
+        covered_ids = {str(i) for i in covered_ids}
+
+        def row(s: dict) -> dict:
+            qty = int(quantities.get(str(s["_id"]), 1) or 1)
+            return {
+                "service_id": str(s["_id"]), "name": s.get("name"), "qty": qty,
+                "amount": round(float(self._resolve_price(s, vehicle_type, first_time_eligible)) * qty, 2),
+                "is_addon": bool(s.get("is_addon")),
+            }
+
+        return {
+            "covers": [row(s) for s in services if str(s["_id"]) in covered_ids],
+            "extras": [row(s) for s in services if str(s["_id"]) not in covered_ids],
+            "covered_amount": round(covered_amount, 2),
+            "extras_total": round(max(0.0, subtotal - covered_amount), 2),
         }
 
     async def _car_services(self, car) -> tuple[list[dict], dict | None, dict[str, int]]:
@@ -3532,7 +3584,10 @@ class BookingService:
              "regular_subtotal": 0.0, "plan_discount": 0.0, "coupon_discount": 0.0, "plan_covered": 0, "total": 0.0,
              # WHICH pass(es) paid for this line — the screens say "Covered by
              # Monthly Pass — 3 left" from this, never from their own guess.
-             "subscription_ids": []}
+             "subscription_ids": [],
+             # What the plan pays for on this line and what is charged on
+             # top of it (add-ons) — straight from the pricing code.
+             "plan_covers": [], "plan_extras": [], "plan_extras_total": 0.0, "plan_note": None}
             for i, (vehicle_type, quantity) in enumerate(line_specs)
         ]
         for index, (line_index, car) in enumerate(units):
@@ -3564,9 +3619,31 @@ class BookingService:
                 row["plan_covered"] += 1
                 row["subscription_ids"].append(car.subscription_id)
                 row["plan_discount"] += priced["discount_amount"]
+                split = priced.get("plan_split") or {}
+                row["plan_covers"].extend(split.get("covers") or [])
+                row["plan_extras"].extend(split.get("extras") or [])
+                row["plan_extras_total"] += float(split.get("extras_total") or 0)
             else:
                 row["coupon_discount"] += priced["discount_amount"]
             row["total"] += max(0.0, priced["subtotal"] - priced["discount_amount"])
+
+        # A plan exists but covers a different car type / wash than this
+        # line: say what it covers (never for an unproven caller — a quote
+        # must not reveal anyone's plans — nor on a logged job, whose own
+        # picker lists the plans).
+        if customer_id and not anonymous and not log_mode:
+            for line_index, row in enumerate(line_rows):
+                if row["plan_covered"]:
+                    continue
+                first = next((car for li, car in units if li == line_index), None)
+                if first is None or first.combo_id:
+                    continue
+                try:
+                    row["plan_note"] = await self.subscription_service.plan_fit_note_for(
+                        customer_id, first.vehicle_type, list(first.service_ids or []),
+                    )
+                except Exception:  # noqa: BLE001 — a note is advice, never a failed quote
+                    logger.exception("Could not build the plan note for a quote")
 
         travel = None
         if terms["charges_travel"] and address:
@@ -3576,7 +3653,7 @@ class BookingService:
         travel_charge = float(travel["charge"]) if travel else 0.0
 
         for row in line_rows:
-            for key in ("subtotal", "regular_subtotal", "plan_discount", "coupon_discount", "total"):
+            for key in ("subtotal", "regular_subtotal", "plan_discount", "coupon_discount", "total", "plan_extras_total"):
                 row[key] = round(row[key], 2)
         subtotal = round(sum(r["subtotal"] for r in line_rows), 2)
         regular = round(sum(r["regular_subtotal"] for r in line_rows), 2)
@@ -3610,6 +3687,10 @@ class BookingService:
             "regular_subtotal": regular,
             "first_time_savings": round(regular - subtotal, 2),
             "plan_discount": round(sum(r["plan_discount"] for r in line_rows), 2),
+            # The plan's part and the paid extras on plan-covered cars:
+            # "Plan covers ₹X · Add-ons ₹Y · you pay ₹Y".
+            "plan_covered_total": round(sum(r["plan_discount"] for r in line_rows), 2),
+            "plan_extras_total": round(sum(r["plan_extras_total"] for r in line_rows), 2),
             "coupon_code": coupon_applied,
             "coupon_discount": round(sum(r["coupon_discount"] for r in line_rows), 2),
             "coupon_error": coupon_error,
@@ -3875,7 +3956,7 @@ class BookingService:
         try:
             scheduled_date = datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
-            raise BadRequestException("Invalid date")
+            raise BadRequestException(f"Pick a valid date as YYYY-MM-DD (you sent '{str(date_str)[:20]}').")
         # Same window every booking path enforces — showing slots the
         # submit would reject is just a broken promise to the customer.
         _ensure_within_advance_window(scheduled_date, policy)
@@ -4185,7 +4266,7 @@ class BookingService:
         try:
             parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
-            raise BadRequestException("Invalid date")
+            raise BadRequestException(f"Pick a valid date as YYYY-MM-DD (you sent '{str(date_str)[:20]}').")
         policy = await self.policy_service.get_policy()
         _ensure_within_advance_window(parsed_date, policy)
         _slot_start, slot_end = _resolve_slot_window(center, parsed_date, slot_key, policy)  # raises on an invented key
@@ -4446,6 +4527,51 @@ class BookingService:
         enriched = await self._enrich_bookings(items)
         return [_redact_financials(b, "captain") for b in enriched], total
 
+    def _plan_split_view(self, booking: dict, services: dict[str, dict]) -> dict | None:
+        """"Covered by plan" and "Add-ons (paid)" as separate lines, for
+        every screen that shows a plan booking (customer, manager, captain,
+        admin). None for a booking no plan paid for. `covered_amount` is the
+        plan's waiver; paid extras = the add-ons booked with it plus
+        anything a captain / manager added on site; both lists carry the
+        catalogue price at booking / the price charged on site."""
+        if not booking.get("subscription_id"):
+            return None
+        vehicle_type = booking.get("vehicle_type") or ""
+        first_time = bool(booking.get("first_time_eligible"))
+        qty_map = booking.get("service_quantities") or {}
+        covered_ids = (booking.get("subscription_consumption") or {}).get("covered_service_ids")
+        covers, booked = [], []
+        for sid in booking.get("service_ids") or []:
+            svc = services.get(sid)
+            if not svc:
+                continue
+            is_covered = (sid in {str(i) for i in covered_ids}) if covered_ids is not None else not svc.get("is_addon")
+            qty = int(qty_map.get(sid, 1) or 1)
+            if is_covered:
+                covers.append({"service_id": sid, "name": svc.get("name"), "qty": qty})
+            else:
+                booked.append({
+                    "service_id": sid, "name": svc.get("name"), "qty": qty, "is_addon": bool(svc.get("is_addon")),
+                    "amount": round(float(self._resolve_price(svc, vehicle_type, first_time)) * qty, 2),
+                })
+        on_site = [
+            {"service_id": e.get("service_id"), "name": e.get("name"), "qty": int(e.get("qty") or 1), "amount": round(float(e.get("amount") or 0), 2),
+             "by_name": e.get("by_name"), "role": e.get("role"), "at": serialize_doc({"at": e.get("at")}).get("at")}
+            for e in booking.get("added_services") or []
+        ]
+        covered_amount = round(float(booking.get("discount_amount") or 0), 2)
+        booked_total = round(max(0.0, float(booking.get("subtotal") or 0) - covered_amount), 2)
+        on_site_total = round(float(booking.get("added_services_total") or 0), 2)
+        return {
+            "covered_amount": covered_amount,
+            "covers": covers,
+            "extras_booked": booked,
+            "extras_booked_total": booked_total,
+            "extras_on_site": on_site,
+            "extras_on_site_total": on_site_total,
+            "extras_total": round(booked_total + on_site_total, 2),
+        }
+
     async def _enrich_bookings(self, bookings: list[dict]) -> list[dict]:
         """Denormalizes customer name/phone, a vehicle snapshot, a flattened
         address, and service/combo names onto each booking so a captain (or
@@ -4595,6 +4721,7 @@ class BookingService:
             doc["amount_due"] = money["amount_due"]
             doc["wallet_due_carried"] = money["wallet_due_carried"]
             doc["added_services_total"] = float(booking.get("added_services_total") or 0)
+            doc["plan_split"] = self._plan_split_view(booking, services)
             if doc.get("manager_paybacks"):
                 # Older paybacks were stored without their label — every row
                 # reads "Service Delayed", never the raw code (FINAL-POLISH).
@@ -4803,6 +4930,9 @@ class BookingService:
         cars follow the plan rule (wash used up inside the last hour), the
         paid part pays the tier once per visit; the visit's money goes to
         the customer's wallet in the same transaction."""
+        if not booking_group_id:
+            # A null id would match every booking that has no group.
+            raise NotFoundException("Booking not found")
         bookings = await self.repo.collection.find(
             {"booking_group_id": booking_group_id, "is_deleted": {"$ne": True}}
         ).to_list(length=20)
@@ -7204,6 +7334,7 @@ class BookingService:
         lead_doc = moved[mover_ids[0]]
         visit = await self._visit_cars(lead_doc)
         reference = self._visit_numbers(visit) if len(visit) > 1 else lead_doc["booking_number"]
+        new_when = f"{to_ist(payload.scheduled_date).strftime('%-d %b %Y')}, {format_slot_12h(payload.scheduled_slot)}"
         if actor_role != "customer":
             # The NEW date and time, worded like every other message
             # ("12 Oct 2026", "9:00 AM – 12:00 PM") — not the raw ISO date
@@ -7212,7 +7343,7 @@ class BookingService:
             await self.notifications.notify(
                 booking["customer_id"],
                 "Booking rescheduled",
-                f"{reference} has been moved to a new time — we'll confirm your captain shortly.",
+                f"{reference} has been moved to {new_when} — we'll confirm your captain shortly.",
                 NotificationType.BOOKING,
                 booking_id,
                 wa_event="reschedule_confirmation",
@@ -7222,7 +7353,7 @@ class BookingService:
             await self.notifications.notify(
                 captain_id,
                 "Booking rescheduled — no longer yours",
-                f"{reference} was rescheduled to a new time and needs a new captain assignment.",
+                f"{reference} was rescheduled to {new_when} and needs a new captain assignment.",
                 NotificationType.BOOKING,
                 booking_id,
             )
@@ -8069,10 +8200,21 @@ class BookingService:
                     manager_id, f"Services added — {updated.get('booking_number')}", line,
                     NotificationType.BOOKING, booking_id, send_whatsapp=False, background=True,
                 )
+            plan_booking = bool(booking.get("subscription_id"))
+            if plan_booking:
+                # A plan wash with a paid extra: the customer is told on
+                # WhatsApp too — it is money they will be asked for.
+                split = self._plan_split_view(updated, {str(s["_id"]): s for s in [await self.service_repo.find_by_id(i) for i in updated.get("service_ids") or []] if s})
+                covers = ", ".join(c["name"] for c in (split or {}).get("covers") or []) or "your wash"
+                customer_text = (
+                    f"{what} added to {updated.get('booking_number')} — ₹{added_total:g} extra. "
+                    f"Your plan still covers {covers}. You pay ₹{float(bm.amount_due(updated)):g} for the extras."
+                )
+            else:
+                customer_text = f"{what} added to {updated.get('booking_number')} — ₹{added_total:g}. New total ₹{float(updated.get('total_amount') or 0):g}."
             await self.notifications.notify(
-                booking["customer_id"], "Added to your booking",
-                f"{what} added to {updated.get('booking_number')} — ₹{added_total:g}. New total ₹{float(updated.get('total_amount') or 0):g}.",
-                NotificationType.BOOKING, booking_id, send_whatsapp=False, background=True,
+                booking["customer_id"], "Add-On Added To Your Booking" if plan_booking else "Added to your booking", customer_text,
+                NotificationType.BOOKING, booking_id, send_whatsapp=plan_booking, background=True,
             )
 
         await self._post_commit("add-on notices", updated, _tell())
@@ -9557,7 +9699,7 @@ class BookingService:
         booking_id = str(booking.get("_id") or booking.get("id") or "")
         if not booking_id:
             return
-        payload = {"type": "changed", "booking_id": booking_id}
+        payload = {"type": "changed", "kind": "booking", "booking_id": booking_id}
         await ws_manager.broadcast(f"booking:{booking_id}", {**payload, "channel": f"booking:{booking_id}"})
         center_id = booking.get("service_center_id")
         if center_id:
@@ -9568,6 +9710,8 @@ class BookingService:
         captain_id = booking.get("captain_id")
         if captain_id:
             await ws_manager.broadcast(f"user:{captain_id}", {**payload, "channel": f"user:{captain_id}"})
+        # Admins watch every center at once (dashboards, bookings lists).
+        await ws_manager.broadcast(ADMIN_CHANNEL, {**payload, "channel": ADMIN_CHANNEL})
 
     async def _broadcast_slots_changed(self, service_center_id: str, date_str: str) -> None:
         """Fired after any write that changes a slot's booked_count,

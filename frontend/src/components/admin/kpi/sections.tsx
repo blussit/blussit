@@ -159,7 +159,7 @@ type BusinessData = {
   trend: { date: string; bookings: number; revenue: number }[];
   service_mix: { name: string; bookings: number; revenue: number; aov: number; cancellation_rate: number | null }[];
   vehicle_mix: { name: string; bookings: number; revenue: number; aov: number }[];
-  revenue_quality: { total: number; new_customer_revenue: number; repeat_customer_revenue: number; repeat_revenue_pct: number | null; subscription_revenue: number; one_time_revenue: number };
+  revenue_quality: { total: number; new_customer_revenue: number; repeat_customer_revenue: number; repeat_revenue_pct: number | null; subscription_revenue: number; plan_addon_revenue?: number; one_time_revenue: number };
 };
 
 export function BusinessTab({ params }: { params: KpiPeriodParams }) {
@@ -244,6 +244,7 @@ export function BusinessTab({ params }: { params: KpiPeriodParams }) {
               <Row label="Repeat-Customer Revenue" value={formatINR(q.repeat_customer_revenue)} />
               <Row label="Repeat Revenue Share" value={pct(q.repeat_revenue_pct)} bold />
               <Row label="Subscription-Covered" value={formatINR(q.subscription_revenue)} />
+              {(q.plan_addon_revenue ?? 0) > 0 && <Row label="Plan Add-Ons (Paid)" value={formatINR(q.plan_addon_revenue ?? 0)} />}
               <Row label="One-Time" value={formatINR(q.one_time_revenue)} />
             </CardBody>
           </Card>

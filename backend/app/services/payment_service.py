@@ -65,6 +65,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
 from app.core.exceptions import AppException, BadRequestException, ConflictException, NotFoundException
+from app.core.ws_manager import manager as ws_manager
 from app.models.enums import NotificationType, PaymentMethod, PaymentStatus
 from app.repositories.booking_repository import BookingRepository
 from app.repositories.subscription_repository import SubscriptionPlanRepository
@@ -832,6 +833,9 @@ class PaymentService:
             await self._flag_order_attention({"_id": claimed["_id"]}, f"paid, but applying the payment failed ({via}) — check it")
             ok = False
         await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
+        # Whatever the purchase was (a visit, a plan, a society or custom
+        # plan), the buyer's screens and the admin's money views refresh now.
+        await ws_manager.notify_changed("payment", users=[claimed.get("customer_id")], center_id=claimed.get("service_center_id"))
         if ok and receipt_for:
             await self._send_payment_receipt(claimed, receipt_for)
         return {**result, "status": "paid" if ok else "needs_attention", "settled": ok}
@@ -2449,8 +2453,14 @@ class PaymentService:
         from datetime import datetime as _dt, timedelta as _td
 
         today = now_ist().replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-        start = _dt.strptime(date_from, "%Y-%m-%d") if date_from else today - _td(days=30)
-        end = (_dt.strptime(date_to, "%Y-%m-%d") if date_to else today) + _td(days=1)
+        try:
+            start = _dt.strptime(date_from, "%Y-%m-%d") if date_from else today - _td(days=30)
+            end = (_dt.strptime(date_to, "%Y-%m-%d") if date_to else today) + _td(days=1)
+        except ValueError:
+            # 2026-13-45 passes the YYYY-MM-DD shape but is no real day.
+            raise BadRequestException("Pick real dates as YYYY-MM-DD for the from and to days.") from None
+        if start >= end:
+            raise BadRequestException("The 'from' day can't be after the 'to' day.")
         return {"$gte": start, "$lt": end}
 
     # Money RECEIVED per booking (spec 1.5): `paid_cash` / `paid_online`
@@ -2959,6 +2969,11 @@ class PaymentService:
                     "payment_status": REFUNDED, "refunded_at": now,
                     "refunded_amount": round(float(car.get("total_amount") or 0), 2), "updated_at": now,
                 }},
+            )
+            # "Refund Due" -> "Refunded" on the booking page, the customer's
+            # list and the center's / admin's money views.
+            await ws_manager.notify_changed(
+                "payment", users=[car.get("customer_id")], center_id=car.get("service_center_id"), booking_id=str(car["_id"]),
             )
 
     # -- Payment Links (WhatsApp bookings) ------------------------------
@@ -3563,6 +3578,7 @@ class PaymentService:
             await self._flag_order_attention({"_id": claimed["_id"]}, "link paid, but applying the payment failed — check it")
             settled = False
         await self.orders.update_one({"_id": claimed["_id"]}, {"$unset": {"settling": ""}})
+        await ws_manager.notify_changed("payment", users=[claimed.get("customer_id")], center_id=claimed.get("service_center_id"))
         if settled:
             # The customer's one "payment received" — sent by whichever path
             # (callback, webhook, sweep, captain's poll) won the claim above.

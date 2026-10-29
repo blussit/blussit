@@ -73,7 +73,9 @@ export function SocietyPlannerView({ isAdmin = false, societyBasePath }: { isAdm
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold text-[#0E1A33]">Society Planner</h1>
-          <p className="text-sm text-[#5F6878]">Premium-wash visit days for every society{p ? ` of ${p.center.name}` : ""} — booked automatically {p?.settings.generate_days_ahead ?? 2} days ahead.</p>
+          <p className="text-sm text-[#5F6878]">Premium-wash visit days for every society{p ? ` of ${p.center.name}` : ""} — booked automatically {p?.settings.generate_days_ahead ?? 2} days ahead.{" "}
+            <Link to={isAdmin ? "/admin/society-schedule-settings" : "/manager/society-schedule-settings"} className="font-medium text-[#0E1A33] underline">Schedule Settings</Link>
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {isAdmin && (

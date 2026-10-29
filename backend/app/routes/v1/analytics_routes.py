@@ -49,25 +49,6 @@ async def manager_summary(service_center_id: str, current_user: CurrentUser = De
     ))
 
 
-@router.get("/kpis/manager-overview/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
-async def manager_kpi_overview(
-    service_center_id: str,
-    period: str | None = None,
-    start: str | None = None,
-    end: str | None = None,
-    current_user: CurrentUser = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """A manager's own combined bookings+plans revenue, bookings and plans
-    sold — the Sales section on their KPI page, scoped to one center. See
-    KpiService.manager_overview."""
-    from app.services.kpi_service import KpiService, resolve_period
-
-    ensure_own_center(current_user.role, current_user.service_center_id, service_center_id)
-    s, e, ps, pe = resolve_period(period, start, end)
-    return success(await KpiService(db).manager_overview(service_center_id, s, e, ps, pe))
-
-
 @router.get("/manager-dashboard/{service_center_id}", dependencies=[Depends(require_manager_or_admin)])
 async def manager_dashboard(
     service_center_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
@@ -93,16 +74,6 @@ async def manager_dashboard(
 # (report_cache): a minute of staleness on an all-time/period aggregate is
 # fine; recomputing it for every open tab on every instance is not.
 _REPORT_TTL = 60
-
-
-@router.get("/dashboard", dependencies=[Depends(require_admin)])
-async def dashboard_summary(db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await report_cache.cached(("analytics", "dashboard"), _REPORT_TTL, AnalyticsService(db).dashboard_summary))
-
-
-@router.get("/booking-trends", dependencies=[Depends(require_admin)])
-async def booking_trends(days: int = 30, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await AnalyticsService(db).booking_trends(days))
 
 
 @router.get("/service-centers", dependencies=[Depends(require_admin)])

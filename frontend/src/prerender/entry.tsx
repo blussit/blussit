@@ -36,13 +36,15 @@ const QUERIES = {
   vehicleTypes: { queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() },
   plans: { queryKey: ["public-plans"], queryFn: () => subscriptionApi.plans(true) },
   testimonials: { queryKey: ["public-testimonials"], queryFn: contentApi.testimonials },
+  // Same key the landing FAQ section reads; empty/missing falls back to src/data/faqs.ts.
+  faqs: { queryKey: ["public-faqs"], queryFn: contentApi.faqs },
   societyPitch: { queryKey: ["society-pitch"], queryFn: societyLeadApi.info },
   // The cancellation charges shown on /cancellation-policy.
   policy: { queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get },
 } as const;
 type QueryName = keyof typeof QUERIES;
 
-const LANDING_DATA: QueryName[] = ["services", "vehicleTypes", "plans", "testimonials", "societyPitch"];
+const LANDING_DATA: QueryName[] = ["services", "vehicleTypes", "plans", "testimonials", "faqs", "societyPitch"];
 const SERVICES_DATA: QueryName[] = ["services"];
 
 /** Keep in step with the public routes in App.tsx. */

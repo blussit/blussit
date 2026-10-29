@@ -107,8 +107,6 @@ async def test_charge_view_says_where_the_money_went(db):
     assert waived["status"] == "waived" and waived["settlement"] == "wallet" and waived["wallet_credited"] == 50
     rows, _ = await svc.list_for_staff(actor_role="manager", actor_center_id=s["center_id"], status=None, customer_id=s["cu"]["id"], page=1, page_size=20)
     assert rows[0]["wallet_credited"] == 50 and rows[0]["settlement"] == "wallet"
-    mine = await svc.my_charges(s["cu"]["id"])
-    assert mine["items"][0]["settlement"] == "wallet" and mine["items"][0]["wallet_credited"] == 50
     # A charge adjusted before the field existed: read from its history.
     legacy = await db.customer_charges.find_one({"_id": ObjectId(charge_id)})
     legacy.pop("wallet_credited")

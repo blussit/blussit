@@ -16,6 +16,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.utils.serializers import serialize_list
 
+ENQUIRY_STATUSES = ("new", "contacted", "closed")
+
 
 class PlanEnquiryService:
     def __init__(self, db: AsyncIOMotorDatabase):
@@ -71,7 +73,7 @@ class PlanEnquiryService:
         """Triage marker for the admin list — new / contacted / closed."""
         from bson import ObjectId
 
-        if status not in {"new", "contacted", "closed"} or not ObjectId.is_valid(enquiry_id):
+        if status not in ENQUIRY_STATUSES or not ObjectId.is_valid(enquiry_id):
             return False
         result = await self.collection.update_one(
             {"_id": ObjectId(enquiry_id)},

@@ -61,6 +61,7 @@ from pymongo import ReturnDocument
 
 from app.core.authz import ensure_customer_in_scope, ensure_own_center, resolve_grant_center_id
 from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
+from app.core.ws_manager import manager as ws_manager
 from app.models.enums import CustomerWalletEntryKind, NotificationType, SubscriptionStatus
 from app.utils.money import round_rupees, split_whole_rupees
 from app.utils.text import normalize_plate
@@ -165,6 +166,14 @@ class CustomPlanService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.carts = db[COLLECTION]
+
+    @staticmethod
+    async def _ping(cart: dict | None) -> None:
+        """A custom plan was made, changed, sent, paid, renewed, refunded or
+        cancelled: its customer's plans and the center's / admin's Custom
+        Plans lists refresh at once."""
+        if cart:
+            await ws_manager.notify_changed("plan", users=[cart.get("customer_id")], center_id=cart.get("service_center_id"))
 
     # ------------------------------------------------------------------
     # Pricing (server-side only)
@@ -382,7 +391,9 @@ class CustomPlanService:
             "is_deleted": False,
         }
         result = await self.carts.insert_one(doc)
-        return await self.view(await self.carts.find_one({"_id": result.inserted_id}))
+        created = await self.carts.find_one({"_id": result.inserted_id})
+        await self._ping(created)
+        return await self.view(created)
 
     async def get(self, cart_id: str) -> dict:
         cart = await self.carts.find_one({"_id": ObjectId(cart_id), "is_deleted": {"$ne": True}}) if ObjectId.is_valid(cart_id or "") else None
@@ -424,6 +435,7 @@ class CustomPlanService:
         if not updated:
             await self._refuse_stale(cart_id)
         await self._void_links(updated, "custom plan changed")
+        await self._ping(updated)
         return await self.view(updated)
 
     async def cancel(self, cart_id: str, *, reason: str | None, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
@@ -447,6 +459,7 @@ class CustomPlanService:
                 {"_id": ObjectId(updated["renewal_of"]), "renewal_cart_id": str(updated["_id"])}, {"$set": {"renewal_cart_id": None}},
             )
         await self._void_links(updated, "custom plan cancelled")
+        await self._ping(updated)
         return await self.view(updated)
 
     # ------------------------------------------------------------------
@@ -531,7 +544,9 @@ class CustomPlanService:
         except BaseException:
             await self.carts.update_one({"_id": old["_id"], "renewal_cart_id": str(new_id)}, {"$set": {"renewal_cart_id": stale}})
             raise
-        return await self.view(await self.carts.find_one({"_id": new_id}))
+        renewed = await self.carts.find_one({"_id": new_id})
+        await self._ping(renewed)
+        return await self.view(renewed)
 
     # ------------------------------------------------------------------
     # Refund one car of a paid cart (staff) — to the customer wallet
@@ -640,6 +655,7 @@ class CustomPlanService:
             outcome = await session.with_transaction(_do)
         if not outcome["already"] and (outcome.get("wallet") or {}).get("created"):
             await wallets.announce(cart["customer_id"], outcome["wallet"], reason=f"Custom plan refund — {plate}")
+        await self._ping(cart)
         refund = outcome.get("refund") or {}
         return {
             "already": outcome["already"],
@@ -760,6 +776,7 @@ class CustomPlanService:
             await self._refuse_stale(cart_id)
         if send_whatsapp:
             await self._send_link_message(marked, amount_paise / 100, short_url)
+        await self._ping(marked)
         return {
             "short_url": short_url, "amount": amount_paise / 100, "order_id": str(order_id), "reused": reused,
             "sent": send_whatsapp, "custom_plan": await self.view(marked),
@@ -1037,6 +1054,7 @@ class CustomPlanService:
             await self._announce(cart, active, period_end)
         if skipped:
             await self._tell_staff(cart, skipped)
+        await self._ping(cart)
         return {"all_active": all_active, "activated": len(active), "skipped": [c.get("registration_number") for c in skipped],
                 "subscription_ids": [c["subscription_id"] for c in active]}
 

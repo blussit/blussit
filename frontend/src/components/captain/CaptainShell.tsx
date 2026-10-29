@@ -16,6 +16,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useLiveChannel } from "../../lib/socket";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { notificationTargetPath } from "../../lib/notifications";
 import { playNotificationChime } from "../../lib/notificationSound";
 import { MandatoryGates } from "../shared/MandatoryGates";
@@ -66,6 +67,8 @@ function useJobPlumbing() {
     queryClient.invalidateQueries({ queryKey: ["captain-visit"] });
     queryClient.invalidateQueries({ queryKey: ["notifications"] });
   });
+  // Wallet / earnings / the rest of the captain's screens (debounced).
+  useLiveRefresh();
 
   const hasActiveJob = (active.data?.meta.total ?? 0) > 0;
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Complaint, Coupon, Notification, PassExtension, Review, SubscriptionPlan, UserSubscription } from "../types";
+import type { Complaint, Notification, PassExtension, Review, SubscriptionPlan, UserSubscription } from "../types";
 
 /** One subscription row on the manager's center overview. */
 export interface CenterSubscriptionRow {
@@ -241,10 +241,6 @@ export const subscriptionApi = {
   mySubscriptions: () => apiClient.get<ApiSuccess<UserSubscription[]>>("/subscriptions/my").then((r) => r.data.data),
   forCustomer: (customerId: string) =>
     apiClient.get<ApiSuccess<UserSubscription[]>>(`/subscriptions/customer/${customerId}`).then((r) => r.data.data),
-  assign: (payload: { customer_id: string; plan_id: string; vehicle_type?: string; auto_renew?: boolean }) =>
-    apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions/assign", payload).then((r) => r.data.data),
-  subscribe: (payload: { plan_id: string; vehicle_type?: string; auto_renew?: boolean }) =>
-    apiClient.post<ApiSuccess<UserSubscription>>("/subscriptions", payload).then((r) => r.data.data),
   cancel: (id: string) => apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/cancel`).then((r) => r.data.data),
   upgrade: (id: string, newPlanId: string) =>
     apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/upgrade`, { new_plan_id: newPlanId }).then((r) => r.data.data),
@@ -253,8 +249,6 @@ export const subscriptionApi = {
    *  is refused by the API — buy the plan again to restart it. */
   setAutoPay: (id: string, enabled: boolean) =>
     apiClient.post<ApiSuccess<UserSubscription>>(`/subscriptions/${id}/auto-pay`, { enabled }).then((r) => r.data.data),
-  adminAll: (params?: { page?: number; page_size?: number }) =>
-    apiClient.get<ApiPaginated<UserSubscription>>("/subscriptions/admin/all", { params }).then((r) => r.data),
   /** Manager/admin sells a plan: a WhatsApp payment link (one-time,
    *  optionally discounted/coupon'd), a full-rate auto-pay link, or cash
    *  collected on the spot. See PaymentService.manager_subscription_offer. */
@@ -268,17 +262,6 @@ export const subscriptionApi = {
    *  Manager-safe (unlike the full PUT edit, which stays admin-only). */
   discontinuePlan: (planId: string) =>
     apiClient.post<ApiSuccess<SubscriptionPlan>>(`/subscription-plans/${planId}/discontinue`).then((r) => r.data.data),
-};
-
-export const couponApi = {
-  publicOffer: (code: string) => apiClient.get<ApiSuccess<Coupon>>(`/coupons/public/${code}`).then((r) => r.data.data),
-  validate: (code: string, orderValue: number) =>
-    apiClient
-      .post<ApiSuccess<{ valid: boolean; discount_amount: number; coupon_code: string }>>("/coupons/validate", {
-        code,
-        order_value: orderValue,
-      })
-      .then((r) => r.data.data),
 };
 
 export const reviewApi = {

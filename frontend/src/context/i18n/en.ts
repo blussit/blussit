@@ -386,6 +386,8 @@ export const en = {
   "captain.onsite.byYou": "By You",
   "captain.onsite.by": "By {name}",
   "captain.money.total": "Total",
+  "captain.money.plan": "Covered By Plan",
+  "captain.money.addons": "Add-Ons (Paid)",
   "captain.money.paid": "Paid",
   "captain.money.wallet": "Wallet Credit Used",
   "captain.money.due": "Due",

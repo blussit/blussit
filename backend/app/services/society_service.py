@@ -29,6 +29,7 @@ from app.repositories.society_repository import (
     SocietyPaymentRepository,
     SocietyRepository,
 )
+from app.core.ws_manager import manager as ws_manager
 from app.repositories.subscription_repository import SubscriptionPlanRepository, UserSubscriptionRepository
 from app.utils.coupon_codes import mask_code
 from app.utils.geo import haversine_km
@@ -2076,6 +2077,7 @@ class SocietyService:
                 {"_id": {"$in": oids}},
                 {"$set": {"status": SubscriptionStatus.CANCELLED.value, "auto_renew": False, "updated_at": now}},
             )
+            await ws_manager.notify_changed("plan", users=[enrollment.get("customer_id")], center_id=enrollment.get("service_center_id"))
             from app.services.subscription_service import release_pass_claims_for
 
             await release_pass_claims_for(self.db, [

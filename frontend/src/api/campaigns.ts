@@ -105,10 +105,6 @@ const BASE = "/whatsapp/campaigns";
 export const campaignApi = {
   list: (page = 1) => apiClient.get<ApiSuccess<{ items: Campaign[]; total: number }>>(BASE, { params: { page } }).then((r) => r.data.data),
   get: (id: string) => apiClient.get<ApiSuccess<Campaign>>(`${BASE}/${id}`).then((r) => r.data.data),
-  limits: () =>
-    apiClient
-      .get<ApiSuccess<{ whatsapp_marketing_cost_paise: number; rate_per_second: number; max_recipients: number; daily_cap: number; max_message_chars: number; template: CampaignQuote["template"] }>>(`${BASE}/limits`)
-      .then((r) => r.data.data),
   uploadImage: async (file: File): Promise<string> => {
     const form = new FormData();
     form.append("file", file);
@@ -118,7 +114,6 @@ export const campaignApi = {
   create: (payload: { name: string; message: string; image_url: string }) => apiClient.post<ApiSuccess<Campaign>>(BASE, payload).then((r) => r.data.data),
   update: (id: string, payload: Partial<{ name: string; message: string; image_url: string }>) =>
     apiClient.put<ApiSuccess<Campaign>>(`${BASE}/${id}`, payload).then((r) => r.data.data),
-  remove: (id: string) => apiClient.delete(`${BASE}/${id}`),
   audience: (selection: Selection, page: number, pageSize = 25) =>
     apiClient.post<ApiSuccess<AudiencePage>>(`${BASE}/audience/selection`, { selection }, { params: { page, page_size: pageSize } }).then((r) => r.data.data),
   preview: (id: string, selection: Selection) => apiClient.post<ApiSuccess<CampaignQuote>>(`${BASE}/${id}/preview`, { selection }).then((r) => r.data.data),

@@ -7,6 +7,7 @@
 import { apiClient, type ApiSuccess } from "../lib/api-client";
 import { catalogApi } from "./catalog";
 import type { Booking } from "../types";
+import type { PlanSplit } from "../lib/planSplit";
 
 /** One line added on site (booking.added_services[]). */
 export interface AddedServiceLine {
@@ -36,6 +37,8 @@ export interface OnsiteMoney {
   wallet_due_carried?: number | null;
   added_services?: AddedServiceLine[] | null;
   added_services_total?: number | null;
+  /** A plan booking's bill: what the plan covers vs the paid add-ons. */
+  plan_split?: PlanSplit | null;
   customer_edited_at?: string | null;
   /** Diff field names: services · vehicle · address · date · slot · notes · total. */
   customer_edited_fields?: string[] | null;

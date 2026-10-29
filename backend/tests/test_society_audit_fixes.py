@@ -30,7 +30,7 @@ from types import SimpleNamespace
 import pytest
 from bson import ObjectId
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ForbiddenException
 from app.schemas.booking_schema import BookingCancelRequest
 from app.schemas.society_schedule_schema import (
     ChangeRequestCreate,
@@ -555,8 +555,6 @@ async def test_auth12_a_captain_moved_to_another_center_loses_the_old_societies(
     with pytest.raises(ForbiddenException):
         await service.arrive(rig.captain, rig.sid, ArriveRequest())
     assert (await schedule.captain_visits(rig.captain))["visits"] == []
-    with pytest.raises(NotFoundException):
-        await schedule.captain_visit(rig.captain, visit["id"])
 
 
 # ---------------------------------------------------------------------------

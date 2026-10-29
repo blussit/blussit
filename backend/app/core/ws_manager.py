@@ -23,6 +23,7 @@ authorization logic over the socket too.
 """
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from fastapi import WebSocket
@@ -35,6 +36,47 @@ logger = logging.getLogger(__name__)
 # bounds the collection.
 WS_EVENT_TTL_SECONDS = 300
 _RELAY_RETRY_SECONDS = 5
+# Admin-only feed: every change an admin's dashboards and lists can show,
+# across all centers (an admin has no single center channel to watch).
+ADMIN_CHANNEL = "admin:live"
+
+
+# The admin/manager report caches (report_cache) hold an aggregate for up to a
+# minute. A change ping must not be answered by a minute-old number, so every
+# admin-feed event (delivered on EVERY instance through the relay) expires
+# them — at most once per window, with a trailing expiry so the last change of
+# a burst is never left behind a cache filled just before it.
+_REPORT_NAMESPACES = ("analytics", "kpi")
+_REPORT_EXPIRE_WINDOW = 3.0
+_report_expired_at = 0.0
+_report_expiry_pending = False
+
+
+def _expire_reports(now: float | None = None) -> None:
+    global _report_expired_at, _report_expiry_pending
+    from app.services import report_cache
+
+    now = time.monotonic() if now is None else now
+    wait = _report_expired_at + _REPORT_EXPIRE_WINDOW - now
+    if wait <= 0:
+        _report_expired_at = now
+        for namespace in _REPORT_NAMESPACES:
+            report_cache.invalidate(namespace)
+        return
+    if _report_expiry_pending:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    def _later() -> None:
+        global _report_expiry_pending
+        _report_expiry_pending = False
+        _expire_reports()
+
+    _report_expiry_pending = True
+    loop.call_later(wait + 0.05, _later)
 
 
 class ConnectionManager:
@@ -78,6 +120,8 @@ class ConnectionManager:
         """Best-effort — a dead/closing socket that fails to send is
         dropped from the registry rather than raising, so one stale
         connection can never take down a broadcast for everyone else."""
+        if channel == ADMIN_CHANNEL:
+            _expire_reports()
         sockets = list(self._channels.get(channel, ()))
         if not sockets:
             return
@@ -89,6 +133,27 @@ class ConnectionManager:
                 dead.append(ws)
         for ws in dead:
             self.unsubscribe(channel, ws)
+
+    async def notify_changed(self, kind: str, *, users=(), center_id: str | None = None, admin: bool = True, **context) -> None:
+        """The one "something you can see changed — refetch" ping for state
+        that is not a single booking's own status (a plan bought or used up,
+        the wallet moving, a payment settling, a notification written).
+        `kind` is a hint for the client about WHICH queries to refresh
+        (booking | plan | wallet | payment | notification); the payload never
+        carries data. Goes to each listed user's own `user:{id}` channel,
+        the center's `center-bookings:{center}` channel (its manager's
+        dashboard) and the admin-only `admin:live` channel. Never raises —
+        a side effect of an already-committed change must not fail it."""
+        try:
+            ping = {"type": "changed", "kind": kind, **context}
+            for user_id in dict.fromkeys(str(u) for u in users if u):
+                await self.broadcast(f"user:{user_id}", {**ping, "channel": f"user:{user_id}"})
+            if center_id:
+                await self.broadcast(f"center-bookings:{center_id}", {**ping, "channel": f"center-bookings:{center_id}"})
+            if admin:
+                await self.broadcast(ADMIN_CHANNEL, {**ping, "channel": ADMIN_CHANNEL})
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not publish a %s change ping", kind, exc_info=True)
 
     def subscriber_count(self, channel: str) -> int:
         return len(self._channels.get(channel, ()))

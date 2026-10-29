@@ -623,7 +623,7 @@ class HolidayService:
             raise BadRequestException("This holiday has already ended — create a new one instead.")
         sent = payload.model_dump(exclude_unset=True)
         if not sent:
-            raise BadRequestException("Nothing to update")
+            raise BadRequestException("Nothing to update — change at least one field.")
         merged = {**self._input_of(existing), **sent}
         check_centers = "scope" in sent or "service_center_ids" in sent
         doc = await self._validated(merged, creating=False, check_centers=check_centers)

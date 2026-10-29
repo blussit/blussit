@@ -12,6 +12,7 @@ from app.schemas.payment_schema import (
 from app.schemas.subscription_schema import ManagerSubscriptionOfferRequest, ManagerSubscriptionPreviewRequest
 from app.services.audit_service import AuditService
 from app.services.payment_service import PaymentService
+from app.utils.response_text import rupees
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 
 
@@ -30,7 +31,10 @@ class PaymentController:
             current_user.id, current_user.role, "CASH_COLLECTED", "bookings", payload.booking_id,
             {"amount": result.get("amount"), "wallet_credit": result.get("wallet_credit")},
         )
-        return success(result, "Cash collection recorded")
+        message = f"Cash collected: {rupees(result.get('amount'))}."
+        if result.get("wallet_credit"):
+            message += f" {rupees(result['wallet_credit'])} of it is credit on the customer's wallet."
+        return success(result, message)
 
     async def collect_link(self, current_user: CurrentUser, payload: CollectPaymentRequest):
         return success(await self.service.captain_payment_link(payload.booking_id, current_user.id))

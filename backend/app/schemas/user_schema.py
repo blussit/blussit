@@ -65,11 +65,6 @@ class OtpChannelRequest(BaseModel):
     channel: OtpChannelName = "whatsapp"
 
 
-class VerifyOtpRequest(BaseModel):
-    identifier: str
-    otp: str = Field(min_length=4, max_length=6)
-
-
 class ConfirmPhoneVerificationRequest(BaseModel):
     """Used by the LOGGED-IN user's own phone-verification step (gates
     their first self-service booking/subscription) — no identifier field,
@@ -152,33 +147,6 @@ class StaffPasswordResetRequest(BaseModel):
     temp_password: str = Field(min_length=8, max_length=72)
 
 
-class ManagerCreateCustomerRequest(BaseModel):
-    """Used by a manager/admin to create a customer account on their behalf
-    (e.g. a phone/walk-in booking) with a temp password the customer must
-    change on first login — see UserModel.must_change_password."""
-    full_name: str = Field(min_length=2, max_length=100)
-    email: Optional[EmailStr] = None
-    phone: str = Field(min_length=10, max_length=15)
-    temp_password: str = Field(min_length=8, max_length=72)
-
-    @field_validator("phone")
-    @classmethod
-    def _valid_phone(cls, v: str) -> str:
-        from app.utils.phone import validate_indian_mobile
-
-        phone = validate_indian_mobile(v)
-        if not phone:
-            raise ValueError("Enter a valid 10-digit Indian mobile number (starts with 6-9)")
-        return phone
-
-    @field_validator("email")
-    @classmethod
-    def _valid_email_domain(cls, v):
-        from app.utils.email_domains import validate_consumer_email
-
-        return validate_consumer_email(v)
-
-
 class UserUpdateRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -254,7 +222,9 @@ class UserPublic(BaseModel):
     # Managers: "WhatsApp me new bookings" (on unless switched off — see
     # PUT /notifications/preferences). In-app alerts are unaffected.
     whatsapp_new_booking_alerts: bool = True
-    created_at: datetime
+    # Optional: an account written by a script or an old import may lack it,
+    # and /auth/me answering a 500 for that is worse than a null date.
+    created_at: Optional[datetime] = None
 
     @classmethod
     def from_doc(cls, doc: dict) -> "UserPublic":

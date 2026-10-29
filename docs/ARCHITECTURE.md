@@ -425,10 +425,10 @@ devices; one IP with > 60 failures in 10 min across accounts is blocked 10 min
 (credential stuffing) — trusted devices excepted. 429 `LOGIN_THROTTLED` with
 `details.retry_after`; unknown identifiers throttle identically.
 
-**No enumeration.** `otp/request`, `forgot-password`, `bookings/verify-phone/request`
-and `booking-access` answer identically for a known customer, an unknown
+**No enumeration.** `otp/request`, `forgot-password` and `bookings/verify-phone/request`
+answer identically for a known customer, an unknown
 identifier and a staff (admin/manager/captain) number: same status, shape
-(`new_account` is gone; `booking-access` is always `{mode: "otp"}`), message,
+(`new_account` is gone), message,
 cooldown/caps/holds and — via a pretend send of the same duration
 (`OTP_FAKE_SEND_DELAY_MS`) — about the same time. For staff numbers (and unknown
 emails / unproven-staff password resets) nothing is sent: an unmatchable
@@ -439,9 +439,9 @@ standing only after proving the phone. A new phone gets a real code; `otp-login`
 answers `{needs_name: true}` after the code checks out and the name is asked
 then. `register` checks the phone proof before it says anything is taken.
 Staff sign in with email/password; the signed-in verify-phone / add-phone paths
-still send to the staff member's own phone. Left as is: a manager's exact
-10-digit `crm/customers/search` and the `auth/customers` 409 still confirm a
-customer exists across centers (the manager booking flow needs that).
+still send to the staff member's own phone. `crm/customers/search`, `booking-access`
+and staff-created customers (`auth/customers`) were removed on 2026-10-29;
+`crm/customers/typeahead` is the only staff customer lookup.
 
 **Staff phone proof.** An admin/manager types a staff member's phone, so it
 is not proof of anything: self-service password reset by code works for staff
@@ -980,6 +980,8 @@ reached, stuck on the way, idle after arrival, left site, overrun.
   beside `center_plan_revenue`. Under an explorer service / car-type slice
   custom carts (no type on the order) are out of both gross and refunds.
 
+**Use My Plan correctness and plan add-ons (2026-10-29).** "Use My Plan" is offered and accepted only for the exact car type (cars and bikes never cross) and the plan's own wash; an explicit pass bought for a bigger type may still wash a smaller one (tier rule). A retyped car's old pass is refused, a guest booking never uses a plan and is quoted the normal price, and every refusal names what the plan covers (`plan_fit_note` / `pass_fits_line` is the one rule for the quote note and the bot). The plan covers only its wash: add-ons are always paid extra. `/bookings/quote` lines carry `plan_covers`, `plan_extras`, `plan_extras_total`, `plan_note`; the top level carries `plan_covered_total` and `plan_extras_total`; bookings carry `plan_split` (covered amount and services, extras booked, extras added on site). Website: Use My Plan / Pay For This Wash, Add Extras chips update the server quote, only the add-on amount is charged (online-only on the website, as before). WhatsApp: after Use My Plan the bot asks "Want To Add Extras?" (states `q_extras_ask`, `q_extras`, `ext:` ids; live-catalogue add-ons for the car type), then day, address, summary ("Covered by plan" + "Add-ons (paid)"), Pay Online Now / Cash After Wash. Captain/manager "Add Service" on a plan booking prices from the catalogue, messages the customer in-app and on WhatsApp ("Add-On Added To Your Booking", generic update template), the amount is due by cash or QR, captain earning is unchanged. KPI: "Subscription-Covered" is the plan waiver (`discount_amount`, else `subtotal`); paid add-ons on plan bookings are `revenue_quality.plan_addon_revenue` ("Plan Add-Ons (Paid)"), counted in total revenue. Customer approval of an on-site add-on is inform-only.
+
 ### 7.4 Societies
 
 Lead (landing form / staff) → manager registers the society (its center is
@@ -1073,6 +1075,10 @@ extend ≤ 10 days. Full design: [SOCIETY_PLANS.md](SOCIETY_PLANS.md).
   and Meta approves them — until then the generic update template is used
   (template-only events like review request and book now are skipped).
 - **SMS:** OTP fallback only (MSG91).
+- **Intent layer (`services/whatsapp_intent.py`):** deterministic (no AI call), English/Hindi/Hinglish. Runs after greeting/unsupported handling and before the state-machine fallback (not at the coupon-code step). Info intents (price, offer, plan_buy, plan_status, timing, address, help, thanks) are answered anywhere, then the current step is re-offered with the draft untouched; action intents (book, cancel, reschedule, status) open the bookings (mid-draft with a seat held, a hint is sent instead); `human` hands off immediately.
+- **Price list:** built live from `vehicle_types`, `services` and `BookingService.price_view` (so it equals what a booking charges), car types in display order, bikes only when asked, a named type narrows it, split under 4096 characters.
+- **Plans are never sold in chat:** a plan/subscription/pass/renew message replies with `SITE_URL` + `/app/subscriptions` (login first, then plans). "Use My Plan" is offered only for a usable plan on that car and service (society and custom passes included), beside "Pay Normal Price".
+- **Replies:** typed answers work at buttons/lists (yes/no, car type, service name, coupon, cancel/reschedule, booking number); reactions are ignored; media pings admins and re-offers the step; expired/timed-out drafts are explained; a bare "cancel" opens the booking to cancel; dates read "Fri 30 Oct", slots 12-hour; button/list labels Title Case within Meta limits; Cloud interactive bodies clipped at 1024.
 
 ### 7.6 Customer wallet
 
@@ -1625,6 +1631,8 @@ Day: 6 Nov 2026" wording on every pass view — customer app, society hub
 `src/api/*` has one module per backend domain; `src/types/index.ts` mirrors
 backend shapes. Request timeout 30 s (uploads 120 s).
 
+**Admin content and society settings (2026-10-29):** `/admin/website-content` manages website Reviews (testimonials: name, 1–5 stars, comment, photo, show/hide, order) and FAQs (question/answer, show/hide, order, "Import Built-In FAQs"). Landing Reviews and FAQs are fetched live (public cache ≤ 30 s); prerender also fetches `public-faqs`/`public-testimonials` at build; the landing FAQ falls back to `data/faqs.ts` when none are showing (hiding every FAQ shows the built-in list). The Services page keeps its own 4 fixed answers. Limits live in `content_schema.py` (FAQ question 5–200, answer 5–1500; review name 2–80, comment 5–600; photo link http(s) or `/uploads/`); only admins write; edits are audited with before/after. `/admin/society-schedule-settings` (editable) and `/manager/society-schedule-settings` (read-only) show the global society schedule settings (`society_settings` doc `_id: "schedule"`: `generate_days_ahead` 1–5 capped at `max_advance_days - 1`, `default_washes_per_captain` 1–20); only admin PUTs, with an audited before/after.
+
 ### 8.3 Realtime
 
 `lib/socket.ts` opens one shared socket to `wss://api.blussit.com/api/v1/ws?token=…`
@@ -1636,11 +1644,16 @@ sockets per account per instance → close code 4429, frames ≤ 64 KiB via
 
 | Channel | Used by | Who may subscribe |
 |---|---|---|
-| `user:{id}` | staff shells (bell) | that user |
+| `user:{id}` | all four portals (customer, captain, manager, admin shells) via `hooks/useLiveRefresh` | that user only |
+| `admin:live` | admin dashboards / lists | admin only — every booking, plan and payment change across all centers |
 | `center-bookings:{center}` | manager queue | admin, that center's manager |
 | `slots:{center}:{date}` | slot pickers | any logged-in user (only this exact shape: 24-hex center id + `YYYY-MM-DD`) |
 | `booking:{id}` | customer booking detail | admin, its customer, its captain, that center's manager |
 | `captain-location:{captain}` | live captain map | admin, the captain, that center's manager |
+
+`user:{id}` pings carry a `kind` (booking, plan, wallet, payment, notification; no kind = booking) so a screen refreshes only what changed. One backend funnel, `ws_manager.notify_changed(kind, users, center_id)`, serves non-booking changes: plans (`UserSubscriptionRepository` create/update), wallet (`CustomerWalletService.post`), payments (`MoneyService.after_payment`, the settle functions), the bell (`NotificationService.notify`); a write inside a transaction is announced only after commit. `center-bookings:{center}` also carries plan, wallet and payment pings for that center's manager. Every `admin:live` event, on every instance (via the relay), expires the "analytics" and "kpi" report caches (at most once per 3 s, trailing) so a ping is never answered by a 60 s-old aggregate.
+
+Frontend: `useLiveRefresh` is mounted once per shell, debounces 500 ms (max 3 s), waits while the tab is hidden, refreshes everything after 60 s away or after a socket re-ack, and throttles heavy aggregates (kpi, manager-dashboard, collections) to once per 10 s. Separately `onApiWrite` in `lib/api-client.ts` refreshes the live keys after every successful write (and after a 409/404/410 "changed under you"). Customers now hold one shared socket while the app is open — budget socket capacity for that (cap stays 20 per account). Known gaps: no optimistic UI (actor sees the change after ~0.5 s refetch), bulk status sweeps only ping if they go through `BookingService` or send a notification, the bot's payment-method change sends no ping.
 
 Messages are "something changed — refetch" pings (captain location carries
 coordinates). Everything authoritative comes from REST; screens also poll.
@@ -1835,7 +1848,7 @@ the worker fails.
     axios/zod/follow-redirects bumps are recommended in a normal release.
   - *Open items closed 2026-10-28 (auth hardening, §5):* per-account login
     lockout → per (account + device + IP) throttle; anonymous enumeration
-    (`new_account`, forgot-password 404/400, booking-access mode, staff
+    (`new_account`, forgot-password 404/400, staff
     numbers) → identical answers; OTP flooding → 60 s per phone with the same
     code re-sent, escalating source holds, per-phone reserve and a platform
     budget. Still open: the git history of `main` still holds the 2026-10-06
@@ -1944,6 +1957,8 @@ the worker fails.
   §7 (Razorpay live + webhook, Meta templates + webhook fields, Atlas
   connections/backups, monitoring, repo history purge).
 
+**Unused API surface (cleaned 2026-10-29):** the routes and frontend wrappers with no caller were removed (`PUT /users/{id}/home-center`, campaign `limits|sanitize|audience/count`, `GET /reviews`, `GET /crm/customers` and `/search`, `GET /inventory/my-center`, `GET /settings/{key}`, captain KYC `versions`, `POST /auth/otp/verify`, `/auth/booking-access`, `/auth/customers*`, `/subscriptions/assign` and `/admin/all`, `/charges/my`, `/wallet/my/transactions`, `/analytics/dashboard|booking-trends`, `/analytics/kpis/manager-overview`, society `captain/visits/{id}`). Kept on purpose: `GET /wallet/captain/{id}` + `POST /wallet/captain/{id}/adjust` (the only audited captain-wallet correction), `POST /bookings/group/{id}/assign-captain`, `POST /bookings/admin/reconcile-slot-counters`, `UserSubscriptionService.assign` (internal). Remaining orphans: `POST /bookings`, `/bookings/group`, `/bookings/manager-create`, `/subscribers` (tests use them; wrappers gone), `WhatsAppService.send_temp_password*`. Open suspicions: about 15 admin GETs return 200 with empty data for a nonexistent center id; `captains_performance_for_center` runs one query per captain (≤200); a manager's notes edit does not notify the captain; `to_list(None)` on two unbounded queries; `:g` money formatting would print exponents above ₹1,000,000. Captain wallet history has no API now (captains have no ledger view).
+
 ## 16. Keeping this document current
 
 Founder rule (2026-10-07): **this file is the single description of the whole
@@ -1975,6 +1990,8 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | Founder round: admin **Website Reviews & FAQs** page, **Society Schedule Settings** (admin edit / manager read-only), unused API and frontend surface removed, **Use My Plan** correctness on every surface and the **plan + add-ons flow** on website / WhatsApp / captain (§7.3), `plan_addon_revenue` KPI; KPI legacy parity reference updated. |
+| 2026-10-29 | Proactive bug sweep (4 parallel audits + fuzzing): **live updates** (§8.3: customer app and every dashboard refresh on cancel / reschedule / edit / payment / plan / wallet; `admin:live`; `kind` pings; report-cache expiry; `onApiWrite`); **WhatsApp bot** (§7.5: intent layer, live price list, plans only via website, typed answers, clearer confirmations, Title Case); **response clarity** (`utils/response_text.py`: messages name the booking, ₹ whole rupees, 12-hour slot and wallet effect; 403 carries `required_roles`/`your_role`; 422 message names the first bad field; staff reschedule and complaint notifications say the new time/status; subscription cancel refuses a repeat; storage miss and unknown conversation are 404); **9 fuzz-found 500s fixed** (bad dates, huge `days`/`page`, accounts without `created_at`); `manager_summary` and dashboard `delayed`/`top_services` exclude cancelled bookings; frontend: captains page error state, 6-digit pincode and 32-char coupon limits matched to the API, dead helpers removed. Known gaps: `dashboard` suspicions and unused routes listed in §15. |
 | 2026-10-29 | Site attack / QA pass (`docs/SITE_ATTACK_QA_REPORT_2026-10-29.md`: 108 routes × 3 widths, 446 API routes × 8 roles, short load tests, read-only production smoke) and its fixes: admin Vehicle Types / Services / Plans switches are labelled and confirm before deactivating; `HEAD` works on `/api/health` and `/api/ready`; unknown API paths answer `NOT_FOUND` in the app envelope (other HTTP errors keep FastAPI's shape); wrong `/auth/otp/verify` code is `success:false`; address pincodes (profile + quick-booking) must be exactly 6 digits and vehicle-type / category / service / center / plan names at least 2 characters; a non-JSON WebSocket frame closes with 1003 (no traceback); CSP `connect-src` allows `analytics.google.com`; hero zoom starts after first paint; `/index.html` redirects to `/`; Cloud Run default concurrency 250 → 80 (one instance queued requests up to 7 s at 200 concurrent; raise with `CLOUD_RUN_CONCURRENCY`); frontend: manager-dashboard and thank-you layout-shift skeletons, ≥40 px tap targets, `<main>` landmark and page titles, staff sidebar drawer below 1024 px, duplicate-city address line, 6-digit pincode input. Not changed: login lock is per account+device+IP (the report's lockout was its own single-device load test). |
 | 2026-10-29 | Complete coupon system (§7.12): coupon box on every booking path (web logged-in, no-login, WhatsApp bot with Confirm / Have A Coupon Code / Cancel); use-type (`applies_to`) enforced in every flow; restrictions (services, car types, centers, first booking, new customers, specific customers, weekday / time window, stackable with offers, combine with plan) on coupons AND bundles; one central validity function; legacy coupons migrated at startup; admin forms + list show use-type and restrictions; plan floor ₹1; attack pass (28 cases) with 3 fixes (look-alike folding, uncapped code length in 3 schemas, plan-visit oracle). |
 | 2026-10-29 | Booking money tools: manager / admin **Give Discount** on an existing booking (`POST /bookings/{id}/discount`, whole-rupee target or percent, reason, idempotency key, `expected_version`, dry run, visit scope; total / due / platform earning move once, surplus of money already paid goes back to the wallet capped at what was paid), manager Reschedule exposed for every not-started booking (unpaid stays `awaiting_payment`, 8/h per booking), admin full edit `PATCH /admin/bookings/{id}` (every field, any status, dry run + money impact, append-only payment adjustments, captain-wallet delta rows) with the immutable `booking_adjustments` history, drawer UI (Give Discount, Reschedule, Edit Booking (Admin), history timeline), customer discount message, manager bell on admin edits; red-team of the booking surface (§13) with five fixes. |

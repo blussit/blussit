@@ -7,9 +7,10 @@
  * responses lack these fields, so each helper falls back to the old rule
  * (an unpaid car owes its whole total).
  */
-import type { Booking, UserSubscription } from "../../types";
+import type { Booking } from "../../types";
 import type { CustomerWalletEntry } from "../../api/customerWalletMe";
 import { toTitle } from "../../lib/titleCase";
+import type { PlanSplit } from "../../lib/planSplit";
 
 /** The money fields a booking carries since 2026-10-07 (all optional). */
 export type BookingMoney = Booking & {
@@ -20,6 +21,8 @@ export type BookingMoney = Booking & {
   added_services_total?: number | null;
   /** Services the captain / manager added at the visit (spec 1.4). */
   added_services?: AddedService[] | null;
+  /** A plan booking's bill: what the plan covers vs the paid add-ons. */
+  plan_split?: PlanSplit | null;
 };
 
 export interface AddedService {
@@ -37,7 +40,7 @@ export const addedByLine = (a: AddedService) =>
   a.role === "captain" ? "Added By Your Captain" : a.role === "manager" ? "Added By Your Manager" : a.role === "admin" ? "Added By Blussit" : "Added On Site";
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-export const rupees = (v: number) => `₹${Math.round(Math.abs(v))}`;
+export const rupees = (v: number) => `₹${Math.round(Math.abs(v)).toLocaleString("en-IN")}`;
 
 /** Does this response carry the new money view? */
 export const hasMoneyView = (cars: Booking[]) => cars.some((c) => typeof (c as BookingMoney).amount_due === "number");
@@ -150,11 +153,4 @@ export function paybackLine(e: CustomerWalletEntry): string {
 
 export type { PassServiceQuota } from "../../types";
 
-/** A /subscriptions/my row — the custom-pass fields now live on UserSubscription. */
-export type PassRow = UserSubscription;
-
 export { isCustomPlanPass as isCustomPass } from "../../lib/passState";
-
-/** "Deep Cleaning 1 Of 2 Left" */
-export const quotaLine = (name: string | null | undefined, remaining: number, total: number) =>
-  `${toTitle(name) || "Wash"} ${remaining} Of ${total} Left`;

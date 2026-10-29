@@ -2,7 +2,7 @@
 from datetime import date
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DateStr = Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
 SlotKey = Annotated[str, Field(pattern=r"^\d{2}:\d{2}-\d{2}:\d{2}$")]
@@ -149,6 +149,8 @@ class ExcludeRequest(BaseModel):
 
 
 class ScheduleSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     generate_days_ahead: int = Field(ge=1, le=5)
     default_washes_per_captain: int = Field(ge=1, le=20)
 

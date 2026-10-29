@@ -122,7 +122,7 @@ async def ensure_campaign_indexes(db: AsyncIOMotorDatabase) -> None:
 
 
 # ----------------------------------------------------------------------
-# Limits (env defaults, admin override of the cost in `settings`)
+# Limits (env defaults; a cost override already stored in `settings` is honoured)
 # ----------------------------------------------------------------------
 
 async def get_limits(db: AsyncIOMotorDatabase) -> dict:
@@ -135,15 +135,6 @@ async def get_limits(db: AsyncIOMotorDatabase) -> dict:
         "max_recipients": max(1, int(settings.WHATSAPP_CAMPAIGN_MAX_RECIPIENTS)),
         "daily_cap": max(1, int(settings.WHATSAPP_CAMPAIGN_DAILY_CAP)),
     }
-
-
-async def update_limits(db: AsyncIOMotorDatabase, cost_paise: int, actor_id: str) -> dict:
-    from app.repositories.content_repository import SettingRepository
-
-    await SettingRepository(db).upsert(
-        SETTINGS_KEY, {"whatsapp_marketing_cost_paise": int(cost_paise)}, "WhatsApp campaign settings", updated_by=actor_id
-    )
-    return await get_limits(db)
 
 
 # ----------------------------------------------------------------------

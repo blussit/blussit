@@ -9,7 +9,7 @@ import { Button, Input, Modal } from "../ui";
 
 const REFRESH = /^(center-bookings|admin-center-bookings|admin-bookings|booking|staff-booking|manager-kpi|manager-dashboard|collections|customer-360)/;
 
-const rupees = (n: number) => `₹${Math.round(n * 100) / 100}`;
+const rupees = (n: number) => `₹${(Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
 /**
  * Manager / admin: give, raise, lower or remove a discount on a booking that

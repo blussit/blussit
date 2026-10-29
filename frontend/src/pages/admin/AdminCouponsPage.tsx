@@ -237,9 +237,10 @@ export default function AdminCouponsPage() {
           <Input
             label="Coupon Code"
             value={form.code}
-            onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
+            onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, "") })}
+            maxLength={20}
             disabled={!!editingId}
-            hint={editingId ? "Code can't be changed after creation." : undefined}
+            hint={editingId ? "Code can't be changed after creation." : "3 to 20 characters: letters, numbers, - and _ only."}
             required
           />
           <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Optional admin note" />

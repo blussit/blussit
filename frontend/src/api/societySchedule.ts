@@ -157,6 +157,19 @@ export interface ScheduleSettings {
   default_washes_per_captain: number;
 }
 
+/** GET /society-schedule/settings: the two values plus context for the settings page. */
+export interface ScheduleSettingsView extends ScheduleSettings {
+  /** Bookings open this many days ahead — visit days can be booked at most one day less before. */
+  max_advance_days: number;
+  updated_at?: string | null;
+  updated_by_name?: string | null;
+}
+
+/** PUT result: the saved values and which of them changed. */
+export interface ScheduleSettingsSaved extends ScheduleSettings {
+  changes?: Record<string, { before: number; after: number }>;
+}
+
 export interface SlotOption {
   key: string;
   label: string;
@@ -320,8 +333,10 @@ type Warnings = { id: string; warnings: string[] };
 const data = <T,>(p: Promise<{ data: ApiSuccess<T> }>) => p.then((r) => r.data.data);
 
 export const scheduleApi = {
-  settings: () => data<ScheduleSettings>(apiClient.get("/society-schedule/settings")),
-  saveSettings: (payload: ScheduleSettings) => data<ScheduleSettings>(apiClient.put("/society-schedule/settings", payload)),
+  settings: () => data<ScheduleSettingsView>(apiClient.get("/society-schedule/settings")),
+  /** Whole envelope back, so the page can toast the server's message. */
+  saveSettings: (payload: ScheduleSettings) =>
+    apiClient.put<ApiSuccess<ScheduleSettingsSaved>>("/society-schedule/settings", payload).then((r) => r.data),
   planner: (params: { center_id?: string; start?: string; end?: string }) => data<Planner>(apiClient.get("/society-schedule/planner", { params })),
   society: (societyId: string, params?: { start?: string; end?: string }) =>
     data<SocietySchedule>(apiClient.get(`/society-schedule/societies/${societyId}`, { params })),

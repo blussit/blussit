@@ -27,7 +27,7 @@ import { bookingApi } from "../../api/booking";
 import { kycApi } from "../../api/staffOps";
 import { reviewApi } from "../../api/engagement";
 import { uploadApi } from "../../api/upload";
-import { Badge, Button, Card, EmptyState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
 import { StaffResetPasswordDialog } from "../../components/shared/StaffResetPasswordDialog";
 import { useAuth } from "../../context/AuthContext";
@@ -107,7 +107,7 @@ export default function ManagerCaptainsPage() {
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["center-captains-page", centerId],
     queryFn: () => staffDirectoryApi.captainsForCenter(centerId, { page: 1, page_size: 50 }),
     enabled: !!centerId,
@@ -310,6 +310,8 @@ export default function ManagerCaptainsPage() {
 
       {isLoading ? (
         <PageLoader />
+      ) : isError && !data ? (
+        <ErrorState message="Couldn't load your captains." busy={isFetching} onRetry={() => void refetch()} />
       ) : !captains.length ? (
         <EmptyState icon={UserRound} title="No Captains Assigned Yet" action={<Button onClick={() => setOpen(true)}>Add Captain</Button>} />
       ) : (

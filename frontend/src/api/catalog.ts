@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { BookingPolicy, Category, ComboOffer, HomepageConfig, Service, ServiceCenter, SlotAvailability, TravelQuote, VehicleTypeOption } from "../types";
+import type { BookingPolicy, Category, Service, ServiceCenter, SlotAvailability, TravelQuote, VehicleTypeOption } from "../types";
 
 export const catalogApi = {
   categories: (activeOnly = true) =>
@@ -19,17 +19,8 @@ export const vehicleTypeApi = {
     apiClient.get<ApiSuccess<{ id: string; name: string; removed: boolean; is_active: boolean }[]>>("/vehicle-types/lookup").then((r) => r.data.data),
 };
 
-export const comboOfferApi = {
-  list: (activeOnly = false) =>
-    apiClient.get<ApiSuccess<ComboOffer[]>>("/combo-offers", { params: { active_only: activeOnly } }).then((r) => r.data.data),
-};
-
 export const bookingPolicyApi = {
   get: () => apiClient.get<ApiSuccess<BookingPolicy>>("/booking-policy").then((r) => r.data.data),
-};
-
-export const homepageConfigApi = {
-  get: () => apiClient.get<ApiSuccess<HomepageConfig>>("/homepage-config").then((r) => r.data.data),
 };
 
 export const serviceCenterApi = {
@@ -51,10 +42,11 @@ export const coverageLeadPublicApi = {
 };
 
 export const contentApi = {
+  /** Public: only the FAQs admin left showing, in admin's order. */
   faqs: () => apiClient.get<ApiSuccess<{ id: string; question: string; answer: string }[]>>("/faqs").then((r) => r.data.data),
   testimonials: () =>
     apiClient
-      .get<ApiSuccess<{ id: string; customer_name: string; rating: number; comment: string }[]>>("/testimonials")
+      .get<ApiSuccess<{ id: string; customer_name: string; customer_image?: string | null; rating: number; comment: string }[]>>("/testimonials")
       .then((r) => r.data.data),
   submitContactMessage: (payload: { name: string; phone: string; email: string; message: string }) =>
     apiClient.post<ApiSuccess<Record<string, unknown>>>("/contact", payload).then((r) => r.data),

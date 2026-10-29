@@ -124,16 +124,6 @@ async def test_normal_phone_formats_still_work(raw):
     assert validate_indian_mobile(raw) == "9876543210"
 
 
-async def test_lookalike_phone_cannot_create_a_duplicate_customer(db, cleanup):
-    A = await make_center(db, cleanup, 1)
-    manager = await make_manager(db, A["id"])
-    cleanup.append(("users", {"_id": ObjectId(manager)}))
-    async with _client() as c:
-        r = await c.post("/api/v1/auth/customers", headers=_auth(manager, "manager", A["id"]),
-                         json={"full_name": "Lookalike", "phone": "9٨76543210", "temp_password": "Temp@12345"})
-    assert r.status_code == 422, r.text
-
-
 # ---------------------------------------------------------------- ENUM-1
 async def test_unknown_identifier_still_pays_for_a_bcrypt_check(db, cleanup, monkeypatch):
     from app.core import security

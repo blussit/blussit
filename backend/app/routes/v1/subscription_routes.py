@@ -19,7 +19,6 @@ from app.core.dependencies import (
 )
 from app.core.responses import success
 from app.schemas.subscription_schema import (
-    AssignSubscriptionRequest,
     AutoPayRequest,
     ManagerSubscriptionOfferRequest,
     ManagerSubscriptionPreviewRequest,
@@ -156,21 +155,10 @@ async def subscribe(payload: SubscribeRequest, current_user: CurrentUser = Depen
     POST /payments/create-order + /payments/verify, which creates the
     subscription AFTER the Razorpay signature checks out. Kept (not
     deleted) so old clients get a clear message instead of a 404. Staff
-    granting a plan uses POST /subscriptions/assign as before."""
+    sell a plan through POST /subscriptions/manager-offers."""
     from app.core.exceptions import BadRequestException
 
     raise BadRequestException("Subscriptions are purchased with online payment — please complete the payment step.")
-
-
-@subscription_router.post("/assign", dependencies=[Depends(require_admin)])
-async def assign_subscription(payload: AssignSubscriptionRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Admin grants a subscription to a customer directly, FREE — same
-    validation as self-purchase (vehicle ownership, vehicle-type match,
-    one-active-subscription-per-vehicle). Admin-only: a manager sells a plan
-    through /subscriptions/manager-offers, whose hand-typed discount is
-    capped (payment_service.manual_plan_discount) — a free grant would be
-    an uncapped 100% discount around that limit. No screen calls this."""
-    return await UserSubscriptionController(db).assign(current_user, payload)
 
 
 @subscription_router.post("/manager-offers/preview", dependencies=[Depends(require_manager_or_admin)])
@@ -229,11 +217,6 @@ async def set_auto_pay(subscription_id: str, payload: AutoPayRequest, current_us
 @subscription_router.post("/{subscription_id}/upgrade", dependencies=[Depends(require_customer)])
 async def upgrade_subscription(subscription_id: str, payload: UpgradeSubscriptionRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await UserSubscriptionController(db).upgrade(current_user, subscription_id, payload)
-
-
-@subscription_router.get("/admin/all", dependencies=[Depends(require_admin)])
-async def list_all_subscriptions(pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await UserSubscriptionController(db).list_all_for_admin(pagination)
 
 
 @subscription_router.get("/admin/overview", dependencies=[Depends(require_admin)])

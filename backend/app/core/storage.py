@@ -37,7 +37,7 @@ from fastapi import UploadFile
 from pymongo import ReturnDocument
 
 from app.core.config import settings
-from app.core.exceptions import BadRequestException, StorageUnavailableException
+from app.core.exceptions import BadRequestException, NotFoundException, StorageUnavailableException
 from app.core.http_client import shared_client
 
 logger = logging.getLogger(__name__)
@@ -478,7 +478,7 @@ async def download_private_document(key: str) -> tuple[bytes, str]:
     (documents uploaded before the private bucket existed), the legacy
     bucket is tried so production keeps working during the migration."""
     if not is_valid_document_key(key):
-        raise BadRequestException("Document not found")
+        raise NotFoundException("Document not found — it may have been removed; ask the owner to upload it again.")
     content_type = document_media_type(key)
     if settings.STORAGE_PROVIDER == "local":
         name = key.split("/", 1)[1]
@@ -486,10 +486,10 @@ async def download_private_document(key: str) -> tuple[bytes, str]:
             path = root / "documents" / name
             if path.is_file():
                 return path.read_bytes(), content_type
-        raise BadRequestException("Document not found")
+        raise NotFoundException("Document not found — it may have been removed; ask the owner to upload it again.")
     data = await _r2_get(settings.R2_PRIVATE_BUCKET_NAME, key)
     if data is None and settings.R2_BUCKET_NAME != settings.R2_PRIVATE_BUCKET_NAME:
         data = await _r2_get(settings.R2_BUCKET_NAME, key)
     if data is None:
-        raise BadRequestException("Document not found")
+        raise NotFoundException("Document not found — it may have been removed; ask the owner to upload it again.")
     return data, content_type

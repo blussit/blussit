@@ -97,14 +97,8 @@ export const paymentApi = {
         ...(outcome === "refunded" && refundAmount ? { refund_amount: refundAmount } : {}),
       })
       .then((r) => r.data.data),
-  // Captain doorstep settlement. A booking on a multi-car visit settles the
-  // VISIT: amount and vehicles cover every car on it, and "paid" means every
-  // car is paid. Cash is recorded only through captainOnsiteApi.collectCash,
-  // which always quotes the expected amount (409 AMOUNT_DUE_CHANGED guard).
-  collectLink: (bookingId: string) =>
-    apiClient.post<ApiSuccess<{ short_url: string; amount: number }>>("/payments/collect/link", { booking_id: bookingId }).then((r) => r.data.data),
-  collectStatus: (bookingId: string) =>
-    apiClient.get<ApiSuccess<CollectResult>>(`/payments/collect/status/${bookingId}`).then((r) => r.data.data),
+  // Captain doorstep settlement lives in captainOnsiteApi (collectLink /
+  // collectStatus / collectCash).
   // Collections reporting — manager (per captain) and admin (per center).
   centerCollections: (centerId: string, params?: { date_from?: string; date_to?: string }) =>
     apiClient.get<ApiSuccess<CollectionsReport>>(`/payments/collections/center/${centerId}`, { params }).then((r) => r.data.data),

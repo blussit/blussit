@@ -9,9 +9,7 @@ export const NAVY = "#0E1A33";
 export const BLUE = "#0A66F0";
 export const MUTED = "#5F6878";
 export const YELLOW = "#FFD21F";
-export const TINT = "#E8F0FE";
 export const ICON_BG = "#EEF3FA";
-export const LINE = "#E4E9F1";
 
 /** One soft card surface for every block on the booking page. */
 export const CARD = "rounded-[18px] border border-[#E4E9F1] bg-white shadow-[0_6px_24px_-12px_rgba(14,26,51,0.14)]";

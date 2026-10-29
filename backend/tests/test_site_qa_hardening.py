@@ -1,5 +1,5 @@
 """Site-attack QA 2026-10-29 fixes: health routes answer HEAD, unknown API paths
-use the app's error envelope, a failed OTP check is success:false, names and
+use the app's error envelope, the unused bare OTP-verify route is gone, names and
 pincodes are validated."""
 import pytest
 from pydantic import ValidationError
@@ -42,13 +42,13 @@ async def test_other_http_errors_keep_their_default_shape():
     assert r.json() == {"detail": "Method Not Allowed"}
 
 
-async def test_wrong_otp_is_success_false(db):
+async def test_bare_otp_verify_route_is_gone():
+    """POST /auth/otp/verify had no caller (the app proves a code inside
+    otp-login / verify-phone / reset-password) and was removed."""
     async with _client() as c:
         r = await c.post("/api/v1/auth/otp/verify", json={"identifier": "9876500011", "otp": "000000"})
-    if r.status_code == 200:
-        body = r.json()
-        assert body["data"]["verified"] is False
-        assert body["success"] is False
+    assert r.status_code == 404
+    assert r.json()["error_code"] == "NOT_FOUND"
 
 
 @pytest.mark.parametrize("pin", ["aaaa", "<script>", "4520", "4520011", " "])

@@ -1,5 +1,5 @@
 import { apiClient, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
-import type { Address, Booking, EquipmentUsed, TravelQuote, Vehicle } from "../types";
+import type { Booking, EquipmentUsed, TravelQuote } from "../types";
 import type { CancellationChargePreview, LateCancellationCharge } from "./charges";
 
 /** Staff cancel options: the customer asked to cancel (late-cancellation
@@ -7,21 +7,6 @@ import type { CancellationChargePreview, LateCancellationCharge } from "./charge
 export interface StaffCancelOptions {
   at_customer_request?: boolean;
   charge_amount?: number;
-}
-
-/** What POST /bookings/group returns: the visit, and every car on it as a
- *  real booking of its own. */
-export interface BookingGroupResult {
-  booking_group_id: string;
-  bookings: Booking[];
-  vehicle_count: number;
-  total_amount: number;
-  /** How long the whole visit runs — all the cars' service time summed. */
-  total_duration_minutes: number;
-  service_center_id: string;
-  scheduled_date: string;
-  scheduled_slot: string;
-  confirmation_token?: string;
 }
 
 /** One vehicle TYPE on a quick booking — "2 SUVs, Foam Wash". */
@@ -154,11 +139,23 @@ export interface BookingQuote {
     /** Cars on this line a plan pays for. */
     plan_covered: number;
     total: number;
+    /** Passes that paid for this line. */
+    subscription_ids?: string[];
+    /** What the plan pays for on this line (server prices). */
+    plan_covers?: { service_id: string; name: string; qty: number; amount: number }[];
+    /** What is charged on top of the plan (add-ons), per service. */
+    plan_extras?: { service_id: string; name: string; qty: number; amount: number; is_addon?: boolean }[];
+    plan_extras_total?: number;
+    /** Set when a plan exists but covers a different car type / wash: "Your plan covers Hatchback Star Wash only — …". */
+    plan_note?: string | null;
   }[];
   subtotal: number;
   regular_subtotal: number;
   first_time_savings: number;
   plan_discount: number;
+  /** The plan's part and the paid add-ons on plan-covered cars. */
+  plan_covered_total?: number;
+  plan_extras_total?: number;
   coupon_code: string | null;
   coupon_discount: number;
   coupon_error: string | null;
@@ -177,25 +174,6 @@ export interface BookingQuote {
 /** Server-side manager-queue filters for GET /bookings/center/{id}. */
 export type CenterQueueScope = "needs_captain" | "open_issues" | "attention" | "active" | "late_starts";
 export type CenterQueueSort = "scheduled_asc" | "scheduled_desc" | "created_desc";
-
-export interface CreateBookingPayload {
-  vehicle_id?: string;
-  vehicle_type?: string;
-  address_id: string;
-  service_ids?: string[];
-  /** Per-unit add-on counts (service_id -> qty) — e.g. Extra Bike Wash ×3. */
-  service_quantities?: Record<string, number>;
-  combo_id?: string;
-  scheduled_date: string;
-  scheduled_slot: string;
-  payment_method?: string;
-  coupon_code?: string;
-  subscription_id?: string;
-  customer_notes?: string;
-  hold_key?: string;
-  alternate_contact_name?: string;
-  alternate_contact_phone?: string;
-}
 
 /** What the device says about a fix; the server cross-checks it (never trusts it alone). */
 export interface GpsFix {
@@ -252,26 +230,6 @@ export interface GeoStatus {
   approval: { status: "none" | "pending" | "approved" | "denied" | "expired"; reason?: string | null };
 }
 
-export interface ManagerCreateBookingPayload {
-  customer_id: string;
-  vehicle_id?: string;
-  new_vehicle?: Partial<Vehicle>;
-  address_id?: string;
-  new_address?: Partial<Address>;
-  service_ids?: string[];
-  service_quantities?: Record<string, number>;
-  combo_id?: string;
-  scheduled_date: string;
-  scheduled_slot: string;
-  payment_method?: string;
-  coupon_code?: string;
-  subscription_id?: string;
-  customer_notes?: string;
-  hold_key?: string;
-  alternate_contact_name?: string;
-  alternate_contact_phone?: string;
-}
-
 export interface EligibleCaptain {
   captain_id: string;
   full_name: string;
@@ -298,8 +256,6 @@ export interface EligibleCaptain {
 }
 
 export const bookingApi = {
-  create: (payload: CreateBookingPayload) => apiClient.post<ApiSuccess<Booking>>("/bookings", payload).then((r) => r.data.data),
-
   /** Our own OTP for a phone with no account yet (WhatsApp / SMS from the
    *  backend). The MSG91 widget path needs no backend call to send. */
   requestPhoneOtp: (phone: string, channel: "whatsapp" | "sms" = "whatsapp") =>
@@ -317,8 +273,6 @@ export const bookingApi = {
   /** The manager did this (not-yet-started) booking himself — closes it, whole visit. */
   markDone: (id: string, sendWhatsapp: boolean) =>
     apiClient.post<ApiSuccess<{ completed: number; booking_numbers: string[] }>>(`/bookings/${id}/mark-done`, { send_whatsapp: sendWhatsapp }).then((r) => r.data.data),
-  /** Add or correct the tip on a job the manager did (0 removes it) — one per visit, added to its total. */
-  setTip: (id: string, tipAmount: number) => apiClient.patch<ApiSuccess<Booking>>(`/bookings/${id}/tip`, { tip_amount: tipAmount }).then((r) => r.data.data),
   /** Same shape, booked by a manager/admin on a customer's behalf. */
   managerQuick: (payload: QuickBookingPayload) =>
     apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-quick", payload).then((r) => r.data.data),
@@ -340,15 +294,6 @@ export const bookingApi = {
 
   /** The bill before booking — same code that prices the booking. */
   quote: (payload: BookingQuotePayload) => apiClient.post<ApiSuccess<BookingQuote>>("/bookings/quote", payload).then((r) => r.data.data),
-
-  subscribersForCenter: (serviceCenterId: string) =>
-    apiClient
-      .get<
-        ApiSuccess<
-          { customer_id: string; customer_name: string; customer_phone?: string; plan_name: string; subscription_status?: string; remaining_service_count?: number; last_visit: string; visits: number }[]
-        >
-      >(`/bookings/center/${serviceCenterId}/subscribers`)
-      .then((r) => r.data.data),
 
   all: (params?: {
     status?: string; service_center_id?: string; page?: number; page_size?: number;
@@ -400,25 +345,6 @@ export const bookingApi = {
 
   /** Too many wrong arrival codes locked the visit — manager/admin reset. */
   unlockArrivalCode: (id: string) => apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/unlock-arrival-code`).then((r) => r.data.data),
-
-  /** Several of the customer's own vehicles wash on ONE visit: one
-   *  address, one slot, one captain, one payment — and ONE slot seat,
-   *  because it's a single trip. */
-  createGroup: (payload: {
-    vehicles: { vehicle_id: string; service_ids: string[]; service_quantities?: Record<string, number>; subscription_id?: string }[];
-    address_id: string;
-    scheduled_date: string;
-    scheduled_slot: string;
-    hold_key?: string;
-    payment_method?: string;
-    coupon_code?: string;
-    customer_notes?: string;
-    alternate_contact_name?: string;
-    alternate_contact_phone?: string;
-  }) =>
-    apiClient
-      .post<ApiSuccess<BookingGroupResult>>("/bookings/group", payload)
-      .then((r) => r.data.data),
 
   /** "I couldn't finish paying online — let me pay the captain instead."
    *  Confirms a still-unpaid booking as a cash booking. */
@@ -476,9 +402,6 @@ export const bookingApi = {
 
   reportRisk: (id: string, note?: string) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/report-risk`, { note }).then((r) => r.data.data),
-
-  managerCreate: (payload: ManagerCreateBookingPayload) =>
-    apiClient.post<ApiSuccess<Booking>>("/bookings/manager-create", payload).then((r) => r.data.data),
 
   eligibleCaptains: (id: string) =>
     apiClient.get<ApiSuccess<EligibleCaptain[]>>(`/bookings/${id}/eligible-captains`).then((r) => r.data.data),

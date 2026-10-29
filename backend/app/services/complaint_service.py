@@ -149,11 +149,19 @@ class ComplaintService:
         updated = await self.repo.update_by_id(complaint_id, data)
         # Re-prioritising is internal triage — only a change the customer
         # can see (status, resolution note) is worth a message to them.
-        if set(data) - {"priority", "updated_at"}:
+        status_moved = bool(data.get("status")) and data["status"] != complaint.get("status")
+        note = (data.get("resolution_note") or "").strip()
+        if status_moved or note:
+            # Say what changed, not just that something did.
+            said = []
+            if status_moved:
+                said.append(f"is now {self._STATUS_LABELS.get(data['status'], data['status'])}")
+            if note:
+                said.append(f"has a note from our team: {note[:140]}")
             await self.notifications.notify(
                 complaint["customer_id"],
                 "Complaint update",
-                f"Your complaint '{complaint['subject']}' has been updated.",
+                f"Your complaint '{complaint['subject']}' " + " and ".join(said) + ".",
                 NotificationType.COMPLAINT,
                 complaint_id,
             )
@@ -243,6 +251,7 @@ class ComplaintService:
 
         message = (message or "").strip()
         status_changes = bool(status) and status != complaint.get("status")
+        wrote_nothing = not message
         if not message and actor_role != "customer" and status_changes:
             # Staff may just move the status — the thread still records it,
             # in words the customer understands.
@@ -298,7 +307,9 @@ class ComplaintService:
             await self.notifications.notify(
                 complaint["customer_id"],
                 "Complaint update",
-                f"Your complaint '{complaint['subject']}' has a new update.",
+                f"Your complaint '{complaint['subject']}'"
+                + (f" is now {self._STATUS_LABELS.get(status, status)}." if status_changes else " has a new update.")
+                + ("" if wrote_nothing else f" Our team wrote: {message[:140]}"),
                 NotificationType.COMPLAINT,
                 complaint_id,
             )

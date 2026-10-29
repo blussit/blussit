@@ -8,7 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.core.responses import success
 from app.services import report_cache
 from app.services.audit_service import AuditService
@@ -92,9 +92,10 @@ async def get_thread(wa_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
 
 @router.post("/conversations/{wa_id}/read")
 async def mark_read(wa_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    await WhatsAppCrmService(db).mark_read(wa_id)
+    if not await WhatsAppCrmService(db).mark_read(wa_id):
+        raise NotFoundException("Conversation not found")
     report_cache.invalidate("wa_badge")
-    return success({"read": True})
+    return success({"read": True}, "Conversation marked as read")
 
 
 @router.post("/conversations/{wa_id}/send")

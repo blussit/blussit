@@ -10,7 +10,7 @@ Every message THIS SERVER sends is one of:
   {"type": "subscribed", "channel": "..."}
   {"type": "unsubscribed", "channel": "..."}
   {"type": "error", "message": "..."}
-  {"type": "changed", "channel": "...", ...small context...}   — "go refetch"
+  {"type": "changed", "channel": "...", "kind": "booking|plan|wallet|payment|notification", ...small context...}   — "go refetch"
   {"type": "captain_location", "channel": "...", "latitude", "longitude", "captured_at"}  — pushed directly, cheap+safe
 
 The browser WebSocket API can't set an Authorization header, so the JWT is
@@ -94,6 +94,9 @@ async def _authorize_channel(channel: str, user: _WsUser, db: AsyncIOMotorDataba
 
     if kind == "user" and len(parts) == 2:
         return parts[1] == user.id  # only ever your own personal channel
+
+    if kind == "admin" and parts == ["admin", "live"]:
+        return user.role == "admin"  # the all-centers change feed
 
     if kind == "booking" and len(parts) == 2:
         booking = await db.bookings.find_one({"_id": _safe_object_id(parts[1]), "is_deleted": {"$ne": True}})

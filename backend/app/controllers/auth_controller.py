@@ -1,6 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.authz import ensure_customer_in_scope, manager_center_or_raise
+from app.core.authz import manager_center_or_raise
 from app.core.dependencies import CurrentUser
 from app.core.responses import success
 from app.schemas.user_schema import (
@@ -8,14 +8,12 @@ from app.schemas.user_schema import (
     ConfirmPhoneVerificationRequest,
     ForgotPasswordRequest,
     LoginRequest,
-    ManagerCreateCustomerRequest,
     RefreshTokenRequest,
     RegisterRequest,
     RequestOtpRequest,
     ResetPasswordRequest,
     StaffCreateRequest,
     UserPublic,
-    VerifyOtpRequest,
 )
 from app.services.audit_service import AuditService
 from app.services.auth_service import AuthService
@@ -79,12 +77,6 @@ class AuthController:
         channel = await self.auth_service.request_otp(payload.identifier, customer_only=True, channel=payload.channel)
         return success(self._sent(channel), "Verification code sent")
 
-    async def verify_otp(self, payload: VerifyOtpRequest):
-        verified = await self.auth_service.verify_otp(payload.identifier, payload.otp)
-        result = success({"verified": verified}, "OTP verified" if verified else "OTP verification failed")
-        result["success"] = verified
-        return result
-
     async def forgot_password(self, payload: ForgotPasswordRequest):
         channel = await self.auth_service.request_otp(payload.identifier, purpose="password_reset", channel=payload.channel)
         return success(self._sent(channel), "Reset code sent")
@@ -100,17 +92,6 @@ class AuthController:
     async def confirm_phone_verification(self, current_user: CurrentUser, payload: ConfirmPhoneVerificationRequest):
         user = await self.auth_service.confirm_phone_verification(current_user.id, payload.otp)
         return success(UserPublic.from_doc(user).model_dump(), "Phone verified")
-
-    async def staff_reset_customer_password(self, current_user: CurrentUser, customer_id: str):
-        # A manager resets passwords only for customers their center has
-        # served — otherwise any manager could sign every customer on the
-        # platform out (and spam their WhatsApp) by id.
-        await ensure_customer_in_scope(self.db, current_user.role, current_user.service_center_id, customer_id)
-        await self.auth_service.staff_reset_customer_password(customer_id, current_user.id)
-        await self.audit.log_action(current_user.id, current_user.role, "RESET_CUSTOMER_PASSWORD", "users", customer_id, {})
-        # Deliberately no password in this response — see
-        # AuthService.staff_reset_customer_password's docstring.
-        return success(None, "A new temporary password has been sent to the customer's WhatsApp")
 
     async def create_staff(self, current_user: CurrentUser, payload: StaffCreateRequest):
         if current_user.role == "manager":
@@ -139,8 +120,3 @@ class AuthController:
             {"role": target.get("role")}, service_center_id=target.get("service_center_id"),
         )
         return success(None, "Temporary password set — share it privately; they'll choose their own at the next login")
-
-    async def create_customer(self, current_user: CurrentUser, payload: ManagerCreateCustomerRequest):
-        result = await self.auth_service.create_customer_by_staff(payload, created_by=current_user.id)
-        await self.audit.log_action(current_user.id, current_user.role, "MANAGER_CREATE_CUSTOMER", "users", result["id"], {"phone": payload.phone})
-        return success(result, "Customer account created successfully")

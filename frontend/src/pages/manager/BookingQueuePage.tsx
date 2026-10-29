@@ -244,7 +244,10 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const allItems = useMemo(() => allQuery.data?.data ?? [], [allQuery.data]);
   const allPages = allQuery.data?.meta.total_pages ?? 0;
 
-  useLiveChannel(centerId ? `center-bookings:${centerId}` : null, () => {
+  useLiveChannel(centerId ? `center-bookings:${centerId}` : null, (message) => {
+    // The same channel also carries plan / wallet pings (useLiveRefresh
+    // handles those); the queue only reacts to bookings and their money.
+    if (message.kind && message.kind !== "booking" && message.kind !== "payment") return;
     queryClient.invalidateQueries({ queryKey: ["center-bookings", centerId] });
   });
 
@@ -360,6 +363,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       isReassign ? bookingApi.reassignCaptain(assigningBooking!.id, captainId) : bookingApi.assignCaptain(assigningBooking!.id, captainId),
     onSuccess: () => {
       invalidate();
+      pushToast({
+        tone: "success",
+        title: isReassign ? "Captain Changed" : "Captain Assigned",
+        message: `${assigningBooking?.booking_number || "The booking"} · ${captainName(captainId)}`,
+      });
       setAssigningBooking(null);
       setCaptainId("");
       setError("");
@@ -386,6 +394,11 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     mutationFn: () => bookingApi.reschedule(reschedulingBooking!.id, newDate, newSlot),
     onSuccess: () => {
       invalidate();
+      pushToast({
+        tone: "success",
+        title: "Booking Rescheduled",
+        message: `${reschedulingBooking?.booking_number || "The booking"} · ${format(newDate)} · ${formatSlot(newSlot)} — the customer is told.`,
+      });
       setReschedulingBooking(null);
       setNewDate("");
       setNewSlot("");
@@ -603,6 +616,8 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       {user?.role === "admin" && (
         <Button
           size="sm"
+          aria-label="Move To Recycle Bin"
+          title="Move To Recycle Bin"
           variant="ghost"
           isLoading={deleteMutation.isPending}
           onClick={async () => {

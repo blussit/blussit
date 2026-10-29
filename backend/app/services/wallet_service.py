@@ -169,14 +169,13 @@ class WalletService:
             raise NotFoundException("Captain not found")
         return await self._atomic_balance_change(captain_id, amount, WalletTransactionType.ADJUSTMENT.value, None, description)
 
-    async def list_transactions(self, captain_id: str, page: int, page_size: int):
-        items, total = await self.txn_repo.list_for_captain(captain_id, page, page_size)
-        return serialize_list(items), total
-
     async def request_withdrawal(self, captain_id: str, amount: float) -> dict:
         wallet = await self.get_or_create_wallet(captain_id)
         if amount > wallet["balance"]:
-            raise BadRequestException("Withdrawal amount exceeds wallet balance")
+            raise BadRequestException(
+                f"You asked for ₹{amount:g} but your wallet balance is ₹{wallet['balance']:g} — request ₹{wallet['balance']:g} or less.",
+                {"requested": amount, "balance": wallet["balance"]},
+            )
         # One pending request at a time — stacking N requests each
         # individually ≤ balance let the SUM exceed it, and only the second
         # approval would discover that (after the first already paid out).

@@ -1615,6 +1615,22 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return await default_http_exception_handler(request, exc)
 
 
+def _validation_summary(errors: list[dict]) -> str:
+    """The first problem in words ("Amount: input should be greater than 0"),
+    so an API caller that never reads details.errors still learns which field
+    to fix. The full list stays in details.errors."""
+    first = errors[0] if errors else {}
+    msg = str(first.get("msg") or "").strip()
+    if not msg:
+        return "Request validation failed"
+    msg = re.sub(r"^(Value|Assertion) (error|failed),\s*", "", msg)
+    loc = [p for p in (first.get("loc") or []) if isinstance(p, str) and p not in ("body", "query", "path", "header", "cookie")]
+    field = loc[-1].replace("_", " ").capitalize() if loc else ""
+    text = f"{field}: {msg[:1].lower()}{msg[1:]}" if field else msg
+    more = len(errors) - 1
+    return f"{text}" + (f" (and {more} more problem{'s' if more > 1 else ''})" if more > 0 else "")
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     # pydantic v2 tucks the ORIGINAL exception object into ctx.error for any
@@ -1643,7 +1659,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "success": False,
             "error_code": "VALIDATION_ERROR",
-            "message": "Request validation failed",
+            "message": _validation_summary(errors),
             "details": {"errors": errors},
         },
     )

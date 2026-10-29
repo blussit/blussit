@@ -1,4 +1,5 @@
 import asyncio
+import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import NamedTuple
@@ -25,6 +26,10 @@ from app.schemas.subscription_schema import (
 from app.utils.serializers import serialize_doc, serialize_list
 from app.utils.text import slugify
 from app.utils.timezone import IST, day_label, from_stored, now_ist, to_ist
+
+# Car vs bike classification of a vehicle-type name (the booking mix rules use
+# the same words) — a car plan never pays for a bike.
+_BIKE_TYPE_WORD = re.compile(r"bike|scooter|two.?wheeler", re.IGNORECASE)
 
 # A customer's own pass list: newest first, never unbounded.
 CUSTOMER_LIST_LIMIT = 50
@@ -846,6 +851,59 @@ class UserSubscriptionService:
             v.pop("extension_days_left", None)
         return await self._with_pass_details(await self._with_society_labels(await self._with_plan_names(views)))
 
+    @staticmethod
+    def pass_fits_line(view: dict, vehicle_type: str | None, service_ids) -> bool:
+        """THE picker rule, shared by every "Use My Plan" surface (website,
+        WhatsApp bot, quote note): the pass can be used right now, is for
+        exactly this vehicle type (car vs bike and each car type separate),
+        and still has a wash of one of the booked main services."""
+        if not view.get("usable") or view.get("effective_status", "active") != SubscriptionStatus.ACTIVE.value:
+            return False
+        if view.get("vehicle_type") != vehicle_type:
+            return False
+        wanted = set(service_ids or [])
+        return any(int(r.get("remaining") or 0) > 0 and r.get("service_id") in wanted for r in pass_covers_rows(view))
+
+    async def plan_fit_note(self, views: list[dict], vehicle_type: str | None, service_ids) -> str | None:
+        """When the customer holds a plan that can be used in general but
+        none fits THIS car and wash, one short sentence saying what the
+        plan(s) cover ("Your plan covers Hatchback Basic Wash only — this
+        wash is at the normal price."). None when a plan fits (nothing to
+        explain) or there is no usable plan at all."""
+        live = [
+            v for v in views
+            if v.get("usable") and v.get("effective_status", "active") == SubscriptionStatus.ACTIVE.value
+            and int(v.get("remaining_service_count") or 0) > 0
+        ]
+        if not live or any(self.pass_fits_line(v, vehicle_type, service_ids) for v in live):
+            return None
+        type_ids = {v.get("vehicle_type") for v in live if v.get("vehicle_type")}
+        names = {t: await self._type_name(t) for t in type_ids}
+        service_names: dict[str, str] = {}
+        covers: list[str] = []
+        for v in live:
+            for row in pass_covers_rows(v):
+                if int(row.get("remaining") or 0) < 1:
+                    continue
+                service_names[row["service_id"]] = row.get("service_name") or "Wash"
+                label = f"{names.get(v.get('vehicle_type')) or ''} {row.get('service_name') or 'Wash'}".strip()
+                if label not in covers:
+                    covers.append(label)
+        if not covers:
+            return None
+        shown = ", ".join(covers[:3]) + (f" and {len(covers) - 3} more" if len(covers) > 3 else "")
+        return f"Your plan covers {shown} only — this wash is at the normal price." if len(live) == 1 else (
+            f"Your plans cover {shown} only — this wash is at the normal price."
+        )
+
+    async def plan_fit_note_for(self, customer_id: str, vehicle_type: str | None, service_ids) -> str | None:
+        has_pass = await self.repo.collection.count_documents(
+            {"customer_id": customer_id, "status": SubscriptionStatus.ACTIVE.value, "is_deleted": {"$ne": True}}, limit=1,
+        )
+        if not has_pass:
+            return None
+        return await self.plan_fit_note(await self.list_my_subscriptions(customer_id), vehicle_type, service_ids)
+
     async def _with_pass_details(self, subs: list[dict]) -> list[dict]:
         """The car's plate on every car-bound pass, what each pass COVERS
         ({service_id, service_name, total, remaining} rows — a custom pass's
@@ -1454,17 +1512,32 @@ class UserSubscriptionService:
                 raise BadRequestException(
                     f"This pass belongs to {plate}. Book that car with it, or book this one as a normal service."
                 )
+            # The booking's real vehicle type (the line's, else the named
+            # car's). Needed by both branches below.
+            booking_type = vehicle_type
+            if not booking_type and vehicle_id:
+                v = await self.vehicle_repo.find_by_id(vehicle_id)
+                booking_type = (v or {}).get("vehicle_type")
+            covered_doc = await self.service_repo.find_by_id(covered_service_id) if covered_service_id else None
+            if named_vehicle and pass_type and booking_type and booking_type != pass_type:
+                # A car-bound pass whose car was retyped since (the picker
+                # shows "Its car type changed"): a forged request must not
+                # use it for the new type.
+                raise BadRequestException(
+                    f"This plan was bought for a different vehicle type — it covers {await self._covers_text(pass_type, covered_doc)} only. "
+                    "Book this car as a normal paid wash."
+                )
             if not named_vehicle or not vehicle_id:
                 # Type-scoped pass: the booking's vehicle type must be the
-                # pass's type or a type the plan prices cheaper.
-                booking_type = vehicle_type
-                if not booking_type and vehicle_id:
-                    v = await self.vehicle_repo.find_by_id(vehicle_id)
-                    booking_type = (v or {}).get("vehicle_type")
-                covered_doc = await self.service_repo.find_by_id(covered_service_id) if covered_service_id else None
-                if pass_type and booking_type != pass_type and not (plan and pass_tier_allows(plan, covered_doc, pass_type, booking_type)):
+                # pass's type or a type the plan prices cheaper — and never
+                # across car / bike (a car plan never washes a bike).
+                if pass_type and booking_type != pass_type and not (
+                    plan and pass_tier_allows(plan, covered_doc, pass_type, booking_type)
+                    and await self._same_vehicle_class(pass_type, booking_type)
+                ):
                     raise BadRequestException(
-                        "This pass was bought for a different vehicle type. Book that type with it, or book this one as a normal service."
+                        f"This plan was bought for a different vehicle type — it covers {await self._covers_text(pass_type, covered_doc)} only. "
+                        "Book this one as a normal paid wash."
                     )
             def _sid(service: dict) -> str:
                 return str(service.get("_id") or service.get("id") or "")
@@ -1473,9 +1546,9 @@ class UserSubscriptionService:
             wrong = [s for s in main_services if _sid(s) != covered_service_id]
             if wrong:
                 covered = await self.service_repo.find_by_id(covered_service_id)
-                name = (covered or {}).get("name") or "its own service"
                 raise BadRequestException(
-                    f"This pass covers {name}. Add-ons are welcome on top, but a different wash has to be booked normally."
+                    f"This pass covers {await self._covers_text(pass_type, covered)} only. "
+                    "Add-ons are welcome on top, but a different wash has to be booked normally."
                 )
             if not main_services:
                 raise BadRequestException("Add the service this pass covers to use it.")
@@ -1530,6 +1603,27 @@ class UserSubscriptionService:
         if sub["remaining_service_count"] < len(countable):
             raise BadRequestException("No remaining services left on this subscription")
         return {"flat_count": len(countable)}
+
+    async def _type_name(self, type_id: str | None) -> str | None:
+        if not type_id:
+            return None
+        doc = await self.vehicle_type_repo.find_by_id(type_id)
+        return (doc or {}).get("name")
+
+    async def _covers_text(self, type_id: str | None, service: dict | None) -> str:
+        """"Hatchback Basic Wash" — what a pass pays for, in the words the
+        refusals and the "your plan covers…" notes use."""
+        name = (service or {}).get("name") or "its own service"
+        type_name = await self._type_name(type_id)
+        return f"{type_name} {name}".strip() if type_name else name
+
+    async def _same_vehicle_class(self, type_a: str | None, type_b: str | None) -> bool:
+        """Car and bike plans never cross (classified from the type name,
+        as the booking's service-mix rules do)."""
+        if not type_a or not type_b or type_a == type_b:
+            return True
+        names = [await self._type_name(t) for t in (type_a, type_b)]
+        return bool(_BIKE_TYPE_WORD.search(names[0] or "")) == bool(_BIKE_TYPE_WORD.search(names[1] or ""))
 
     async def _custom_consumption(self, sub: dict, vehicle_id: str | None, services: list[dict]) -> dict:
         """A custom pass covers ONLY its own car (never a type-only booking
@@ -2169,6 +2263,12 @@ class UserSubscriptionService:
             raise BadRequestException("A society plan is cancelled by your society manager — please call them.")
         if sub.get("custom_plan_id"):
             raise BadRequestException("A custom plan is cancelled by your service center — please call them.")
+        # A plan that is already over used to answer "cancelled" again — and
+        # an ended one was rewritten as cancelled, losing that it expired.
+        if sub.get("status") == SubscriptionStatus.CANCELLED.value:
+            raise BadRequestException("This plan is already cancelled.")
+        if _with_effective_status(sub).get("effective_status") == SubscriptionStatus.EXPIRED.value:
+            raise BadRequestException("This plan has already ended, so there is nothing to cancel.")
         # Cancelling the plan must also stop the money: an auto-pay mandate
         # left alive would keep charging a card the customer just killed.
         # Immediate (not at-cycle-end) — they asked for it to stop now.
@@ -2182,10 +2282,6 @@ class UserSubscriptionService:
         )
         await release_pass_claims_for(self.repo.db, [(sub, pass_claim_keys_of(sub))])
         return _with_effective_status(updated)
-
-    async def list_all_for_admin(self, page: int, page_size: int):
-        items, total = await self.repo.list_all(page, page_size)
-        return _with_effective_statuses(items), total
 
     # ------------------------------------------------------------------
     # Reports (manager Subscribers page, admin Purchased plans page,

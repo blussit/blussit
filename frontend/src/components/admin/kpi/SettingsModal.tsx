@@ -86,7 +86,7 @@ export function BusinessSettingsModal({ open, onClose, initialTab = "costs" }: {
                     <span className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)]">{m.campaign}</span>
                     <span className="font-mono-num font-semibold">₹{m.spend}</span>
                     <span className="font-mono-num text-[var(--color-text-secondary)]">{m.leads || 0}L · {m.customers || 0}C</span>
-                    <button type="button" onClick={() => setForm((f) => (f ? { ...f, marketing_entries: f.marketing_entries.filter((_, j) => j !== i) } : f))} className="text-[var(--color-error)] opacity-60 hover:opacity-100">
+                    <button type="button" onClick={() => setForm((f) => (f ? { ...f, marketing_entries: f.marketing_entries.filter((_, j) => j !== i) } : f))} className="text-[var(--color-error)] opacity-60 hover:opacity-100" aria-label={`Remove ${m.campaign}`} title="Remove">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>

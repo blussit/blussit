@@ -549,8 +549,8 @@ async def test_admin_only_access(db):
     mgr = await make_manager(db, center)
     cap = await make_captain(db, center)
     cust = await make_customer(db)
-    paths = [("get", "/whatsapp/campaigns"), ("get", "/whatsapp/campaigns/audience"), ("get", "/whatsapp/campaigns/limits"),
-             ("post", "/whatsapp/campaigns/audience/count"), ("post", f"/whatsapp/campaigns/{ObjectId()}/send"),
+    paths = [("get", "/whatsapp/campaigns"), ("get", "/whatsapp/campaigns/audience"),
+             ("post", f"/whatsapp/campaigns/{ObjectId()}/send"),
              ("post", f"/whatsapp/campaigns/{ObjectId()}/cancel"), ("post", f"/whatsapp/campaigns/{ObjectId()}/test"),
              ("post", "/whatsapp/campaigns/image"), ("post", "/whatsapp/campaigns")]
     async with _client() as client:
@@ -600,8 +600,6 @@ async def test_http_flow_upload_create_preview_test_send_cancel_audit(db, city, 
         page = await client.post("/api/v1/whatsapp/campaigns/audience/selection?page_size=5", json={"selection": sel}, headers=h)
         d = page.json()["data"]
         assert d["total"] == 8 and d["selected_count"] == 6 and len(d["items"]) == 5 and d["next_after"]
-        cnt = await client.post("/api/v1/whatsapp/campaigns/audience/count", json={"selection": sel}, headers=h)
-        assert cnt.json()["data"] == {"selected": 6, "matching_total": 8}
         pv = await client.post(f"/api/v1/whatsapp/campaigns/{cid}/preview", json={"selection": sel}, headers=h)
         q = pv.json()["data"]
         assert q["recipient_count"] == 6 and q["cost_paise"] == 6 * 78 and q["can_send"] and q["image_url"] == url
@@ -623,8 +621,6 @@ async def test_http_flow_upload_create_preview_test_send_cancel_audit(db, city, 
         assert lst.json()["data"]["items"][0]["id"] == cid
         cancel = await client.post(f"/api/v1/whatsapp/campaigns/{cid}/cancel", headers=h)
         assert cancel.json()["data"]["already_finished"]
-        lim = await client.put("/api/v1/whatsapp/campaigns/limits", json={"whatsapp_marketing_cost_paise": 90}, headers=h)
-        assert lim.json()["data"]["whatsapp_marketing_cost_paise"] == 90
     actions = {a["action"] async for a in db.audit_logs.find({"target_id": cid})}
     assert {"CREATE_CAMPAIGN", "TEST_CAMPAIGN", "SEND_CAMPAIGN"} <= actions
     await db.settings.delete_many({"key": svc.SETTINGS_KEY})

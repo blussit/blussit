@@ -62,12 +62,6 @@ async def request_kyc_reverification(
     return success(result, "Re-verification requested")
 
 
-@router.get("/captains/{captain_id}/kyc/versions", dependencies=[Depends(require_manager_or_admin)])
-async def captain_kyc_versions(captain_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Earlier (superseded / reopened) packets, read-only, numbers masked."""
-    return success(await StaffKycService(db).list_versions(captain_id, current_user.role, current_user.service_center_id))
-
-
 @router.post("/captains/{captain_id}/kyc/review", dependencies=[Depends(require_manager_or_admin)])
 async def review_captain_kyc(
     captain_id: str,
@@ -233,7 +227,7 @@ async def set_captain_status(
         raise NotFoundException("Captain not found")
     ensure_own_center(current_user.role, current_user.service_center_id, captain.get("service_center_id"))
     if captain.get("status") == payload.status:
-        return success(_public(captain), "No change")
+        return success(_public(captain), f"{captain.get('full_name') or 'This captain'} is already {payload.status} — nothing changed.")
     if payload.status == "active" and current_user.role != "admin" and captain.get("suspended_by_role") == "admin":
         # An admin's suspension (fraud, moonlighting…) is the admin's to lift.
         raise ForbiddenException("An admin suspended this captain — only an admin can reactivate them.")
@@ -244,5 +238,9 @@ async def set_captain_status(
         current_user.id, current_user.role, "SET_CAPTAIN_STATUS", "users", captain_id,
         {"status": payload.status, "changes": field_changes(captain, updated, ["status"])},
     )
-    message = "Captain suspended" if payload.status == "suspended" else "Captain reactivated"
+    who = captain.get("full_name") or "The captain"
+    message = (
+        f"{who} suspended — signed out everywhere and can't log in until reactivated."
+        if payload.status == "suspended" else f"{who} reactivated — they can log in again."
+    )
     return success(_public(updated), message)

@@ -40,11 +40,6 @@ async def update_bank_details(payload: BankDetailsRequest, current_user: Current
     return await WalletController(db).update_bank_details(current_user, payload)
 
 
-@router.get("/my/transactions", dependencies=[Depends(require_captain)])
-async def my_transactions(pagination: PaginationParams = Depends(), current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await WalletController(db).my_transactions(current_user, pagination)
-
-
 @router.post("/withdrawals", dependencies=[Depends(require_captain)])
 async def request_withdrawal(payload: WithdrawalCreateRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     return await WalletController(db).request_withdrawal(current_user, payload)

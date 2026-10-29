@@ -23,8 +23,7 @@ import razorpay.errors
 import requests
 from bson import ObjectId
 
-from app.controllers.auth_controller import AuthController
-from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.exceptions import BadRequestException
 from app.models.enums import PaymentMethod
 from app.schemas.booking_schema import BookingCreateRequest, PhotoCaptureRequest
 from app.schemas.payment_schema import CreateOrderRequest
@@ -43,7 +42,6 @@ from tests.factories import (
     make_captain,
     make_customer,
     make_customer_with_vehicle,
-    make_manager,
     make_service_center,
     make_vehicle,
     make_recorded_photo_url,
@@ -345,18 +343,3 @@ async def test_plan_revenue_lands_on_its_own_ist_day(db, cleanup):
     payments = PaymentService(db)
     assert (await payments.admin_collections(day, day))["subscriptions"]["cash_amount"] >= 1234
     assert (await payments.admin_collections(prev, prev))["subscriptions"]["cash_amount"] < 1234
-
-
-async def test_manager_resets_passwords_only_for_their_centers_customers(db, cleanup):
-    center_a = await make_service_center(db)
-    center_b = await make_service_center(db)
-    cleanup += [("service_centers", {"_id": ObjectId(center_a)}), ("service_centers", {"_id": ObjectId(center_b)})]
-    manager_id = await make_manager(db, center_a)
-    cleanup.append(("users", {"_id": ObjectId(manager_id)}))
-    stranger = await make_customer(db)
-    _track_customer(cleanup, stranger)
-    await db.bookings.insert_one({"customer_id": stranger, "service_center_id": center_b, "status": "completed", "is_deleted": False})
-    manager = SimpleNamespace(id=manager_id, role="manager", service_center_id=center_a)
-    with pytest.raises(NotFoundException):
-        await AuthController(db).staff_reset_customer_password(manager, stranger)
-    assert (await db.users.find_one({"_id": ObjectId(stranger)})).get("must_change_password") is not True

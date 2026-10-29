@@ -75,9 +75,6 @@ async def test_quick_booking_customer_has_no_password_and_login_is_401(db, clean
     assert res.status_code == 401, res.text
     assert res.json()["message"] == "Invalid credentials"
 
-    # Password-less -> the guest wizard asks for an OTP, never a password.
-    assert (await AuthService(db).booking_access_mode(phone))["mode"] == "otp"
-
 
 @pytest.mark.asyncio
 async def test_whatsapp_created_customer_has_no_password(db, cleanup):
@@ -89,8 +86,6 @@ async def test_whatsapp_created_customer_has_no_password(db, cleanup):
     assert stored["password_hash"] is None and stored["phone_verified"] is True
     with pytest.raises(UnauthorizedException, match="Invalid credentials"):
         await AuthService(db).login(phone, "whatever-password")
-    # Phone freshly verified by the chat, but still no password to ask for.
-    assert (await AuthService(db).booking_access_mode(phone))["mode"] == "otp"
 
 
 @pytest.mark.asyncio

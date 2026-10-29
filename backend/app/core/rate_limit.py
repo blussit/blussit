@@ -51,11 +51,9 @@ RULES: list[tuple[str, int, int, str | None]] = [
     ("/api/v1/auth/reset-password/widget", 30, 300, None),
     ("/api/v1/auth/reset-password", 30, 300, None),
     ("/api/v1/auth/otp/request", 30, 300, None),
-    ("/api/v1/auth/otp/verify", 60, 300, None),
     ("/api/v1/auth/add-phone", 60, 300, None),
     ("/api/v1/auth/google", 20, 60, None),
     ("/api/v1/auth/otp-login", 60, 300, None),
-    ("/api/v1/auth/booking-access", 20, 60, None),
     ("/api/v1/bookings/verify-phone/request", 30, 300, None),
     ("/api/v1/auth/login", 15, 60, None),
     # Token refresh is cheap but is the one endpoint a stolen refresh token

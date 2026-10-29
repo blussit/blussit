@@ -121,10 +121,8 @@ async def test_captain_sees_only_the_days_they_are_on(db, cleanup, two):
         resp = await c.get("/api/v1/society-schedule/captain/visits", headers=mine)
         assert resp.status_code == 200
         assert [v["id"] for v in resp.json()["data"]["visits"]] == [vid]
-        assert (await c.get(f"/api/v1/society-schedule/captain/visits/{vid}", headers=mine)).status_code == 200
         for who, center in ((other_captain, t["a"]["id"]), (t["captain_b"], t["b"]["id"])):
             h = auth(who, "captain", center)
-            assert (await c.get(f"/api/v1/society-schedule/captain/visits/{vid}", headers=h)).status_code == 404
             assert (await c.get("/api/v1/society-schedule/captain/visits", headers=h)).json()["data"]["visits"] == []
         # Read-only: no planning routes for a captain.
         assert (await c.post(f"/api/v1/society-schedule/visits/{vid}/skip", headers=mine)).status_code == 403

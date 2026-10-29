@@ -11,9 +11,6 @@ class CaptainWalletRepository(BaseRepository):
 class WalletTransactionRepository(BaseRepository):
     collection_name = "wallet_transactions"
 
-    async def list_for_captain(self, captain_id: str, page: int, page_size: int):
-        return await self.find_many({"captain_id": captain_id}, page=page, page_size=page_size)
-
 
 class WithdrawalRequestRepository(BaseRepository):
     collection_name = "withdrawal_requests"

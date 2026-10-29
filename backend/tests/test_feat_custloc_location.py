@@ -201,15 +201,8 @@ async def test_manager_scope_unchanged_and_coordinates_hidden(db, cleanup, world
     cleanup.append(("users", {"_id": ObjectId(manager)}))
     mh = _auth(manager, "manager", blr)
     async with _client() as c:
-        # Even filtering on someone else's home center never reveals them.
-        res = await c.get("/api/v1/crm/customers", params={"center_id": pune}, headers=mh)
-        assert res.status_code == 200 and res.json()["data"] == []
-        res = await c.get("/api/v1/crm/customers", params={"center_id": blr, "page_size": 100}, headers=mh)
-        ids = [u["id"] for u in res.json()["data"]]
-        assert mine in ids and other not in ids
-        row = next(u for u in res.json()["data"] if u["id"] == mine)
-        assert row["home_city"] == "Bengaluru" and row["home_pincode"] == "560101" and row["home_center_name"] == "LocCtr Blr"
-        assert "home_lat" not in row and "home_lng" not in row and "email" not in row
+        # The unused customer-list route is gone (users list is admin-only).
+        assert (await c.get("/api/v1/crm/customers", params={"center_id": blr}, headers=mh)).status_code in (404, 405, 422)
         # Opening a customer with no history with this center: still 404.
         assert (await c.get(f"/api/v1/crm/customers/{other}", headers=mh)).status_code == 404
         r360 = (await c.get(f"/api/v1/crm/customers/{mine}", headers=mh)).json()["data"]["profile"]
@@ -222,7 +215,5 @@ async def test_manager_scope_unchanged_and_coordinates_hidden(db, cleanup, world
         assert me.status_code == 200 and "home_center_id" not in me.text and "home_lat" not in me.text
         # Managers can't use the admin endpoints.
         assert (await c.get("/api/v1/users", headers=mh)).status_code in (401, 403)
-        assert (await c.put(f"/api/v1/users/{mine}/home-center", json={"center_id": pune}, headers=mh)).status_code in (401, 403)
-        # Admin manual override sticks.
-        res = await c.put(f"/api/v1/users/{mine}/home-center", json={"center_id": pune}, headers=admin_headers)
-        assert res.status_code == 200 and res.json()["data"]["location_source"] == "manual"
+        # The unused admin home-center override route is gone for everyone.
+        assert (await c.put(f"/api/v1/users/{mine}/home-center", json={"center_id": pune}, headers=admin_headers)).status_code in (404, 405)

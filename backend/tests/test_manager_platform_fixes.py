@@ -137,7 +137,7 @@ async def test_customer_email_domain_allow_list():
     """Founder call: customer sign-ups accept only mainstream consumer mail
     providers. Staff accounts are deliberately NOT restricted (company
     domains are legitimate there)."""
-    from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest
+    from app.schemas.user_schema import RegisterRequest
 
     # Allowed, and normalised to lower case.
     assert RegisterRequest(full_name="A B", email="Ravi@Gmail.com", password="Password@1").email == "ravi@gmail.com"
@@ -148,13 +148,7 @@ async def test_customer_email_domain_allow_list():
         with pytest.raises(ValidationError, match="Gmail, Yahoo"):
             RegisterRequest(full_name="A B", email=bad, password="Password@1")
 
-    # Staff-created customers go through the same gate...
-    with pytest.raises(ValidationError, match="Gmail, Yahoo"):
-        ManagerCreateCustomerRequest(full_name="A B", email="a@test.xyz", phone="9876543210", temp_password="Password@1")
-    ok = ManagerCreateCustomerRequest(full_name="A B", email="a@gmail.com", phone="9876543210", temp_password="Password@1")
-    assert ok.email == "a@gmail.com"
-
-    # ...but STAFF accounts keep full email freedom (company domains).
+    # STAFF accounts keep full email freedom (company domains).
     StaffCreateRequest(full_name="Mgr", email="ops@blussit.in", password="Password@1", role=UserRole.MANAGER)
 
     # Phone-only sign-up is still fine — email stays optional.

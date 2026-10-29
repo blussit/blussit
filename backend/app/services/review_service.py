@@ -14,9 +14,6 @@ from app.schemas.review_schema import ReviewCreateRequest, ReviewUpdateRequest
 from app.utils.serializers import serialize_doc, serialize_list
 
 _EDITABLE_FIELDS = ("captain_rating", "captain_comment", "service_rating", "service_comment")
-# What GET /reviews (no login) may show — legacy rating/comment included
-# for reviews written before the captain/service split.
-_PUBLIC_REVIEW_FIELDS = ("id", *_EDITABLE_FIELDS, "rating", "comment", "created_at")
 
 
 class ReviewService:
@@ -48,9 +45,8 @@ class ReviewService:
         # model's `is_published: bool = True` default is never actually
         # applied to the inserted document (BaseRepository.create() only
         # defaults created_at/updated_at/is_deleted) — every review ever
-        # created was missing this field entirely, so list_public's
-        # {"is_published": True} filter silently matched nothing. Set
-        # explicitly here, same fix already applied to complaint status.
+        # created was missing this field entirely. Set explicitly here,
+        # same fix already applied to complaint status.
         doc["is_published"] = True
         try:
             created = await self.repo.create(doc)
@@ -71,7 +67,7 @@ class ReviewService:
 
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
         if not data:
-            raise BadRequestException("Nothing to update")
+            raise BadRequestException("Nothing to update — change the rating or the comment.")
 
         update: dict = dict(data)
         # The true original is captured once, on the FIRST edit only — a
@@ -95,13 +91,6 @@ class ReviewService:
     async def list_my_reviews(self, customer_id: str, booking_ids: list[str] | None = None) -> list[dict]:
         reviews = await self.repo.list_for_customer(customer_id, booking_ids)
         return serialize_list(reviews)
-
-    async def list_public(self, page: int, page_size: int):
-        """Anonymous endpoint: the ratings and words only. The raw document
-        also carries who wrote it, which captain/center/booking it was, the
-        pre-edit original and who deleted what — none of it for strangers."""
-        items, total = await self.repo.list_public(page, page_size)
-        return [{k: r.get(k) for k in _PUBLIC_REVIEW_FIELDS} for r in serialize_list(items)], total
 
     async def list_all_for_admin(
         self, page: int, page_size: int, include_deleted: bool = False,

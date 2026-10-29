@@ -1,4 +1,3 @@
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.authz import customers_known_to_center, ensure_customer_in_scope
@@ -35,24 +34,6 @@ class CRMService:
         self.vehicle_type_repo = VehicleTypeRepository(db)
         self.db = db
 
-    async def find_customer_by_phone(
-        self, phone: str, actor_role: str = "admin", actor_center_id: str | None = None,
-    ) -> dict | None:
-        """Used by the manager 'book on behalf of a customer' flow. Never
-        leaks a staff account via a phone search — customers only. Same
-        shape rule as search_customers' full-number match: a manager gets
-        only what booking needs (id, name, phone), never the email or
-        account flags of a customer their center may never have served;
-        an unlinked manager gets nothing."""
-        if actor_role != "admin" and not actor_center_id:
-            return None
-        user = await self.user_repo.find_by_phone(phone)
-        if not user or user.get("role") != UserRole.CUSTOMER.value or user.get("is_deleted"):
-            return None
-        if actor_role != "admin":
-            return self._lookup_row(user)
-        return UserPublic.from_doc(user).model_dump()
-
     # How many name matches a manager's typeahead looks through before
     # keeping only their own center's customers — bounds the work per
     # keystroke (a common name can match thousands platform-wide).
@@ -64,8 +45,7 @@ class CRMService:
         """Typeahead for the manager's 'add a booking' / 'sell a plan' forms
         and the header "Find customer" box — matching by name OR phone as
         they type, so an existing customer is picked directly instead of
-        accidentally re-created. Customers only, same rule as
-        find_customer_by_phone above.
+        accidentally re-created. Customers only — a staff account is never returned.
 
         Scope (decided 2026-10, final security pass): customers aren't
         owned by a center, but a manager has no business BROWSING the whole
@@ -111,53 +91,6 @@ class CRMService:
         known = await self._known_to_center([str(u["_id"]) for u in candidates], actor_center_id)
         return [self._lookup_row(u) for u in candidates if str(u["_id"]) in known][:limit]
 
-    _MANAGER_LIST_CANDIDATES = 5000
-
-    async def list_customers(
-        self, actor_role: str, actor_center_id: str | None, *, center_id: str | None = None, city: str | None = None,
-        pincode: str | None = None, search: str | None = None, sort_by: str = "created_at", sort_order: int = -1,
-        page: int = 1, page_size: int = 20,
-    ) -> tuple[list[dict], int]:
-        """Customer list with the location facets (center / city / pincode).
-
-        Admin: every customer. Manager: ONLY customers their center has
-        dealt with (customers_known_to_center's rule — the filters here never
-        widen it; home_center_id is a facet, not a grant of access). Staff
-        see center/city/pincode; exact coordinates are admin-only."""
-        from app.core.exceptions import ForbiddenException
-        from app.repositories.base_repository import build_search_filter
-        from app.services.customer_location_service import (
-            SORTABLE, attach_center_names, location_filters, location_view,
-        )
-
-        query: dict = {"role": UserRole.CUSTOMER.value, "is_deleted": {"$ne": True}, **location_filters(center_id, city, pincode)}
-        if search and len(search.strip()) >= 2:
-            query.update(build_search_filter(search.strip(), ["full_name", "phone"]))
-        db = self.user_repo.collection.database
-        if actor_role != "admin":
-            if actor_role != "manager" or not actor_center_id:
-                raise ForbiddenException("Your account isn't linked to a service center yet — ask an admin to link one.")
-            cap = self._MANAGER_LIST_CANDIDATES
-            known = set(await db.bookings.distinct("customer_id", {"service_center_id": actor_center_id}))
-            known.update(await db.user_subscriptions.distinct("customer_id", {"service_center_id": actor_center_id}))
-            society_ids = [str(s["_id"]) for s in await db.societies.find({"service_center_id": actor_center_id}, {"_id": 1}).to_list(length=500)]
-            if society_ids:
-                known.update(await db.society_enrollments.distinct("customer_id", {"society_id": {"$in": society_ids}}))
-            ids = [ObjectId(i) for i in list(known)[:cap] if ObjectId.is_valid(str(i))]
-            query["_id"] = {"$in": ids}
-        total = await self.user_repo.collection.count_documents(query)
-        field = SORTABLE.get(sort_by, "created_at")
-        cursor = self.user_repo.collection.find(query).sort([(field, 1 if sort_order == 1 else -1), ("_id", 1)]).skip(max(page - 1, 0) * page_size).limit(page_size)
-        rows = []
-        for u in await cursor.to_list(length=page_size):
-            row = UserPublic.from_doc(u).model_dump()
-            if actor_role != "admin":  # a manager gets the lookup shape + location, never contact extras
-                row = {k: row[k] for k in ("id", "full_name", "phone", "role", "created_at")}
-            row.update(location_view(u, include_coordinates=actor_role == "admin"))
-            rows.append(row)
-        await attach_center_names(db, rows)
-        return rows, total
-
     @staticmethod
     def _lookup_row(user: dict) -> dict:
         return {
@@ -172,7 +105,7 @@ class CRMService:
 
     async def get_customer_360(self, customer_id: str, actor_role: str | None = None, actor_center_id: str | None = None) -> dict:
         user = await self.user_repo.find_by_id(customer_id)
-        # Customers only — same rule as find_customer_by_phone above. Without
+        # Customers only. Without
         # this, passing a STAFF user id here dumped that staff member's
         # profile through a customer-CRM endpoint.
         if not user or user.get("role") != UserRole.CUSTOMER.value:

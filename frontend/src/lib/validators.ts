@@ -47,11 +47,3 @@ export function cleanMobileInput(raw: string): string {
   else if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
   return digits.slice(0, 10);
 }
-
-/** Vehicle brand/model text ("Maruti Swift", "i20", "Alto K10", "CR-V") —
- * letters, digits, spaces and hyphens only. Strips anything else (emoji,
- * punctuation, symbols) as the customer types, instead of letting a junk
- * character sit in the field until a submit bounces it. */
-export function sanitizeVehicleName(raw: string): string {
-  return (raw || "").replace(/[^a-zA-Z0-9\s-]/g, "");
-}

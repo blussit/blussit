@@ -14,7 +14,6 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { vehicleTypeApi } from "../../api/catalog";
 import { formatClockIST, formatDay, formatSlot } from "../../lib/date";
-import { vehicleLabel } from "../../lib/constants";
 import { bookingServiceLabel, societyPlanSuffix, toSlabs, type BookingSlab } from "../../lib/bookingGroups";
 import { titleCase } from "../public/landing/shared";
 import type { Booking } from "../../types";
@@ -64,7 +63,6 @@ export const serviceName = (b: Booking) => {
   const name = b.combo_name || b.service_names?.join(", ");
   return name ? `${titleCase(name)}${societyPlanSuffix(b)}` : bookingServiceLabel(b);
 };
-export const carName = (b: Booking) => vehicleLabel(b);
 
 /** "Pending" / "Half Day" — a raw API status shown as a chip. */
 export const statusWord = (s?: string | null) => titleCase((s ?? "").replace(/_/g, " "));

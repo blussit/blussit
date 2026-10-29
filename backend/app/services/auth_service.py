@@ -23,7 +23,6 @@ from app.core.config import settings
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
-    ForbiddenException,
     NotFoundException,
     PhoneNotVerifiedException,
     StaffResetRefusedException,
@@ -34,7 +33,7 @@ from app.services import auth_guard as guard
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password_async, verify_password_async, verify_password_or_dummy_async
 from app.models.enums import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
-from app.schemas.user_schema import ManagerCreateCustomerRequest, RegisterRequest, StaffCreateRequest, UserPublic
+from app.schemas.user_schema import RegisterRequest, StaffCreateRequest, UserPublic
 from app.services.sms_service import SmsService
 from app.services.whatsapp_service import WhatsAppService
 from app.utils.phone import BUSINESS_NUMBER_MESSAGE, is_business_whatsapp_number, validate_indian_mobile
@@ -321,37 +320,6 @@ class AuthService:
             raise BadRequestException("That service center doesn't exist.")
         if center.get("is_active") is False:
             raise BadRequestException("That service center is switched off — switch it on before adding staff to it.")
-
-    async def create_customer_by_staff(self, payload: ManagerCreateCustomerRequest, created_by: str) -> dict:
-        """A manager/admin booking on behalf of a customer who doesn't have an
-        account yet. Sets a temp password and must_change_password=True so the
-        customer is forced through a real password change on first login —
-        this account is not passwordless."""
-        if payload.email and await self.users.find_by_email(payload.email):
-            raise ConflictException("An account with this email already exists")
-        if is_business_whatsapp_number(payload.phone):
-            raise BadRequestException(BUSINESS_NUMBER_MESSAGE)
-        if await self.users.find_by_phone(payload.phone):
-            raise ConflictException("An account with this phone number already exists")
-
-        referral_code = self._generate_referral_code(payload.full_name)
-        user_doc = self._strip_absent_contact_fields({
-            "full_name": payload.full_name,
-            "email": payload.email,
-            "phone": payload.phone,
-            "password_hash": await hash_password_async(payload.temp_password),
-            "role": UserRole.CUSTOMER.value,
-            "status": UserStatus.ACTIVE.value,
-            "referral_code": referral_code,
-            "must_change_password": True,
-            "created_by": created_by,
-        })
-        try:
-            created = await self.users.create(user_doc)
-        except DuplicateKeyError:
-            # Same check-then-act race as register_customer — see there.
-            raise ConflictException("An account with this email or phone number already exists")
-        return UserPublic.from_doc(created).model_dump()
 
     async def ensure_customer_by_phone(self, phone: str, full_name: str, *, create: bool = True) -> dict | None:
         """Quick-booking model (2026-09): a booking needs no account up front.
@@ -1071,7 +1039,7 @@ class AuthService:
         `accept`: the purposes this consumer takes (OTP_ACCEPTS). A code
         issued for anything else is not even compared — no attempt spent,
         nothing consumed, so it still works for the job it was sent for.
-        None = any purpose (the bare /auth/otp/verify check)."""
+        None = any purpose (the bare check)."""
         code = "".join(str(otp or "").split())
         phone = await self._otp_phone(identifier)
         if not code or not phone:
@@ -1198,61 +1166,6 @@ class AuthService:
             raise BadRequestException(self._OTP_INVALID)
         return await self._mark_self_verified(user)
 
-    async def staff_reset_customer_password(self, customer_id: str, actor_id: str) -> None:
-        """A manager/admin resetting a customer's forgotten password on
-        their behalf. Deliberately returns nothing — the generated temp
-        password is NEVER handed back in the API response, so it never
-        appears in the manager's UI, network tab, or logs on their side;
-        it goes straight to the customer's own WhatsApp instead. The
-        customer is forced through a real password change on next login
-        (must_change_password), same as any other temp-password account."""
-        customer = await self.users.find_by_id(customer_id)
-        if not customer:
-            raise NotFoundException("Customer not found")
-        if customer.get("role") != UserRole.CUSTOMER.value:
-            raise ForbiddenException("This action is only for customer accounts.")
-        phone = customer.get("phone")
-        if not phone:
-            raise BadRequestException("This customer has no phone number on file to send a temporary password to.")
-        # Refuse BEFORE touching the password when the message can't reach
-        # them (no approved template and no open 24 h chat — DEP-04): it used
-        # to reset first and only then say "couldn't be sent", leaving the
-        # customer locked out of a password nobody could read.
-        if not await self.whatsapp.can_deliver_temp_password(phone):
-            raise BadRequestException(
-                "A temporary password can't be sent to this customer's WhatsApp right now — ask them to use 'Forgot password' instead."
-            )
-
-        temp_password = "".join(secrets.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for _ in range(10))
-        new_hash = await hash_password_async(temp_password)
-        await self.users.collection.update_one(
-            {"_id": customer["_id"]},
-            {"$set": {"password_hash": new_hash, "must_change_password": True, "updated_at": datetime.now(timezone.utc)},
-             "$inc": {"token_version": 1}},
-        )
-        # Same channel-order fallback as OTPs (note: MSG91's OTP API can't
-        # carry free text, so send_temp_password returns False and
-        # WhatsApp handles it).
-        from app.core.config import settings as _settings
-        order = ["sms", "whatsapp"] if _settings.OTP_CHANNEL == "sms" else ["whatsapp", "sms"]
-        sent = False
-        for channel in order:
-            if channel == "whatsapp":
-                sent = await self.whatsapp.send_temp_password(phone, temp_password)
-            elif channel == "sms" and self.sms.enabled:
-                sent = await self.sms.send_temp_password(phone, temp_password)
-            if sent:
-                break
-        if not sent:
-            # The pre-check passed but the send still failed (Meta error):
-            # put the old password back — unless something changed it since
-            # — so the customer isn't locked out of one nobody can read.
-            await self.users.collection.update_one(
-                {"_id": customer["_id"], "password_hash": new_hash},
-                {"$set": {"password_hash": customer.get("password_hash"), "must_change_password": bool(customer.get("must_change_password"))}},
-            )
-            raise BadRequestException("The temporary password couldn't be sent, so their password is unchanged — ask the customer to use 'Forgot password' instead.")
-
     async def staff_reset_staff_password(
         self, target_id: str, temp_password: str, actor_id: str, actor_role: str, actor_center_id: str | None,
     ) -> dict:
@@ -1283,19 +1196,6 @@ class AuthService:
              "$inc": {"token_version": 1}},
         )
         return target
-
-    async def booking_access_mode(self, phone: str) -> dict:
-        """What should the guest wizard ask this phone for? ALWAYS "otp":
-        the answer used to be register / otp / password depending on whether
-        the number had an account, which told anyone whether (and what kind
-        of) account a number holds. Booking now always proves the phone with
-        a code, so nothing here depends on the account — identical for a
-        customer, an unknown number and a staff number."""
-        from app.utils.phone import validate_indian_mobile
-
-        if not validate_indian_mobile(phone):
-            raise BadRequestException("Enter a valid 10-digit mobile number")
-        return {"mode": "otp"}
 
     async def otp_login(
         self, phone: str, otp: str | None = None, widget_access_token: str | None = None, full_name: str | None = None

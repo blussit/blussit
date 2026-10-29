@@ -177,6 +177,8 @@ async def _book_through(db, s: dict, day: int, *, plan: str | None) -> dict:
     if plan is not None:
         assert any(i.startswith("plan:") for i in (row_ids(q) or [b["id"] for b in q.get("options") or []]))
         await say(s, reply=plan)
+        if plan != "plan:none":
+            await say(s, reply="ext:no")  # no extras
     await say(s, reply=f"when:{hh.day(day)}|09:00-12:00")
     await say(s, reply=f"addr:{s['cu']['address_id']}")
     await say(s, reply="confirm:yes")
@@ -191,6 +193,7 @@ async def test_one_plan_is_offered_and_booked_without_payment_and_restored_on_ca
     assert {b["title"] for b in q["options"]} == {"Use My Plan", "Pay Normal Price"}
     assert "4 washes left" in q["message"] and "Last Booking Day" in q["message"]
     await say(s, reply=f"plan:{sub}")
+    await say(s, reply="ext:no")  # no extras
     await say(s, reply=f"when:{hh.day(2)}|09:00-12:00")
     await say(s, reply=f"addr:{s['cu']['address_id']}")
     summary = await last(db, s)
@@ -236,6 +239,7 @@ async def test_two_usable_plans_show_a_chooser_and_the_picked_one_is_used(db, cl
     assert "4 left" in desc[f"plan:{type_sub}"] and "2 left" in desc[f"plan:{car_sub}"]
     assert all("Last Booking Day" in desc[f"plan:{x}"] for x in (type_sub, car_sub))
     await say(s, reply=f"plan:{car_sub}")
+    await say(s, reply="ext:no")  # no extras
     await say(s, reply=f"when:{hh.day(2)}|09:00-12:00")
     await say(s, reply=f"addr:{s['cu']['address_id']}")
     await say(s, reply="confirm:yes")
@@ -251,6 +255,7 @@ async def test_a_custom_multi_car_pass_is_offered_by_name_and_consumed(db, clean
     q = await to_when(db, s)
     assert f"plan:{sub}" in {b["id"] for b in q["options"]}
     await say(s, reply=f"plan:{sub}")
+    await say(s, reply="ext:no")  # no extras
     await say(s, reply=f"when:{hh.day(2)}|09:00-12:00")
     await say(s, reply=f"addr:{s['cu']['address_id']}")
     await say(s, reply="confirm:yes")
@@ -265,6 +270,7 @@ async def test_an_extended_plan_is_offered_and_booked_inside_its_last_booking_da
     q = await to_when(db, s)
     assert f"plan:{sub}" in {b["id"] for b in q["options"]}
     await say(s, reply=f"plan:{sub}")
+    await say(s, reply="ext:no")  # no extras
     msg = await last(db, s)
     days = {r.split(":", 1)[1].split("|")[0] for r in row_ids(msg)}
     assert days and max(days) <= hh.day(4)  # nothing offered after the Last Booking Day

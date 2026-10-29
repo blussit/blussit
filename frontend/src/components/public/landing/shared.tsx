@@ -249,13 +249,3 @@ export function vehicleLabel(ids: string[] | undefined, types: VehicleTypeOption
   const cars = mine.length - bikes;
   return cars && bikes ? "Car & Bike" : bikes ? "Bike" : "Car";
 }
-
-/** "Hatchback, Sedan, SUV +2 more" */
-export function vehicleNames(ids: string[] | undefined, types: VehicleTypeOption[] | undefined, max = 3): string | null {
-  if (!types?.length) return null;
-  const mine = ids?.length ? types.filter((t) => ids.includes(t.id)) : types;
-  if (!mine.length) return null;
-  const names = mine.map((t) => titleCase(t.name));
-  if (names.length <= max) return names.join(", ");
-  return `${names.slice(0, max).join(", ")} +${names.length - max} more`;
-}

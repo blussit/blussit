@@ -7,7 +7,6 @@ import { catalogApi, vehicleTypeApi } from "../../api/catalog";
 import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 import { bikeTypeIds } from "../../lib/serviceMix";
 import type { Service, VehicleTypeOption } from "../../types";
-import { DiscountBadge, OfferTag, discountPercent } from "../ui";
 import {
   INR,
   parseIncludes,
@@ -81,67 +80,6 @@ export function useActiveOffers(): PromotedOffer[] {
   return (data?.data ?? [])
     .filter((s) => s.is_active !== false && !s.is_addon && s.offer_tag?.trim())
     .map((s) => toOffer(s, vehicleTypes));
-}
-
-/** The first of those — what the one-time popup promotes. */
-export function usePromotedOffer(): PromotedOffer | null {
-  return useActiveOffers()[0] ?? null;
-}
-
-export function LaunchOfferStrip({
-  offer,
-  onClaim,
-}: {
-  offer: PromotedOffer;
-  onClaim: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClaim}
-      className="group relative z-20 w-full overflow-hidden bg-[#1677FF] text-white shadow-[0_12px_28px_rgba(22,119,255,0.20)]"
-    >
-      <span className="pointer-events-none absolute inset-0 bg-[linear-gradient(110deg,transparent_0%,rgba(255,255,255,0.14)_24%,transparent_45%)] animate-sheen-drift" />
-      <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/35" />
-
-      <div className="container-page relative flex min-h-[48px] items-center justify-center gap-2 overflow-hidden py-2 text-center sm:gap-3">
-        <span className="hidden sm:inline-flex">
-          <OfferTag
-            label={titleCase(offer.tag)}
-            className="ring-1 ring-white/40"
-          />
-        </span>
-
-        <span className="min-w-0 truncate text-sm font-bold sm:text-base">
-          {titleCase(offer.service.name)}
-        </span>
-
-        <span className="shrink-0 text-sm font-black sm:text-base">
-          {!offer.samePriceForAllCars && (
-            <span className="mr-1 font-medium text-white/70">
-              from
-            </span>
-          )}
-          {INR(offer.price)}
-        </span>
-
-        {offer.original != null && (
-          <span className="hidden shrink-0 text-sm text-white/55 line-through sm:inline">
-            {INR(offer.original)}
-          </span>
-        )}
-
-        <DiscountBadge
-          percent={discountPercent(
-            offer.price,
-            offer.original
-          )}
-        />
-
-        <ArrowRight className="h-4 w-4 shrink-0 transition-transform group-hover:translate-x-1" />
-      </div>
-    </button>
-  );
 }
 
 export function LaunchOfferPopup({

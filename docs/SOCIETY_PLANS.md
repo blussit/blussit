@@ -39,7 +39,7 @@ special-casing.
 purchase sheet, admin's normal plan editor) never returns society plans.
 Every general purchase path refuses them: customer checkout
 (`/payments/create-order` purpose `subscription`), `/subscriptions/quote`,
-manager "Sell a plan" (preview/offer), `/subscriptions/assign`. The only way
+manager "Sell a plan" (preview/offer). The only way
 to get one is a society enrollment.
 
 ### 1.2 Rate card (customise)

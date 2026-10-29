@@ -20,11 +20,11 @@ class InventoryService:
         actor_role: str | None = None,
         actor_center_id: str | None = None,
     ):
-        # actor_role=None (only the captain's own-center lookup at
-        # GET /inventory/my-center passes this) means the caller already
-        # resolved service_center_id from their own account — nothing to
-        # check against. Every manager-facing center-scoped call passes a
-        # real role and must be checked.
+        # actor_role=None means the caller already resolved service_center_id
+        # from its own account (internal use only — the captain-facing
+        # GET /inventory/my-center that used it was removed). Every
+        # manager-facing center-scoped call passes a real role and must be
+        # checked.
         if actor_role is not None:
             ensure_own_center(actor_role, actor_center_id, service_center_id)
         items, total = await self.repo.list_for_center(service_center_id, page, page_size, low_stock_only)
@@ -47,7 +47,10 @@ class InventoryService:
     async def adjust(self, item_id: str, payload: InventoryAdjustRequest, actor_role: str, actor_center_id: str | None) -> dict:
         item = await self._own_center_item(item_id, actor_role, actor_center_id)
         if item["quantity_available"] + payload.delta < 0:
-            raise BadRequestException("Insufficient stock for this adjustment")
+            raise BadRequestException(
+                f"Only {item['quantity_available']:g} of {item.get('item_name') or 'this item'} in stock — can't take out {abs(payload.delta):g}.",
+                {"available": item["quantity_available"], "requested": abs(payload.delta)},
+            )
         updated = await self.repo.adjust_quantity(item_id, payload.delta)
         return serialize_doc(updated)
 

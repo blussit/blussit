@@ -167,9 +167,8 @@ async def test_cannot_delete_someone_elses_review(completed_booking, db, cleanup
 async def test_created_review_is_published(completed_booking):
     """ReviewModel defaults is_published=True, but create() builds the doc
     from the request schema (not the model) — this field must be set
-    explicitly or list_public's {"is_published": True} filter silently
-    matches nothing (a real bug this test caught: every review ever
-    created was missing the field entirely)."""
+    explicitly (a real bug this test caught: every review ever created was
+    missing the field entirely)."""
     service = ReviewService(completed_booking["db"])
     review = await service.create(completed_booking["customer_id"], ReviewCreateRequest(booking_id=completed_booking["booking_id"], captain_rating=5, service_rating=5))
     raw = await completed_booking["db"].reviews.find_one({"_id": ObjectId(review["id"])})

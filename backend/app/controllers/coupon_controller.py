@@ -5,6 +5,7 @@ from app.core.responses import paginated, success
 from app.schemas.coupon_schema import CouponCreateRequest, CouponUpdateRequest, CouponValidateRequest
 from app.services.audit_service import AuditService
 from app.services.coupon_service import CouponService
+from app.utils.response_text import rupees
 
 
 class CouponController:
@@ -33,7 +34,10 @@ class CouponController:
 
     async def validate(self, current_user: CurrentUser, payload: CouponValidateRequest):
         coupon, discount = await self.service.validate_and_compute_discount(payload.code, payload.order_value, current_user.id, use=payload.use)
-        return success({"valid": True, "discount_amount": discount, "coupon_code": coupon["code"]}, "Coupon is valid")
+        return success(
+            {"valid": True, "discount_amount": discount, "coupon_code": coupon["code"]},
+            f"Coupon {coupon['code']} is valid — you save {rupees(discount)}." if discount else f"Coupon {coupon['code']} is valid.",
+        )
 
     async def public_offer(self, code: str):
         coupon = await self.service.validate_public_offer(code)

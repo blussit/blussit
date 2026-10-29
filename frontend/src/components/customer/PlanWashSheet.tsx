@@ -197,11 +197,6 @@ export function PlanWashSheet({
           subscription_id: car.subscription_id,
         }
       : null;
-  // The paid extras on the line, × quantity (the base is the plan's).
-  const extraRows = mix.serviceIds
-    .filter((id) => id !== serviceId)
-    .map((id) => ({ service: services.find((x) => x.id === id), qty: mix.quantities[id] || 1 }))
-    .filter((r): r is { service: Service; qty: number } => !!r.service);
   const addressBody = isNew
     ? newAddress && coverage.data?.covered
       ? { address: { latitude: newAddress.latitude, longitude: newAddress.longitude, pincode: newAddress.pincode } }
@@ -438,21 +433,17 @@ export function PlanWashSheet({
             ) : quote ? (
               <>
                 <div className="flex justify-between gap-3">
-                  <span className="text-[#0E1A33]">{serviceName(serviceId)}</span>
-                  <span className="font-semibold text-[#1E7B3C]">Covered By Your Plan</span>
+                  <span className="text-[#0E1A33]">Plan Covers · {(quote.lines[0]?.plan_covers || []).map((c) => toTitle(c.name)).join(", ") || serviceName(serviceId)}</span>
+                  <span className="font-semibold text-[#1E7B3C]">₹0</span>
                 </div>
-                {extraRows.map(({ service: s, qty }) => (
-                  <div key={s.id} className="flex justify-between gap-3 text-[#5F6878]">
+                {/* The paid add-ons, priced by the server's quote. */}
+                {(quote.lines[0]?.plan_extras || []).map((e) => (
+                  <div key={e.service_id} className="flex justify-between gap-3 text-[#5F6878]" data-testid="plan-wash-extra">
                     <span>
-                      {toTitle(s.name)}
-                      {qty > 1 && (
-                        <span className="tabular-nums">
-                          {" "}
-                          · ₹{priceOf(s, typeId)} × {qty}
-                        </span>
-                      )}
+                      Add-On (Paid) · {toTitle(e.name)}
+                      {e.qty > 1 && <span className="tabular-nums"> × {e.qty}</span>}
                     </span>
-                    <span className="tabular-nums">₹{priceOf(s, typeId) * qty}</span>
+                    <span className="tabular-nums">₹{Math.round(e.amount)}</span>
                   </div>
                 ))}
                 {quote.travel_charge > 0 && (

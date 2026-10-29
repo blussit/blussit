@@ -764,26 +764,3 @@ class CustomerChargeService:
             for b in await self.db.bookings.find({"_id": {"$in": applied}}, {"payment_status": 1}).to_list(length=len(applied))
         } if applied else {}
         return [await self.view(r, users=users, paid=paid) for r in rows], total
-
-    async def my_charges(self, customer_id: str) -> dict:
-        """The customer's charge records. `open_total` (legacy: what the next
-        booking carried) is 0 once charges are settled through the wallet —
-        the wallet balance (GET /wallet/me) is what the next booking carries."""
-        rows = await self.collection.find({"customer_id": customer_id}).sort("created_at", -1).to_list(length=50)
-        return {
-            "open_total": round(sum(float(r.get("amount") or 0) for r in rows if r.get("status") == CustomerChargeStatus.OPEN.value), 2),
-            "items": [
-                {
-                    "id": str(r["_id"]),
-                    "amount": float(r.get("amount") or 0),
-                    "tier": r.get("tier"),
-                    "source_booking_number": r.get("source_booking_number"),
-                    "created_at": serialize_doc({"created_at": r.get("created_at")})["created_at"],
-                    "status": r.get("status"),
-                    "applied_to_booking_number": r.get("applied_to_booking_number"),
-                    "settlement": self.settlement_of(r),
-                    "wallet_credited": self.wallet_credited_of(r),
-                }
-                for r in rows
-            ],
-        }

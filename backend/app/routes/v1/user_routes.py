@@ -49,21 +49,6 @@ async def location_facets(db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await facets(db))
 
 
-@router.put("/{user_id}/home-center", dependencies=[Depends(require_admin)])
-async def set_home_center(
-    user_id: str, payload: dict, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Admin override of a customer's home center ("manual"); center_id null
-    clears the override and re-derives from addresses/bookings."""
-    from app.core.responses import success
-    from app.services.audit_service import AuditService
-    from app.services.customer_location_service import set_manual_location
-
-    result = await set_manual_location(db, user_id, (payload or {}).get("center_id"))
-    await AuditService(db).log_action(current_user.id, current_user.role, "SET_CUSTOMER_HOME_CENTER", "users", user_id, {"center_id": (payload or {}).get("center_id")})
-    return success(result, "Home center updated")
-
-
 @router.get("/{user_id}", dependencies=[Depends(require_admin)])
 async def get_user(user_id: str, db: AsyncIOMotorDatabase = Depends(get_db)):
     return await UserController(db).get_user(user_id)

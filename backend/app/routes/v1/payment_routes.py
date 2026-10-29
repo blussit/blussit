@@ -86,8 +86,8 @@ async def center_collections(
 
 @router.get("/collections/admin", dependencies=[Depends(require_admin)])
 async def admin_collections(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """Platform roll-up: per-center totals, subscription revenue, and the

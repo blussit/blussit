@@ -301,6 +301,18 @@ class MoneyService:
         entry = result.get("wallet_entry")
         if entry and entry.get("created"):
             await self.wallet.announce(result.get("customer_id"), entry)
+        # Paid / part-paid / wallet-credited: the customer's booking page and
+        # lists, the captain's job and the center's queue and dashboard show
+        # the new money now (cash at the door, an online payment, a link).
+        if result.get("applied") or result.get("excess"):
+            from app.services.booking_service import BookingService
+
+            service = BookingService(self.db)
+            for car in result.get("cars") or []:
+                try:
+                    await service._broadcast_booking_changed(car)
+                except Exception:  # noqa: BLE001 — a missed ping never undoes a payment
+                    logger.warning("Could not ping %s after its payment", car.get("_id"), exc_info=True)
         if confirm_note and result.get("newly_paid"):
             from app.services.booking_service import BookingService
 

@@ -1,5 +1,5 @@
 import { Outlet } from "react-router-dom";
-import { AlertTriangle, Building, CalendarDays, CalendarPlus, CalendarX2, CheckCircle2, CreditCard, Gift, Layers, LayoutDashboard, ListChecks, Package, Star, User, Users } from "lucide-react";
+import { AlertTriangle, Building, CalendarDays, CalendarPlus, CalendarX2, CheckCircle2, CreditCard, Gift, Layers, LayoutDashboard, ListChecks, Package, SlidersHorizontal, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 import { CustomerLookup } from "../../components/shared/CustomerLookup";
 
@@ -15,6 +15,7 @@ const navItems: NavItem[] = [
   { label: "Custom Plans", to: "/manager/custom-plans", icon: Layers },
   { label: "Societies", to: "/manager/societies", icon: Building },
   { label: "Society Planner", to: "/manager/society-planner", icon: CalendarDays },
+  { label: "Society Schedule Settings", to: "/manager/society-schedule-settings", icon: SlidersHorizontal },
   { label: "Inventory", to: "/manager/inventory", icon: Package },
   { label: "Complaints", to: "/manager/complaints", icon: AlertTriangle },
   { label: "Reviews", to: "/manager/reviews", icon: Star },

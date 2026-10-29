@@ -386,6 +386,8 @@ export const hi = {
   "captain.onsite.byYou": "आपने जोड़ा",
   "captain.onsite.by": "{name} ने जोड़ा",
   "captain.money.total": "टोटल",
+  "captain.money.plan": "प्लान में शामिल",
+  "captain.money.addons": "ऐड-ऑन (पेड)",
   "captain.money.paid": "मिल चुका",
   "captain.money.wallet": "वॉलेट क्रेडिट लगा",
   "captain.money.due": "बाकी",

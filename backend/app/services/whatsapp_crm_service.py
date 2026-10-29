@@ -507,8 +507,10 @@ class WhatsAppCrmService:
         messages.sort(key=lambda x: x["at"] or "")
         return {"conversation": await self._convo_out(convo), "messages": messages[-limit:]}
 
-    async def mark_read(self, wa_id: str) -> None:
-        await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": {"unread_count": 0}})
+    async def mark_read(self, wa_id: str) -> bool:
+        """True when the conversation exists (and is now read)."""
+        result = await self.db.whatsapp_conversations.update_one({"wa_id": wa_id}, {"$set": {"unread_count": 0}})
+        return result.matched_count > 0
 
     # ------------------------------------------------------------------
     # Sending
@@ -536,7 +538,7 @@ class WhatsAppCrmService:
     async def send_text(self, wa_id: str, text: str, agent_id: str) -> dict:
         convo = await self._require_convo(wa_id)
         if not text.strip():
-            raise BadRequestException("Message is empty")
+            raise BadRequestException("Write a message before sending.")
         if not self._window_state(convo)["active"]:
             raise BadRequestException("The 24-hour customer service window has expired — send an approved template instead.")
         ok = await self.wa.send_agent_text(convo.get("phone") or _local_phone(wa_id), text.strip(), agent_id)
@@ -566,7 +568,7 @@ class WhatsAppCrmService:
     async def send_media_message(self, wa_id: str, media_type: str, media_id: str, caption: str, filename: str, agent_id: str) -> dict:
         convo = await self._require_convo(wa_id)
         if media_type not in ("image", "document", "video", "audio"):
-            raise BadRequestException("Unsupported media type")
+            raise BadRequestException(f"Can't send '{media_type}' — use image, document, video or audio.")
         if not self._window_state(convo)["active"]:
             raise BadRequestException("The 24-hour customer service window has expired — media needs an active window.")
         ok = await self.wa.send_agent_media(convo.get("phone") or _local_phone(wa_id), media_type, media_id, caption, filename, agent_id)

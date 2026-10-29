@@ -115,11 +115,6 @@ async def list_settings(db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await SettingService(db).list_all())
 
 
-@settings_router.get("/{key}")
-async def get_setting(key: str, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return success(await SettingService(db).get(key))
-
-
 @settings_router.put("")
 async def upsert_setting(payload: SettingUpsertRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     """Admin-only, whitelisted keys only (ADM-01): booking_policy,

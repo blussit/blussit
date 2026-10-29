@@ -530,9 +530,12 @@ async def test_an_unpaid_online_booking_swept_after_the_window_returns_the_code(
     # The payment-window sweep cancels a still-unpaid visit with only_if_unpaid.
     await db.bookings.update_one({"_id": ObjectId(booking["id"])}, {"$set": {"payment_status": "pending", "status": "awaiting_payment"}})
     raw = await db.bookings.find_one({"_id": ObjectId(booking["id"])})
-    await svc.cancel_booking_group(
-        raw["booking_group_id"], BookingCancelRequest(reason="Payment window expired"), "system", "admin", only_if_unpaid=True,
-    )
+    # A single booking has no group id; the sweep then cancels it by id.
+    reason = BookingCancelRequest(reason="Payment window expired")
+    if raw.get("booking_group_id"):
+        await svc.cancel_booking_group(raw["booking_group_id"], reason, "system", "admin", only_if_unpaid=True)
+    else:
+        await svc.cancel_booking(booking["id"], reason, "system", "admin", only_if_unpaid=True)
     assert (await code_doc(db, code))["used_count"] == 0
 
 

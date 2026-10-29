@@ -10,6 +10,7 @@ import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import type { OnsiteBooking } from "../../api/captainOnsite";
 import type { Booking } from "../../types";
 import { titleCase } from "../public/landing/shared";
+import { planSplitTotals } from "../../lib/planSplit";
 import { carTitle, rupees, visitMoney, type CarTypes } from "./jobState";
 import { Notice, Panel } from "./ui";
 
@@ -17,6 +18,8 @@ export function JobMoney({ cars, types }: { cars: Booking[]; types?: CarTypes })
   const { t } = useCaptainTranslation();
   const { user } = useAuth();
   const money = visitMoney(cars);
+  // A plan booking: the plan's wash and the paid add-ons, apart (the add-ons are what is collected).
+  const split = planSplitTotals(cars.map((c) => c as OnsiteBooking));
   const isVisit = cars.length > 1;
   const added = cars.flatMap((c, i) =>
     ((c as OnsiteBooking).added_services ?? []).map((line, j) => ({ line, car: c, carNo: i + 1, key: `${c.id}-${j}` })),
@@ -25,6 +28,8 @@ export function JobMoney({ cars, types }: { cars: Booking[]; types?: CarTypes })
   return (
     <Panel className="p-4" >
       <div data-testid="captain-job-money" className="space-y-1.5">
+        {split && <Row label={t("captain.money.plan")} value={split.coveredNames.join(", ") || "—"} tone="green" />}
+        {split && split.extras > 0 && <Row label={t("captain.money.addons")} value={rupees(split.extras)} />}
         <Row label={t("captain.money.total")} value={rupees(money.total)} />
         {money.paid > 0 && <Row label={t("captain.money.paid")} value={rupees(money.paid)} tone="green" />}
         {money.wallet > 0 && <Row label={t("captain.money.wallet")} value={rupees(money.wallet)} tone="green" />}

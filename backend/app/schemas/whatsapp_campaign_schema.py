@@ -50,7 +50,3 @@ class SendBody(BaseModel):
     selection: Selection
     # The count the admin typed in the confirmation box.
     confirm_count: int = Field(ge=0)
-
-
-class LimitsUpdate(BaseModel):
-    whatsapp_marketing_cost_paise: int = Field(ge=0, le=2000)

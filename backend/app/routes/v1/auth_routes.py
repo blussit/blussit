@@ -4,13 +4,12 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.auth_controller import AuthController
-from app.core.dependencies import CurrentUser, get_current_user, get_db, require_admin, require_manager_or_admin
+from app.core.dependencies import CurrentUser, get_current_user, get_db, require_manager_or_admin
 from app.schemas.user_schema import (
     ChangePasswordRequest,
     ConfirmPhoneVerificationRequest,
     ForgotPasswordRequest,
     LoginRequest,
-    ManagerCreateCustomerRequest,
     OtpChannelRequest,
     RefreshTokenRequest,
     RegisterRequest,
@@ -18,7 +17,6 @@ from app.schemas.user_schema import (
     ResetPasswordRequest,
     StaffCreateRequest,
     StaffPasswordResetRequest,
-    VerifyOtpRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -68,11 +66,6 @@ async def request_otp(payload: RequestOtpRequest, db: AsyncIOMotorDatabase = Dep
     return await AuthController(db).request_otp(payload)
 
 
-@router.post("/otp/verify")
-async def verify_otp(payload: VerifyOtpRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await AuthController(db).verify_otp(payload)
-
-
 @router.post("/forgot-password")
 async def forgot_password(payload: ForgotPasswordRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
     return await AuthController(db).forgot_password(payload)
@@ -106,18 +99,6 @@ async def staff_reset_staff_password(
     return await AuthController(db).staff_reset_staff_password(current_user, user_id, payload.temp_password)
 
 
-@router.post("/customers", dependencies=[Depends(require_manager_or_admin)])
-async def create_customer(
-    payload: ManagerCreateCustomerRequest,
-    current_user: CurrentUser = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Manager/admin creates a customer account on their behalf (e.g. a
-    phone/walk-in booking) with a temp password — see
-    UserModel.must_change_password."""
-    return await AuthController(db).create_customer(current_user, payload)
-
-
 @router.post("/verify-phone/request")
 async def request_phone_verification(
     payload: OtpChannelRequest | None = None,
@@ -139,16 +120,6 @@ async def confirm_phone_verification(
 ):
     return await AuthController(db).confirm_phone_verification(current_user, payload)
 
-
-@router.post("/customers/{customer_id}/reset-password", dependencies=[Depends(require_manager_or_admin)])
-async def staff_reset_customer_password(
-    customer_id: str, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)
-):
-    """Manager/admin resets a customer's forgotten password on their
-    behalf — the generated temp password is sent straight to the
-    customer's WhatsApp and is never included in this response, so it's
-    never visible to the manager triggering it."""
-    return await AuthController(db).staff_reset_customer_password(current_user, customer_id)
 
 # ---- MSG91 OTP widget (server-verified) -----------------------------------
 from pydantic import BaseModel as _BaseModel, Field as _WField  # noqa: E402
@@ -197,10 +168,6 @@ async def reset_password_via_widget(payload: WidgetResetRequest, db: AsyncIOMoto
     return success({}, message="Password reset — you can log in now")
 
 
-class BookingAccessRequest(_BaseModel):
-    phone: str = _WField(min_length=10, max_length=15)
-
-
 class OtpLoginRequest(_BaseModel):
     phone: str = _WField(min_length=10, max_length=15)
     otp: str | None = _WField(default=None, min_length=4, max_length=8)
@@ -211,13 +178,6 @@ class OtpLoginRequest(_BaseModel):
 
 class SetPasswordRequest(_BaseModel):
     new_password: str = _WField(min_length=8, max_length=72)
-
-
-@router.post("/booking-access")
-async def booking_access(payload: BookingAccessRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
-    """Guest wizard: which credential should this phone be asked for —
-    register / otp (unverified or stale account) / password (established)."""
-    return success(await AuthService(db).booking_access_mode(payload.phone))
 
 
 @router.post("/otp-login")

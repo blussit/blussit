@@ -521,6 +521,7 @@ async def test_bot_confirm_total_is_the_booking_total_with_a_plan(rig, db, clean
     use_plan = (await last_out(db, phone))["options"][0]["id"]
     assert use_plan.startswith("plan:")
     await bot.handle_webhook(wa_payload(wa_id, reply=use_plan))
+    await bot.handle_webhook(wa_payload(wa_id, reply="ext:no"))  # no extras
     when = (await last_out(db, phone))["options"][0]["id"]
     # The saved address resolved THIS center, so its grid was offered.
     assert when.startswith("when:")

@@ -133,13 +133,27 @@ def is_catalogue_editor(user: CurrentUser | None) -> bool:
     return bool(user and user.role in (UserRole.ADMIN.value, UserRole.MANAGER.value))
 
 
+def _a(role: str) -> str:
+    return f"{'an' if role[:1] in 'aeiou' else 'a'} {role}"
+
+
+def _who(roles: tuple[UserRole, ...]) -> str:
+    names = [r.value for r in roles]
+    if len(names) == 1:
+        return _a(names[0])
+    return f"{', '.join(_a(n) for n in names[:-1])} or {_a(names[-1])}"
+
+
 def require_roles(*roles: UserRole):
     """Dependency factory enforcing RBAC on a route."""
 
     async def _checker(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
         allowed = {r.value for r in roles}
         if current_user.role not in allowed:
-            raise ForbiddenException("You do not have permission to perform this action")
+            raise ForbiddenException(
+                f"This action is only for {_who(roles)} account — you are signed in as {_a(current_user.role)}.",
+                {"required_roles": sorted(allowed), "your_role": current_user.role},
+            )
         return current_user
 
     return _checker

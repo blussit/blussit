@@ -8,21 +8,6 @@ from app.services.crm_service import CRMService
 router = APIRouter(prefix="/crm", tags=["CRM"], dependencies=[Depends(require_manager_or_admin)])
 
 
-# Must be declared before /customers/{customer_id} — Starlette matches routes
-# in declaration order, so a literal /customers/search path has to come
-# first or it gets swallowed by the {customer_id} path param.
-@router.get("/customers/search")
-async def search_customer_by_phone(
-    phone: str = Query(..., max_length=20),
-    current_user: CurrentUser = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Used by the manager 'book on behalf of a customer' flow to find an
-    existing customer by phone before falling back to creating a new one.
-    A manager gets the minimal lookup row (id, name, phone) only."""
-    return success(await CRMService(db).find_customer_by_phone(phone, current_user.role, current_user.service_center_id))
-
-
 @router.get("/customers/typeahead")
 async def search_customers_typeahead(
     q: str = Query(..., max_length=100),
@@ -36,30 +21,6 @@ async def search_customers_typeahead(
     created. A manager's name search only covers customers their own
     center has served — see CRMService.search_customers."""
     return success(await CRMService(db).search_customers(q, limit, current_user.role, current_user.service_center_id))
-
-
-@router.get("/customers")
-async def list_customers(
-    center_id: str | None = None,
-    city: str | None = None,
-    pincode: str | None = None,
-    search: str | None = Query(None, max_length=100),
-    sort_by: str = Query("created_at", max_length=30),
-    sort_order: int = Query(-1),
-    page: int = Query(1, ge=1, le=10_000),
-    page_size: int = Query(20, ge=1, le=100),
-    current_user: CurrentUser = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    """Customers filtered/sorted by home center, city and pincode. A manager
-    only ever sees customers their own center has dealt with."""
-    from app.core.responses import paginated
-
-    items, total = await CRMService(db).list_customers(
-        current_user.role, current_user.service_center_id, center_id=center_id, city=city, pincode=pincode,
-        search=search, sort_by=sort_by, sort_order=sort_order, page=page, page_size=page_size,
-    )
-    return paginated(items, page, page_size, total)
 
 
 @router.get("/customers/{customer_id}")

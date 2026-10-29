@@ -4,7 +4,6 @@ from app.core.authz import ensure_customer_in_scope
 from app.core.dependencies import CurrentUser, PaginationParams
 from app.core.responses import paginated, success
 from app.schemas.subscription_schema import (
-    AssignSubscriptionRequest,
     AutoPayRequest,
     PassQuoteRequest,
     PlanEnquiryRequest,
@@ -15,7 +14,7 @@ from app.schemas.subscription_schema import (
     UpgradeSubscriptionRequest,
 )
 from app.services.audit_service import AuditService
-from app.services.plan_enquiry_service import PlanEnquiryService
+from app.services.plan_enquiry_service import ENQUIRY_STATUSES, PlanEnquiryService
 from app.services.purchase_confirmation_service import PurchaseConfirmationService
 from app.services.subscription_service import SubscriptionPlanService, UserSubscriptionService, extension_message
 
@@ -83,14 +82,28 @@ class UserSubscriptionController:
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def set_enquiry_status(self, current_user: CurrentUser, enquiry_id: str, status: str):
-        from app.core.exceptions import NotFoundException
+        from app.core.exceptions import BadRequestException, NotFoundException
 
+        # A typo'd status used to answer "Enquiry not found" — name the
+        # real problem instead.
+        if status not in ENQUIRY_STATUSES:
+            raise BadRequestException(
+                f"Status must be one of: {', '.join(ENQUIRY_STATUSES)} (you sent '{status}').", {"allowed": list(ENQUIRY_STATUSES)},
+            )
         if not await self.enquiries.set_status(enquiry_id, status):
             raise NotFoundException("Enquiry not found")
         await self.audit.log_action(
             current_user.id, current_user.role, "UPDATE_PLAN_ENQUIRY", "plan_enquiries", enquiry_id, {"status": status}
         )
-        return success(None, "Updated")
+        return success({"id": enquiry_id, "status": status}, f"Enquiry marked {status}.")
+
+    async def _plan_name(self, plan_id: str | None) -> str | None:
+        from bson import ObjectId
+
+        if not plan_id or not ObjectId.is_valid(plan_id):
+            return None
+        plan = await self.db.subscription_plans.find_one({"_id": ObjectId(plan_id)}, {"name": 1})
+        return (plan or {}).get("name")
 
     async def list_mine(self, current_user: CurrentUser):
         return success(await self.service.list_my_subscriptions(current_user.id))
@@ -117,22 +130,17 @@ class UserSubscriptionController:
         result["confirmation_token"] = await self.confirmations.issue(
             "subscription", result["id"], current_user.id, {"plan_name": result.get("plan_name")}
         )
-        return success(result, "Subscribed successfully")
-
-    async def assign(self, current_user: CurrentUser, payload: AssignSubscriptionRequest):
-        from app.core.authz import resolve_grant_center_id
-
-        center_id = resolve_grant_center_id(current_user.role, current_user.service_center_id, payload.service_center_id)
-        result = await self.service.assign(payload, actor_center_id=center_id)
-        await self.audit.log_action(
-            current_user.id, current_user.role, "ASSIGN_SUBSCRIPTION", "user_subscriptions", result["id"], {"customer_id": payload.customer_id}
-        )
-        return success(result, "Subscription assigned successfully")
+        return success(result, f"You're subscribed to {result.get('plan_name') or 'the plan'}.")
 
     async def cancel(self, current_user: CurrentUser, subscription_id: str):
         result = await self.service.cancel(current_user.id, subscription_id)
         await self.audit.log_action(current_user.id, current_user.role, "CANCEL_SUBSCRIPTION", "user_subscriptions", subscription_id, None)
-        return success(result, "Subscription cancelled")
+        name = await self._plan_name(result.get("plan_id"))
+        return success(
+            result,
+            f"{name or 'Your plan'} cancelled — it can't be used for new washes any more. "
+            "Auto-pay (if it was on) is switched off, so no further payment is taken.",
+        )
 
     async def set_auto_pay(self, current_user: CurrentUser, subscription_id: str, payload: AutoPayRequest):
         result = await self.service.set_auto_pay(current_user.id, subscription_id, payload.enabled)
@@ -147,7 +155,9 @@ class UserSubscriptionController:
         await self.audit.log_action(
             current_user.id, current_user.role, "UPGRADE_SUBSCRIPTION", "user_subscriptions", subscription_id, {"new_plan_id": payload.new_plan_id}
         )
-        return success(result, "Subscription upgraded")
+        name = await self._plan_name(payload.new_plan_id)
+        retired = " Auto-pay was switched off — turn it on again for the new plan." if result.get("auto_pay_retired") else ""
+        return success(result, f"Switched to {name or 'the new plan'}. Washes already used this cycle still count.{retired}")
 
     async def extend(self, current_user: CurrentUser, subscription_id: str, payload: SubscriptionExtendRequest):
         result = await self.service.extend_pass(
@@ -161,10 +171,6 @@ class UserSubscriptionController:
              "custom_plan_id": result.get("custom_plan_id")},
         )
         return success(result, extension_message(payload.days, result))
-
-    async def list_all_for_admin(self, pagination: PaginationParams):
-        items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size)
-        return paginated(items, pagination.page, pagination.page_size, total)
 
     async def admin_overview(self):
         return success(await self.service.admin_overview())

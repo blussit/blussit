@@ -45,6 +45,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.ws_manager import manager as ws_manager
 from app.models.enums import CustomerWalletEntryKind as Kind, NotificationType
 from app.services import booking_money as bm
 from app.services.booking_money import EPSILON, paise, r2
@@ -288,7 +289,13 @@ class CustomerWalletService:
         if session is not None:
             return await _do(session)
         try:
-            return await in_transaction(self.db, _do)
+            entry = await in_transaction(self.db, _do)
+            if entry.get("created"):
+                # The wallet screens (and a manager looking at this customer)
+                # show the new balance at once. A post inside the caller's
+                # transaction (above) is announced by the caller after commit.
+                await ws_manager.notify_changed("wallet", users=[customer_id])
+            return entry
         except DuplicateKeyError:
             # Lost a same-key race outside any caller transaction: the
             # winner's row is the answer.
@@ -513,6 +520,9 @@ class CustomerWalletService:
             "method": method, "reference": reference, "reason": reason, "note": note, "signals": signals,
             "balance_after": record["balance_after"],
         }, booking_center)
+        # The booking's paid-back total and the wallet moved inside one
+        # transaction: tell the customer's screens and the center's dashboard.
+        await ws_manager.notify_changed("payment", users=[customer_id], center_id=booking_center, booking_id=record["booking_id"])
         if entry and entry.get("created"):
             await self.announce(customer_id, entry, reason=f"Paid back for {REASON_LABELS[reason].lower()}")
         if record["goodwill_amount"] > EPSILON:

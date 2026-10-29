@@ -119,7 +119,7 @@ def status_filter(bundle: dict, status: str, now: datetime | None = None) -> dic
         return {**active, "used_count": {"$gt": 0, "$lt": uses}}
     if status == "unused":
         return {**active, "used_count": 0}
-    raise BadRequestException("Unknown status filter")
+    raise BadRequestException(f"Unknown status filter. Use one of: {', '.join(STATUSES)}.")
 
 
 class CouponBundleService:
@@ -342,7 +342,7 @@ class CouponBundleService:
         clauses: list[dict] = [{"bundle_id": str(bundle["_id"])}]
         if status:
             if status not in STATUSES:
-                raise BadRequestException("Unknown status filter")
+                raise BadRequestException(f"Unknown status filter. Use one of: {', '.join(STATUSES)}.")
             clauses.append(status_filter(bundle, status))
         if search and search.strip():
             clauses.append({"code": {"$regex": "^" + re.escape(normalise_code(search))}})

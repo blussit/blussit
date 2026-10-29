@@ -338,10 +338,8 @@ export default function ForgotPasswordPage() {
                 <p className="mt-2 text-[13px] leading-5 text-[#747C8A]">
                   You can now log in with your new password.
                 </p>
-                <Link to="/login">
-                  <button className="group relative mt-6 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#0A66F0] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(10,102,240,0.18)] transition-all hover:bg-[#0857D0] hover:shadow-[0_10px_24px_rgba(10,102,240,0.23)]">
-                    <span>Back To Login</span>
-                  </button>
+                <Link to="/login" className="group relative mt-6 flex h-[48px] w-full items-center justify-center rounded-[10px] bg-[#0A66F0] cursor-pointer text-[14px] font-bold text-white shadow-[0_8px_20px_rgba(10,102,240,0.18)] transition-all hover:bg-[#0857D0] hover:shadow-[0_10px_24px_rgba(10,102,240,0.23)]">
+                  <span>Back To Login</span>
                 </Link>
               </div>
             )}

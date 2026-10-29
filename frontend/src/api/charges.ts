@@ -96,7 +96,6 @@ export const CHARGE_STATUS_LABELS: Record<ChargeStatus, string> = {
 export const chargeApi = {
   list: (params?: { status?: ChargeStatus; customer_id?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<CustomerCharge>>("/charges", { params }).then((r) => r.data),
-  my: () => apiClient.get<ApiSuccess<MyCharges>>("/charges/my").then((r) => r.data.data),
   /** Reduce (amount below the current one) or waive (0). Never raises. */
   adjust: (id: string, amount: number, note?: string) =>
     apiClient.post<ApiSuccess<CustomerCharge>>(`/charges/${id}/adjust`, { amount, note: note || undefined }).then((r) => r.data.data),

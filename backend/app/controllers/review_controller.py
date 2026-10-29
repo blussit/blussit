@@ -30,10 +30,6 @@ class ReviewController:
     async def list_my_reviews(self, current_user: CurrentUser, booking_ids: list[str] | None = None):
         return success(await self.service.list_my_reviews(current_user.id, booking_ids))
 
-    async def list_public(self, pagination: PaginationParams):
-        items, total = await self.service.list_public(pagination.page, pagination.page_size)
-        return paginated(items, pagination.page, pagination.page_size, total)
-
     async def list_all_for_admin(self, pagination: PaginationParams, include_deleted: bool, **filters):
         items, total = await self.service.list_all_for_admin(pagination.page, pagination.page_size, include_deleted, **filters)
         return paginated(items, pagination.page, pagination.page_size, total)

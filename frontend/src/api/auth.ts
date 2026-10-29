@@ -27,7 +27,6 @@ export const authApi = {
 
   me: () => apiClient.get<ApiSuccess<User>>("/auth/me").then((r) => r.data.data),
 
-  logout: () => apiClient.post<{ success: boolean }>("/auth/logout").then((r) => r.data),
   // The server signs out every other device on a password change and hands
   // THIS one a fresh pair — store it, or the very next request 401s.
   changePassword: (payload: { current_password: string; new_password: string }) =>
@@ -58,12 +57,6 @@ export const authApi = {
   confirmPhoneVerification: (otp: string) =>
     apiClient.post<ApiSuccess<User>>("/auth/verify-phone/confirm", { otp }).then((r) => r.data.data),
 
-  // Manager/admin resets a customer's forgotten password — the generated
-  // temp password is sent straight to the customer's WhatsApp and is
-  // never included in this response (see backend docstring).
-  resetCustomerPassword: (customerId: string) =>
-    apiClient.post<ApiSuccess<null>>(`/auth/customers/${customerId}/reset-password`).then((r) => r.data),
-
   // Admin (any staff but themselves) / manager (own center's captains):
   // sets a temporary password the staff member must change on next login.
   resetStaffPassword: (userId: string, tempPassword: string) =>
@@ -83,8 +76,6 @@ export const otpWidgetApi = {
 };
 
 export const guestAuthApi = {
-  bookingAccess: (phone: string) =>
-    apiClient.post<ApiSuccess<{ mode: "register" | "otp" | "password" }>>("/auth/booking-access", { phone }).then((r) => r.data.data),
   // A number with no account yet answers { needs_name } until the same
   // proof comes back with full_name — then the account is created.
   otpLogin: (payload: { phone: string; otp?: string; access_token?: string; full_name?: string }) =>
