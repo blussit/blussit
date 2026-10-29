@@ -102,7 +102,11 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     // right half of the screen it grows leftwards so it never runs off-screen.
     useLayoutEffect(() => {
       if (!open) return;
-      const place = () => {
+      const place = (e?: Event) => {
+        // The list's OWN scrolling also reaches this capture listener — repositioning
+        // (and re-running the "reveal the selected row" effect) on it snapped the list
+        // back to the top, so no dropdown could be scrolled.
+        if (e?.target instanceof Node && panelRef.current?.contains(e.target)) return;
         const rect = wrapperRef.current?.getBoundingClientRect();
         if (!rect) return;
         const margin = 8;
@@ -132,10 +136,19 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
       };
     }, [open, options.length, compact]);
 
-    // Long lists open scrolled to the current choice.
+    // Long lists open scrolled to the current choice — once per opening, and by
+    // scrolling the list itself (never the page behind it).
+    const revealed = useRef(false);
     useEffect(() => {
-      if (!open || !panelStyle) return;
-      panelRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+      if (!open) {
+        revealed.current = false;
+        return;
+      }
+      const panel = panelRef.current;
+      if (!panelStyle || !panel || revealed.current) return;
+      revealed.current = true;
+      const row = panel.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (row) panel.scrollTop = Math.max(0, row.offsetTop - panel.clientHeight / 2 + row.offsetHeight / 2);
     }, [open, panelStyle]);
 
     const selectOption = (opt: OptionEl) => {
