@@ -193,10 +193,6 @@ export function VideoReviews({ id = "video-reviews" }: { id?: string }) {
                   </svg>
                 </span>
               </h2>
-
-              <p className="mt-3 text-[14px] leading-[1.5] text-[#64748B] sm:text-[15px]">
-                Real customers, real doorstep washes — straight from them.
-              </p>
             </div>
 
             {/* Navigation is placed on the left/right edges of the cards below. */}

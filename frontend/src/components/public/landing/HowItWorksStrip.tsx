@@ -5,7 +5,6 @@ import { useLayoutEffect, useRef, useState } from "react";
 
 const NAVY = "#0E1A33";
 const BLUE = "#0A66F0";
-const MUTED = "#5F6878";
 
 // Three steps joined by one winding blue dashed "road" — side by side on every screen.
 const STEPS = [
@@ -138,9 +137,6 @@ export function HowItWorksStrip({ id = "how-it-works" }: { id?: string }) {
                 </svg>
               </span>
             </h2>
-            <p className="mt-3 text-[14px] leading-[1.5] sm:text-[15px]" style={{ color: MUTED }}>
-              A spotless car in three easy steps — no driving, no waiting.
-            </p>
           </div>
           <Link
             to="/book"
@@ -226,9 +222,6 @@ export function HowItWorksStrip({ id = "how-it-works" }: { id?: string }) {
                 <h3 className="mt-3 text-[14px] font-bold leading-tight md:mt-4 md:text-[19px]" style={{ color: NAVY }}>
                   {s.title}
                 </h3>
-                <p className="mt-1 max-w-[260px] text-[12px] leading-[1.4] md:mt-1.5 md:text-[15px]" style={{ color: MUTED }}>
-                  {s.text}
-                </p>
               </motion.li>
             );
           })}

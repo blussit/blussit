@@ -99,44 +99,51 @@ async def _after_hi(db, clean_, extra=None):  # noqa: ANN001
     return s
 
 
-async def test_price_question_gets_the_live_list_by_car_type_then_a_book_now_button(db, clean):
+async def test_price_question_asks_the_vehicle_then_the_service_then_shows_that_price(db, clean):
     s = await _after_hi(db, clean)
     before = len(await outbox(db, s))
     await say(s, text="kitna rate hai")
     sent = await _texts(db, s, before)
-    texts = [m["message"] for m in sent if not m.get("interactive_kind")]
-    assert texts and all(len(t) <= 4096 for t in texts)
-    full = "\n".join(texts)
-    cars = [t["name"] for t in await _types(db) if "bike" not in t["name"].lower()]
-    positions = [full.index(f"*{name}*") for name in cars]
-    assert positions == sorted(positions)  # display order, one block per car type
-    assert "*Bike*" not in full  # a bike is listed only when asked for
-    # The price shown is the price a booking charges THIS customer.
+    # No catalogue dump: ONE short question, a list of vehicle types.
+    assert len(sent) == 1 and sent[0]["interactive_kind"] == "list" and len(sent[0]["message"]) < 200
+    assert row_ids(sent[0]) == [f"pt:{t['_id']}" for t in (await _types(db))[:10]]
+    # The vehicle -> the services, each row already carrying its price.
+    await say(s, reply=f"pt:{s['hatch']}")
+    services = await last(db, s)
+    assert services["interactive_kind"] == "list" and f"ps:{s['hatch']}:{s['star']}" in row_ids(services)
     star = await db.services.find_one({"_id": ObjectId(s["star"])})
     first_time = await BookingService(db)._first_time_eligible(s["phone"])
     expected = BookingService.price_view(star, s["hatch"], first_time)["price"]
-    hatch_block = full.split(f"*{cars[0]}*", 1)[1].split("\n\n", 1)[0]
-    assert f"{star['name']} — ₹{expected:g}" in hatch_block
-    assert "Price shown is final" in full or "distance charge" in full
-    buttons = sent[-1]
-    assert buttons["interactive_kind"] == "buttons" and [b["id"] for b in buttons["options"]] == ["menu:book", "menu:bookings"]
-    assert [b["title"] for b in buttons["options"]] == ["Book Now", "My Bookings"]
+    row = next(r for r in services["options"] if r["id"] == f"ps:{s['hatch']}:{s['star']}")
+    assert f"₹{expected:g}" in row["description"]
+    # The service -> its price and Book Now.
+    await say(s, reply=f"ps:{s['hatch']}:{s['star']}")
+    card = await last(db, s)
+    assert card["interactive_kind"] == "buttons" and f"₹{expected:g}" in card["message"] and star["name"] in card["message"]
+    assert [b["id"] for b in card["options"]][0] == f"pbook:{s['hatch']}:{s['star']}"
+    assert [b["title"] for b in card["options"]] == ["Book Now", "Other Service", "Other Vehicle"]
+    assert "Price shown is final" in card["message"] or "distance charge" in card["message"].lower()
+    # Asking prices never touched the conversation state.
+    assert (await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]}))["state"] in (None, "menu")
+    # Book Now continues straight into the booking with that vehicle + service chosen.
+    await say(s, reply=f"pbook:{s['hatch']}:{s['star']}")
     convo = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
-    assert convo["state"] == "menu"
-    await say(s, reply="menu:book")  # Book Now leads straight into booking
-    assert (await last(db, s))["interactive_kind"] == "list" and any(r.startswith("vt:") for r in row_ids(await last(db, s)))
+    assert convo["state"] not in (None, "menu") and (await last(db, s))["interactive_kind"] in ("list", "buttons")
+    assert convo["data"]["cur"]["vehicle_type"] == s["hatch"] or convo["data"]["lines"]
 
 
-async def test_price_for_one_named_type_shows_only_that_type(db, clean):
+async def test_price_for_one_named_type_skips_the_vehicle_question(db, clean):
     s = await _after_hi(db, clean)
     sedan = next(t for t in await _types(db) if "sedan" in t["name"].lower())
     before = len(await outbox(db, s))
     await say(s, text="sedan ka rate batao")
-    full = "\n".join(m["message"] for m in await _texts(db, s, before) if not m.get("interactive_kind"))
-    assert f"*{sedan['name']}*" in full and "*Hatchback*" not in full
+    sent = await _texts(db, s, before)
+    assert len(sent) == 1 and sent[0]["interactive_kind"] == "list"
+    assert all(r.startswith(f"ps:{sedan['_id']}:") for r in row_ids(sent[0]))
     svc = await db.services.find_one({"_id": ObjectId(s["star"])})
     view = BookingService.price_view(svc, str(sedan["_id"]), await BookingService(db)._first_time_eligible(s["phone"]))
-    assert f"₹{view['price']:g}" in full
+    desc = " ".join(r["description"] for r in sent[0]["options"] if r.get("description"))
+    assert f"₹{view['price']:g}" in desc
 
 
 async def test_a_price_question_mid_booking_answers_then_asks_the_same_question_again(db, clean):
@@ -148,7 +155,8 @@ async def test_a_price_question_mid_booking_answers_then_asks_the_same_question_
     before = len(await outbox(db, s))
     await say(s, text="price kya hai?")
     sent = await _texts(db, s, before)
-    assert any("Our Prices" in m["message"] for m in sent)
+    assert any("price is shown with each option" in m["message"] for m in sent)  # one line, no catalogue dump
+    assert not any(m["message"].startswith("💰 *Our Prices*") for m in sent)
     assert sent[-1]["interactive_kind"] == "list" and f"svc:{s['star']}" in row_ids(sent[-1])  # the service list again
     after = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
     assert after["state"] == "q_service" and after["data"]["cur"]["vehicle_type"] == s["hatch"] and not after["data"].get("strikes")
@@ -315,7 +323,7 @@ async def test_timing_address_offer_help_and_thanks_each_answer_and_show_the_men
     for text, needle in (
         ("timing kya hai", "captains work between"),
         ("aap kahan ho", "We come to you"),
-        ("koi offer hai?", "Current Offers"),
+        ("koi offer hai?", "today's offers"),
         ("help", "Here's what I can do"),
         ("thanks", "You're welcome"),
     ):
@@ -323,7 +331,9 @@ async def test_timing_address_offer_help_and_thanks_each_answer_and_show_the_men
         await say(s, text=text)
         sent = await _texts(db, s, before)
         assert any(needle in m["message"] for m in sent), (text, [m["message"][:60] for m in sent])
-        if text != "thanks":  # a thank-you needs no next step; every answer does
+        if text == "koi offer hai?":  # offers ask the vehicle first (a list), prices never dumped
+            assert sent[-1]["interactive_kind"] == "list" and all(r.endswith(":o") for r in row_ids(sent[-1])), text
+        elif text != "thanks":  # a thank-you needs no next step; every answer does
             assert sent[-1]["interactive_kind"] == "buttons", text
     assert center  # hours come from the center (7:00 AM style 12-hour times)
 
@@ -433,8 +443,13 @@ async def test_a_brand_new_number_asking_a_price_is_answered_before_the_name_is_
     await db.whatsapp_conversations.delete_many({"wa_id": s["wa_id"]})
     await say(s, text="kitna rate hai?")
     sent = await outbox(db, s)
-    assert any("Our Prices" in m["message"] for m in sent) and "tell me your name" in sent[-1]["message"]
+    assert any(m.get("interactive_kind") == "list" and any(r.startswith("pt:") for r in row_ids(m)) for m in sent)
+    assert "tell me your name" in sent[-1]["message"]
     assert await db.users.count_documents({"phone": s["phone"]}) == 0  # still no account
+    await say(s, reply=f"pt:{s['hatch']}")  # browsing prices works before there is an account...
+    assert (await last(db, s))["interactive_kind"] == "list" and await db.users.count_documents({"phone": s["phone"]}) == 0
+    await say(s, reply=f"pbook:{s['hatch']}:{s['star']}")  # ...and Book Now asks the name instead of booking
+    assert "tell me your name" in (await last(db, s))["message"] and await db.users.count_documents({"phone": s["phone"]}) == 0
     convo = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
     assert convo["state"] == "collect_name"
     await say(s, text="price list")  # a question is never taken as the name
@@ -470,18 +485,46 @@ async def test_no_coupon_at_the_coupon_question_returns_to_the_summary(db, clean
     assert (await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]}))["state"] == "confirm"
 
 
-async def test_a_car_price_list_has_no_bike_add_on_and_names_the_offer_that_adds_a_distance_charge(db, clean):
+async def test_a_car_price_flow_has_no_bike_add_on_and_names_the_offer_that_adds_a_distance_charge(db, clean):
     s = await _after_hi(db, clean)
-    before = len(await outbox(db, s))
     await say(s, text="price")
-    full = "\n".join(m["message"] for m in (await outbox(db, s))[before:] if not m.get("interactive_kind"))
-    assert "Extra Bike Wash" not in full
-    charging = [x["name"] for x in await db.services.find({"is_active": True, "charges_travel": True}).to_list(None)]
-    for name in charging:
-        assert name in full.split("🚗", 1)[1]
+    await say(s, reply=f"pt:{s['hatch']}")
+    listing = await last(db, s)
+    assert f"ps:{s['hatch']}:addons" in row_ids(listing)
+    await say(s, reply=f"ps:{s['hatch']}:addons")
+    addons = await last(db, s)
+    assert "Extra Bike Wash" not in addons["message"] and addons["message"].startswith("*Add-Ons*")
+    charging = await db.services.find({"is_active": True, "charges_travel": True, "is_addon": {"$ne": True}}).to_list(None)
+    for svc in charging:
+        if svc.get("vehicle_types") and s["hatch"] not in svc["vehicle_types"]:
+            continue
+        await say(s, reply=f"ps:{s['hatch']}:{svc['_id']}")
+        assert "distance charge" in (await last(db, s))["message"].lower()
     await say(s, text="bike ka rate")
-    bike = "\n".join(m["message"] for m in (await outbox(db, s)) if "*Bike*" in m["message"])
-    assert "*Bike*" in bike and "*Hatchback*" not in bike
+    bike = await last(db, s)
+    bike_type = next(t for t in await _types(db) if "bike" in t["name"].lower())
+    assert bike["interactive_kind"] == "list" and all(r.startswith(f"ps:{bike_type['_id']}:") for r in row_ids(bike))
+
+
+async def test_price_taps_never_disturb_a_booking_in_progress(db, clean):
+    s = await _after_hi(db, clean)
+    await say(s, reply="menu:book")
+    await say(s, reply=f"vt:{s['hatch']}")
+    before = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
+    await say(s, reply=f"ps:{s['hatch']}:{s['star']}")  # an old price list tapped mid-booking
+    after = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
+    assert after["state"] == before["state"] == "q_service" and after["data"] == before["data"]
+    await say(s, reply=f"pbook:{s['hatch']}:{s['star']}")  # Book Now mid-booking never wipes the draft
+    again = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
+    assert again["state"] == "q_service" and again["data"]["cur"] == before["data"]["cur"]
+    assert "already booking" in (await outbox(db, s))[-2]["message"]
+
+
+async def test_a_stale_price_row_for_a_removed_type_is_handled_politely(db, clean):
+    s = await _after_hi(db, clean)
+    await say(s, reply=f"pt:{ObjectId()}")
+    sent = await outbox(db, s)
+    assert "isn't available any more" in sent[-2]["message"] and sent[-1]["interactive_kind"] == "list"
 
 
 async def test_a_five_digit_pincode_is_refused_with_help_instead_of_crashing_the_address(db, clean):

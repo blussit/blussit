@@ -1,11 +1,3 @@
-import { Clock, Droplets, ShieldCheck } from "lucide-react";
-
-const TRUST = [
-  { Icon: Droplets, top: "Waterless", bottom: "Options" },
-  { Icon: Clock, top: "On-Time", bottom: "Service" },
-  { Icon: ShieldCheck, top: "Trusted", bottom: "Professionals" },
-];
-
 /**
  * "Book Your / Car Wash" header from the approved booking mockup.
  * `page` (the public /book page): the wide photo of a captain at work, copy
@@ -16,11 +8,9 @@ export function BookHero({ variant }: { variant: "page" | "app" }) {
   if (variant === "app") {
     return (
       <header className="mb-5">
-        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#0A66F0]">Premium doorstep car care</p>
-        <h1 className="mt-1.5 font-display text-[28px] font-extrabold leading-[1.08] tracking-[-0.03em] text-[#0E1A33] sm:text-[34px]">
+        <h1 className="font-display text-[28px] font-extrabold leading-[1.08] tracking-[-0.03em] text-[#0E1A33] sm:text-[34px]">
           Book Your <span className="text-[#0A66F0]">Car Wash</span>
         </h1>
-        <p className="mt-1.5 text-[14px] text-[#5F6878] sm:text-[15px]">Quick. Easy. At your doorstep in Indore.</p>
       </header>
     );
   }
@@ -47,26 +37,11 @@ export function BookHero({ variant }: { variant: "page" | "app" }) {
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[#F6F8FC] to-transparent" />
 
       <div className="relative mx-auto w-full max-w-[1200px] px-4 pb-12 pt-6 sm:px-6 sm:pb-20 sm:pt-12 lg:pb-24 lg:pt-14">
-        <p className="hidden text-[11px] font-bold uppercase tracking-[0.2em] text-[#0A66F0] sm:block">Premium doorstep car care</p>
-        <h1 className="font-display text-[32px] font-extrabold leading-[1.02] tracking-[-0.035em] text-[#0E1A33] sm:mt-3 sm:text-[46px] lg:text-[58px]">
+        <h1 className="font-display text-[32px] font-extrabold leading-[1.02] tracking-[-0.035em] text-[#0E1A33] sm:text-[46px] lg:text-[58px]">
           Book Your
           <br />
           <span className="text-[#0A66F0]">Car Wash</span>
         </h1>
-        <p className="mt-2 max-w-[190px] text-[13px] leading-snug text-[#3D4757] sm:mt-3 sm:max-w-none sm:text-[18px]">Quick. Easy. At your doorstep in Indore.</p>
-        <ul className="mt-6 hidden gap-6 sm:flex">
-          {TRUST.map(({ Icon, top, bottom }) => (
-            <li key={top} className="flex items-center gap-2.5">
-              <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF3FA] text-[#0A66F0]">
-                <Icon className="h-[18px] w-[18px]" />
-              </span>
-              <span className="text-[13px] leading-tight text-[#0E1A33]">
-                <span className="block font-semibold">{top}</span>
-                <span className="block text-[#5F6878]">{bottom}</span>
-              </span>
-            </li>
-          ))}
-        </ul>
       </div>
     </section>
   );

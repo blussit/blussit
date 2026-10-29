@@ -103,6 +103,9 @@ _LIVE_STATUSES = ["awaiting_payment", "pending", "assigned", "captain_on_the_way
 # A new booking being built (vehicle type -> confirm). Free-text questions
 # asked here are answered and the same step is offered again, never lost.
 _DRAFT_STATES = {"q_type", "q_service", "q_plan", "q_extras_ask", "q_extras", "q_address", "await_location", "await_addr_pincode", "q_when", "confirm", "q_coupon"}
+# Price-lookup taps (vehicle type -> service -> that price). Stateless: every id carries
+# its own context, so they work from any point of the chat.
+_PRICE_PREFIXES = ("pt:", "ps:", "pbook:", "ptypes")
 # Managing an existing booking.
 _MANAGE_STATES = {"bookings_list", "booking_detail", "resched_date", "resched_slot", "cancel_confirm"}
 # Questions answered for a number that has no account yet (then the name is asked),
@@ -521,6 +524,13 @@ class WhatsAppBotService:
             await self._send_menu(wa_id, phone)
             return
 
+        # The price lookup's taps are stateless (see _on_price_pick): a price
+        # question never disturbs a booking in progress and works for a number
+        # that has no account yet.
+        if kind == "reply" and str(value).startswith(_PRICE_PREFIXES):
+            await self._on_price_pick(wa_id, phone, convo, str(value))
+            return
+
         # A link to an account that no longer exists (hard-deleted by an
         # admin) is dropped and the number resolved afresh — else the dead
         # id would fail every booking from this number, forever.
@@ -855,11 +865,10 @@ class WhatsAppBotService:
                 await self._reoffer(wa_id, phone, customer_id, state, data)
             return True
         if found in (intent.PRICE, intent.OFFER):
-            await self._send_prices(phone, customer_id, text, offer=found == intent.OFFER)
-            if state in (None, "menu"):
-                await self.wa.send_buttons(phone, "Ready to book? 👇", [{"id": "menu:book", "title": "Book Now"}, {"id": "menu:bookings", "title": "My Bookings"}])
-                await self._set_state(wa_id, "menu", {})
+            if not started:
+                await self._price_question(phone, text, offer=found == intent.OFFER)
                 return True
+            await self._price_question_mid_booking(phone, state, text, offer=found == intent.OFFER)
         elif found == intent.PLAN_BUY:
             await self.wa.send_text(phone, await self._plan_buy_text(customer_id))
         elif found == intent.PLAN_STATUS:
@@ -877,7 +886,7 @@ class WhatsAppBotService:
 
     async def _answer_before_signup(self, phone: str, found: str, text: str) -> None:
         if found in (intent.PRICE, intent.OFFER):
-            await self._send_prices(phone, None, text, offer=found == intent.OFFER)
+            await self._price_question(phone, text, offer=found == intent.OFFER)
         elif found == intent.PLAN_BUY:
             await self.wa.send_text(phone, await self._plan_buy_text(None))
         elif found == intent.TIMING:
@@ -1005,7 +1014,156 @@ class WhatsAppBotService:
             "Share your location pin when you book and I'll check your area."
         )
 
-    # -- the price list --
+    # -- the price lookup: vehicle type -> service -> that service's price --
+    # Stateless on purpose. Every row id carries its own context
+    # (pt:<type>[:o], ps:<type>:<service|addons>[:o], pbook:<type>:<service>;
+    # a trailing :o means the customer asked for OFFERS), so a price question
+    # works from anywhere — at the menu, mid-booking, or before the number has
+    # an account — and never changes the conversation state.
+
+    async def _price_question(self, phone: str, text: str, offer: bool = False) -> None:
+        """"price" / "offers": ask the vehicle type first, then the service —
+        one short step each, never the whole catalogue in one message. A
+        type already named ("sedan price") skips the first question."""
+        types = await self._active_types()
+        named = intent.match_names(text, {str(t["_id"]): t.get("name", "") for t in types})
+        if len(named) == 1:
+            await self._ask_price_service(phone, next(t for t in types if str(t["_id"]) == named[0]), offer)
+        else:
+            await self._ask_price_type(phone, offer)
+
+    async def _price_question_mid_booking(self, phone: str, state: str | None, text: str, offer: bool = False) -> None:
+        """A price question while a booking is being built: answer without
+        derailing it — the same step is offered again right after (the caller)."""
+        if intent.match_names(text, {str(t["_id"]): t.get("name", "") for t in await self._active_types()}):
+            await self._send_prices(phone, None, text, offer=offer)  # that one vehicle's short list
+        elif state in ("q_type", "q_service", "q_plan", "q_extras_ask", "q_extras"):
+            await self.wa.send_text(phone, "The price is shown with each option below 👇")
+        else:
+            await self.wa.send_text(phone, "You'll see the final price before you confirm. Here's where we were 👇")
+
+    async def _ask_price_type(self, phone: str, offer: bool = False) -> None:
+        types = await self._active_types()
+        if not types:
+            await self.wa.send_text(phone, "Prices aren't available right now — please try again in a bit, or type *agent*.")
+            return
+        suffix = ":o" if offer else ""
+        rows = [{"id": f"pt:{t['_id']}{suffix}", "title": _short(t.get("name", "Type"))} for t in types[:10]]
+        body = "Which vehicle would you like today's offers for? 👇" if offer else "Which vehicle would you like prices for? 👇"
+        await self.wa.send_list(phone, body, "Vehicle Type", rows)
+
+    async def _price_addons(self, tid: str, is_bike: bool) -> list[dict]:
+        services = await self.services.find_all_no_paginate({"is_active": True}, sort_by="display_order", sort_order=1)
+        return [
+            s for s in services
+            if s.get("is_addon") and (not s.get("vehicle_types") or tid in s["vehicle_types"])
+            and (is_bike or not BookingService._BIKE_WORD.search(s.get("name") or ""))  # a bike extra is not a car one
+        ]
+
+    async def _ask_price_service(self, phone: str, vt: dict, offer: bool = False) -> None:
+        tid = str(vt["_id"])
+        name = vt.get("name") or "vehicle"
+        options = await self._service_options(tid)
+        addons = await self._price_addons(tid, bool(BookingService._BIKE_WORD.search(name)))
+        if not options and not addons:
+            await self.wa.send_text(phone, f"Sorry — no services are available for {name} right now.")
+            await self._ask_price_type(phone, offer)
+            return
+        suffix = ":o" if offer else ""
+        first_time = await self.booking_service._first_time_eligible(phone)
+        rows = [
+            {"id": f"ps:{tid}:{s['_id']}{suffix}", "title": _short(self._display_name(s)), "description": self._price_text(s, tid, first_time)}
+            for s in options[: 9 if addons else 10]
+        ]
+        if addons:
+            rows.append({"id": f"ps:{tid}:addons{suffix}", "title": "Add-Ons", "description": "Extras you can add to a wash"})
+        await self.wa.send_list(phone, f"Which service for your {name}? Tap one to see its price 👇", "Choose Service", rows)
+
+    async def _on_price_pick(self, wa_id: str, phone: str, convo: dict, value: str) -> None:
+        parts = value.split(":")
+        offer = parts[-1] == "o"
+        if offer:
+            parts = parts[:-1]
+        if parts[0] == "ptypes":
+            await self._ask_price_type(phone, offer)
+            return
+        vt = await self.vehicle_types.find_by_id(parts[1]) if len(parts) > 1 else None
+        if not vt or not vt.get("is_active", True):
+            await self.wa.send_text(phone, "That vehicle type isn't available any more — please pick again.")
+            await self._ask_price_type(phone, offer)
+            return
+        pick = parts[2] if len(parts) > 2 else ""
+        if parts[0] == "pt":
+            await self._ask_price_service(phone, vt, offer)
+        elif parts[0] == "ps":
+            await self._send_service_price(phone, vt, pick, offer)
+        elif parts[0] == "pbook":
+            await self._price_book(wa_id, phone, convo, vt, pick)
+
+    async def _send_service_price(self, phone: str, vt: dict, pick: str, offer: bool = False) -> None:
+        tid = str(vt["_id"])
+        type_name = vt.get("name") or "vehicle"
+        suffix = ":o" if offer else ""
+        first_time = await self.booking_service._first_time_eligible(phone)
+        more = [{"id": f"pt:{tid}{suffix}", "title": "Other Service"}, {"id": f"ptypes{suffix}", "title": "Other Vehicle"}]
+        if pick == "addons":
+            addons = await self._price_addons(tid, bool(BookingService._BIKE_WORD.search(type_name)))
+            lines = [f"• {self._display_name(a)} — {self._price_text(a, tid, first_time)}" for a in addons[:12]]
+            await self.wa.send_buttons(phone, f"*Add-Ons* · {type_name}\n" + ("\n".join(lines) or "No add-ons right now.") + "\n\nAdd these while booking.", more)
+            return
+        service = await self.services.find_by_id(pick)
+        if not service or not service.get("is_active", True) or service.get("is_addon") or (service.get("vehicle_types") and tid not in service["vehicle_types"]):
+            await self.wa.send_text(phone, "That service isn't available any more — please pick again.")
+            await self._ask_price_service(phone, vt, offer)
+            return
+        group = service.get("variant_group")
+        members = [service]
+        if group:
+            members = [m for m in await self.services.find_all_no_paginate({"is_active": True, "variant_group": group}) if not m.get("vehicle_types") or tid in m["vehicle_types"]] or [service]
+            members.sort(key=self._variant_count)
+        if len(members) > 1:
+            body = "\n".join(f"• {m.get('name') or 'Service'} — {self._price_text(m, tid, first_time)}" for m in members)
+        else:
+            body = f"💰 {self._price_text(service, tid, first_time)}"
+        foot = []
+        if any(m.get("prepaid_only") for m in members):
+            foot.append("Prepaid offers are confirmed once paid online.")
+        if any(m.get("charges_travel") for m in members):
+            try:
+                cfg = await self.booking_service.pricing_service.get_pricing_config()
+                foot.append(f"🚗 Distance charge beyond {float(cfg['customer_free_km']):g} km (₹{float(cfg['customer_per_km_rate']):g}/km), shown before you confirm.")
+            except Exception:  # noqa: BLE001
+                foot.append("🚗 A distance charge may apply, shown before you confirm.")
+        else:
+            foot.append("Price shown is final.")
+        if offer:
+            foot.append("🏷 Have a coupon code? Tap *Have A Coupon Code* on the final summary.")
+        text = f"*{self._display_name(service)}* · {type_name}\n{body}\n\n" + "\n".join(foot)
+        await self.wa.send_buttons(phone, text, [{"id": f"pbook:{tid}:{service['_id']}", "title": "Book Now"}, *more])
+
+    async def _price_book(self, wa_id: str, phone: str, convo: dict, vt: dict, service_id: str) -> None:
+        """"Book Now" under a price: starts a booking with that vehicle and
+        service already chosen — unless one is already being built."""
+        customer_id = await self._live_customer_id(wa_id, convo.get("customer_id"))
+        if not customer_id:
+            await self.wa.send_text(phone, "To book, please tell me your name 🙂")
+            await self._set_state(wa_id, "collect_name", {})
+            return
+        state, data = convo.get("state"), convo.get("data") or {}
+        if state in _DRAFT_STATES:
+            await self.wa.send_text(phone, "You're already booking a wash — just pick from the options below. 👇")
+            await self._reoffer(wa_id, phone, customer_id, state, data)
+            return
+        service = await self.services.find_by_id(service_id)
+        if not service or not service.get("is_active", True):
+            await self.wa.send_text(phone, "That service isn't available any more — please pick again.")
+            await self._ask_price_service(phone, vt)
+            return
+        data = {"lines": [], "cur": {"vehicle_type": str(vt["_id"]), "type_name": vt.get("name") or "vehicle", "count": 1}}
+        await self._set_state(wa_id, "q_service", data)
+        await self._on_service(wa_id, phone, customer_id, data, "reply", f"svc:{service['_id']}")
+
+    # -- the full price list (one vehicle's, used mid-booking) --
 
     async def _send_prices(self, phone: str, customer_id: str | None, text: str, offer: bool = False) -> None:
         for message in await self._price_messages(phone, text, offer=offer):

@@ -7,7 +7,6 @@ const NAVY = "#0E1A33";
 const BLUE = "#0A66F0";
 const MUTED = "#5F6878";
 const YELLOW = "#FFD21F";
-const ICON_BG = "#EEF3FA";
 const INSTAGRAM_URL = "https://www.instagram.com/blussitwash/";
 
 // Hero photos — WebP copies of the shoot images (the PNGs are 2+ MB each).
@@ -36,37 +35,6 @@ const AVATARS: Avatar[] = [
 ];
 
 /* ---------- solid icons, as drawn in the design ---------- */
-function LeafIcon() {
-  return (
-    <svg width="68%" height="68%" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M20.5 3C11.4 3 4.5 7.6 4.5 14.6c0 2.2.7 4.2 1.9 5.7 1.4.8 3 1.2 4.8 1.2C17.6 21.5 21.4 14.4 20.5 3Z" fill="#12A150" />
-      <path d="M6.6 20.4C8.9 15.2 12.6 11.3 17 8.8" stroke="#FFFFFF" strokeWidth="1.7" strokeLinecap="round" fill="none" />
-    </svg>
-  );
-}
-function HouseIcon() {
-  return (
-    <svg width="68%" height="68%" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 2.6 2.4 10.7a1 1 0 0 0 .64 1.77H4.8V20a1 1 0 0 0 1 1h12.4a1 1 0 0 0 1-1v-7.53h1.76a1 1 0 0 0 .64-1.77L12 2.6Z" fill={BLUE} />
-      <rect x="10.1" y="14.6" width="3.8" height="6.4" rx="0.7" fill="#FFFFFF" />
-    </svg>
-  );
-}
-function ShieldIcon() {
-  return (
-    <svg width="68%" height="68%" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 2.2 4.2 5.1v6.3c0 4.7 3.2 8.9 7.8 10.4 4.6-1.5 7.8-5.7 7.8-10.4V5.1L12 2.2Z" fill={BLUE} />
-      <path d="m8.4 12.1 2.5 2.5 4.8-5" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </svg>
-  );
-}
-
-const FEATURES: { Icon: () => ReactNode; line1: string; line2: string }[] = [
-  { Icon: LeafIcon, line1: "Waterless", line2: "Options" },
-  { Icon: HouseIcon, line1: "At Your", line2: "Doorstep" },
-  { Icon: ShieldIcon, line1: "Trusted", line2: "Professionals" },
-];
-
 function CountUp({ to, decimals = 0, duration = 1800, group = true }: { to: number; decimals?: number; duration?: number; group?: boolean }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [value, setValue] = useState(0);
@@ -154,7 +122,6 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
             {/* Instagram sits beside the badge, in the photo's open sky —
                 -my-1 keeps the row the badge's height, so nothing moves. */}
             <div className="flex items-center gap-3">
-              <Badge />
               <InstagramLink className="-my-1 h-9 w-9" />
             </div>
             <h1
@@ -168,10 +135,8 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
               <span style={{ color: BLUE }}>Your Doorstep.</span>
             </h1>
             <p className="mt-5 max-w-[470px] text-[17px] leading-[1.55]" style={{ color: MUTED }}>
-              Professional car wash at your location in Indore. Waterless options. Cleaner cars. Happier drives.
+              Professional car wash at your location in Indore.
             </p>
-
-            <Features className="mt-7" />
 
             <div className="mt-8 flex items-center gap-4">
               <BookButton onClick={() => onBook()} className="h-[56px] w-[210px] text-[16px]" />
@@ -218,16 +183,10 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
           />
 
           <div className="absolute left-0 top-0 z-10 flex flex-col" style={{ padding: "4vw 0 0 5vw" }}>
-            <span
-              className="inline-flex w-fit items-center rounded-full bg-[#E8F0FE]/95 font-bold uppercase tracking-[0.05em]"
-              style={{ color: "#1A5CE0", fontSize: "2.5vw", padding: "0.45em 0.9em" }}
-            >
-              Premium doorstep car care
-            </span>
             {/* The phone layout's copy of the headline is a <p>: the page has ONE <h1> (the desktop block above), however the layouts swap. */}
             <p
               className="font-display font-extrabold leading-[1.05] tracking-[-0.03em]"
-              style={{ color: NAVY, fontSize: "6.8vw", marginTop: "2.6vw" }}
+              style={{ color: NAVY, fontSize: "6.8vw" }}
             >
               Your Car
               <br />
@@ -261,55 +220,12 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
         {/* A frosted white sheet that rides up over the bottom of the photo, so
             the actions sit higher and stand out; grows with the screen. */}
         <div className="relative z-10 -mt-[12vw] rounded-t-[7vw] bg-white/80 px-[5vw] pb-[3vw] pt-[4.5vw] shadow-[0_-10px_30px_rgba(15,30,60,0.10)] backdrop-blur-xl">
-          <Features compact />
-          <BookButton onClick={() => onBook()} className="mt-[5vw] h-[clamp(52px,12vw,72px)] w-full text-[clamp(15.5px,3.7vw,22px)]" />
+          <BookButton onClick={() => onBook()} className="h-[clamp(52px,12vw,72px)] w-full text-[clamp(15.5px,3.7vw,22px)]" />
           <WatchButton className="mt-[3vw] h-[clamp(50px,11.5vw,68px)] w-full text-[clamp(14.5px,3.5vw,21px)]" />
           <TrustRow compact className="mt-[3.5vw]" />
         </div>
       </div>
     </section>
-  );
-}
-
-function Badge({ small = false }: { small?: boolean }) {
-  return (
-    <span
-      className={`inline-flex w-fit items-center rounded-full bg-[#E8F0FE] font-bold uppercase tracking-[0.05em] ${
-        small ? "px-3 py-1.5 text-[10px]" : "px-3.5 py-1.5 text-[11.5px]"
-      }`}
-      style={{ color: "#1A5CE0" }}
-    >
-      Premium doorstep car care
-    </span>
-  );
-}
-
-/** Three trust points with thin dividers between them. */
-function Features({ compact = false, className = "" }: { compact?: boolean; className?: string }) {
-  return (
-    <div className={`flex items-center ${compact ? "justify-between" : "w-max"} ${className}`}>
-      {FEATURES.map(({ Icon, line1, line2 }, i) => (
-        <div key={line1} className={`flex items-center ${compact ? "gap-[2vw]" : "gap-3"}`}>
-          {i > 0 && <span className={`self-stretch border-l border-[#E4E9F1] ${compact ? "mr-[1.5vw]" : "mx-5"}`} aria-hidden="true" />}
-          <span
-            // Below 360 px the three points don't fit with their icons —
-            // the words stay, the circles go ("Professionals" was clipped).
-            className={`flex shrink-0 items-center justify-center rounded-full ${compact ? "h-[clamp(36px,9vw,60px)] w-[clamp(36px,9vw,60px)] max-[359px]:hidden" : "h-12 w-12"}`}
-            style={{ backgroundColor: ICON_BG }}
-          >
-            <Icon />
-          </span>
-          <span className={`leading-[1.25] ${compact ? "text-[clamp(11.5px,2.95vw,18px)]" : "text-[14.5px]"}`}>
-            <span className="block font-semibold" style={{ color: NAVY }}>
-              {line1}
-            </span>
-            <span className={`block ${compact ? "" : "font-semibold"}`} style={{ color: compact ? MUTED : NAVY }}>
-              {line2}
-            </span>
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }
 

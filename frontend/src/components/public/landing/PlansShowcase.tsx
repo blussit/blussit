@@ -9,9 +9,7 @@ import { useAuth } from "../../../context/AuthContext";
 import { CustomPlanEnquiryModal } from "../../shared/CustomPlanEnquiryModal";
 import { bikeTypeIds } from "../../../lib/serviceMix";
 import { cheapestMonthlyPassPrice } from "../../../lib/passPricing";
-import { titleCase } from "./shared";
 import { SocietyRequestCard } from "./SocietyRequestCard";
-import type { Service } from "../../../types";
 
 const MONTHLY_IMG = "/img/plans-card1-800.webp";
 const CUSTOM_IMG = "/img/plans-card2-800.webp";
@@ -44,15 +42,6 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
   // Bike-only vehicle types are excluded so the headline always reflects a car wash.
   const bikeIds = bikeTypeIds(vehicleTypes);
 
-  const washes = Array.from(
-    new Set(
-      active
-        .flatMap((plan) => plan.included_service_ids ?? [])
-        .map((sid) => services.find((s) => s.id === sid))
-        .filter((s): s is Service => !!s && !(s.vehicle_types?.length && s.vehicle_types.every((t) => bikeIds.has(t))))
-        .map((s) => s.name)
-    )
-  );
   // Per MONTH: a quarterly/yearly plan's count (12, 48) isn't a monthly figure.
   const maxWashesAMonth = Math.max(0, ...active.filter((p) => (p.billing_cycle || "monthly") === "monthly").map((p) => p.total_service_count || 0));
   // The real, buyable minimum from the live plans (pre-rendered into the
@@ -80,9 +69,6 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
               </svg>
             </span>
           </h2>
-          <p className="mt-2 max-w-[680px] text-[14px] text-[#64748B] sm:text-[15px]">
-            Save more with our convenient monthly car care plans. Hassle-free, doorstep service.
-          </p>
         </div>
 
         {/* Cards */}
@@ -94,7 +80,6 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
             <div className="group relative flex flex-col overflow-hidden rounded-[22px] border border-[#E4E9F0] bg-white text-[#071A3D] shadow-[0_6px_22px_rgba(15,30,60,0.05)] sm:flex-row lg:h-full lg:flex-col">
               <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
                 <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[26px]">Monthly Pass</h3>
-                <p className="mt-1 text-[13px] text-[#64748B]">Price depends on your car and wash</p>
 
                 {fromPrice != null && (
                   <div className="mt-1.5 flex items-baseline gap-1.5">
@@ -105,13 +90,9 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
                 )}
 
                 <ul className="my-3 space-y-1.5">
-                  <PlanLine
-                    Icon={Droplet}
-                    title="Choose Your Service"
-                    sub={washes.length > 0 ? washes.map((w) => titleCase(w)).join(", ") : "Pick the wash that fits your car"}
-                  />
+                  <PlanLine Icon={Droplet} title="Choose Your Service" />
                   <PlanLine Icon={Car} title="One Car Per Pass" sub={washesLine} />
-                  <PlanLine Icon={CalendarCheck} title="At Your Doorstep" sub="Book anytime, we come to you" />
+                  <PlanLine Icon={CalendarCheck} title="At Your Doorstep" />
                 </ul>
 
                 <button
@@ -148,13 +129,13 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
             <div className="relative z-10 flex flex-1 flex-col p-5 sm:w-[56%] sm:flex-none sm:p-6 lg:w-full lg:flex-1 lg:p-7">
               <h3 className="font-display text-[22px] font-extrabold leading-tight sm:text-[24px]">Custom Plan</h3>
               <p className="mt-1 text-[13px] leading-snug text-[#64748B]">
-                More cars, more washes, or a fixed time every week? Tell us what you need and we'll create a plan for you.
+                More cars or a fixed schedule? We'll build a plan for you.
               </p>
 
               <ul className="mb-5 mt-5 space-y-3">
-                <PlanLine Icon={Users} title="Any Number Of Vehicles" sub="Personal or business fleets" />
-                <PlanLine Icon={CalendarClock} title="Your Own Schedule" sub="Weekly, bi-weekly or custom" />
-                <PlanLine Icon={FileText} title="We Call You Back" sub="With the best price for your needs" />
+                <PlanLine Icon={Users} title="Any Number Of Vehicles" />
+                <PlanLine Icon={CalendarClock} title="Your Own Schedule" />
+                <PlanLine Icon={FileText} title="We Call You Back" />
               </ul>
 
               <button
@@ -195,7 +176,7 @@ export function PlansShowcase({ id = "plans" }: { id?: string; showEmpty?: boole
   );
 }
 
-function PlanLine({ Icon, title, sub }: { Icon: LucideIcon; title: string; sub: string }) {
+function PlanLine({ Icon, title, sub }: { Icon: LucideIcon; title: string; sub?: string }) {
   return (
     <li className="flex items-center gap-3">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#EEF4FF]">
@@ -203,7 +184,7 @@ function PlanLine({ Icon, title, sub }: { Icon: LucideIcon; title: string; sub: 
       </span>
       <span className="min-w-0 leading-tight">
         <span className="block text-[13.5px] font-bold text-[#071A3D]">{title}</span>
-        <span className="mt-0.5 block text-[12px] text-[#64748B]">{sub}</span>
+        {sub && <span className="mt-0.5 block text-[12px] text-[#64748B]">{sub}</span>}
       </span>
     </li>
   );

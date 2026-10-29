@@ -203,8 +203,8 @@ function ArrowButton({ side, disabled, onClick }: { side: "left" | "right"; disa
  * (shown as ticks), or a single sentence when that's how it's written. */
 function included(description?: string | null): { items: string[]; summary: string | null } {
   const { summary, items } = parseIncludes(description);
-  if (items.length) return { items: items.slice(0, 3), summary: null };
-  return { items: [], summary: summary || "Professional doorstep care for your vehicle." };
+  if (items.length) return { items: items.slice(0, 2), summary: null };
+  return { items: [], summary: summary || null };
 }
 
 function serviceIcon(name: string): { Icon: LucideIcon; color: string } {
@@ -288,11 +288,11 @@ function ServiceCard({ group, index }: { group: ServiceGroup<Service>; index: nu
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="mt-1.5 line-clamp-2 text-[13px] leading-[1.45] sm:text-[12px] md:text-[13.5px]" style={{ color: MUTED }}>
+        ) : includes.summary ? (
+          <p className="mt-1.5 line-clamp-1 text-[13px] leading-[1.45] sm:text-[12px] md:text-[13.5px]" style={{ color: MUTED }}>
             {includes.summary}
           </p>
-        )}
+        ) : null}
         <p className="mt-2.5 flex items-center gap-1.5 text-[12px] sm:mt-2 sm:text-[11.5px] md:mt-3 md:text-[13px]" style={{ color: MUTED }}>
           <Clock className="h-3.5 w-3.5 shrink-0 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" strokeWidth={2} />
           {s.duration_minutes || 45} mins

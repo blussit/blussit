@@ -51,10 +51,6 @@ export function FaqSection({ id = "faq" }: { id?: string }) {
             </svg>
           </span>
         </h2>
-
-        <p className="mt-4 text-[15px] leading-6 text-[#64748B] sm:text-[16px]">
-          Everything customers usually ask before their first doorstep wash.
-        </p>
       </div>
 
       {/* FAQ Accordion */}

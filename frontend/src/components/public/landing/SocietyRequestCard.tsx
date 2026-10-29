@@ -44,9 +44,6 @@ export function SocietyRequestCard() {
           <h3 className="mt-3 font-display text-[22px] font-extrabold leading-tight text-[#0E1A33] sm:text-[24px]">
             Every Car In Your Society, Washed Daily
           </h3>
-          <p className="mt-2 text-[13px] leading-snug text-[#5F6878]">
-            A dedicated captain comes every morning, plus premium washes each month. Residents join from one link.
-          </p>
         </div>
 
         <div className="mt-5 lg:mt-6">

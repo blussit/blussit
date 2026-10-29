@@ -14,7 +14,6 @@ import {
   CreditCard,
   Gift,
   Info,
-  Lock,
   MapPin,
   Plus,
   ShieldCheck,
@@ -1646,10 +1645,10 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
           )}
         </span>
       </div>
-      {!isLog && (
+      {!isLog && (liveQuote?.travel_pending || (!liveQuote && coverage !== "covered" && billed.some((x) => x.charges_travel)) || quoteUnavailable) && (
         <p className="flex items-center gap-1.5 text-xs text-[#5F6878]">
           <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#16A34A]" aria-hidden="true" />
-          {liveQuote ? (liveQuote.travel_pending ? "Any distance charge shows once you add the address." : "Price shown is final — no hidden charges.") : coverage !== "covered" && billed.some((s) => s.charges_travel) ? "Any distance charge shows once you add the address." : quoteUnavailable ? "Couldn't confirm the price." : quoting || step === 1 ? "Checking the price…" : "Estimated price — confirmed before you book."}
+          {quoteUnavailable ? "Couldn't confirm the price." : "Distance charge shows after you add the address."}
           {quoteUnavailable && (
             <button type="button" onClick={() => void refetchQuote()} disabled={quoting} className="font-semibold text-[#0A66F0] hover:underline disabled:opacity-60">
               {quoting ? "Trying…" : "Try Again"}
@@ -1914,19 +1913,16 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const quotedPhone = !!quoteRequest?.customer_phone;
   const priceDependsOnNumber =
     mode === "public" && !!liveQuote && liveQuote.first_time_savings > 0 && (!quotedPhone || liveQuote.first_time_confirmed === false);
+  // Only what the customer needs to act on — a final price says nothing.
   const priceNote = !lines.length
-    ? "Pick your car type and service to see the price."
+    ? ""
     : liveQuote?.travel_pending
-      ? "Any distance charge shows once you add the address."
+      ? "Distance charge shows after you add the address."
       : repricedTotal != null
-        ? "Updated for your number — this is the price you'll pay."
+        ? "Price updated for your number."
         : liveQuote && priceDependsOnNumber
-          ? "First-wash price for new numbers — confirmed for yours before you book."
-          : liveQuote
-            ? "Price shown is final — no hidden charges."
-            : quoteUnavailable || quoteError
-              ? ""
-              : "Checking the price…";
+          ? "First-wash price — confirmed for your number."
+          : "";
   const bookLabel = !liveQuote
     ? quoteUnavailable || quoteError
       ? "Price Not Confirmed"
@@ -2027,11 +2023,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         {bookLabel} {!submitting && priceConfirmed && <ArrowRight className="h-5 w-5" />}
       </button>
     );
-  const secureNote = (
-    <p className="flex items-center justify-center gap-1.5 text-[12px] text-[#5F6878]">
-      <Lock className="h-3.5 w-3.5" /> Secure &amp; Safe Booking
-    </p>
-  );
 
   const summaryRow = (icon: ReactNode, label: string, value: ReactNode, muted = false) => (
     <div className="flex items-start gap-3">
@@ -2083,7 +2074,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
       <div className="my-4 h-px bg-[#EEF1F5]" />
       {billBlock}
       <div className="mt-4">{ctaButton}</div>
-      <div className="mt-3">{secureNote}</div>
     </aside>
   );
 
@@ -3299,7 +3289,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     <div className="space-y-3 @4xl/book:hidden">
                       {lines.length > 0 && <div className={`${CARD} p-4`}>{billBlock}</div>}
                       {ctaButton}
-                      {secureNote}
                     </div>
                   </>
                 ) : (
@@ -3457,7 +3446,6 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     <div className="space-y-3 @4xl/book:hidden">
                       <div className={`${CARD} p-4`}>{billBlock}</div>
                       {ctaButton}
-                      {secureNote}
                     </div>
                   </>
                 )}
