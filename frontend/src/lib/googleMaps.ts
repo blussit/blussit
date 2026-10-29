@@ -100,8 +100,38 @@ export type PickedAddress = {
   formatted: string;
 };
 
+// Every Geocoder.geocode() is a billed request. A pin that settles on the
+// same spot again (re-opening the picker, nudging back, GPS jitter, a repeat
+// booking) must not pay twice: answers are kept per ~11 m cell for the tab
+// session, and two callers asking for one cell at once share one request.
+const geocodeCache = new Map<string, PickedAddress | null>();
+const geocodeInflight = new Map<string, Promise<PickedAddress | null>>();
+const GEOCODE_CACHE_MAX = 200;
+
 /** Reverse-geocodes a point into the fields our address form uses. */
 export async function reverseGeocode(lat: number, lng: number): Promise<PickedAddress | null> {
+  const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const withPin = (a: PickedAddress | null) => (a ? { ...a, latitude: lat, longitude: lng } : null);
+  if (geocodeCache.has(key)) return withPin(geocodeCache.get(key) ?? null);
+  let pending = geocodeInflight.get(key);
+  if (!pending) {
+    pending = lookupAddress(lat, lng)
+      .then((found) => {
+        // Only remember real answers — a null may be a transient failure
+        // and must be allowed to retry.
+        if (found) {
+          if (geocodeCache.size >= GEOCODE_CACHE_MAX) geocodeCache.delete(geocodeCache.keys().next().value as string);
+          geocodeCache.set(key, found);
+        }
+        return found;
+      })
+      .finally(() => geocodeInflight.delete(key));
+    geocodeInflight.set(key, pending);
+  }
+  return withPin(await pending);
+}
+
+async function lookupAddress(lat: number, lng: number): Promise<PickedAddress | null> {
   const geocoding = await getLib("geocoding");
   if (!geocoding) return null;
   const geocoder = new geocoding.Geocoder();

@@ -1142,6 +1142,7 @@ class BookingService:
         _route = None if _completed_by else await road_distance_eta(
             _center_lat, _center_lng,
             address.get("latitude"), address.get("longitude"),
+            db=self.db,
         )
         travel_estimate = {
             "travel_distance_km": _route["km"] if _route else None,
@@ -9783,7 +9784,7 @@ class BookingService:
         if store["km"] is None and dest_lat is not None:
             center = await self.center_repo.find_by_id(booking["service_center_id"])
             c_lat, c_lng = self._center_coords(center)
-            computed = await road_distance_eta(c_lat, c_lng, dest_lat, dest_lng)
+            computed = await road_distance_eta(c_lat, c_lng, dest_lat, dest_lng, db=self.db)
             if computed:
                 store = computed
                 await self.repo.update_by_id(booking_id, {
@@ -9800,7 +9801,7 @@ class BookingService:
             captain = await self.user_repo.find_by_id(booking["captain_id"])
             loc = (captain or {}).get("last_known_location")
             if loc:
-                leg = await road_distance_eta(loc.get("latitude"), loc.get("longitude"), dest_lat, dest_lng)
+                leg = await road_distance_eta(loc.get("latitude"), loc.get("longitude"), dest_lat, dest_lng, db=self.db, live=True)
                 if leg:
                     captain_leg = {
                         **leg,

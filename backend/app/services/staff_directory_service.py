@@ -329,7 +329,7 @@ class StaffDirectoryService:
                     break
                 if row["latitude"] is None:
                     continue
-                leg = await road_distance_eta(row["latitude"], row["longitude"], address["latitude"], address["longitude"])
+                leg = await road_distance_eta(row["latitude"], row["longitude"], address["latitude"], address["longitude"], db=self.db, live=True)
                 budget -= 1
                 if leg:
                     row["road_km"] = leg["km"]
