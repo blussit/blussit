@@ -1128,17 +1128,11 @@ class WhatsAppBotService:
         foot = []
         if any(m.get("prepaid_only") for m in members):
             foot.append("Prepaid offers are confirmed once paid online.")
-        if any(m.get("charges_travel") for m in members):
-            try:
-                cfg = await self.booking_service.pricing_service.get_pricing_config()
-                foot.append(f"🚗 Distance charge beyond {float(cfg['customer_free_km']):g} km (₹{float(cfg['customer_per_km_rate']):g}/km), shown before you confirm.")
-            except Exception:  # noqa: BLE001
-                foot.append("🚗 A distance charge may apply, shown before you confirm.")
-        else:
-            foot.append("Price shown is final.")
+        # No distance-charge line here: it depends on where the customer is, so
+        # it is shown with the booking summary once their location is known.
         if offer:
             foot.append("🏷 Have a coupon code? Tap *Have A Coupon Code* on the final summary.")
-        text = f"*{self._display_name(service)}* · {type_name}\n{body}\n\n" + "\n".join(foot)
+        text = f"*{self._display_name(service)}* · {type_name}\n{body}" + ("\n\n" + "\n".join(foot) if foot else "")
         await self.wa.send_buttons(phone, text, [{"id": f"pbook:{tid}:{service['_id']}", "title": "Book Now"}, *more])
 
     async def _price_book(self, wa_id: str, phone: str, convo: dict, vt: dict, service_id: str) -> None:
@@ -1204,7 +1198,6 @@ class WhatsAppBotService:
             return out + (f" · {' · '.join(extras)}" if extras else "")
 
         blocks = ["🏷 *Current Offers & Prices*" if offer else "💰 *Our Prices*"]
-        travel_names: list[str] = []
         any_prepaid = any_first = False
         for t in shown:
             tid = str(t["_id"])
@@ -1215,7 +1208,6 @@ class WhatsAppBotService:
             for members in groups.values():
                 low = min(members, key=self._variant_count)
                 rows.append(line(low, tid, from_=len(members) > 1))
-                travel_names += [self._display_name(m) for m in members if m.get("charges_travel") and self._display_name(m) not in travel_names]
                 any_prepaid = any_prepaid or any(m.get("prepaid_only") for m in members)
                 any_first = any_first or BookingService.price_view(low, tid, first_time)["first_time"]
             if rows:
@@ -1239,20 +1231,12 @@ class WhatsAppBotService:
             foot.append("First-wash prices apply to your first booking with us.")
         if any_prepaid:
             foot.append("Prepaid offers are confirmed once paid online.")
-        if travel_names:
-            who = " & ".join(travel_names[:3])
-            try:
-                cfg = await self.booking_service.pricing_service.get_pricing_config()
-                foot.append(f"🚗 {who}: distance charge beyond {float(cfg['customer_free_km']):g} km (₹{float(cfg['customer_per_km_rate']):g}/km), shown before you confirm.")
-            except Exception:  # noqa: BLE001
-                foot.append(f"🚗 {who}: a distance charge may apply, shown before you confirm.")
-        else:
-            foot.append("Price shown is final.")
         if offer:
             foot.append("🏷 Have a coupon code? Tap *Have A Coupon Code* on the final summary.")
         if not named and len(shown) < len(types):
             foot.append("Bike prices: type *bike price*.")
-        blocks.append("\n".join(foot))
+        if foot:
+            blocks.append("\n".join(foot))
         return intent.split_messages(blocks)
 
     # -- re-offering the current step --
@@ -2472,7 +2456,8 @@ class WhatsAppBotService:
                 out += f"➕ Add-ons (paid): ₹{quote['plan_extras_total']:g}\n"
         travel = quote.get("travel")
         if travel and travel["charge"] > 0:
-            out += f"🚗 Distance charge ({travel['distance_km']:g} km): ₹{travel['charge']:g}\n"
+            free = f" · first {travel['free_km']:g} km free" if travel.get("free_km") else ""
+            out += f"🚗 Distance charge ({travel['distance_km']:g} km{free}): ₹{travel['charge']:g}\n"
         # Wallet (spec 1.1): money owed from before rides on this booking;
         # credit is spent on it.
         if quote.get("previous_balance_due"):

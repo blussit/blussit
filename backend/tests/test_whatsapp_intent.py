@@ -122,7 +122,7 @@ async def test_price_question_asks_the_vehicle_then_the_service_then_shows_that_
     assert card["interactive_kind"] == "buttons" and f"₹{expected:g}" in card["message"] and star["name"] in card["message"]
     assert [b["id"] for b in card["options"]][0] == f"pbook:{s['hatch']}:{s['star']}"
     assert [b["title"] for b in card["options"]] == ["Book Now", "Other Service", "Other Vehicle"]
-    assert "Price shown is final" in card["message"] or "distance charge" in card["message"].lower()
+    assert "distance" not in card["message"].lower()  # that depends on the location: shown with the booking summary
     # Asking prices never touched the conversation state.
     assert (await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]}))["state"] in (None, "menu")
     # Book Now continues straight into the booking with that vehicle + service chosen.
@@ -485,7 +485,13 @@ async def test_no_coupon_at_the_coupon_question_returns_to_the_summary(db, clean
     assert (await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]}))["state"] == "confirm"
 
 
-async def test_a_car_price_flow_has_no_bike_add_on_and_names_the_offer_that_adds_a_distance_charge(db, clean):
+async def test_the_booking_summary_explains_the_distance_charge_with_the_free_km():
+    line = WhatsAppBotService._bill_extras({"travel": {"charge": 19, "distance_km": 12.75, "free_km": 5.0, "per_km_rate": 2.5}})
+    assert "Distance charge (12.8 km · first 5 km free): ₹19" in line or "Distance charge (12.75 km · first 5 km free): ₹19" in line
+    assert "Distance" not in WhatsAppBotService._bill_extras({"travel": {"charge": 0, "distance_km": 3.0, "free_km": 5.0}})
+
+
+async def test_a_car_price_flow_has_no_bike_add_on_and_never_mentions_a_distance_charge(db, clean):
     s = await _after_hi(db, clean)
     await say(s, text="price")
     await say(s, reply=f"pt:{s['hatch']}")
@@ -499,7 +505,7 @@ async def test_a_car_price_flow_has_no_bike_add_on_and_names_the_offer_that_adds
         if svc.get("vehicle_types") and s["hatch"] not in svc["vehicle_types"]:
             continue
         await say(s, reply=f"ps:{s['hatch']}:{svc['_id']}")
-        assert "distance charge" in (await last(db, s))["message"].lower()
+        assert "distance" not in (await last(db, s))["message"].lower()  # never in a price answer
     await say(s, text="bike ka rate")
     bike = await last(db, s)
     bike_type = next(t for t in await _types(db) if "bike" in t["name"].lower())
