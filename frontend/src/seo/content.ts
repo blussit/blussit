@@ -190,6 +190,8 @@ export const HOW_IT_WORKS = [
 export const INDORE_FAQS: Faq[] = [
   { q: "Do You Wash Cars At Home Anywhere In Indore?", a: "Yes. We come to any colony in Indore — your home, office or society parking. Drop a pin while booking; if a distance charge applies to your address, you see it before you confirm." },
   { q: "Is There A Car Wash Near Me That Comes To My Home?", a: "Yes — that is exactly what Blussit does. Instead of finding a car washing service centre near you, book a slot and a captain comes to your doorstep." },
+  { q: "What Home Car Services Do You Offer?", a: "Blussit is a car washing service that comes to you: an exterior Jet Wash, a foam Star Wash with interior vacuum, a waterless wash, interior deep cleaning, bike and scooty wash, and add-ons such as car polish, bike polish and windshield cleaner refill." },
+  { q: "Do You Do Interior And Exterior Car Cleaning At Home?", a: "Yes. Star Wash is an exterior foam wash with an interior vacuum and dashboard polish. Deep Cleaning cleans the seats, floor, mats, pedals and door gates along with a foam wash. Jet Wash covers the outside only." },
   { q: "What Time Can I Book A Car Wash?", a: "Slots run from 7:00 AM to 7:00 PM, all 7 days. Pick any open slot while booking." },
   { q: "How Do I Pay?", a: "Pay in cash to the captain after the wash, or online by UPI, card or net banking. A few offer prices must be paid online when you book — the booking page tells you when." },
   { q: "Are Your Captains Verified?", a: "Every captain is ID-verified by our team before their first job, and takes before and after photos of every wash." },

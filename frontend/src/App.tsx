@@ -23,6 +23,7 @@ import LandingPage from "./pages/public/LandingPage";
 // spinner before showing the very same page.
 import ServicesPage from "./pages/public/seo/ServicesPage";
 import ServiceDetailPage from "./pages/public/seo/ServiceDetailPage";
+import AddOnsPage from "./pages/public/seo/AddOnsPage";
 import IndoreCarWashPage from "./pages/public/seo/IndoreCarWashPage";
 import PlansPage from "./pages/public/seo/PlansPage";
 import NotFoundPage from "./pages/public/seo/NotFoundPage";
@@ -182,6 +183,7 @@ export default function App() {
             <Route path="/" element={<LandingPage />} />
             {/* Search-landing pages — keep in step with src/prerender/entry.tsx and src/seo/pages.json. */}
             <Route path="/services" element={<ServicesPage />} />
+            <Route path="/services/add-ons" element={<AddOnsPage />} />
             <Route path="/services/:slug" element={<ServiceDetailPage />} />
             <Route path="/plans" element={<PlansPage />} />
             <Route path="/doorstep-car-wash-indore" element={<IndoreCarWashPage />} />

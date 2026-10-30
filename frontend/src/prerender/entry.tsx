@@ -12,6 +12,7 @@ import { societyLeadApi } from "../api/society";
 import LandingPage from "../pages/public/LandingPage";
 import ServicesPage from "../pages/public/seo/ServicesPage";
 import ServiceDetailPage from "../pages/public/seo/ServiceDetailPage";
+import AddOnsPage from "../pages/public/seo/AddOnsPage";
 import IndoreCarWashPage from "../pages/public/seo/IndoreCarWashPage";
 import PlansPage from "../pages/public/seo/PlansPage";
 import ServicePolicyPage from "../pages/public/ServicePolicyPage";
@@ -65,6 +66,7 @@ function PublicPages() {
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/services" element={<ServicesPage />} />
+      <Route path="/services/add-ons" element={<AddOnsPage />} />
       <Route path="/services/:slug" element={<ServiceDetailPage />} />
       <Route path="/plans" element={<PlansPage />} />
       <Route path="/doorstep-car-wash-indore" element={<IndoreCarWashPage />} />

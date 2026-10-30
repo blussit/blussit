@@ -40,7 +40,7 @@ export default function ServicesPage() {
       <PageHero
         eyebrow="Services & Prices"
         title="Car Wash Services At Your Doorstep In Indore"
-        intro="Every Blussit service is done where your car or bike is parked — at home, at the office or in your society. Pick the wash that fits, see exactly what's included, and book a slot in a minute."
+        intro="Blussit's home car services are done where your car or bike is parked — at home, at the office or in your society. Pick an exterior wash, a foam wash with interior cleaning, a waterless wash or a full deep clean, see exactly what's included, and book a slot in a minute."
       >
         <BookButtons bookHref={bookHref} />
       </PageHero>
@@ -94,7 +94,10 @@ export default function ServicesPage() {
           <div className="mt-8 rounded-[18px] border border-[#D9E8FF] bg-white p-5">
             <h3 className="text-[17px] font-bold">Add-Ons</h3>
             <p className="mt-1 text-[14px]" style={{ color: MUTED }}>
-              Add any of these to a wash while booking.
+              Add any of these to a wash while booking.{" "}
+              <Link to="/services/add-ons" className="font-semibold underline" style={{ color: BLUE }}>
+                See car polish, bike polish and all add-ons
+              </Link>
             </p>
             <ul className="mt-3 flex flex-wrap gap-2">
               {addons.map((a) => (

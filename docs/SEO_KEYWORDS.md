@@ -27,6 +27,7 @@ indexable URLs with no page about any one service or about Indore.
 | Waterless | waterless car wash, waterless car wash indore, car wash without water, dry car wash, eco friendly car wash, car wash basement parking | `/services/waterless-car-wash` |
 | Deep cleaning | car deep cleaning, car deep cleaning indore, car interior cleaning, car interior cleaning at home, car seat cleaning, car mat cleaning, car detailing at home, car interior detailing | `/services/car-deep-cleaning` |
 | Bike | bike wash at home, bike wash near me, bike wash indore, scooty wash at home, two wheeler wash, bike foam wash | `/services/bike-wash` |
+| Add-ons | car polish at home, car polish near me, bike polish, windshield cleaner refill, engine wash, rat spray, car wash add-ons | `/services/add-ons` |
 | Price intent | car wash price indore, car wash charges at home, doorstep car wash price, car deep cleaning price, bike wash price | `/services` |
 | Plans | monthly car wash plan, car wash subscription, monthly car cleaning package, daily car cleaning service, car wash for housing society, society car wash indore, apartment car wash, fleet car washing | `/plans` |
 | Booking | book car wash online, car wash booking indore, car wash appointment | `/book` |
@@ -44,6 +45,13 @@ Rules that keep this working:
   naturally write it. Misspellings are mentioned once, on the Indore page.
 - **New service = new page.** Add it to `SERVICES` in `content.ts` and give
   it a `pages.json` entry — the build fails if the entry is missing.
+
+## AI / LLM visibility
+
+`frontend/public/llms.txt` (served at https://blussit.com/llms.txt) is a plain-text
+summary of the business, services and key pages for AI assistants and crawlers.
+Keep it in step with the site: a new service or page → add its line; never put
+prices in it (they differ by car type and change in the admin).
 
 ## Off-site checklist — this is most of "near me"
 

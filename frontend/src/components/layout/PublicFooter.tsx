@@ -34,6 +34,7 @@ const COLUMNS = [
       { label: "Waterless Car Wash", href: "/services/waterless-car-wash" },
       { label: "Car Deep Cleaning", href: "/services/car-deep-cleaning" },
       { label: "Bike Wash", href: "/services/bike-wash" },
+      { label: "Add-Ons", href: "/services/add-ons" },
     ],
   },
   {

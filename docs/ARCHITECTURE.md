@@ -1582,6 +1582,7 @@ React 19 + TypeScript + Vite (rolldown), React Router 7, TanStack Query 5
 (server state; no Redux), axios, react-hook-form + zod, Tailwind 4,
 framer-motion, Leaflet/OpenStreetMap + Google Maps, react-helmet-async.
 `npm run build` = sitemap → `tsc -b` → `vite build` → **prerender**:
+- **SEO additions (2026-10-30):** `/services/add-ons` (`pages/public/seo/AddOnsPage.tsx`, car/bike polish, windshield cleaner refill, engine wash, rat spray — live names/prices from the catalogue, copy map keyed by add-on slug; an add-on with no copy entry is not listed) is a normal pages.json route + footer link; `public/llms.txt` summarises the business and key pages for AI crawlers (no prices — they vary by car type); `<html lang="en-IN">`; "home car services" / interior-and-exterior wording added to the services hub and the Indore FAQ (`INDORE_FAQS`). Keyword map: docs/SEO_KEYWORDS.md.
 
 - `scripts/prerender.mjs` + `src/prerender/entry.tsx` render every public
   route in `src/seo/pages.json` (`/`, `/doorstep-car-wash-indore`,

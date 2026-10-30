@@ -20,7 +20,7 @@
     {
       "path": "/services",
       "title": "Car Wash Services & Prices in Indore | Blussit",
-      "description": "Doorstep car and bike wash in Indore: Jet Wash, Star Wash foam wash, waterless car wash, car deep cleaning and bike wash. See what's included and prices.",
+      "description": "Home car services in Indore: exterior wash, foam wash with interior cleaning, waterless wash, deep cleaning, bike wash, car polish. See what's included and prices.",
       "changefreq": "weekly",
       "priority": "0.9"
     },
@@ -58,6 +58,13 @@
       "description": "Bike and scooty foam wash at your doorstep in Indore. Book one or two bikes, or add a bike wash to your car wash — Blussit comes to you.",
       "changefreq": "weekly",
       "priority": "0.8"
+    },
+    {
+      "path": "/services/add-ons",
+      "title": "Car Polish & Bike Polish at Home in Indore | Add-Ons | Blussit",
+      "description": "Add car polish, bike polish, windshield cleaner refill, engine wash or rat spray to your Blussit doorstep wash in Indore. See add-on prices.",
+      "changefreq": "weekly",
+      "priority": "0.7"
     },
     {
       "path": "/plans",
