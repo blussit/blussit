@@ -586,6 +586,10 @@ class WhatsAppBotService:
                     convo["customer_id"] = customer_id
                     await self._set_state(wa_id, None, {}, customer_id=customer_id)
                     await self.wa.send_text(phone, f"Thanks {name_text.split()[0]}! Your WhatsApp number is verified. ✅")
+                    # They tapped Book Now under a price: carry on with that
+                    # vehicle and service rather than starting over at the menu.
+                    if await self._resume_price_booking(wa_id, phone, customer_id, data.get("price_book")):
+                        return
                     await self._send_menu(wa_id, phone)
                     return
                 await self._set_state(wa_id, "collect_name", {})
@@ -1164,14 +1168,19 @@ class WhatsAppBotService:
         service already chosen — unless one is already being built."""
         customer_id = await self._live_customer_id(wa_id, convo.get("customer_id"))
         if not customer_id:
+            # Remember the choice: once the name is in, the booking carries on
+            # from it (see _resume_price_booking) instead of restarting.
             await self.wa.send_text(phone, "To book, please tell me your name 🙂")
-            await self._set_state(wa_id, "collect_name", {})
+            await self._set_state(wa_id, "collect_name", {"price_book": {"vt": str(vt["_id"]), "service": service_id}})
             return
         state, data = convo.get("state"), convo.get("data") or {}
         if state in _DRAFT_STATES:
             await self.wa.send_text(phone, "You're already booking a wash — just pick from the options below. 👇")
             await self._reoffer(wa_id, phone, customer_id, state, data)
             return
+        await self._start_price_booking(wa_id, phone, customer_id, vt, service_id)
+
+    async def _start_price_booking(self, wa_id: str, phone: str, customer_id: str, vt: dict, service_id: str) -> None:
         service = await self.services.find_by_id(service_id)
         if not service or not service.get("is_active", True):
             await self.wa.send_text(phone, "That service isn't available any more — please pick again.")
@@ -1180,6 +1189,17 @@ class WhatsAppBotService:
         data = {"lines": [], "cur": {"vehicle_type": str(vt["_id"]), "type_name": vt.get("name") or "vehicle", "count": 1}}
         await self._set_state(wa_id, "q_service", data)
         await self._on_service(wa_id, phone, customer_id, data, "reply", f"svc:{service['_id']}")
+
+    async def _resume_price_booking(self, wa_id: str, phone: str, customer_id: str, pending: dict | None) -> bool:
+        """After a new customer's name: continue the booking they started from a
+        price (vehicle + service already chosen). False → nothing to resume."""
+        if not isinstance(pending, dict) or not pending.get("vt") or not pending.get("service"):
+            return False
+        vt = await self.vehicle_types.find_by_id(pending["vt"])
+        if not vt or not vt.get("is_active", True):
+            return False
+        await self._start_price_booking(wa_id, phone, customer_id, vt, pending["service"])
+        return True
 
     # -- the full price list (one vehicle's, used mid-booking) --
 

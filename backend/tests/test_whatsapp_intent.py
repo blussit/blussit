@@ -463,6 +463,12 @@ async def test_a_brand_new_number_asking_a_price_is_answered_and_not_asked_for_a
     await say(s, text="Ravi Kumar")
     user = await db.users.find_one({"phone": s["phone"]})
     assert user and user["full_name"] == "Ravi Kumar"
+    # Book Now was tapped before the name: the booking carries on from that
+    # vehicle + service (no restart at the menu).
+    convo = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
+    assert convo["state"] not in (None, "menu", "collect_name")
+    assert convo["data"]["cur"]["vehicle_type"] == s["hatch"] or convo["data"]["lines"]
+    assert (await last(db, s))["interactive_kind"] in ("list", "buttons")
     await db.users.delete_one({"_id": user["_id"]})
 
 
