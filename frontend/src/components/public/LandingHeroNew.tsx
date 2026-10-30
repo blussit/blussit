@@ -119,9 +119,11 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
 
         <div className="container-page relative z-10 flex min-h-[640px] flex-col justify-center py-14 xl:min-h-[680px]">
           <div className="w-[50%] max-w-[580px] xl:w-[46%]">
-            {/* Instagram sits beside the badge, in the photo's open sky —
-                -my-1 keeps the row the badge's height, so nothing moves. */}
+            {/* The brand tagline, with Instagram beside it in the photo's open sky. */}
             <div className="flex items-center gap-3">
+              <p className="text-[16px] font-bold tracking-[-0.005em]" style={{ color: BLUE }}>
+                Premium Car Wash At Your Doorstep
+              </p>
               <InstagramLink className="-my-1 h-9 w-9" />
             </div>
             <h1
@@ -183,10 +185,13 @@ export function LandingHero({ onBook, offer }: { onBook: (serviceSlug?: string) 
           />
 
           <div className="absolute left-0 top-0 z-10 flex flex-col" style={{ padding: "4vw 0 0 5vw" }}>
+            <p className="font-bold leading-[1.25]" style={{ color: BLUE, fontSize: "2.9vw", maxWidth: "36vw" }}>
+              Premium Car Wash At Your Doorstep
+            </p>
             {/* The phone layout's copy of the headline is a <p>: the page has ONE <h1> (the desktop block above), however the layouts swap. */}
             <p
               className="font-display font-extrabold leading-[1.05] tracking-[-0.03em]"
-              style={{ color: NAVY, fontSize: "6.8vw" }}
+              style={{ color: NAVY, fontSize: "6.8vw", marginTop: "2vw" }}
             >
               Your Car
               <br />
