@@ -437,14 +437,16 @@ async def test_the_bot_has_no_path_that_sells_a_plan():
     assert ".subscribe(" not in source and "SubscribeRequest" not in source and "create_subscription" not in source
 
 
-async def test_a_brand_new_number_asking_a_price_is_answered_before_the_name_is_asked(db, clean):
+async def test_a_brand_new_number_asking_a_price_is_answered_and_not_asked_for_a_name(db, clean):
     s = await _rig(db, clean)
     await db.users.delete_one({"_id": ObjectId(s["cu"]["id"])})  # the number has no account now
     await db.whatsapp_conversations.delete_many({"wa_id": s["wa_id"]})
     await say(s, text="kitna rate hai?")
     sent = await outbox(db, s)
     assert any(m.get("interactive_kind") == "list" and any(r.startswith("pt:") for r in row_ids(m)) for m in sent)
-    assert "tell me your name" in sent[-1]["message"]
+    assert not any("your name" in m["message"] for m in sent)  # a question is answered, no name wanted yet
+    convo = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
+    assert not convo or convo.get("state") != "collect_name"  # so the NEXT line is never taken as a name
     assert await db.users.count_documents({"phone": s["phone"]}) == 0  # still no account
     await say(s, reply=f"pt:{s['hatch']}")  # browsing prices works before there is an account...
     assert (await last(db, s))["interactive_kind"] == "list" and await db.users.count_documents({"phone": s["phone"]}) == 0
@@ -452,12 +454,36 @@ async def test_a_brand_new_number_asking_a_price_is_answered_before_the_name_is_
     assert "tell me your name" in (await last(db, s))["message"] and await db.users.count_documents({"phone": s["phone"]}) == 0
     convo = await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]})
     assert convo["state"] == "collect_name"
-    await say(s, text="price list")  # a question is never taken as the name
-    assert await db.users.count_documents({"phone": s["phone"]}) == 0
+    await say(s, text="price list")  # asked for the name already: answer, then ask again
+    sent = await outbox(db, s)
+    assert "tell me your name" in sent[-1]["message"] and await db.users.count_documents({"phone": s["phone"]}) == 0
+    await say(s, text="Inter cleaning bhi krwana h")  # a sentence is not a name
+    assert "reply with your name" in (await last(db, s))["message"] and await db.users.count_documents({"phone": s["phone"]}) == 0
+    assert (await db.whatsapp_conversations.find_one({"wa_id": s["wa_id"]}))["state"] == "collect_name"
     await say(s, text="Ravi Kumar")
     user = await db.users.find_one({"phone": s["phone"]})
     assert user and user["full_name"] == "Ravi Kumar"
     await db.users.delete_one({"_id": user["_id"]})
+
+
+async def test_a_sentence_after_a_price_question_from_a_new_number_is_never_saved_as_the_name(db, clean):
+    s = await _rig(db, clean)
+    await db.users.delete_one({"_id": ObjectId(s["cu"]["id"])})
+    await db.whatsapp_conversations.delete_many({"wa_id": s["wa_id"]})
+    await say(s, text="price")
+    await say(s, text="Inter cleaning bhi krwana h")  # the exact line from the field report
+    assert await db.users.count_documents({"phone": s["phone"]}) == 0
+    assert "tell us your name" in (await last(db, s))["message"]  # now (and only now) the name is asked
+
+
+def test_only_something_that_looks_like_a_name_is_accepted_as_one():
+    from app.services.whatsapp_bot_service import _looks_like_name
+
+    for ok in ("Rahul Sharma", "राहुल शर्मा", "Mohd. Aslam", "Anne-Marie O'Neil", "A K Singh", "Ravi", "मोहम्मद"):
+        assert _looks_like_name(ok), ok
+    for bad in ("Inter cleaning bhi krwana h", "my number is 98765 43210", "Rahul123", "hi i want a wash today please",
+                "http://x.com", "😀😀", "98765", "Rahul@gmail.com", "—"):
+        assert not _looks_like_name(bad), bad
 
 
 async def test_an_unfinished_booking_that_timed_out_is_explained_not_silently_dropped(db, clean):

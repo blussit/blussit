@@ -120,6 +120,23 @@ def _short(text: str, limit: int = 24) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _looks_like_name(text: str) -> bool:
+    """A person's name, not a sentence: 1-4 words made of letters (any script,
+    so Hindi works) with at most a dot, hyphen or apostrophe inside — no digits,
+    links, emoji or other symbols."""
+    words = text.split()
+    if not 1 <= len(words) <= 4:
+        return False
+    for word in words:
+        if not any(unicodedata.category(ch).startswith("L") for ch in word):
+            return False
+        for ch in word:
+            cat = unicodedata.category(ch)
+            if not (cat[0] in ("L", "M") or ch in ".'’-" or ch in "\u200c\u200d"):
+                return False
+    return True
+
+
 def _clean_name(text: str) -> str:
     """A typed name as stored: control characters (newlines, NULs, bells)
     become spaces, whitespace runs collapse, capped at NAME_MAX_LENGTH."""
@@ -545,9 +562,14 @@ class WhatsAppBotService:
                 found = intent.detect_intent(str(value)) if kind == "text" else None
                 if found in _ANSWERABLE_BEFORE_SIGNUP:
                     # A question ("kitna rate hai", "plan lena hai") from a number
-                    # with no account yet: answer it, then ask for the name.
-                    await self._answer_before_signup(phone, found, str(value))
-                    await self._set_state(wa_id, "collect_name", data)
+                    # with no account yet: just answer it. The name is asked when
+                    # they start booking — not right after a question, where the
+                    # next free-text line would be saved as their name. (Already
+                    # asked for it? Answer, then ask again.)
+                    awaiting_name = convo.get("state") == "collect_name"
+                    await self._answer_before_signup(phone, found, str(value), ask_name=awaiting_name)
+                    if awaiting_name:
+                        await self._set_state(wa_id, "collect_name", data)
                     return
                 if convo.get("state") == "collect_name":
                     name_text = _clean_name(str(value))
@@ -555,6 +577,7 @@ class WhatsAppBotService:
                         kind != "text" or len(name_text) < 2 or name_text.lower() in _GREETING_WORDS
                         or intent.is_greeting(name_text) or found in _NOT_A_NAME
                         or (found in _NOT_A_ONE_WORD_NAME and len(name_text.split()) == 1)
+                        or not _looks_like_name(name_text)
                     ):
                         await self.wa.send_text(phone, "Please reply with your name so we can save your booking correctly.")
                         await self._set_state(wa_id, "collect_name", data)
@@ -884,7 +907,7 @@ class WhatsAppBotService:
         await self._reoffer(wa_id, phone, customer_id, state, data)
         return True
 
-    async def _answer_before_signup(self, phone: str, found: str, text: str) -> None:
+    async def _answer_before_signup(self, phone: str, found: str, text: str, ask_name: bool = False) -> None:
         if found in (intent.PRICE, intent.OFFER):
             await self._price_question(phone, text, offer=found == intent.OFFER)
         elif found == intent.PLAN_BUY:
@@ -895,7 +918,8 @@ class WhatsAppBotService:
             await self.wa.send_text(phone, await self._area_text())
         else:
             await self.wa.send_text(phone, self._help_text())
-        await self.wa.send_text(phone, "To book, please tell me your name 🙂")
+        if ask_name:
+            await self.wa.send_text(phone, "To book, please tell me your name 🙂")
 
     async def _live_bookings(self, customer_id: str, page_size: int = 5) -> list[dict]:
         items, _ = await self.bookings.find_many(
