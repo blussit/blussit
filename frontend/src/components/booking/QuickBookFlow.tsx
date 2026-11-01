@@ -2223,6 +2223,62 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
     </>
   );
 
+  // Coupon box: customer (page 2, after the details) and console share it.
+  const couponNode =
+      !isLog && (payable > 0 || !!couponCode) ? (
+        <div className="max-w-sm" data-testid="coupon-box">
+          <p className={SECTION_LABEL}>Have A Coupon Code?</p>
+          {couponCode ? (
+            <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono-num text-sm font-semibold text-[#0E1A33]">{couponCode}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCouponCode("");
+                    setCouponDraft("");
+                  }}
+                  className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0E1A33]"
+                >
+                  Remove Coupon
+                </button>
+              </div>
+              {liveQuote?.coupon_error ? (
+                <p className="mt-1 text-xs text-[var(--color-error)]" role="alert">{liveQuote.coupon_error}</p>
+              ) : liveQuote && liveQuote.coupon_discount > 0 ? (
+                <p className="mt-1 text-xs font-semibold text-[var(--color-success)]">You Save ₹{liveQuote.coupon_discount} With This Coupon</p>
+              ) : (
+                <p className="mt-1 text-xs text-[#5F6878]">Checking This Coupon…</p>
+              )}
+            </div>
+          ) : (
+            <form
+              className="flex items-start gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const code = couponDraft.replace(/\s/g, "").toUpperCase();
+                if (code) setCouponCode(code);
+              }}
+            >
+              <div className="min-w-0 flex-1">
+                <Input
+                  aria-label="Coupon Code"
+                  value={couponDraft}
+                  maxLength={32}
+                  placeholder="Enter Coupon Code"
+                  autoCapitalize="characters"
+                  autoComplete="off"
+                  onChange={(e) => setCouponDraft(e.target.value.toUpperCase().replace(/\s/g, ""))}
+                  error={fieldErrors.couponCode || undefined}
+                />
+              </div>
+              <Button type="submit" variant="outline" disabled={!couponDraft.trim()}>
+                Apply
+              </Button>
+            </form>
+          )}
+        </div>
+      ) : null;
   // ---- console wizard (manager + log) -----------------------------------------
   if (isManager) {
     return (
@@ -2738,60 +2794,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                     </div>
                   )}
 
-                  {!isLog && (payable > 0 || !!couponCode) && (
-                    <div className="max-w-sm" data-testid="coupon-box">
-                      <p className={SECTION_LABEL}>Have A Coupon Code?</p>
-                      {couponCode ? (
-                        <div className="rounded-xl border border-[#F3E5B5] bg-[#FFFCF0] p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="font-mono-num text-sm font-semibold text-[#0E1A33]">{couponCode}</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setCouponCode("");
-                                setCouponDraft("");
-                              }}
-                              className="text-xs font-semibold text-[#5F6878] underline underline-offset-2 hover:text-[#0E1A33]"
-                            >
-                              Remove Coupon
-                            </button>
-                          </div>
-                          {liveQuote?.coupon_error ? (
-                            <p className="mt-1 text-xs text-[var(--color-error)]" role="alert">{liveQuote.coupon_error}</p>
-                          ) : liveQuote && liveQuote.coupon_discount > 0 ? (
-                            <p className="mt-1 text-xs font-semibold text-[var(--color-success)]">You Save ₹{liveQuote.coupon_discount} With This Coupon</p>
-                          ) : (
-                            <p className="mt-1 text-xs text-[#5F6878]">Checking This Coupon…</p>
-                          )}
-                        </div>
-                      ) : (
-                        <form
-                          className="flex items-start gap-2"
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            const code = couponDraft.replace(/\s/g, "").toUpperCase();
-                            if (code) setCouponCode(code);
-                          }}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <Input
-                              aria-label="Coupon Code"
-                              value={couponDraft}
-                              maxLength={32}
-                              placeholder="Enter Coupon Code"
-                              autoCapitalize="characters"
-                              autoComplete="off"
-                              onChange={(e) => setCouponDraft(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                              error={fieldErrors.couponCode || undefined}
-                            />
-                          </div>
-                          <Button type="submit" variant="outline" disabled={!couponDraft.trim()}>
-                            Apply
-                          </Button>
-                        </form>
-                      )}
-                    </div>
-                  )}
+                  {couponNode}
 
                   {/* Optional extras */}
                   <div>
@@ -3366,6 +3369,13 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                       {introSummary && lines.length === 1 && addonsRow}
                       {!(introSummary && lines.length === 1) && planChoice}
                       {planNoteNode}
+
+                      {couponNode && (
+                        <>
+                          {divider}
+                          {couponNode}
+                        </>
+                      )}
 
                       {amountToPay > 0 && (
                         <>
