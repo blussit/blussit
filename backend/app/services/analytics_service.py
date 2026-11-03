@@ -77,6 +77,8 @@ class AnalyticsService:
         center_ids = [str(c["_id"]) for c in centers]
         if not center_ids:
             return []
+        today_start = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)
+        is_today = {"$and": [{"$gte": ["$scheduled_date", today_start]}, {"$lt": ["$scheduled_date", today_start + timedelta(days=1)]}]}
         booking_rows, rating_rows = await asyncio.gather(
             self.db.bookings.aggregate([
                 {"$match": {"service_center_id": {"$in": center_ids}, **_NOT_DELETED}},
@@ -86,6 +88,7 @@ class AnalyticsService:
                     "completed": _count_if(_COMPLETED),
                     "pending": _count_if({"$in": ["$status", ["pending", "rescheduled"]]}),
                     "delayed": _count_if({"$and": [{"$ne": ["$status", "cancelled"]}, {"$gt": [{"$ifNull": ["$delay_minutes", 0]}, 0]}]}),
+                    "pending_today": _count_if({"$and": [{"$in": ["$status", ["pending", "rescheduled"]]}, is_today]}),
                 }},
             ]).to_list(length=None),
             self.db.reviews.aggregate([
@@ -107,6 +110,7 @@ class AnalyticsService:
                 "completed": b.get("completed", 0),
                 "pending": b.get("pending", 0),
                 "delayed": b.get("delayed", 0),
+                "pending_today": b.get("pending_today", 0),
                 "avg_rating": round(r["avg"], 1) if r and r.get("avg") is not None else None,
                 "review_count": r["count"] if r else 0,
             })

@@ -37,6 +37,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { combinedStatus } from "../../lib/bookingGroups";
 import { PaymentCancelled, PaymentFailed, PaymentNeedsAttention, PaymentPendingConfirmation, paymentErrorMessage, payWithRazorpay, sentence } from "../../lib/razorpay";
 import { cn } from "../../lib/cn";
+import { PriceBreakup } from "../../components/shared/PriceBreakup";
 import type { Booking } from "../../types";
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = { cash: "Cash On Service", online: "Online", subscription: "Plan" };
@@ -199,6 +200,7 @@ export default function BookingDetailPage() {
   const pricedCars = liveCars.length ? liveCars : trailCars;
   /** The visit's price — every car still on it. */
   const visitTotal = pricedCars.reduce((sum, b) => sum + (b.total_amount || 0), 0);
+  const hasBill = pricedCars.length > 0 && pricedCars.every((b) => !!(b as BookingMoney).bill);
   /** What a payment now actually charges — the server's own rule: the
    *  not-cancelled cars' amount_due (total − wallet credit used − paid);
    *  older responses: every unpaid car's total. */
@@ -751,6 +753,12 @@ export default function BookingDetailPage() {
     <section className={`${card} order-5 p-5`}>
       <h2 className="mb-3 font-display text-[16px] font-bold text-[#0E1A33]">Price Details</h2>
       <div className="space-y-2.5 text-sm">
+        {hasBill ? (
+          <PriceBreakup
+            cars={pricedCars.map((c) => ({ id: c.id, bill: (c as BookingMoney).bill, label: visitTypeServiceLabel({ bookings: [c] }, vehicleTypes) }))}
+          />
+        ) : (
+          <>
         {visit ? (
           visit.map((car) => {
             // A car cancelled off a still-live visit isn't charged: shown struck, out of the total.
@@ -843,6 +851,8 @@ export default function BookingDetailPage() {
             <span className="text-[#5F6878]">Previous Cancellation Charge</span>
             <span className="tabular-nums text-[#0E1A33]">₹{Math.round(carriedCharge)}</span>
           </div>
+        )}
+          </>
         )}
         <div className="flex justify-between border-t border-[#EEF2F7] pt-3 text-base font-bold text-[#0E1A33]">
           <span>Total</span>

@@ -367,6 +367,9 @@ async def test_manager_overview_matches_legacy(db, dataset, period):
 async def test_service_center_summaries_match_legacy(db, dataset):
     legacy = await LegacyAnalyticsService(db).service_center_summaries()
     new = await AnalyticsService(db).service_center_summaries()
+    # `pending_today` is newer than the frozen legacy reference (the admin card's today count).
+    today = [row.pop("pending_today") for row in new]
+    assert all(isinstance(n, int) and 0 <= n <= row["pending"] for n, row in zip(today, new))
     assert_same(legacy, new)
 
 

@@ -1,4 +1,5 @@
 import { apiClient, type ApiSuccess } from "../lib/api-client";
+import type { Bill } from "../lib/bill";
 import type { PlanSplit } from "../lib/planSplit";
 import type { Booking } from "../types";
 import type { LateCancellationCharge } from "./charges";
@@ -76,6 +77,8 @@ export interface BookingMoneyFields {
   added_services_total?: number | null;
   /** A plan booking's bill: what the plan covers vs the paid add-ons. */
   plan_split?: PlanSplit | null;
+  /** The itemised bill (server-built; rows add up to total_amount). */
+  bill?: Bill | null;
   customer_edited_at?: string | null;
   customer_edited_fields?: string[] | null;
   customer_edited_by_role?: string | null;

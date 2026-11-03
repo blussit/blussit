@@ -11,6 +11,7 @@ import type { Booking } from "../../types";
 import type { CustomerWalletEntry } from "../../api/customerWalletMe";
 import { toTitle } from "../../lib/titleCase";
 import type { PlanSplit } from "../../lib/planSplit";
+import type { Bill } from "../../lib/bill";
 
 /** The money fields a booking carries since 2026-10-07 (all optional). */
 export type BookingMoney = Booking & {
@@ -23,6 +24,8 @@ export type BookingMoney = Booking & {
   added_services?: AddedService[] | null;
   /** A plan booking's bill: what the plan covers vs the paid add-ons. */
   plan_split?: PlanSplit | null;
+  /** The itemised bill (server-built; rows add up to total_amount). */
+  bill?: Bill | null;
 };
 
 export interface AddedService {

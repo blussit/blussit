@@ -125,7 +125,7 @@ function ServiceCenterOverview({ onSelect, onShowRecycleBin }: { onSelect: (cent
                 <Stat label="Bookings" value={c.bookings} />
                 <Stat label="Completed" value={c.completed} tone="success" />
                 <Stat label="Pending" value={c.pending} tone="warning" />
-                <Stat label="Delayed" value={c.delayed} tone={c.delayed > 0 ? "error" : "neutral"} />
+                <Stat label="Pending Today" value={c.pending_today} tone={c.pending_today > 0 ? "warning" : "neutral"} />
               </div>
               <p className="mt-3 flex items-center gap-1 text-xs font-medium text-[var(--color-primary)]">
                 View Bookings <ChevronRight className="h-3.5 w-3.5" />

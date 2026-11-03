@@ -199,6 +199,8 @@ export interface ServiceCenterSummary {
   completed: number;
   pending: number;
   delayed: number;
+  /** Pending / rescheduled bookings scheduled for today (IST). */
+  pending_today: number;
   avg_rating: number | null;
   review_count: number;
 }

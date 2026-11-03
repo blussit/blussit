@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import RemovedTypeTag from "../../components/shared/RemovedTypeTag";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -103,6 +103,34 @@ function bookingLabel(b: Booking): string {
 /** One line per visit: every car on it, each with its own wash. */
 function slabLabel(slab: BookingSlab): string {
   return slab.isVisit ? slab.bookings.map(bookingLabel).join(" + ") : bookingLabel(slab.primary);
+}
+
+/** The top of a booking card: who → when → booking number → what was booked
+ * (car type + service, highlighted). Same order on every card in the queue. */
+function BookingCardHead({ b, ids, label, chip, after }: { b: Booking; ids: string; label: string; chip?: ReactNode; after?: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="flex flex-wrap items-center gap-x-2 text-[15px] font-bold text-black">
+        {b.customer_name || "Customer"}
+        {b.customer_phone && (
+          <span className="inline-flex items-center gap-1 text-[13px] font-medium text-[var(--color-text-secondary)]">
+            <Phone className="h-3 w-3" /> {b.customer_phone}
+          </span>
+        )}
+      </p>
+      <p className="mt-0.5 text-sm font-semibold text-[var(--color-text-primary)]">
+        {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
+        {after && <span className="font-normal text-[var(--color-text-secondary)]"> · {after}</span>}
+      </p>
+      <p className="mt-0.5 flex flex-wrap items-center gap-2 font-mono-num text-xs font-semibold text-[var(--color-text-secondary)]">
+        {ids}
+        {chip}
+      </p>
+      <p className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-lg bg-[#FFF4CC] px-2 py-1 text-[13px] font-semibold text-black">
+        <Sparkles className="h-3 w-3 shrink-0" /> <span className="min-w-0">{label}</span>
+      </p>
+    </div>
+  );
 }
 
 /** The single clear answer to "what's going on with this booking" — blank
@@ -717,21 +745,20 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                     onClick={() => setSelectedBooking(b)}
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="flex flex-wrap items-center gap-2 font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">
-                          {slab.isVisit ? slab.bookings.map((x) => x.booking_number).join(" · ") : b.booking_number}
-                          {/* One trip, several cars — dispatching them
-                              separately would send two captains to one gate. */}
-                          {slab.isVisit && (
+                      <BookingCardHead
+                        b={b}
+                        ids={slab.isVisit ? slab.bookings.map((x) => x.booking_number).join(" · ") : b.booking_number}
+                        label={slabLabel(slab)}
+                        chip={
+                          /* One trip, several cars — dispatching them
+                             separately would send two captains to one gate. */
+                          slab.isVisit && (
                             <span className="rounded-full bg-[#EEF3FA] px-2 py-0.5 text-[10px] font-bold text-[#0E1A33]">
                               1 Visit · {slab.vehicleCount} Vehicles
                             </span>
-                          )}
-                        </p>
-                        <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                          {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)}
-                        </p>
-                      </div>
+                          )
+                        }
+                      />
                       <div className="flex flex-col items-end gap-1.5">
                         <span className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">₹{slab.totalAmount}</span>
                         {prioritySelector(b)}
@@ -747,21 +774,6 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                             : `Starts in ${Math.round(minutesLeft)} min — assign now`}
                       </div>
                     )}
-                    <div className="mt-2 space-y-1 text-sm text-[var(--color-text-secondary)]">
-                      {(b.customer_name || b.customer_phone) && (
-                        <p>
-                          {b.customer_name}
-                          {b.customer_phone && (
-                            <span className="ml-2 inline-flex items-center gap-1">
-                              <Phone className="h-3 w-3" /> {b.customer_phone}
-                            </span>
-                          )}
-                        </p>
-                      )}
-                      <p className="flex items-center gap-1">
-                        <Sparkles className="h-3 w-3 shrink-0" /> <span className="min-w-0">{slabLabel(slab)}</span>
-                      </p>
-                    </div>
                     <div className="mt-3">{bookingActions(b)}</div>
                   </Card>
                   );
@@ -785,13 +797,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                     onClick={() => setSelectedBooking(b)}
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
-                        <p className="mt-0.5 text-xs font-medium text-[var(--color-text-primary)]">{bookingLabel(b)}</p>
-                        <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                          {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
-                        </p>
-                      </div>
+                      <BookingCardHead b={b} ids={b.booking_number} label={bookingLabel(b)} after={`Captain: ${captainName(b.captain_id)}`} />
                       <div className="flex flex-col items-end gap-1.5">
                         <StatusBadge status={b.status} />
                         <CustomerEditedChip booking={b as StaffBooking} />
@@ -860,13 +866,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                   onClick={() => setSelectedBooking(b)}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-mono-num text-sm font-semibold text-[var(--color-text-primary)]">{b.booking_number}</p>
-                      <p className="mt-0.5 text-xs font-medium text-[var(--color-text-primary)]">{bookingLabel(b)}</p>
-                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                        {format(b.scheduled_date)} · {formatSlot(b.scheduled_slot)} · Captain: {captainName(b.captain_id)}
-                      </p>
-                    </div>
+                    <BookingCardHead b={b} ids={b.booking_number} label={bookingLabel(b)} after={`Captain: ${captainName(b.captain_id)}`} />
                     <StatusBadge status={b.status} />
                   </div>
                   <div className="mt-2 flex items-center gap-1.5 text-xs font-medium">

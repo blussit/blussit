@@ -22,6 +22,7 @@ import { isArrivalLocked, issueLabel, vehicleLabel } from "../../lib/constants";
 import { bookingServiceLabel, combinedStatus } from "../../lib/bookingGroups";
 import { toTitle } from "../../lib/titleCase";
 import { GeoReview } from "./GeoReview";
+import { PriceBreakup } from "./PriceBreakup";
 import type { Booking } from "../../types";
 
 /** "Sedan" (quick booking) or "Sedan · Honda City · MP09AB1234" (older
@@ -98,6 +99,7 @@ export function BookingDetailDrawer({
   const cars: StaffBooking[] = groupId && visitBookings?.length ? visitBookings : single ? [single] : [];
   const isVisit = cars.length > 1;
   const visitTotal = cars.reduce((sum, c) => sum + (c.total_amount || 0), 0);
+  const hasBill = cars.length > 0 && cars.every((c) => !!c.bill);
 
   // Which car's work is on show. Defaults to the one whose row was
   // clicked, and resets whenever a different booking opens the drawer.
@@ -428,6 +430,19 @@ export function BookingDetailDrawer({
             {/* One visit is one bill. The per-car lines are still shown,
                 because a captain collecting cash needs the total, and the
                 office reconciling it needs the split. */}
+            {hasBill ? (
+              <>
+                <PriceBreakup
+                  staff={isStaff}
+                  cars={cars.map((c) => ({ id: c.id, bill: c.bill, label: carLine(c) || c.booking_number }))}
+                />
+                <div className="flex items-start justify-between gap-4 border-t border-[var(--color-border)] pt-2 text-sm font-bold text-[var(--color-text-primary)]">
+                  <span>{isVisit ? `Total · ${cars.length} Vehicles` : "Total"}</span>
+                  <span className="font-mono-num">₹{visitTotal}</span>
+                </div>
+              </>
+            ) : (
+              <>
             {isVisit &&
               cars.map((c) => (
                 <Row
@@ -508,6 +523,8 @@ export function BookingDetailDrawer({
                   </span>
                 }
               />
+            )}
+              </>
             )}
             {money.wallet > 0 && <Row label="Paid From Wallet" value={<span className="font-mono-num">−₹{Math.round(money.wallet)}</span>} />}
             <Row label="Method" value={toTitle(booking.payment_method)} />

@@ -454,7 +454,7 @@ _CUSTOMER_HIDDEN_FIELDS = (
     "payments", "payment_keys", "cash_collected_by",
 )
 _CAPTAIN_HIDDEN_FIELDS = (
-    "platform_earning",
+    "platform_earning", "bill",
     "manager_discount", "manager_discount_by", "manager_discount_reason", "manager_discount_by_name", "manager_discount_at",
     "admin_notes", "admin_edit_rev", "admin_edited_at", "admin_edited_by", "payment_adjustments", "version",
     "payments", "payment_keys",
@@ -4573,6 +4573,76 @@ class BookingService:
             "extras_total": round(booked_total + on_site_total, 2),
         }
 
+    def _bill_view(self, booking: dict, services: dict[str, dict], combo_name: str | None) -> dict:
+        """The itemised bill every screen shows the same way (customer,
+        manager, admin): each service at the price CHARGED (the first-wash
+        price when it applied, with the regular price beside it), the coupon
+        / plan / manager discount, the distance charge, previous balance, add-ons
+        added on site and the tip — adding up to `total`. Anything that
+        does not add up (a catalogue price changed since the booking) is one
+        explicit adjustment row, so the rows ALWAYS sum to the total."""
+        def r2(v) -> float:
+            try:
+                return round(float(v or 0), 2)
+            except (TypeError, ValueError):
+                return 0.0
+
+        vehicle_type = booking.get("vehicle_type") or ""
+        first_time = bool(booking.get("first_time_eligible"))
+        qty_map = booking.get("service_quantities") or {}
+        subtotal = r2(booking.get("subtotal"))
+        lines: list[dict] = []
+        if booking.get("combo_id"):
+            lines.append({"service_id": None, "name": combo_name or "Combo", "qty": 1, "amount": subtotal, "regular_amount": None, "is_addon": False})
+        else:
+            for sid in booking.get("service_ids") or []:
+                svc = services.get(sid)
+                if not svc:
+                    continue
+                qty = int(qty_map.get(sid, 1) or 1)
+                amount = r2(self._resolve_price(svc, vehicle_type, first_time) * qty)
+                regular = r2(self._resolve_price(svc, vehicle_type, False) * qty)
+                lines.append({
+                    "service_id": sid, "name": svc.get("name"), "qty": qty, "amount": amount,
+                    "regular_amount": regular if regular > amount else None, "is_addon": bool(svc.get("is_addon")),
+                })
+        gap = r2(subtotal - sum(l["amount"] for l in lines))
+        adjustment = gap if abs(gap) >= 0.5 else 0.0
+        manager_discount = r2(booking.get("manager_discount"))
+        # discount_amount holds the manager's discount too (on a job they logged).
+        main = r2(max(0.0, r2(booking.get("discount_amount")) - manager_discount))
+        discount = None
+        if main > 0:
+            kind = "plan" if booking.get("subscription_id") else ("coupon" if booking.get("coupon_code") else "discount")
+            discount = {"kind": kind, "code": booking.get("coupon_code") if kind == "coupon" else None, "amount": main}
+        on_site = [
+            {"name": e.get("name"), "qty": int(e.get("qty") or 1), "amount": r2(e.get("amount"))}
+            for e in booking.get("added_services") or []
+        ]
+        travel = r2(booking.get("travel_charge"))
+        carried = r2(booking.get("wallet_due_carried"))
+        cancellation = r2(booking.get("cancellation_charge"))
+        tip = r2(booking.get("tip_amount"))
+        total = r2(booking.get("total_amount"))
+        expected = (
+            subtotal + 0.0 - main - manager_discount + r2(booking.get("tax_amount")) + travel + carried + cancellation
+            + sum(e["amount"] for e in on_site) + tip
+        )
+        other = r2(total - expected)
+        return {
+            "lines": lines,
+            "adjustment": adjustment,
+            "discount": discount,
+            "manager_discount": manager_discount,
+            "on_site": on_site,
+            "travel": {"amount": travel, "km": booking.get("travel_charge_km")} if travel > 0 else None,
+            "carried": carried,
+            "cancellation": cancellation,
+            "tip": {"amount": tip, "method": booking.get("tip_method") or "cash"} if tip > 0 else None,
+            "other": other if abs(other) >= 0.5 else 0.0,
+            "total": total,
+        }
+
     async def _enrich_bookings(self, bookings: list[dict]) -> list[dict]:
         """Denormalizes customer name/phone, a vehicle snapshot, a flattened
         address, and service/combo names onto each booking so a captain (or
@@ -4723,6 +4793,7 @@ class BookingService:
             doc["wallet_due_carried"] = money["wallet_due_carried"]
             doc["added_services_total"] = float(booking.get("added_services_total") or 0)
             doc["plan_split"] = self._plan_split_view(booking, services)
+            doc["bill"] = self._bill_view(booking, services, doc.get("combo_name"))
             if doc.get("manager_paybacks"):
                 # Older paybacks were stored without their label — every row
                 # reads "Service Delayed", never the raw code (FINAL-POLISH).
