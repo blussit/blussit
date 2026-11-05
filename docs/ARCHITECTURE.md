@@ -1272,6 +1272,11 @@ booking, payment or KPI collection.
   + plans + credits − debits). The roll-up is held only 3 s in-process per window
   (`finance_service.clear_cache()` in tests), and the page polls every 10 s and on
   tab focus (`LIVE` in AdminFinancePage), so a payment shows within seconds.
+  **Finance vs dashboard Revenue:** the dashboard's Revenue is the *billed* value of
+  jobs completed (+ plan and society money); Bookings Earning is money *received*.
+  `summary()["bridge"]` (shown as "Why This Differs From Revenue") walks from one to
+  the other: billed − not collected yet − paid from wallet − paid back + received for
+  jobs not completed yet = Bookings Earning. Plan money matches between the two.
 - **UI:** StatCards for the period (presets Today / 7 Days / This Month / Last
   Month / This Year / Custom): Bookings Earning, Plan Sales, Other Credits, Debits, Net
   For Period, plus a hero "Total In Blussit Account"; By Category breakdown;

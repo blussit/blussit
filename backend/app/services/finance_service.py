@@ -263,9 +263,17 @@ class FinanceService:
                 (roll.get(k) or {}).get("online_amount", 0) + (roll.get(k) or {}).get("cash_amount", 0)
                 for k in ("subscriptions", "society", "custom_plans")
             )
+            t = roll["totals"]
+            paise = lambda k: int(round(float(t.get(k) or 0) * 100))  # noqa: E731
             value = {
-                "net_paise": int(round(float(roll["totals"].get("net_collected") or 0) * 100)),
+                "net_paise": paise("net_collected"),
                 "plan_paise": int(round(float(plans) * 100)),
+                # What stands between the dashboard's Revenue (the billed value of the jobs
+                # completed) and money actually received — see summary()["bridge"].
+                "billed_paise": paise("billed_amount"),
+                "uncollected_paise": paise("uncollected_amount"),
+                "wallet_paise": paise("wallet_amount"),
+                "paid_back_paise": paise("paid_back_by_managers"),
             }
             if len(_cache) > 64:
                 _cache.clear()
@@ -282,6 +290,20 @@ class FinanceService:
                 out[r["_id"]] = int(r["paise"] or 0)
                 out[f"{r['_id']}_n"] = r["n"]
         return out
+
+    @staticmethod
+    def _bridge(b: dict) -> dict:
+        """From the billed value of the completed jobs (what the dashboard's
+        Revenue counts) to the money actually received (Bookings Earning):
+        what is still to be collected, what customers paid from their wallet,
+        what managers paid back, and — the balancing line — money received for
+        jobs that are not completed yet (a prepaid / upcoming booking)."""
+        billed, due, wallet, back = b["billed_paise"], b["uncollected_paise"], b["wallet_paise"], b["paid_back_paise"]
+        not_done_yet = b["net_paise"] - (billed - due - wallet - back)
+        return {
+            "billed_paise": billed, "uncollected_paise": due, "wallet_paise": wallet, "paid_back_paise": back,
+            "received_not_completed_paise": not_done_yet, "bookings_earning_paise": b["net_paise"],
+        }
 
     async def summary(self, date_from: str | None, date_to: str | None) -> dict:
         today = _today()
@@ -353,6 +375,7 @@ class FinanceService:
                 "credits_paise": all_sums["credit"], "credits": rupees(all_sums["credit"]),
                 "debits_paise": all_sums["debit"], "debits": rupees(all_sums["debit"]),
             },
+            "bridge": self._bridge(book_period),
             "plan_sales_paise": book_period["plan_paise"], "plan_sales": rupees(book_period["plan_paise"]),
             "plan_sales_note": "Subscription, society and custom-plan money received in the period (refunds taken off). Counted in the balance.",
             "by_category": by_category,

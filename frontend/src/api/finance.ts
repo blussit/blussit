@@ -54,6 +54,15 @@ export interface FinanceSummary {
   total_balance_paise: number;
   plan_sales_paise: number;
   plan_sales_note: string;
+  /** From the billed value of completed jobs (the dashboard's Revenue) to money received. */
+  bridge: {
+    billed_paise: number;
+    uncollected_paise: number;
+    wallet_paise: number;
+    paid_back_paise: number;
+    received_not_completed_paise: number;
+    bookings_earning_paise: number;
+  };
   all_time: { bookings_earning_paise: number; plan_sales_paise: number; credits_paise: number; debits_paise: number };
   by_category: { category: string; credit_paise: number; debit_paise: number }[];
   series_unit: "day" | "month";

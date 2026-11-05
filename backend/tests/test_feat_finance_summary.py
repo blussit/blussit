@@ -46,6 +46,8 @@ async def test_summary_math(db, clean, cleanup):
     async with h.client() as c:
         before = (await c.get(f"{BASE}/summary?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
         assert before["bookings_earning_paise"] == 80000 and before["bookings_earning"] == 800.0
+        b = before["bridge"]  # billed → received always adds up to Bookings Earning
+        assert b["billed_paise"] - b["uncollected_paise"] - b["wallet_paise"] - b["paid_back_paise"] + b["received_not_completed_paise"] == before["bookings_earning_paise"]
         assert before["credits_paise"] == 0 and before["total_balance_paise"] == before["all_time"]["bookings_earning_paise"] + before["all_time"]["plan_sales_paise"]
         base_balance = before["total_balance_paise"]
 

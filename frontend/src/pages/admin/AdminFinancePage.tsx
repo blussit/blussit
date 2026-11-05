@@ -285,6 +285,36 @@ export default function AdminFinancePage() {
         <StatCard label="Debits" tone="error" value={money(s?.debits_paise)} hint={s ? `${s.debit_count} Entr${s.debit_count === 1 ? "y" : "ies"}` : undefined} />
         <StatCard label="Net For Period" value={money(s?.net_period_paise)} tone={s && s.net_period_paise < 0 ? "error" : "default"} hint="Bookings + plans + credits − debits" />
       </div>
+      {s && (
+        <Panel title="Why This Differs From Revenue" description="The dashboard Revenue counts the billed value of completed jobs; this page counts money actually received">
+          <div className="space-y-1.5 text-sm" data-testid="finance-bridge">
+            {(
+              [
+                ["Billed For Completed Jobs", s.bridge.billed_paise, ""],
+                ["Not Collected Yet", -s.bridge.uncollected_paise, "Completed, payment still due"],
+                ["Paid From Customer Wallet", -s.bridge.wallet_paise, "Credit the customer already held"],
+                ["Paid Back To Customers", -s.bridge.paid_back_paise, "Manager paybacks"],
+                ["Received For Jobs Not Done Yet", s.bridge.received_not_completed_paise, "Prepaid or upcoming bookings"],
+              ] as [string, number, string][]
+            )
+              .filter(([, v], i) => i === 0 || v !== 0)
+              .map(([label, v, note]) => (
+                <div key={label} className="flex items-start justify-between gap-4">
+                  <span className="min-w-0 text-[var(--color-text-secondary)]">
+                    {label}
+                    {note && <span className="block text-xs">{note}</span>}
+                  </span>
+                  <span className={`shrink-0 tabular-nums ${v < 0 ? "text-[var(--color-error)]" : ""}`}>{rupees(v)}</span>
+                </div>
+              ))}
+            <div className="flex justify-between gap-4 border-t border-[var(--color-border)] pt-2 font-bold">
+              <span>Bookings Earning (Money Received)</span>
+              <span className="tabular-nums">{rupees(s.bridge.bookings_earning_paise)}</span>
+            </div>
+          </div>
+        </Panel>
+      )}
+
       <Panel title="By Category" description="Credits and debits in the chosen period">
         {!s || s.by_category.length === 0 ? (
           <p className="text-sm text-[var(--color-text-secondary)]">No entries in this period.</p>
