@@ -40,13 +40,15 @@ SUGGESTED_CATEGORIES = [
 ]
 BOOKINGS_EARNING_DEFINITION = (
     "Money actually received for non-cancelled bookings (cash collected + paid online) minus what managers paid back "
-    "to customers — the Collections page's net collected. Not the billed value; plan and society sales are separate."
+    "to customers — the Collections page's net collected. Not the billed value; plan and society sales are their own line."
 )
 MAX_FUTURE_DAYS = 1
 MAX_PAST_DAYS = 5 * 365 + 1
 MAX_RANGE_DAYS = 5 * 366 + 2
 CSV_MAX_ROWS = 50_000
-_BOOKINGS_CACHE_TTL = 60.0
+# Short on purpose: the balance must move as money moves. This only collapses a burst of
+# identical requests (several admin tabs polling) into one roll-up.
+_BOOKINGS_CACHE_TTL = 3.0
 _ALL_FROM, _ALL_TO = "2000-01-01", "2100-01-01"
 
 _cache: dict[tuple[str, str], tuple[float, dict]] = {}
@@ -242,8 +244,9 @@ class FinanceService:
     # ---------- summary ----------
 
     async def _bookings_earning(self, date_from: str, date_to: str) -> dict:
-        """Cached 60 s in-process (the Collections roll-up runs several
-        aggregations; an all-time one is the heaviest)."""
+        """Cached 3 s in-process (the Collections roll-up runs several
+        aggregations; an all-time one is the heaviest) — just enough to
+        collapse simultaneous polls; the balance is otherwise live."""
         key = (date_from, date_to)
         hit = _cache.get(key)
         if hit and time.monotonic() - hit[0] < _BOOKINGS_CACHE_TTL:
@@ -331,7 +334,9 @@ class FinanceService:
 
         credits, debits = period_sums["credit"], period_sums["debit"]
         earning = book_period["net_paise"]
-        balance = book_all["net_paise"] + all_sums["credit"] - all_sums["debit"]
+        # Everything that moved money: bookings received, plan / society / custom-plan
+        # sales, and the manual credits and debits.
+        balance = book_all["net_paise"] + book_all["plan_paise"] + all_sums["credit"] - all_sums["debit"]
         return {
             "period": {"from": lo_s, "to": hi_s},
             "bookings_earning_paise": earning, "bookings_earning": rupees(earning),
@@ -339,15 +344,17 @@ class FinanceService:
             "credits_paise": credits, "credits": rupees(credits), "credit_count": period_sums["credit_n"],
             "debits_paise": debits, "debits": rupees(debits), "debit_count": period_sums["debit_n"],
             "net_other_paise": credits - debits, "net_other": rupees(credits - debits),
-            "net_period_paise": earning + credits - debits, "net_period": rupees(earning + credits - debits),
+            "net_period_paise": earning + book_period["plan_paise"] + credits - debits,
+            "net_period": rupees(earning + book_period["plan_paise"] + credits - debits),
             "total_balance_paise": balance, "total_balance": rupees(balance),
             "all_time": {
                 "bookings_earning_paise": book_all["net_paise"], "bookings_earning": rupees(book_all["net_paise"]),
+                "plan_sales_paise": book_all["plan_paise"], "plan_sales": rupees(book_all["plan_paise"]),
                 "credits_paise": all_sums["credit"], "credits": rupees(all_sums["credit"]),
                 "debits_paise": all_sums["debit"], "debits": rupees(all_sums["debit"]),
             },
             "plan_sales_paise": book_period["plan_paise"], "plan_sales": rupees(book_period["plan_paise"]),
-            "plan_sales_note": "Subscription, society and custom-plan money received in the period. Shown for information; not added to the balance.",
+            "plan_sales_note": "Subscription, society and custom-plan money received in the period (refunds taken off). Counted in the balance.",
             "by_category": by_category,
             "series_unit": "day" if by_day else "month",
             "series": series_rows,

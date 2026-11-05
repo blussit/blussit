@@ -92,6 +92,10 @@ const SIGN = { credit: "+", debit: "-" } as const;
  * The bookings dashboard is untouched; this page only READS the bookings'
  * received money so the account balance can show everything in one place.
  */
+/** The balance moves as money moves: refetch every few seconds while the tab is
+ *  open and on coming back to it (the app default is a 30 s stale window and no focus refetch). */
+const LIVE = { staleTime: 0, refetchInterval: 10_000, refetchOnWindowFocus: true } as const;
+
 export default function AdminFinancePage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
@@ -130,11 +134,13 @@ export default function AdminFinancePage() {
     queryFn: () => financeApi.summary(range.from, range.to),
     enabled: rangeOk,
     placeholderData: keepPreviousData,
+    ...LIVE,
   });
   const list = useQuery({
     queryKey: ["finance-entries", filters, page],
     queryFn: () => financeApi.list({ ...filters, page, page_size: 20 }),
     placeholderData: keepPreviousData,
+    ...LIVE,
   });
   const cats = useQuery({ queryKey: ["finance-categories"], queryFn: financeApi.categories, staleTime: 60_000 });
   const categoryOptions = cats.data?.all ?? SUGGESTED_FALLBACK;
@@ -269,21 +275,16 @@ export default function AdminFinancePage() {
         label="Total In Blussit Account"
         icon={Wallet}
         value={money(s?.total_balance_paise)}
-        hint="All time: bookings earning + credits − debits"
+        hint="All time: bookings + plan sales + credits − debits · updates live"
         className="border-[#0E1A33]"
       />
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatCard label="Bookings Earning" value={money(s?.bookings_earning_paise)} hint="Money received, net of paybacks" />
+        <StatCard label="Plan Sales" value={money(s?.plan_sales_paise)} hint="Monthly, society and custom plans" />
         <StatCard label="Other Credits" tone="success" value={money(s?.credits_paise)} hint={s ? `${s.credit_count} Entr${s.credit_count === 1 ? "y" : "ies"}` : undefined} />
         <StatCard label="Debits" tone="error" value={money(s?.debits_paise)} hint={s ? `${s.debit_count} Entr${s.debit_count === 1 ? "y" : "ies"}` : undefined} />
-        <StatCard label="Net For Period" value={money(s?.net_period_paise)} tone={s && s.net_period_paise < 0 ? "error" : "default"} hint="Bookings + credits − debits" />
+        <StatCard label="Net For Period" value={money(s?.net_period_paise)} tone={s && s.net_period_paise < 0 ? "error" : "default"} hint="Bookings + plans + credits − debits" />
       </div>
-      {s && s.plan_sales_paise > 0 && (
-        <p className="text-xs text-[var(--color-text-secondary)]">
-          Plan sales received in this period: {rupees(s.plan_sales_paise)} — shown for information, not counted above.
-        </p>
-      )}
-
       <Panel title="By Category" description="Credits and debits in the chosen period">
         {!s || s.by_category.length === 0 ? (
           <p className="text-sm text-[var(--color-text-secondary)]">No entries in this period.</p>

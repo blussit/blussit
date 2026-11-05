@@ -1266,12 +1266,14 @@ booking, payment or KPI collection.
   own roll-up) and takes `totals.net_collected` = cash collected + paid online
   for non-cancelled bookings (window = the bookings' scheduled day), minus the
   paybacks managers made to customers. Customer-wallet spends are not
-  earning. Plan, society and custom-plan sales are separate lines on that
-  page; the ledger shows them as `plan_sales_*` for information only and does
-  **not** add them to the balance. The result is cached 60 s in-process per
-  window (`finance_service.clear_cache()` in tests).
+  earning. Plan, society and custom-plan sales (money
+  received, refunds taken off; `plan_sales_*`) ARE added to the balance and the
+  period net (changed 2026-11-05 — the balance is every rupee that moved: bookings
+  + plans + credits − debits). The roll-up is held only 3 s in-process per window
+  (`finance_service.clear_cache()` in tests), and the page polls every 10 s and on
+  tab focus (`LIVE` in AdminFinancePage), so a payment shows within seconds.
 - **UI:** StatCards for the period (presets Today / 7 Days / This Month / Last
-  Month / This Year / Custom): Bookings Earning, Other Credits, Debits, Net
+  Month / This Year / Custom): Bookings Earning, Plan Sales, Other Credits, Debits, Net
   For Period, plus a hero "Total In Blussit Account"; By Category breakdown;
   entries table (cards at phone width) with filters, Show Voided, Export CSV;
   Add/Edit dialog ("Done By" remembered per admin in `localStorage`) and a

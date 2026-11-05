@@ -46,7 +46,7 @@ async def test_summary_math(db, clean, cleanup):
     async with h.client() as c:
         before = (await c.get(f"{BASE}/summary?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
         assert before["bookings_earning_paise"] == 80000 and before["bookings_earning"] == 800.0
-        assert before["credits_paise"] == 0 and before["total_balance_paise"] == before["all_time"]["bookings_earning_paise"]
+        assert before["credits_paise"] == 0 and before["total_balance_paise"] == before["all_time"]["bookings_earning_paise"] + before["all_time"]["plan_sales_paise"]
         base_balance = before["total_balance_paise"]
 
         # Same number as the Collections roll-up it reuses.
@@ -105,7 +105,7 @@ async def test_summary_today_uses_ist_day(db, clean):
         assert s["credits_paise"] == 0
 
 
-async def test_bookings_earning_is_cached_60s(db, clean, monkeypatch):
+async def test_bookings_earning_is_cached_only_briefly(db, clean, monkeypatch):
     admin = await fh.admin_h(db)
     from app.services.payment_service import PaymentService
 
@@ -122,6 +122,23 @@ async def test_bookings_earning_is_cached_60s(db, clean, monkeypatch):
         for _ in range(3):
             assert (await c.get(f"{BASE}/summary?from=2019-03-01&to=2019-03-31", headers=admin)).status_code == 200
     assert len(calls) == 2  # the period + the all-time window, once each
+
+
+async def test_a_plan_sale_moves_the_balance_straight_away(db, clean, cleanup):
+    admin = await fh.admin_h(db)
+    async with h.client() as c:
+        finance_service.clear_cache()
+        before = (await c.get(f"{BASE}/summary?from={fh.today()}&to={fh.today()}", headers=admin)).json()["data"]
+        order = await db.payment_orders.insert_one({
+            "purpose": "subscription", "status": "paid", "kind": "online", "amount_paise": 99900, "created_at": datetime.utcnow(),
+        })
+        cleanup.append(("payment_orders", {"_id": order.inserted_id}))
+        await asyncio.sleep(3.2)  # the roll-up is only held for a moment
+        after = (await c.get(f"{BASE}/summary?from={fh.today()}&to={fh.today()}", headers=admin)).json()["data"]
+        assert after["plan_sales_paise"] == before["plan_sales_paise"] + 99900
+        assert after["total_balance_paise"] == before["total_balance_paise"] + 99900
+        assert after["net_period_paise"] == before["net_period_paise"] + 99900
+        assert after["all_time"]["plan_sales_paise"] == before["all_time"]["plan_sales_paise"] + 99900
 
 
 async def test_fifty_parallel_creates_all_land(db, clean):
