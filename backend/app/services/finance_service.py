@@ -305,6 +305,57 @@ class FinanceService:
             "received_not_completed_paise": not_done_yet, "bookings_earning_paise": b["net_paise"],
         }
 
+    async def uncollected(self, date_from: str | None, date_to: str | None) -> "list[dict]":
+        """The completed jobs behind the bridge's "Not Collected Yet" line — same
+        window and same due rule as the Collections roll-up, so the rows add up
+        to that number."""
+        from app.services.payment_service import PaymentService  # local: keeps the import graph unchanged
+
+        today = _today()
+        lo = _parse_day(date_from, "from") or today.replace(day=1)
+        hi = _parse_day(date_to, "to") or today
+        if lo > hi:
+            raise BadRequestException("'from' can't be after 'to'.")
+        if (hi - lo).days > MAX_RANGE_DAYS:
+            raise BadRequestException("Pick a range of at most 5 years.")
+        ps = PaymentService(self.db)
+        rows = await ps.booking_repo.collection.aggregate([
+            {"$match": {
+                "is_deleted": {"$ne": True}, "status": "completed",
+                "scheduled_date": ps._collections_window(lo.isoformat(), hi.isoformat()),
+            }},
+            {"$addFields": {"due_now": ps._DUE}},
+            {"$match": {"due_now": {"$gt": 0.004}}},
+            {"$sort": {"scheduled_date": -1}},
+            {"$limit": 200},
+            {"$project": {
+                "booking_number": 1, "scheduled_date": 1, "customer_id": 1, "payment_status": 1, "payment_method": 1,
+                "total_amount": 1, "amount_paid": 1, "wallet_applied": 1, "paid_cash": 1, "paid_online": 1,
+                "tip_amount": 1, "completed_by_role": 1, "due_now": 1,
+            }},
+        ]).to_list(length=200)
+        ids = [ObjectId(r["customer_id"]) for r in rows if r.get("customer_id") and ObjectId.is_valid(r["customer_id"])]
+        names = {
+            str(u["_id"]): u
+            for u in await self.db.users.find({"_id": {"$in": ids}}, {"full_name": 1, "phone": 1}).to_list(length=200)
+        }
+        paise = lambda v: int(round(float(v or 0) * 100))  # noqa: E731
+        return [{
+            "id": str(r["_id"]),
+            "booking_number": r.get("booking_number"),
+            "scheduled_date": r["scheduled_date"].date().isoformat() if r.get("scheduled_date") else None,
+            "customer_name": (names.get(r.get("customer_id") or "") or {}).get("full_name"),
+            "customer_phone": (names.get(r.get("customer_id") or "") or {}).get("phone"),
+            "payment_status": r.get("payment_status"),
+            "payment_method": r.get("payment_method"),
+            "completed_by_role": r.get("completed_by_role"),
+            "total_paise": paise(r.get("total_amount")),
+            "tip_paise": paise(r.get("tip_amount")),
+            "wallet_paise": paise(r.get("wallet_applied")),
+            "received_paise": paise((r.get("paid_cash") or 0) + (r.get("paid_online") or 0)),
+            "due_paise": paise(r.get("due_now")),
+        } for r in rows]
+
     async def summary(self, date_from: str | None, date_to: str | None) -> dict:
         today = _today()
         lo = _parse_day(date_from, "from") or today.replace(day=1)

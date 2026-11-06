@@ -76,6 +76,15 @@ async def summary(
     return success(await FinanceService(db).summary(date_from, date_to))
 
 
+@router.get("/uncollected")
+async def uncollected(
+    date_from: str | None = Query(None, alias="from", pattern=_DAY),
+    date_to: str | None = Query(None, alias="to", pattern=_DAY),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return success(await FinanceService(db).uncollected(date_from, date_to))
+
+
 @router.get("/categories")
 async def categories(db: AsyncIOMotorDatabase = Depends(get_db)):
     return success(await FinanceService(db).categories())

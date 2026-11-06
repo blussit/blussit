@@ -1277,6 +1277,9 @@ booking, payment or KPI collection.
   `summary()["bridge"]` (shown as "Why This Differs From Revenue") walks from one to
   the other: billed − not collected yet − paid from wallet − paid back + received for
   jobs not completed yet = Bookings Earning. Plan money matches between the two.
+  `GET /admin/finance/uncollected?from&to` lists the completed jobs behind "Not Collected Yet"
+  (same window and due rule as the roll-up; booking, customer, billed/received/wallet/tip,
+  marked payment status, due) and is shown under the panel.
 - **UI:** StatCards for the period (presets Today / 7 Days / This Month / Last
   Month / This Year / Custom): Bookings Earning, Plan Sales, Other Credits, Debits, Net
   For Period, plus a hero "Total In Blussit Account"; By Category breakdown;

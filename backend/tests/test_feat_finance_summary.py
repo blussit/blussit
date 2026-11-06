@@ -97,6 +97,17 @@ async def test_summary_math(db, clean, cleanup):
         assert (await c.get(f"{BASE}/summary?from=2000-01-01&to=2026-01-01", headers=admin)).status_code == 400
 
 
+async def test_uncollected_rows_add_up_to_the_bridge(db, clean, cleanup):
+    admin = await fh.admin_h(db)
+    await _seed_bookings(db, cleanup)
+    async with h.client() as c:
+        s = (await c.get(f"{BASE}/summary?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
+        rows = (await c.get(f"{BASE}/uncollected?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
+        assert s["bridge"]["uncollected_paise"] == 99900
+        assert len(rows) == 1 and rows[0]["due_paise"] == 99900 and rows[0]["received_paise"] == 0 and rows[0]["scheduled_date"] == "2019-03-07"
+        assert sum(r["due_paise"] for r in rows) == s["bridge"]["uncollected_paise"]
+
+
 async def test_summary_today_uses_ist_day(db, clean):
     admin = await fh.admin_h(db)
     async with h.client() as c:

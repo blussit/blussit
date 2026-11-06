@@ -142,6 +142,13 @@ export default function AdminFinancePage() {
     placeholderData: keepPreviousData,
     ...LIVE,
   });
+  const dueCount = summary.data?.bridge.uncollected_paise ?? 0;
+  const uncollected = useQuery({
+    queryKey: ["finance-uncollected", range.from, range.to],
+    queryFn: () => financeApi.uncollected(range.from, range.to),
+    enabled: rangeOk && dueCount > 0,
+    ...LIVE,
+  });
   const cats = useQuery({ queryKey: ["finance-categories"], queryFn: financeApi.categories, staleTime: 60_000 });
   const categoryOptions = cats.data?.all ?? SUGGESTED_FALLBACK;
   const s = summary.data;
@@ -312,6 +319,27 @@ export default function AdminFinancePage() {
               <span className="tabular-nums">{rupees(s.bridge.bookings_earning_paise)}</span>
             </div>
           </div>
+          {(uncollected.data?.length ?? 0) > 0 && (
+            <div className="mt-4 border-t border-[var(--color-border)] pt-3" data-testid="finance-uncollected">
+              <p className="mb-2 text-sm font-semibold">Completed Jobs With Money Still Due</p>
+              <ul className="space-y-2 text-sm">
+                {uncollected.data!.map((b) => (
+                  <li key={b.id} className="flex items-start justify-between gap-4">
+                    <span className="min-w-0">
+                      <span className="font-medium">{b.booking_number}</span>
+                      <span className="text-[var(--color-text-secondary)]"> · {b.scheduled_date && formatDate(b.scheduled_date)} · {b.customer_name || b.customer_phone || "Customer"}</span>
+                      <span className="block text-xs text-[var(--color-text-secondary)]">
+                        Billed {rupees(b.total_paise)} · Received {rupees(b.received_paise)}
+                        {b.wallet_paise > 0 && <> · Wallet {rupees(b.wallet_paise)}</>}
+                        {b.tip_paise > 0 && <> · Tip {rupees(b.tip_paise)}</>} · Marked {(b.payment_status || "pending").replace("_", " ")}
+                      </span>
+                    </span>
+                    <span className="shrink-0 tabular-nums text-[var(--color-error)]">{rupees(b.due_paise)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </Panel>
       )}
 
