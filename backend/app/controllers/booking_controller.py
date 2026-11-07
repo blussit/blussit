@@ -650,6 +650,6 @@ class BookingController:
         """On-site add-ons (spec 1.4) — audited by the service."""
         result = await self.service.add_services_on_site(
             booking_id, payload.service_ids, payload.quantities, current_user.id, current_user.role, current_user.service_center_id,
-            note=payload.note,
+            note=payload.note, payment=payload.payment,
         )
         return success(result, "Services added")

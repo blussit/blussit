@@ -142,6 +142,58 @@ async def test_manager_adds_after_completion_on_prepaid_due_collected_by_qr(db):
     assert await fb.hb.wallet(db, s["cap"]["id"]) == pytest.approx(after_completion)
 
 
+async def _cash_paid_done_job(db):
+    s = await fb.rig(db)
+    b = await fb.book(db, s["cu"], s["when"], s["keys"][0])
+    await _complete(db, s, b["id"])
+    await PaymentService(db).captain_collect_cash(b["id"], s["cap"]["id"])
+    assert (await fb.doc(db, b["id"]))["payment_status"] == "paid"
+    return s, b
+
+
+async def test_manager_extra_on_a_cash_paid_done_job_is_paid_straight_away(db):
+    s, b = await _cash_paid_done_job(db)
+    polish = await _polish(db)
+    before = await fb.doc(db, b["id"])
+    out = await BookingService(db).add_services_on_site(b["id"], [str(polish["_id"])], {}, s["mgr"]["id"], "manager", s["center_id"])
+    d = await fb.doc(db, b["id"])
+    assert out["amount_due"] == 0 and d["payment_status"] == "paid" and d["amount_due"] == 0
+    assert d["paid_cash"] == pytest.approx(before["paid_cash"] + out["added_total"]) and d["total_amount"] == pytest.approx(before["total_amount"] + out["added_total"])
+    assert d["cash_collected_by"] == s["mgr"]["id"]
+
+
+async def test_manager_can_leave_the_extra_unpaid_or_say_how_it_was_paid(db):
+    s, b = await _cash_paid_done_job(db)
+    polish = await _polish(db)
+    out = await BookingService(db).add_services_on_site(
+        b["id"], [str(polish["_id"])], {}, s["mgr"]["id"], "manager", s["center_id"], payment="unpaid",
+    )
+    d = await fb.doc(db, b["id"])
+    assert out["amount_due"] == out["added_total"] and d["payment_status"] == "partially_paid"
+    # …and a later add, said to be paid online, settles only its own amount.
+    other = await db.services.find_one({"is_addon": True, "slug": {"$ne": "exterior-polish"}, "is_active": True})
+    if other:
+        try:
+            out2 = await BookingService(db).add_services_on_site(
+                b["id"], [str(other["_id"])], {}, s["mgr"]["id"], "manager", s["center_id"], payment="online",
+            )
+        except BadRequestException:
+            return  # that add-on isn't offered for this car type — the rule above is what matters
+        d2 = await fb.doc(db, b["id"])
+        assert out2["added_total"] > 0 and d2["paid_online"] == pytest.approx(out2["added_total"])
+        assert d2["amount_due"] == pytest.approx(out["added_total"])
+
+
+async def test_a_captain_cannot_mark_the_extra_paid(db):
+    s = await fb.rig(db)
+    b = await fb.book(db, s["cu"], s["when"], s["keys"][0])
+    polish = await _polish(db)
+    await fb.hb.on_the_way(db, b["id"], s["cap"]["id"], vehicle_verified=True)
+    out = await BookingService(db).add_services_on_site(b["id"], [str(polish["_id"])], {}, s["cap"]["id"], "captain", payment="cash")
+    d = await fb.doc(db, b["id"])
+    assert out["amount_due"] > 0 and not d.get("paid_cash")
+
+
 async def test_add_services_authz(db):
     s = await fb.rig(db)
     b = await fb.book(db, s["cu"], s["when"], s["keys"][0])

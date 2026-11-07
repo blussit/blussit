@@ -824,7 +824,13 @@ reached, stuck on the way, idle after arrival, left site, overrun.
 - **On-site add-ons** — captain (after arrival) or manager adds services
   (`POST /bookings/{id}/add-services`); recorded in `added_services[]` +
   `added_services_total`; captain earning unchanged; the new total is due
-  via `MoneyService.on_price_change`. **Offered services only** (QA
+  via `MoneyService.on_price_change`. **Paid or not (manager/admin):** the request's
+  `payment` (`cash` / `online` / `unpaid`) says whether the added amount was paid then —
+  paid is applied in the same transaction (`apply_payment`, only the added amount), so
+  a done job doesn't flip to Part Paid; left out, a completed, fully cash-paid, non-plan
+  job takes it as cash, everything else becomes due. The dialog asks (Paid In Cash / Paid
+  Online / Not Paid Yet); a captain's add is always due (he collects at the door).
+  **Offered services only** (QA
   2026-10-07): on-site adds and edits take only what the booking page
   offers that vehicle type — services listed for the type; the add-a-bike
   line (Extra Bike Wash) only on a BIKE booking, where it is the bike
@@ -1273,13 +1279,8 @@ booking, payment or KPI collection.
   (`finance_service.clear_cache()` in tests), and the page polls every 10 s and on
   tab focus (`LIVE` in AdminFinancePage), so a payment shows within seconds.
   **Finance vs dashboard Revenue:** the dashboard's Revenue is the *billed* value of
-  jobs completed (+ plan and society money); Bookings Earning is money *received*.
-  `summary()["bridge"]` (shown as "Why This Differs From Revenue") walks from one to
-  the other: billed − not collected yet − paid from wallet − paid back + received for
-  jobs not completed yet = Bookings Earning. Plan money matches between the two.
-  `GET /admin/finance/uncollected?from&to` lists the completed jobs behind "Not Collected Yet"
-  (same window and due rule as the roll-up; booking, customer, billed/received/wallet/tip,
-  marked payment status, due) and is shown under the panel.
+  jobs completed (+ plan and society money); Bookings Earning is money *received* — a
+  completed job with no payment recorded shows in one and not the other.
 - **UI:** StatCards for the period (presets Today / 7 Days / This Month / Last
   Month / This Year / Custom): Bookings Earning, Plan Sales, Other Credits, Debits, Net
   For Period, plus a hero "Total In Blussit Account"; By Category breakdown;

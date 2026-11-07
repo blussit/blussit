@@ -54,15 +54,6 @@ export interface FinanceSummary {
   total_balance_paise: number;
   plan_sales_paise: number;
   plan_sales_note: string;
-  /** From the billed value of completed jobs (the dashboard's Revenue) to money received. */
-  bridge: {
-    billed_paise: number;
-    uncollected_paise: number;
-    wallet_paise: number;
-    paid_back_paise: number;
-    received_not_completed_paise: number;
-    bookings_earning_paise: number;
-  };
   all_time: { bookings_earning_paise: number; plan_sales_paise: number; credits_paise: number; debits_paise: number };
   by_category: { category: string; credit_paise: number; debit_paise: number }[];
   series_unit: "day" | "month";
@@ -70,23 +61,6 @@ export interface FinanceSummary {
 }
 
 const clean = (f: FinanceFilters) => Object.fromEntries(Object.entries(f).filter(([, v]) => v !== "" && v !== undefined && v !== false));
-
-/** A completed job with money still due — a row behind the bridge's "Not Collected Yet". */
-export interface UncollectedBooking {
-  id: string;
-  booking_number: string | null;
-  scheduled_date: string | null;
-  customer_name: string | null;
-  customer_phone: string | null;
-  payment_status: string | null;
-  payment_method: string | null;
-  completed_by_role: string | null;
-  total_paise: number;
-  tip_paise: number;
-  wallet_paise: number;
-  received_paise: number;
-  due_paise: number;
-}
 
 export const financeApi = {
   list: (filters: FinanceFilters & { page?: number; page_size?: number }) =>
@@ -98,8 +72,6 @@ export const financeApi = {
     apiClient.post<ApiSuccess<FinanceEntry>>(`/admin/finance/entries/${id}/void`, { reason }).then((r) => r.data.data),
   summary: (from: string, to: string) =>
     apiClient.get<ApiSuccess<FinanceSummary>>("/admin/finance/summary", { params: { from, to } }).then((r) => r.data.data),
-  uncollected: (from: string, to: string) =>
-    apiClient.get<ApiSuccess<UncollectedBooking[]>>("/admin/finance/uncollected", { params: { from, to } }).then((r) => r.data.data),
   categories: () =>
     apiClient.get<ApiSuccess<{ suggested: string[]; used: string[]; all: string[] }>>("/admin/finance/categories").then((r) => r.data.data),
   exportCsv: (filters: FinanceFilters) =>

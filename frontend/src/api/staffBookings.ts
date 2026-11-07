@@ -131,7 +131,7 @@ export interface StaffCancelResult {
 export const staffBookingApi = {
   /** Manager (own center) / admin: any non-cancelled booking, even after
    *  completion. The added amount becomes due. */
-  addServices: (bookingId: string, payload: { service_ids: string[]; quantities?: Record<string, number>; note?: string }) =>
+  addServices: (bookingId: string, payload: { service_ids: string[]; quantities?: Record<string, number>; note?: string; payment?: "cash" | "online" | "unpaid" }) =>
     apiClient
       .post<ApiSuccess<AddServicesResult>>(`/bookings/${bookingId}/add-services`, { ...payload, note: payload.note || undefined })
       .then((r) => r.data.data),

@@ -46,8 +46,6 @@ async def test_summary_math(db, clean, cleanup):
     async with h.client() as c:
         before = (await c.get(f"{BASE}/summary?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
         assert before["bookings_earning_paise"] == 80000 and before["bookings_earning"] == 800.0
-        b = before["bridge"]  # billed → received always adds up to Bookings Earning
-        assert b["billed_paise"] - b["uncollected_paise"] - b["wallet_paise"] - b["paid_back_paise"] + b["received_not_completed_paise"] == before["bookings_earning_paise"]
         assert before["credits_paise"] == 0 and before["total_balance_paise"] == before["all_time"]["bookings_earning_paise"] + before["all_time"]["plan_sales_paise"]
         base_balance = before["total_balance_paise"]
 
@@ -95,17 +93,6 @@ async def test_summary_math(db, clean, cleanup):
         assert d["period"]["from"] == fh.today()[:8] + "01" and d["period"]["to"] == fh.today()
         assert (await c.get(f"{BASE}/summary?from=2026-02-01&to=2026-01-01", headers=admin)).status_code == 400
         assert (await c.get(f"{BASE}/summary?from=2000-01-01&to=2026-01-01", headers=admin)).status_code == 400
-
-
-async def test_uncollected_rows_add_up_to_the_bridge(db, clean, cleanup):
-    admin = await fh.admin_h(db)
-    await _seed_bookings(db, cleanup)
-    async with h.client() as c:
-        s = (await c.get(f"{BASE}/summary?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
-        rows = (await c.get(f"{BASE}/uncollected?from={WIN_FROM}&to={WIN_TO}", headers=admin)).json()["data"]
-        assert s["bridge"]["uncollected_paise"] == 99900
-        assert len(rows) == 1 and rows[0]["due_paise"] == 99900 and rows[0]["received_paise"] == 0 and rows[0]["scheduled_date"] == "2019-03-07"
-        assert sum(r["due_paise"] for r in rows) == s["bridge"]["uncollected_paise"]
 
 
 async def test_summary_today_uses_ist_day(db, clean):

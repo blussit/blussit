@@ -8122,7 +8122,7 @@ class BookingService:
 
     async def add_services_on_site(
         self, booking_id: str, service_ids: list[str], quantities: dict[str, int], actor_id: str, actor_role: str,
-        actor_center_id: str | None = None, *, note: str | None = None,
+        actor_center_id: str | None = None, *, note: str | None = None, payment: str | None = None,
     ) -> dict:
         """Add services/add-ons to one car (see the section comment). One
         transaction: the car's total, added_services[], duration (later cars
@@ -8131,6 +8131,12 @@ class BookingService:
         the added amount becomes due) — guarded on the total it was computed
         from, so an online payment or another add-on landing at the same
         moment makes it retry cleanly, never double-add.
+
+        `payment` (manager / admin only): "cash" / "online" — the added amount
+        was paid right then, so the booking stays Paid; "unpaid" — it becomes
+        due. Left out: a finished job that was fully paid in cash takes the
+        added amount as cash too (nobody is left chasing ₹40); anything else
+        becomes due.
 
         Returns {booking (as the caller may see it), added [entries],
         added_total, amount_due, visit_amount_due}."""
@@ -8191,7 +8197,11 @@ class BookingService:
         added_total = round(sum(e["amount"] for e in entries), 2)
         added_minutes = sum(e["duration_minutes"] for e in entries)
 
+        paid_now: dict | None = None
+
         async def _do_add(session):
+            nonlocal paid_now
+            paid_now = None
             await self._touch_customer(booking["customer_id"], session)
             fresh = await self.repo.find_by_id(booking_id, session=session)
             if not fresh:
@@ -8225,6 +8235,17 @@ class BookingService:
             )
             if done is None:
                 raise BadRequestException("This booking just changed — refresh and try again.")
+            paid_how = self._paid_on_the_spot(fresh, payment, actor_role)
+            if paid_how:
+                # Same transaction as the add: never a moment (or a crash) where the
+                # extra shows as owed after the manager said it was paid.
+                took = await self.money.apply_payment(
+                    [booking_id], min(added_total, float(money.get("amount_due") or 0)), method=paid_how,
+                    key=f"addon-paid:{booking_id}:{new_total}", session=session, actor_id=actor_id, actor_role=actor_role,
+                    collected_by=actor_id, note="Paid when the service was added",
+                )
+                paid_now = took
+                done = next((c for c in took["cars"] if str(c["_id"]) == booking_id), done)
             # Later cars of the visit start that much later (the captain's
             # blocked time keeps covering the whole visit).
             for car in rows:
@@ -8243,13 +8264,16 @@ class BookingService:
             updated, money = await session.with_transaction(_do_add)
 
         await self._post_commit("price-change money", updated, self.money.after_price_change([money], "Services added on site"))
+        if paid_now:
+            await self._post_commit("add-on payment", updated, self.money.after_payment(paid_now))
         what = ", ".join(e["name"] + (f" ×{e['qty']}" if e["qty"] > 1 else "") for e in entries)
         changes = [{"booking_id": booking_id, "booking_number": updated.get("booking_number"), "field": "added_services",
                     "from": None, "to": what}, {"booking_id": booking_id, "booking_number": updated.get("booking_number"),
                     "field": "total", "from": float(booking.get("total_amount") or 0), "to": float(updated.get("total_amount") or 0)}]
         who = f"{'Captain' if actor_role == 'captain' else actor_role.title()} {actor.get('name') or ''}".strip()
         after_wash = " after the wash" if booking.get("status") == BookingStatus.COMPLETED.value else ""
-        line = f"{who} added {what}{after_wash} — ₹{added_total:g} (new total ₹{float(updated.get('total_amount') or 0):g})."
+        paid_note = f" Paid ({paid_now['cars'][0].get('payment_method')})." if paid_now and not paid_now.get("already") else ""
+        line = f"{who} added {what}{after_wash} — ₹{added_total:g} (new total ₹{float(updated.get('total_amount') or 0):g}).{paid_note}"
         await self._post_commit("history row", updated, self._record_history(
             booking_id, BookingStatus(updated["status"]), actor_id, line, changes=changes,
         ))
@@ -8309,6 +8333,29 @@ class BookingService:
             "visit_amount_due": round(sum(bm.amount_due(c) for c in visit_now), 2),
             "next_job_conflict": next_job_conflict,
         }
+
+    @staticmethod
+    def _paid_on_the_spot(booking: dict, payment: str | None, actor_role: str) -> str | None:
+        """How the amount added to this booking was paid at that moment
+        ("cash" / "online"), or None when it becomes due. Only a manager or
+        admin can say it was paid; a captain collects at the door as before.
+        With nothing said, a finished job that was fully paid in cash takes the
+        extra as cash too — a plan wash's extras are paid online, so never
+        guessed."""
+        if actor_role not in ("manager", "admin"):
+            return None
+        if payment in ("cash", "online"):
+            return payment
+        if payment == "unpaid":
+            return None
+        if (
+            booking.get("status") == BookingStatus.COMPLETED.value
+            and not booking.get("subscription_id")
+            and bm.money_view(booking)["payment_status"] == bm.PAID
+            and booking.get("payment_method") == "cash"
+        ):
+            return "cash"
+        return None
 
     async def _next_job_conflict_after_growth(
         self, booking: dict, visit: list[dict], grew_by: int, actor_id: str | None,

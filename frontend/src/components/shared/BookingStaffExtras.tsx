@@ -120,8 +120,21 @@ export function HistoryChanges({ rows }: { rows?: StatusHistoryRow[] | null }) {
 /** The price this car type pays for a service (standard, not first-wash). */
 const priceFor = (s: Service, typeId?: string | null) => Number((typeId && s.vehicle_type_prices?.[typeId]) ?? s.price ?? 0);
 
+type AddedPayment = "cash" | "online" | "unpaid";
+const PAYMENT_CHOICES: { key: AddedPayment; label: string }[] = [
+  { key: "cash", label: "Paid In Cash" },
+  { key: "online", label: "Paid Online" },
+  { key: "unpaid", label: "Not Paid Yet" },
+];
+
+/** What the staff most likely means: a finished, cash-paid job whose extra was
+ *  settled on the spot → paid in cash; anything else is collected later. */
+const defaultPayment = (b: StaffBooking): AddedPayment =>
+  b.status === "completed" && b.payment_status === "paid" && b.payment_method === "cash" && !b.subscription_id ? "cash" : "unpaid";
+
 /** Manager / admin: add services or add-ons to one car, any time until
- *  cancelled (even after completion). The added amount becomes due. */
+ *  cancelled (even after completion). They say whether the added amount was
+ *  paid right then; if not, it becomes due. */
 export function AddServiceDialog({ booking, onClose, onAdded }: { booking: StaffBooking | null; onClose: () => void; onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
@@ -129,11 +142,13 @@ export function AddServiceDialog({ booking, onClose, onAdded }: { booking: Staff
   const [note, setNote] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
+  const [payment, setPayment] = useState<AddedPayment>("unpaid");
   useEffect(() => {
     setPicked({});
     setNote("");
     setConfirming(false);
     setError("");
+    if (booking) setPayment(defaultPayment(booking));
   }, [booking?.id]);
 
   const { data, isLoading } = useQuery({
@@ -161,6 +176,7 @@ export function AddServiceDialog({ booking, onClose, onAdded }: { booking: Staff
         service_ids: lines.map((l) => l.s.id),
         quantities: Object.fromEntries(lines.filter((l) => l.qty > 1).map((l) => [l.s.id, l.qty])),
         note: note.trim() || undefined,
+        payment,
       }),
     onSuccess: (r) => {
       queryClient.invalidateQueries({
@@ -169,7 +185,7 @@ export function AddServiceDialog({ booking, onClose, onAdded }: { booking: Staff
       pushToast({
         tone: "success",
         title: `Added ${rupees(r.added_total)}`,
-        message: `New total ${rupees(r.booking.total_amount)} · ${rupees(r.visit_amount_due)} due now.`,
+        message: `New total ${rupees(r.booking.total_amount)} · ${r.visit_amount_due > 0 ? `${rupees(r.visit_amount_due)} due now.` : "Nothing due."}`,
       });
       onAdded?.();
       onClose();
@@ -213,7 +229,26 @@ export function AddServiceDialog({ booking, onClose, onAdded }: { booking: Staff
                 <span className="font-mono-num">{rupees(currentTotal + addedTotal)}</span>
               </p>
             </div>
-            <p className="text-xs text-gray-500">The added {rupees(addedTotal)} becomes due — collected by cash or online. Captain pay doesn&apos;t change.</p>
+            <div role="radiogroup" aria-label={`Was the ${rupees(addedTotal)} paid?`} className="space-y-2" data-testid="add-service-payment">
+              <p className="text-sm font-semibold text-black">Was The {rupees(addedTotal)} Paid?</p>
+              <div className="grid grid-cols-3 gap-2">
+                {PAYMENT_CHOICES.map((c) => (
+                  <button
+                    key={c.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={payment === c.key}
+                    onClick={() => setPayment(c.key)}
+                    className={`min-h-11 rounded-xl border px-2 text-sm font-semibold ${payment === c.key ? "border-black bg-[var(--color-primary-light)] text-black" : "border-gray-200 text-gray-600"}`}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="text-xs text-gray-500">
+              {payment === "unpaid" ? `The added ${rupees(addedTotal)} stays due until it is collected.` : `The added ${rupees(addedTotal)} is recorded as received now.`} Captain pay doesn&apos;t change.
+            </p>
             {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
             <div className="flex gap-2">
               <Button variant="outline" className="min-h-11 flex-1" onClick={() => setConfirming(false)}>

@@ -738,6 +738,9 @@ class AddServicesRequest(BaseModel):
     service_ids: list[str] = Field(min_length=1, max_length=10)
     quantities: dict[str, int] = Field(default_factory=dict)
     note: Optional[str] = Field(default=None, max_length=300)
+    # Manager / admin only: was the added amount paid when it was added?
+    # None = decided by the server (a finished, cash-paid job → paid in cash).
+    payment: Optional[Literal["cash", "online", "unpaid"]] = None
 
     _services = field_validator("service_ids")(_unique_ids)
 
