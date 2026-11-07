@@ -135,7 +135,7 @@ function DetailRow({ icon: Icon, children }: { icon: LucideIcon; children: React
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -221,8 +221,13 @@ export default function BookingDetailPage() {
   const refundCars = trailCars.filter((b) => b.payment_status === "refund_due" || b.payment_status === "refunded");
   const refundTotal = refundCars.reduce((sum, b) => sum + (Number(b.refunded_amount) || b.total_amount || 0), 0);
   const refundDone = refundCars.length > 0 && refundCars.every((b) => b.payment_status === "refunded");
+  // What a plan wash adds on top of the plan (add-ons, a costlier swap) is paid online —
+  // the server refuses a switch to cash for it (BookingService._plan_extras_online_only).
+  const planExtrasOnline = trailCars.some(
+    (b) => !!b.subscription_id && (b.total_amount || 0) - (Number(b.cancellation_charge) || 0) - (Number((b as { wallet_due_carried?: number }).wallet_due_carried) || 0) > 0,
+  );
   // Founder rule: a prepaid service can never fall back to cash.
-  const cashAllowed = !prepaidOnly && booking?.status === "awaiting_payment";
+  const cashAllowed = !prepaidOnly && !planExtrasOnline && booking?.status === "awaiting_payment";
 
   useLiveChannel(id && live ? `booking:${id}` : null, () => {
     queryClient.invalidateQueries({ queryKey: bookingQueryKey });
@@ -414,6 +419,18 @@ export default function BookingDetailPage() {
     },
     onError: (err) => setError(getErrorMessage(err)),
   });
+
+  // "Book & Pay" from the plan-wash sheet lands here with ?pay=1 — open the payment once.
+  const payLinkDone = useRef(false);
+  useEffect(() => {
+    if (payLinkDone.current || searchParams.get("pay") !== "1" || !booking || !isCustomer) return;
+    payLinkDone.current = true;
+    const next = new URLSearchParams(searchParams);
+    next.delete("pay");
+    setSearchParams(next, { replace: true });
+    if (booking.status === "awaiting_payment" && !paymentHeld && dueAmount > 0) payMutation.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booking, isCustomer, searchParams]);
 
   const deleteReviewMutation = useMutation({
     mutationFn: () => reviewApi.remove(myReview!.id),
@@ -632,7 +649,7 @@ export default function BookingDetailPage() {
                 {payMutation.isPending ? "Opening Payment…" : lastFailure ? `Try Again — ₹${Math.round(dueAmount)}` : `Pay ₹${Math.round(dueAmount)} Now`}
               </button>
             )}
-            {!prepaidOnly && !paymentHeld && (
+            {cashAllowed && !paymentHeld && (
               <button type="button" className={btn("outline", "md", "w-full")} disabled={payBusy} onClick={() => switchToCashMutation.mutate()}>
                 {switchToCashMutation.isPending ? "Switching To Cash…" : "Pay Cash Instead"}
               </button>

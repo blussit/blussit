@@ -239,8 +239,16 @@ export function PlanWashSheet({
         void queryClient.invalidateQueries({ queryKey: key as readonly unknown[] });
       }
       onClose();
-      toast.push({ tone: "success", title: "Plan Wash Booked", message: `${result.booking_numbers.join(" + ")} · ${format(date)}` });
       const first = result.bookings[0];
+      // Extras on a plan wash are paid online first: the slot is only held for
+      // a short while, so say so and open the payment straight away (?pay=1) —
+      // never "booked" for a visit that is still waiting on its payment.
+      if (result.awaiting_payment) {
+        toast.push({ tone: "info", title: "Pay To Confirm", message: `${result.booking_numbers.join(" + ")} · ${format(date)} · pay the extras to confirm your slot` });
+        if (first) navigate(`/app/bookings/${first.id}?pay=1`);
+        return;
+      }
+      toast.push({ tone: "success", title: "Plan Wash Booked", message: `${result.booking_numbers.join(" + ")} · ${format(date)}` });
       if (first) navigate(`/app/bookings/${first.id}`);
     },
     onError: (err) => {
