@@ -13,14 +13,20 @@ class NotificationController:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.service = NotificationService(db)
 
-    async def list_mine(self, current_user: CurrentUser, pagination: PaginationParams, unread_only: bool):
+    async def list_mine(self, current_user: CurrentUser, pagination: PaginationParams, unread_only: bool, history: bool = False, fresh: bool = False):
         if current_user.role == "manager":
             # A manager's bell is a to-do list: alerts about work already
-            # done clear themselves, and read ones drop off the list.
+            # done clear themselves; the bell lists only what is unread.
             try:
                 await self.service.clear_handled_alerts(current_user.id)
             except Exception:  # noqa: BLE001 — the list must still load
                 logger.exception("Could not clear handled alerts for manager %s", current_user.id)
+            if history:
+                # The Notifications page: unread plus the latest few he has read.
+                items, total = await self.service.history_for_manager(current_user.id, pagination.page, pagination.page_size, prune=fresh)
+                result = paginated(items, pagination.page, pagination.page_size, total)
+                result["unread_count"] = await self.service.unread_count(current_user.id)
+                return result
             unread_only = True
         items, total = await self.service.list_for_user(current_user.id, pagination.page, pagination.page_size, unread_only)
         unread = await self.service.unread_count(current_user.id)

@@ -9,8 +9,8 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
 @router.get("")
-async def list_notifications(unread_only: bool = False, pagination: PaginationParams = Depends(), current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await NotificationController(db).list_mine(current_user, pagination, unread_only)
+async def list_notifications(unread_only: bool = False, history: bool = False, fresh: bool = False, pagination: PaginationParams = Depends(), current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await NotificationController(db).list_mine(current_user, pagination, unread_only, history, fresh)
 
 
 @router.get("/preferences")

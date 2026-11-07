@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Bell, BellOff, ChevronRight } from "lucide-react";
@@ -14,7 +14,19 @@ export default function NotificationsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [page, setPage] = useState(1);
-  const { data, isLoading, isError, isFetching, refetch } = useQuery({ queryKey: ["notifications", page], queryFn: () => notificationApi.list({ page, page_size: 15 }) });
+  // Opening the page asks the server to tidy a manager's old read alerts (it keeps the
+  // latest few); every refetch after that — a "Mark All Read" included — leaves them on
+  // screen, so what was just read doesn't vanish until the next visit.
+  const justOpened = useRef(true);
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
+    queryKey: ["notifications", page],
+    queryFn: () => {
+      const fresh = justOpened.current;
+      justOpened.current = false;
+      return notificationApi.list({ page, page_size: 15, history: true, fresh });
+    },
+    refetchOnMount: "always",
+  });
 
   const markReadMutation = useMutation({
     mutationFn: notificationApi.markRead,
@@ -56,7 +68,7 @@ export default function NotificationsPage() {
         <ErrorState message="Couldn't load your notifications." busy={isFetching} onRetry={() => void refetch()} />
       ) : !data?.data.length ? (
         user?.role === "manager" ? (
-          <EmptyState icon={Bell} title="You're All Caught Up" description="Alerts clear once you open them or the job is done." />
+          <EmptyState icon={Bell} title="You're All Caught Up" description="New alerts show here. Read ones are kept for a day." />
         ) : (
           <EmptyState icon={Bell} title="No Notifications Yet" />
         )

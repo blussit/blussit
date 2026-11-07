@@ -517,6 +517,13 @@ async def create_indexes() -> None:
             logger.warning("TTL index on %s.%s skipped: %s", collection.name, field, exc)
 
     await _ensure_ttl(db.notifications, "created_at", 90 * 24 * 3600)
+    # An alert is deleted a day after it was read (read_at is set wherever one is
+    # marked read; rows read before the field existed get it from their last update).
+    await getattr(db.notifications, "raw", db.notifications).update_many(
+        {"is_read": True, "read_at": {"$exists": False}},
+        [{"$set": {"read_at": {"$ifNull": ["$updated_at", "$created_at"]}}}],
+    )
+    await _ensure_ttl(db.notifications, "read_at", 24 * 3600)
     await _ensure_ttl(db.sms_outbox, "created_at", 365 * 24 * 3600)
     # WhatsApp traffic logs were the fastest-growing unbounded collections
     # (a row per message, both providers). One year of history is plenty

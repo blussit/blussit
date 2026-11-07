@@ -293,7 +293,7 @@ export const reviewApi = {
 };
 
 export const notificationApi = {
-  list: (params?: { unread_only?: boolean; page?: number; page_size?: number }) =>
+  list: (params?: { unread_only?: boolean; history?: boolean; fresh?: boolean; page?: number; page_size?: number }) =>
     apiClient.get<ApiPaginated<Notification> & { unread_count: number }>("/notifications", { params }).then((r) => r.data),
   markRead: (id: string) => apiClient.post<ApiSuccess<Notification>>(`/notifications/${id}/read`).then((r) => r.data.data),
   markAllRead: () => apiClient.post("/notifications/read-all").then((r) => r.data),

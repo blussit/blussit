@@ -54,6 +54,8 @@ NEEDS_CAPTAIN_TITLES = ("New booking", "Still needs a captain")
 URGENT_TITLE = "🚨 Urgent"
 FINISHED_BOOKING = frozenset({"completed", "cancelled"})
 CLOSED_COMPLAINT = frozenset({"resolved", "closed"})
+# How many alerts a manager has already read stay on his Notifications page.
+READ_HISTORY_KEPT = 10
 CLEAR_SCAN_LIMIT = 300
 
 # ---------------------------------------------------------------------------
@@ -947,6 +949,16 @@ class NotificationService:
         items, total = await self.repo.list_for_user(user_id, page, page_size, unread_only)
         return serialize_list(items), total
 
+    async def history_for_manager(self, user_id: str, page: int, page_size: int, *, prune: bool):
+        """The manager's Notifications page: every unread alert plus the ones he
+        has read. `prune` (the page was just opened) first deletes all but the
+        newest READ_HISTORY_KEPT read ones — so what he marked read a moment ago
+        stays on screen until he comes back."""
+        if prune:
+            await self.repo.prune_read(user_id, READ_HISTORY_KEPT)
+        items, total = await self.repo.list_with_read(user_id, page, page_size)
+        return serialize_list(items), total
+
     async def clear_handled_alerts(self, user_id: str) -> int:
         """Marks read a manager's open alerts whose job is already done, so
         the bell only lists what still needs him:
@@ -1011,7 +1023,7 @@ class NotificationService:
             return 0
         result = await self.db.notifications.update_many(
             {"_id": {"$in": done}, "user_id": user_id, "is_read": False},
-            {"$set": {"is_read": True, "auto_cleared": True, "updated_at": datetime.now(timezone.utc)}},
+            {"$set": {"is_read": True, "auto_cleared": True, "read_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}},
         )
         return result.modified_count
 

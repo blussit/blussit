@@ -147,3 +147,47 @@ async def test_manager_bell_clears_handled_alerts_and_hides_read(rig):
     assert listed["unread_count"] == len(listed["data"])
     cleared = await db.notifications.find_one({"user_id": rig["manager_id"], "title": {"$regex": "^New booking"}})
     assert cleared["is_read"] is True and cleared["auto_cleared"] is True
+
+
+@pytest.mark.asyncio
+async def test_manager_history_keeps_what_was_just_read_and_trims_on_the_next_visit(rig):
+    """Founder: "Mark All Read" must not make everything vanish at once. The page
+    keeps them on screen; the next time it is opened only the latest 10 read
+    ones remain (the rest are deleted). Every read alert gets read_at (the
+    24-hour delete)."""
+    from app.controllers.notification_controller import NotificationController
+    from app.core.dependencies import CurrentUser, PaginationParams
+
+    db = rig["db"]
+    uid = rig["manager_id"]
+    base = datetime.now(timezone.utc)
+    await db.notifications.insert_many([
+        {"user_id": uid, "title": f"Alert {i}", "message": "x", "notification_type": "system", "is_read": False, "created_at": base - timedelta(minutes=i)}
+        for i in range(14)
+    ])
+    manager = CurrentUser(id=uid, role="manager", service_center_id=rig["center_id"])
+    page = PaginationParams(page=1, page_size=50)
+    ctl = NotificationController(db)
+
+    listed = await ctl.list_mine(manager, page, False, history=True, fresh=True)
+    assert len(listed["data"]) == 14 and listed["unread_count"] == 14
+
+    await ctl.mark_all_read(manager)
+    assert await db.notifications.count_documents({"user_id": uid, "is_read": True, "read_at": {"$type": "date"}}) == 14
+    # The refetch right after marking: all 14 are still there, now read.
+    listed = await ctl.list_mine(manager, page, False, history=True, fresh=False)
+    assert len(listed["data"]) == 14 and listed["unread_count"] == 0  # nothing vanishes
+    # (nothing is deleted until the page is opened again)
+    assert await db.notifications.count_documents({"user_id": uid}) == 14
+
+    # A new alert arrives; the manager comes back → the 4 older read ones are deleted.
+    await db.notifications.insert_one({"user_id": uid, "title": "Brand new", "message": "x", "notification_type": "system", "is_read": False, "created_at": base + timedelta(minutes=1)})
+    listed = await ctl.list_mine(manager, page, False, history=True, fresh=True)
+    titles = [n["title"] for n in listed["data"]]
+    assert titles[0] == "Brand new" and len(titles) == 11 and listed["unread_count"] == 1
+    assert await db.notifications.count_documents({"user_id": uid}) == 11
+    assert "Alert 13" not in titles  # the oldest read ones are gone
+
+    # The bell's own polling (no history flag) still lists only unread.
+    bell = await ctl.list_mine(manager, page, False)
+    assert [n["title"] for n in bell["data"]] == ["Brand new"]
