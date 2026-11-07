@@ -105,7 +105,18 @@ export interface CancelOutcome {
   plan_wash_forfeited?: boolean | number | null;
 }
 
+/** POST /bookings/{id}/extras — what adding paid add-ons answers (the money, as the server sees it). */
+export interface AddExtrasResult {
+  added_total: number;
+  /** Still to pay on this car after adding. */
+  amount_due: number;
+  visit_amount_due: number;
+}
+
 export const bookingEditApi = {
+  /** Add paid add-ons to one of my bookings (a plan wash included). Add-ons only; the server refuses once the captain is on the way. */
+  addExtras: (id: string, serviceIds: string[]) =>
+    apiClient.post<ApiSuccess<AddExtrasResult>>(`/bookings/${id}/extras`, { service_ids: serviceIds }).then((r) => r.data.data),
   edit: (id: string, payload: BookingEditPayload) =>
     apiClient.patch<ApiSuccess<BookingEditResult>>(`/bookings/${id}`, payload).then((r) => r.data.data),
   editGroup: (groupId: string, payload: BookingEditPayload) =>

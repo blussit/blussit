@@ -845,6 +845,11 @@ class BookingService:
     async def visit_is_prepaid(self, booking: dict) -> bool:
         return any(c.get("prepaid_only") for c in await self._visit_cars(booking))
 
+    async def visit_is_online_only(self, booking: dict) -> bool:
+        """No cash switch for this visit: a prepaid service, or the paid extras on a plan wash."""
+        cars = await self._visit_cars(booking)
+        return any(c.get("prepaid_only") for c in cars) or self._plan_extras_online_only(self._plan_rows(cars))
+
     async def create_booking(
         self,
         customer_id: str,
@@ -8104,7 +8109,15 @@ class BookingService:
                     return
                 raise BadRequestException("This visit is fully paid — ask your manager to add anything more.")
             raise BadRequestException("You can add services once you've reached the customer and verified the code.")
-        if actor_role == "manager":
+        if actor_role == "customer":
+            # The customer adds paid extras to their own booking under the same
+            # lock as an edit (before the captain heads out, > 1 hour before the slot).
+            if booking.get("customer_id") != actor_id:
+                raise NotFoundException("Booking not found")
+            if booking.get("status") == BookingStatus.COMPLETED.value:
+                raise BadRequestException("This booking is done — book a new wash for anything else.")
+            self._ensure_customer_may_edit(visit or [booking])
+        elif actor_role == "manager":
             ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
         elif actor_role != "admin":
             raise ForbiddenException("You can't add services to this booking")
@@ -8154,6 +8167,8 @@ class BookingService:
             svc = await self.service_repo.find_by_id(sid)
             if not svc or not svc.get("is_active"):
                 raise NotFoundException(f"Service not found or inactive: {sid}")
+            if actor_role == "customer" and not svc.get("is_addon"):
+                raise BadRequestException("Only add-ons can be added to a booking you've made — book a new wash for another service.")
             new_services.append(svc)
         # The same mix rules as a booking (car vs bike, one pick per variant,
         # per-unit quantities, bike polish ≤ bikes) on the car as it will be
@@ -8296,6 +8311,8 @@ class BookingService:
                     manager_id, f"Services added — {updated.get('booking_number')}", line,
                     NotificationType.BOOKING, booking_id, send_whatsapp=False, background=True,
                 )
+            if actor_role == "customer":
+                return  # they just did it themselves — the screen already says so
             plan_booking = bool(booking.get("subscription_id"))
             if plan_booking:
                 # A plan wash with a paid extra: the customer is told on

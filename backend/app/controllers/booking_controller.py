@@ -646,6 +646,13 @@ class BookingController:
             return success(result, "Preview — nothing saved")
         return success(result, "Booking updated" if result.get("changes") else "Nothing changed")
 
+    async def add_extras(self, current_user: CurrentUser, booking_id: str, payload: AddServicesRequest):
+        """The customer adds paid add-ons to their own booking (plan wash or not)."""
+        result = await self.service.add_services_on_site(
+            booking_id, payload.service_ids, payload.quantities, current_user.id, current_user.role, None, note=payload.note,
+        )
+        return success(result, "Extras added")
+
     async def add_services(self, current_user: CurrentUser, booking_id: str, payload: AddServicesRequest):
         """On-site add-ons (spec 1.4) — audited by the service."""
         result = await self.service.add_services_on_site(

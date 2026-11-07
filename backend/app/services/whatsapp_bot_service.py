@@ -2795,7 +2795,7 @@ class WhatsAppBotService:
             return False
         amount = booking.get("total_amount")
         booking_id = str(booking.get("_id") or booking.get("id"))
-        if await self.booking_service.visit_is_prepaid(booking):
+        if await self.booking_service.visit_is_online_only(booking):
             return await self.wa.send_buttons(
                 phone,
                 f"⏳ *{booking.get('booking_number')}* is still waiting on payment — *₹{amount}*.\nPay online to confirm it.",

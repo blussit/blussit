@@ -28,6 +28,7 @@ import { paymentApi } from "../../api/payment";
 import { complaintApi, reviewApi } from "../../api/engagement";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { Input, Modal, PageLoader } from "../../components/ui";
 import { btn, card, PageHeader, StatusChip, WhatsAppGlyph, whatsAppLink } from "../../components/customer/ui";
 import { useLiveChannel } from "../../lib/socket";
@@ -139,6 +140,7 @@ export default function BookingDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const toast = useToast();
   const confirm = useConfirm();
   const isCustomer = user?.role === "customer";
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -1105,6 +1107,14 @@ export default function BookingDetailPage() {
           queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
           queryClient.invalidateQueries({ queryKey: ["available-slots"] });
           queryClient.invalidateQueries({ queryKey: ["my-wallet"] });
+          queryClient.invalidateQueries({ queryKey: paymentStateKey });
+        }}
+        onExtrasAdded={(r) => {
+          setEditOpen(false);
+          toast.push({ tone: "success", title: "Extras Added", message: r.visit_amount_due > 0 ? `Pay ₹${Math.round(r.visit_amount_due)} online from this page.` : "Nothing more to pay." });
+          queryClient.invalidateQueries({ queryKey: bookingQueryKey });
+          queryClient.invalidateQueries({ queryKey: ["booking-group", groupId] });
+          queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
           queryClient.invalidateQueries({ queryKey: paymentStateKey });
         }}
       />

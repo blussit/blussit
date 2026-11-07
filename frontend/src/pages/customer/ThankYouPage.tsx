@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, useReducedMotion, type Variants } from "framer-motion";
 import { CheckCircle2, CreditCard, Gift, Home, LayoutDashboard, LogIn, ReceiptText } from "lucide-react";
+import { bookingPolicyApi } from "../../api/catalog";
 import { purchaseConfirmationApi, type PurchaseConfirmation } from "../../api/purchaseConfirmation";
 import { Button, Card, CardBody, PageLoader, Spinner } from "../../components/ui";
 import { useAuth } from "../../context/AuthContext";
@@ -150,6 +151,9 @@ export default function ThankYouPage() {
     }
   }, [invalid, confirmationLoading, navigate]);
 
+  // The hold is the admin's "Online Payment Hold" — say the real number, not a guess.
+  const { data: policy } = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get, staleTime: 5 * 60_000 });
+  const holdMinutes = policy?.payment_window_minutes ?? 30;
   if (!token) return <PageLoader />;
   if (confirmationLoading && !instant) return <PageLoader />;
   if (invalid || (!confirmation && !instant)) return null; // redirecting via the effect above
@@ -204,7 +208,7 @@ export default function ThankYouPage() {
   const message = isSubscription
     ? `${confirmed.payload.plan_name || "Your plan"} is ready to book with.`
     : awaitingPayment
-      ? `Slot held for 30 minutes${when ? `: ${when}` : ""}.`
+      ? `Slot held for ${holdMinutes} minutes${when ? `: ${when}` : ""}.`
       : when || "We'll message you when a captain is assigned.";
 
   return (

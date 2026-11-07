@@ -528,6 +528,20 @@ async def add_services_on_site(
     return await BookingController(db).add_services(current_user, booking_id, payload)
 
 
+@router.post("/{booking_id}/extras", dependencies=[Depends(require_customer)])
+async def add_extras(
+    payload: AddServicesRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """The customer adds paid add-ons to their own booking — a plan wash
+    included (its covered wash stays as it is; the extras are what is due,
+    paid online). Same lock as an edit: before the captain heads out and more
+    than an hour before the slot. Add-ons only."""
+    return await BookingController(db).add_extras(current_user, booking_id, payload)
+
+
 @router.patch("/{booking_id}/tip", dependencies=[Depends(require_manager_or_admin)])
 async def set_booking_tip(
     booking_id: str, payload: BookingTipRequest, current_user: CurrentUser = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)

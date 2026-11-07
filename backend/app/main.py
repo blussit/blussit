@@ -929,7 +929,7 @@ async def _sweep_once(db, holder: str) -> None:
                 booking["customer_id"],
                 "Finish your payment",
                 f"{reference} is waiting for payment — finish in the next {minutes_left} minutes to keep your slot"
-                + ("." if any(c.get("prepaid_only") for c in cars) else ", or choose cash on service."),
+                + ("." if any(c.get("prepaid_only") for c in cars) or booking_service._plan_extras_online_only(booking_service._plan_rows(cars)) else ", or choose cash on service."),
                 NotificationType.BOOKING,
                 str(booking["_id"]),
                 wa_event="payment_pending",

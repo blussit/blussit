@@ -3,7 +3,9 @@
  * visit until 1 hour before the slot: date & time, address (a saved one or
  * a new one pinned on the map — same service center), notes, and per car
  * its type and services (a bike: how many bikes — the booking page's own
- * counter and rules). Plan-covered cars keep their car and service.
+ * counter and rules). Plan-covered cars keep their car and service, but
+ * can take paid add-ons on top (POST /bookings/{id}/extras — the extras are
+ * what becomes due, paid online).
  *
  * The exact new price is shown before saving — the same PATCH with
  * dry_run: true (priced and rolled back by the server) — and the save
@@ -13,7 +15,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { CarFront, Gift } from "lucide-react";
-import { bookingEditApi, type BookingCarEdit, type BookingEditPayload, type BookingEditPreview, type BookingEditResult } from "../../api/bookingEdit";
+import { bookingEditApi, type AddExtrasResult, type BookingCarEdit, type BookingEditPayload, type BookingEditPreview, type BookingEditResult } from "../../api/bookingEdit";
 import { catalogApi } from "../../api/catalog";
 import { addressApi } from "../../api/profile";
 import { Input, Modal, Select } from "../ui";
@@ -80,6 +82,7 @@ export function EditBookingSheet({
   groupId,
   vehicleTypes,
   onSaved,
+  onExtrasAdded,
 }: {
   open: boolean;
   onClose: () => void;
@@ -88,6 +91,8 @@ export function EditBookingSheet({
   groupId: string | null;
   vehicleTypes?: VehicleTypeOption[];
   onSaved: (result: BookingEditResult) => void;
+  /** Paid add-ons were added to a plan car — the page refreshes and offers the payment. */
+  onExtrasAdded?: (result: AddExtrasResult) => void;
 }) {
   const lead = cars[0];
   const { data: servicesPage } = useQuery({ queryKey: ["public-services"], queryFn: () => catalogApi.services({ page_size: 100 }), staleTime: 60_000, enabled: open });
@@ -227,6 +232,21 @@ export function EditBookingSheet({
   // The booking page's own add-on chips for this type (never Extra Bike Wash on a car).
   const addonsFor = (typeId: string) => offeredAddons(services, typeId, bikeIds);
 
+  // Paid add-ons on a plan car: picked here, added in one tap (their own request).
+  const [extraPicks, setExtraPicks] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    if (open) setExtraPicks({});
+  }, [open, lead?.id]);
+  const addExtras = useMutation({
+    mutationFn: (carId: string) => bookingEditApi.addExtras(carId, extraPicks[carId] || []),
+    onMutate: () => setError(""),
+    onSuccess: (result, carId) => {
+      setExtraPicks((p) => ({ ...p, [carId]: [] }));
+      onExtrasAdded?.(result);
+    },
+    onError: (err) => setError(getErrorMessage(err)),
+  });
+
   const save = useMutation({
     mutationFn: () => {
       const expected = confirmTotal ?? preview.data?.total_amount ?? currentTotal;
@@ -306,12 +326,55 @@ export function EditBookingSheet({
           const car = cars.find((c) => c.id === d.id);
           const head = [`Car ${cars.length > 1 ? i + 1 : ""}`.trim(), typeName(d.typeId), car?.vehicle_registration_number || ""].filter(Boolean).join(" · ");
           if (d.plan) {
+            // Add-ons already on this car (booked with it, or added later) can't go on twice; a bike's per-bike lines stay with the booking page.
+            const onCar = new Set([...(car?.service_ids || []), ...(((car as { added_services?: { service_id: string }[] } | undefined)?.added_services) || []).map((a) => a.service_id)]);
+            const planKit = isBikeType(d.typeId) ? addonKit(services, d.typeId, bikeIds) : null;
+            const extraChoices = addonsFor(d.typeId).filter((a) => !onCar.has(a.id) && a.id !== planKit?.addBike?.id && a.id !== planKit?.bikePolish?.id);
+            const picked = extraPicks[d.id] || [];
+            const pickedTotal = picked.reduce((sum, id) => sum + priceOf(svcById.get(id)!, d.typeId), 0);
             return (
-              <section key={d.id} className="rounded-xl bg-[#F7F9FC] p-3 text-sm">
-                <p className="flex items-center gap-2 font-semibold text-[#0E1A33]">
-                  <Gift className="h-4 w-4 text-[#0A66F0]" /> {head}
-                </p>
-                <p className="mt-1 text-xs text-[#5F6878]">On your plan — only the date, time, address and notes can change.</p>
+              <section key={d.id} className="space-y-3 rounded-xl bg-[#F7F9FC] p-3 text-sm">
+                <div>
+                  <p className="flex items-center gap-2 font-semibold text-[#0E1A33]">
+                    <Gift className="h-4 w-4 text-[#0A66F0]" /> {head}
+                  </p>
+                  <p className="mt-1 text-xs text-[#5F6878]">On your plan — the wash stays as booked. You can change the date, time, address and notes, and add paid extras.</p>
+                </div>
+                {extraChoices.length > 0 && (
+                  <div data-testid="plan-extras">
+                    <p className="mb-1.5 text-xs font-semibold text-[#5F6878]">Add Extras · Paid Online</p>
+                    <div className="flex flex-wrap gap-2">
+                      {extraChoices.map((a) => {
+                        const on = picked.includes(a.id);
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            aria-pressed={on}
+                            onClick={() => setExtraPicks((p) => ({ ...p, [d.id]: on ? picked.filter((x) => x !== a.id) : [...picked, a.id] }))}
+                            className={cn(
+                              "min-h-[44px] rounded-full border px-3.5 text-sm transition-colors",
+                              on ? "border-[#0E1A33] bg-[#E8F0FE] font-semibold text-[#0E1A33]" : "border-[#E4E9F1] bg-white text-[#0E1A33] hover:border-[#CFDCF0]"
+                            )}
+                          >
+                            {toTitle(a.name)}
+                            {priceOf(a, d.typeId) > 0 && <span className="ml-1 text-[#5F6878]">+₹{priceOf(a, d.typeId)}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {picked.length > 0 && (
+                      <button
+                        type="button"
+                        className={btn("primary", "md", "mt-3 w-full")}
+                        disabled={addExtras.isPending}
+                        onClick={() => addExtras.mutate(d.id)}
+                      >
+                        {addExtras.isPending ? "Adding…" : `Add Extras · ₹${pickedTotal}`}
+                      </button>
+                    )}
+                  </div>
+                )}
               </section>
             );
           }
