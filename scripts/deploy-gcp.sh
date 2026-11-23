@@ -549,9 +549,16 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 
 for name in "${UNIQUE_SECRET_NAMES[@]}"; do
   if gcloud secrets describe "$name" --project "$PROJECT_ID" >/dev/null 2>&1; then
-    printf 'Adding Secret Manager version: %s\n' "$name"
-    printf '%s' "${!name}" | gcloud secrets versions add "$name" \
-      --project "$PROJECT_ID" --data-file=- >/dev/null
+    # Every enabled version is billed, and each deploy used to add one: only
+    # add a version when the value really changed (never printed).
+    current="$(gcloud secrets versions access latest --secret "$name" --project "$PROJECT_ID" 2>/dev/null || true)"
+    if [[ "$current" == "${!name}" ]]; then
+      printf 'Secret unchanged, no new version: %s\n' "$name"
+    else
+      printf 'Adding Secret Manager version: %s\n' "$name"
+      printf '%s' "${!name}" | gcloud secrets versions add "$name" \
+        --project "$PROJECT_ID" --data-file=- >/dev/null
+    fi
   else
     printf 'Creating Secret Manager secret: %s\n' "$name"
     printf '%s' "${!name}" | gcloud secrets create "$name" \
