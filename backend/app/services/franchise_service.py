@@ -37,6 +37,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
 from app.models.base import utcnow
+from app.repositories.service_center_repository import STATUS_LABEL, center_status
 from app.schemas.franchise_schema import SettlementCreate, finalize_operation, today_ist
 from app.services.audit_service import AuditService
 from app.services.customer_wallet_service import in_transaction
@@ -120,10 +121,36 @@ def operation_snapshot(op: dict) -> dict:
     }
 
 
+def _day_start(day: str) -> datetime:
+    """The first instant of an IST day (aware)."""
+    return datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=IST)
+
+
+def effective_instant(day: str | None, now: datetime | None = None) -> datetime:
+    """The exact moment a new operation rule takes effect (aware, IST).
+    No day, or TODAY, means NOW: a job completed earlier today stays under the
+    old terms and only jobs completed at / after the switch use the new ones.
+    Any other day (a future date, or a backdated one) means the START of that
+    IST day."""
+    now = (now or datetime.now(timezone.utc)).astimezone(IST)
+    if not day or day == now.date().isoformat():
+        return now
+    return _day_start(day)
+
+
+def _eff_at(h: dict) -> datetime:
+    """When a history entry took effect: its stored instant, or (older rows
+    that only kept the day) the start of that IST day."""
+    at = h.get("effective_at")
+    if isinstance(at, datetime):
+        return from_stored(at)
+    return _day_start(h.get("effective_from") or _EARLIEST)
+
+
 def _history(center: dict) -> list[dict]:
     rows = [h for h in (center.get("operation_history") or []) if isinstance(h, dict)]
-    # Oldest effective day first; a stable sort keeps the order they were saved in.
-    return sorted(rows, key=lambda h: h.get("effective_from") or "")
+    # Oldest effective moment first; a stable sort keeps the order they were saved in.
+    return sorted(rows, key=_eff_at)
 
 
 def _rules(snapshot: dict | None) -> dict:
@@ -131,16 +158,28 @@ def _rules(snapshot: dict | None) -> dict:
     return {k: (snapshot or {})[k] for k in keys if k in (snapshot or {})}
 
 
-def operation_as_of(center: dict | None, day: str | None = None) -> dict:
-    """The operation in force on IST day `day` (default today): the type,
-    revenue share and pay-manager of the latest history entry whose
-    `effective_from` is on or before that day, on top of the center's
-    current details (partner contact, fee, kits, default pay)."""
+def operation_as_of(center: dict | None, when: str | datetime | None = None) -> dict:
+    """The operation in force at `when`, on top of the center's current
+    details (partner contact, fee, kits, default pay).
+
+    * a datetime — the exact moment (a booking's `completed_at`): the type,
+      revenue share and pay-manager of the latest history entry whose
+      effective MOMENT is at or before it. A job completed earlier on the day
+      of a switch keeps the old terms;
+    * a day string (or nothing = today) — the latest entry whose
+      `effective_from` day is on or before that day (day-level answers:
+      salary payments, labels)."""
     op = operation_of(center)
     hist = _history(center or {})
     if not hist:
         return op
-    day = day or today_ist().isoformat()
+    if isinstance(when, datetime):
+        at = when.astimezone(IST) if when.tzinfo else from_stored(when)
+        for h in reversed(hist):
+            if at >= _eff_at(h):
+                return {**op, **_rules(h.get("after"))}
+        return {**op, **_rules(hist[0].get("before"))}
+    day = when or today_ist().isoformat()
     for h in reversed(hist):
         if day >= (h.get("effective_from") or _EARLIEST):
             return {**op, **_rules(h.get("after"))}
@@ -155,31 +194,46 @@ def captain_pay_finance_impact(center: dict | None, day: str | None = None) -> b
     return not (op.get("type") == "franchise" and op.get("captain_pay_managed_by") == "franchise")
 
 
-def franchise_periods(center: dict | None) -> list[tuple[str, str | None]]:
-    """Inclusive IST day ranges during which the center ran as a franchise
-    (end None = still is). Cash is counted as the partner's only within them."""
+def franchise_windows(center: dict | None) -> list[dict]:
+    """The times the center ran as a franchise, as [start_at, end_at) instants
+    (aware, IST; end_at None = still is) with their inclusive IST day ranges.
+    `start_at` None = from the center's first day (created as a franchise),
+    when no instant needs applying. Cash is counted as the partner's only
+    inside them — on the day of a switch only jobs completed on the franchise
+    side of the switch moment count."""
     center = center or {}
     hist = _history(center)
     op = operation_of(center)
     created = center.get("created_at")
     start_default = from_stored(created).date().isoformat() if isinstance(created, datetime) else _EARLIEST
+
+    def window(start_day, start_at, end_at):
+        end_day = (end_at - timedelta(microseconds=1)).astimezone(IST).date().isoformat() if end_at else None
+        return {"start_day": start_day, "start_at": start_at, "end_day": end_day, "end_at": end_at}
+
     if not hist:
         if op["type"] == "franchise":
-            return [(op.get("effective_from") or start_default, None)]
+            return [window(op.get("effective_from") or start_default, None, None)]
         return []
-    periods: list[tuple[str, str | None]] = []
-    open_from: str | None = start_default if (hist[0].get("before") or {}).get("type") == "franchise" else None
+    windows: list[dict] = []
+    open_from: tuple[str, datetime | None] | None = (start_default, None) if (hist[0].get("before") or {}).get("type") == "franchise" else None
     for h in hist:
-        eff = h.get("effective_from") or _EARLIEST
+        at = _eff_at(h)
         after_type = (h.get("after") or {}).get("type")
         if open_from is None and after_type == "franchise":
-            open_from = eff
+            open_from = (at.date().isoformat(), at)
         elif open_from is not None and after_type != "franchise":
-            periods.append((open_from, (date.fromisoformat(eff) - timedelta(days=1)).isoformat()))
+            windows.append(window(open_from[0], open_from[1], at))
             open_from = None
     if open_from is not None:
-        periods.append((open_from, None))
-    return periods
+        windows.append(window(open_from[0], open_from[1], None))
+    return windows
+
+
+def franchise_periods(center: dict | None) -> list[tuple[str, str | None]]:
+    """Inclusive IST day ranges during which the center ran as a franchise
+    (end None = still is)."""
+    return [(w["start_day"], w["end_day"]) for w in franchise_windows(center)]
 
 
 def is_or_was_franchise(center: dict | None) -> bool:
@@ -202,7 +256,7 @@ def redact_operation(center: dict) -> dict:
     return out
 
 
-def normalise_operation(stored: dict | None, sent: dict | None, *, today: str | None = None) -> tuple[dict, dict | None]:
+def normalise_operation(stored: dict | None, sent: dict | None, *, today: str | None = None, now: datetime | None = None) -> tuple[dict, dict | None]:
     """Merge an edit onto the stored operation and validate the result.
     Returns (new operation, history entry or None). `sent` holds only the
     fields the admin sent (exclude_unset). A switch to self-operated clears
@@ -237,9 +291,13 @@ def normalise_operation(stored: dict | None, sent: dict | None, *, today: str | 
     clean["effective_from"] = (stored or {}).get("effective_from")
     if tracked:
         clean["effective_from"] = effective or today
+        at = effective_instant(effective, now)
         entry = {
             "at": utcnow(),
             "effective_from": clean["effective_from"],
+            # The exact moment (not just the day): a job completed earlier on
+            # the switch day keeps the old terms.
+            "effective_at": at.astimezone(timezone.utc),
             "changed": tracked,
             "before": before,
             "after": after,
@@ -308,6 +366,12 @@ def _completion_day(booking: dict) -> str:
     return today_ist().isoformat()
 
 
+def _completion_at(booking: dict) -> datetime:
+    """The moment the job was completed (IST-aware); now when it has no stamp yet."""
+    stamp = booking.get("completed_at") or booking.get("closed_at")
+    return from_stored(stamp) if isinstance(stamp, datetime) else datetime.now(IST)
+
+
 def _counts_for_share(booking: dict) -> bool:
     """A job earns the partner's share only while it is completed, live and not refunded."""
     return (
@@ -329,6 +393,11 @@ def _month_bounds(month: str) -> tuple[str, str]:
         raise BadRequestException("Month must look like 2026-11.") from None
     nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
     return first.isoformat(), (nxt - timedelta(days=1)).isoformat()
+
+
+def _utc_instant(at: datetime) -> datetime:
+    """An aware instant as the naive UTC datetime Mongo stores."""
+    return at.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _utc_naive(day: str, *, end: bool = False) -> datetime:
@@ -380,8 +449,13 @@ class FranchiseService:
                 center = await self.db.service_centers.find_one(
                     {"_id": _oid(center_id)}, {"operation": 1, "operation_history": 1, "created_at": 1}, session=s,
                 ) if _oid(center_id) else None
-                op = operation_as_of(center, _completion_day(b))
+                op = operation_as_of(center, _completion_at(b))
                 if op.get("type") != "franchise" or not op.get("revenue_share_percent"):
+                    return
+                # A center created as a franchise (no history) is the partner's only from
+                # its effective day — a job back-dated before that earns no share (the
+                # cash windows already count it that way).
+                if not _history(center or {}) and (op.get("effective_from") or "") > _completion_at(b).astimezone(IST).date().isoformat():
                     return
                 frozen = float(op["revenue_share_percent"])
             base = _base_paise(b) if live else int(b.get("franchise_base_paise") or 0)
@@ -443,13 +517,15 @@ class FranchiseService:
     # ------------------------------------------------------------------
 
     async def _franchise_centers(self) -> list[dict]:
+        # Paused and archived (soft-deleted) centers stay: their share, cash
+        # and settlements are still owed / owing and must never vanish.
         return await self.db.service_centers.find({
-            "is_deleted": {"$ne": True},
             "$or": [{"operation.type": "franchise"}, {"operation_history.after.type": "franchise"}],
         }).sort("name", 1).to_list(length=500)
 
     async def _center(self, center_id: str) -> dict:
-        center = await self.db.service_centers.find_one({"_id": _oid(center_id), "is_deleted": {"$ne": True}}) if _oid(center_id) else None
+        # Any state — a final settlement with an archived center is normal.
+        center = await self.db.service_centers.find_one({"_id": _oid(center_id)}) if _oid(center_id) else None
         if not center:
             raise NotFoundException("Service center not found")
         return center
@@ -466,14 +542,26 @@ class FranchiseService:
         pay = PaymentService(self.db)
         center_id = str(center["_id"])
         cash = online = back_cash = 0.0
-        for start, end in franchise_periods(center):
-            a = max(start, lo or _EARLIEST)
-            b = min(end or _LATEST, hi or _LATEST)
+        for w in franchise_windows(center):
+            a = max(w["start_day"], lo or _EARLIEST)
+            b = min(w["end_day"] or _LATEST, hi or _LATEST)
             if a > b:
                 continue
             window = pay._collections_window(a, b)
+            match: dict = {"service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$ne": "cancelled"}, "scheduled_date": window}
+            # The days a switch happens on: only jobs completed on the franchise
+            # side of the switch moment (a morning job stays the old terms').
+            edges = []
+            if w["start_at"] is not None and a == w["start_day"]:
+                after_day = datetime.strptime(w["start_day"], "%Y-%m-%d") + timedelta(days=1)
+                edges.append({"$or": [{"scheduled_date": {"$gte": after_day}}, {"completed_at": {"$gte": _utc_instant(w["start_at"])}}]})
+            if w["end_at"] is not None and b == w["end_day"]:
+                after_day = datetime.strptime(w["end_day"], "%Y-%m-%d") + timedelta(days=1)
+                edges.append({"$or": [{"scheduled_date": {"$gte": after_day}}, {"completed_at": {"$lt": _utc_instant(w["end_at"])}}]})
+            if edges:
+                match = {"$and": [match, *edges]}
             rows = await self.bookings.aggregate([
-                {"$match": {"service_center_id": center_id, "is_deleted": {"$ne": True}, "status": {"$ne": "cancelled"}, "scheduled_date": window}},
+                {"$match": match},
                 {"$group": {"_id": None, "cash": {"$sum": pay._CASH}, "online": {"$sum": pay._ONLINE}}},
             ]).to_list(length=1)
             if rows:
@@ -549,6 +637,9 @@ class FranchiseService:
             "name": center.get("name"),
             "code": center.get("code"),
             "is_active": center.get("is_active", True),
+            "is_deleted": bool(center.get("is_deleted")),
+            "status": center_status(center),
+            "status_label": STATUS_LABEL[center_status(center)],
             "type": current["type"],
             "partner": op.get("partner") or (self._former_partner(center)),
             "revenue_share_percent": current.get("revenue_share_percent"),

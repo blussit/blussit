@@ -9,10 +9,39 @@ from datetime import date, datetime
 
 # The dated part of the terms — what a segment stores and `terms_at` returns.
 DATED_FIELDS = (
-    "basis", "salary_monthly_paise", "weekly_off", "paid_leaves_per_month", "petrol_per_day_paise", "extra_day_on_off", "commission",
+    "basis", "salary_monthly_paise", "weekly_off_days", "paid_leaves_per_month", "petrol_per_day_paise", "extra_day_on_off", "commission",
 )
-DEFAULT_WEEKLY_OFF = 6  # Sunday (0 = Monday)
-DEFAULT_PAID_LEAVES = 1
+DEFAULT_WEEKLY_OFF_DAYS = (5, 6)  # Saturday + Sunday (0 = Monday) — founder 2026-11-23
+DEFAULT_WEEKLY_OFF = 6  # the pre-2026-11-23 single day, kept for old imports
+DEFAULT_PAID_LEAVES = 0
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def off_days_of(terms: dict | None) -> list[int]:
+    """The weekly-off weekdays of a terms / pay block. `weekly_off_days` wins;
+    an old stored `weekly_off` int means just that day (so a captain stored with
+    `weekly_off: 6` stays Sunday-only until edited); nothing stored = Sat + Sun."""
+    terms = terms or {}
+    days = terms.get("weekly_off_days")
+    if isinstance(days, (list, tuple, set)):
+        return sorted({int(d) for d in days if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 6})
+    old = terms.get("weekly_off")
+    if isinstance(old, int) and not isinstance(old, bool) and 0 <= old <= 6:
+        return [old]
+    return list(DEFAULT_WEEKLY_OFF_DAYS)
+
+
+def normalize_off(pay: dict) -> dict:
+    """`pay` (a copy) with `weekly_off_days` set from the old `weekly_off` when
+    only that is stored, and the old key removed."""
+    out = dict(pay or {})
+    out["weekly_off_days"] = off_days_of(out)
+    out.pop("weekly_off", None)
+    return out
+
+
+def weekday_labels(days: list[int]) -> str:
+    return ", ".join(WEEKDAY_NAMES[d] for d in days) or "None"
 DEFAULT_COMMISSION = {"mode": "percent", "percent": 0.0}
 DEFAULT_MAX_COMMISSION_PERCENT = 70.0
 DEFAULT_COMMISSION_ALERT_PERCENT = 40.0
@@ -27,7 +56,7 @@ def blank_pay(basis: str = "legacy") -> dict:
     return {
         "basis": basis,
         "salary_monthly_paise": 0,
-        "weekly_off": DEFAULT_WEEKLY_OFF,
+        "weekly_off_days": list(DEFAULT_WEEKLY_OFF_DAYS),
         "paid_leaves_per_month": DEFAULT_PAID_LEAVES,
         "petrol_per_day_paise": 0,
         "extra_day_on_off": False,
@@ -52,7 +81,7 @@ def basis_of(user: dict | None, day: str | None = None) -> str:
 def pay_view(user: dict, day: str | None = None) -> dict:
     """The pay block as it stands on a day: stored top level with the dated
     fields replaced by the segment in force."""
-    pay = dict(user.get("pay") or blank_pay())
+    pay = normalize_off(dict(user.get("pay") or blank_pay()))
     if pay.get("pay_history"):
         from app.utils.timezone import now_ist
 
@@ -67,7 +96,8 @@ def is_payroll(user: dict | None) -> bool:
 
 def dated_terms(pay: dict) -> dict:
     """Only the effective-dated fields of a pay block, copied."""
-    out = {k: pay.get(k) for k in DATED_FIELDS}
+    out = {k: pay.get(k) for k in DATED_FIELDS if k != "weekly_off_days"}
+    out["weekly_off_days"] = off_days_of(pay)
     out["commission"] = dict(pay.get("commission") or DEFAULT_COMMISSION)
     return out
 
@@ -111,7 +141,8 @@ def terms_at(user: dict, day: str) -> dict:
             chosen = seg
     terms = (chosen or segments(user)[0])["terms"] or {}
     base = blank_pay()
-    merged = {k: terms.get(k, base[k]) for k in DATED_FIELDS}
+    merged = {k: terms.get(k, base[k]) for k in DATED_FIELDS if k != "weekly_off_days"}
+    merged["weekly_off_days"] = off_days_of(terms)
     merged["commission"] = {**DEFAULT_COMMISSION, **(merged.get("commission") or {})}
     return merged
 
@@ -120,10 +151,17 @@ def merged_terms(current: dict, patch: dict) -> dict:
     """`current` pay block with the sent fields of `patch` laid over it
     (nested commission and kit merge field-wise)."""
     out = {**blank_pay(current.get("basis") or "legacy"), **{k: v for k, v in current.items() if v is not None}}
+    out = normalize_off(out)
+    patch = dict(patch)
+    old_day = patch.pop("weekly_off", None)  # the old single-day field, still accepted
+    if old_day is not None and patch.get("weekly_off_days") is None:
+        patch["weekly_off_days"] = [old_day]
     for key, value in patch.items():
         if value is None:
             continue
-        if key == "commission":
+        if key == "weekly_off_days":
+            out["weekly_off_days"] = sorted({int(d) for d in value})
+        elif key == "commission":
             out["commission"] = {**DEFAULT_COMMISSION, **(out.get("commission") or {}), **{k: v for k, v in value.items() if v is not None}}
         elif key == "kit":
             kit = {**empty_kit(), **(out.get("kit") or {})}
@@ -148,3 +186,18 @@ def commission_percent_at(user: dict, day: str) -> tuple[str, float]:
     """(mode, percent) of the commission terms on a day."""
     c = terms_at(user, day).get("commission") or {}
     return c.get("mode") or "percent", float(c.get("percent") or 0.0)
+
+
+def leave_on_off_day_message(user: dict, day: str) -> str | None:
+    """Why leave can't be taken on `day` (an IST YYYY-MM-DD) — it is one of a
+    salary captain's weekly-off days — else None. Weekly off only exists for
+    salary captains (a commission captain isn't paid by the day)."""
+    try:
+        weekday = date.fromisoformat(str(day)[:10]).weekday()
+    except ValueError:
+        return None
+    if basis_of(user, str(day)[:10]) != "salary":
+        return None
+    if weekday in terms_at(user, str(day)[:10])["weekly_off_days"]:
+        return f"{WEEKDAY_NAMES[weekday]} is a weekly off — leave can't be taken on a weekly off day."
+    return None

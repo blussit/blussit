@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardEdit, LogOut, Pencil, RotateCcw, ShieldCheck, Star, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { analyticsApi } from "../../api/admin";
+import { centerLabel } from "../../lib/centerLabel";
 import { reviewApi } from "../../api/engagement";
 import { Badge, Button, Card, DataTable, ErrorState, Select, StatusBadge } from "../../components/ui";
 import { BookingFilterBar } from "../../components/shared/BookingFilterBar";
@@ -107,13 +108,13 @@ function ServiceCenterOverview({ onSelect, onShowRecycleBin }: { onSelect: (cent
       ) : isError && !data ? (
         <ErrorState message="Couldn't load service centers." onRetry={() => void refetch()} busy={isFetching} />
       ) : !data?.length ? (
-        <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">No active service centers yet.</p>
+        <p className="rounded-xl bg-gray-50 p-4 text-sm text-[var(--color-text-secondary)]">No service centers with bookings yet.</p>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.map((c) => (
             <Card key={c.service_center_id} className="cursor-pointer p-5 transition-shadow hover:shadow-[var(--shadow-lifted)]" onClick={() => onSelect(c.service_center_id)}>
               <div className="flex items-start justify-between gap-2">
-                <p className="font-semibold text-[var(--color-text-primary)]">{c.name}</p>
+                <p className="font-semibold text-[var(--color-text-primary)]">{c.status && c.status !== "active" ? centerLabel(c) : c.name}</p>
                 {c.avg_rating != null && (
                   <span className="flex shrink-0 items-center gap-1 text-sm">
                     <Star className="h-3.5 w-3.5 fill-[var(--color-secondary)] text-[var(--color-secondary)]" />
@@ -191,7 +192,8 @@ function CenterBookings({ centerId, onBack, onShowRecycleBin }: { centerId: stri
 
   // Same key as the overview, so the name comes from cache.
   const { data: centers } = useQuery({ queryKey: ["admin-center-summaries"], queryFn: analyticsApi.serviceCenterSummaries });
-  const centerName = centers?.find((c) => c.service_center_id === centerId)?.name;
+  const centerRow = centers?.find((c) => c.service_center_id === centerId);
+  const centerName = centerRow ? (centerRow.status && centerRow.status !== "active" ? centerLabel(centerRow) : centerRow.name) : undefined;
 
   const reviewsQuery = useQuery({
     queryKey: ["admin-center-bookings-reviews", centerId],

@@ -8,6 +8,8 @@ import { rupeesText } from "../../lib/paise";
 import { cn } from "../../lib/cn";
 import { Banner, FRANCHISE_BANNER, LEDGER_LABEL, SkeletonRows } from "./payrollUi";
 import { RecordPaymentModal, VoidPaymentModal } from "./PaymentModals";
+import { InvoiceLink } from "./InvoiceLink";
+import { PayWizard } from "./PayWizard";
 
 const PAYMENT_KINDS: LedgerKind[] = ["payout", "advance", "payout_void"];
 const PAYMENT_FOR: Record<string, string> = { salary: "Salary", commission: "Commission", petrol: "Petrol", advance: "Advance", other: "Other" };
@@ -15,6 +17,7 @@ const PAYMENT_FOR: Record<string, string> = { salary: "Salary", commission: "Com
 /** The captain's ledger: payments by default, everything on request. Newest first. */
 export function PaymentsTab({ detail }: { detail: PayrollCaptainDetail }) {
   const [paying, setPaying] = useState(false);
+  const [other, setOther] = useState(false);
   const [voiding, setVoiding] = useState<LedgerEntry | null>(null);
   const [onlyPayments, setOnlyPayments] = useState(true);
   const [page, setPage] = useState(1);
@@ -49,7 +52,7 @@ export function PaymentsTab({ detail }: { detail: PayrollCaptainDetail }) {
           ))}
         </div>
         <Button size="sm" onClick={() => setPaying(true)}>
-          <HandCoins className="h-4 w-4" /> Record Payment
+          <HandCoins className="h-4 w-4" /> Pay
         </Button>
       </div>
       {!detail.finance_impact && <Banner>{FRANCHISE_BANNER}</Banner>}
@@ -59,7 +62,7 @@ export function PaymentsTab({ detail }: { detail: PayrollCaptainDetail }) {
       ) : query.isError && !query.data ? (
         <ErrorState message="Couldn't load the ledger." busy={query.isFetching} onRetry={() => void query.refetch()} />
       ) : !rows.length ? (
-        <EmptyState icon={HandCoins} title={onlyPayments ? "No Payments Yet" : "Nothing In The Ledger Yet"} description="Payments you record show up here, and stay here even if voided." />
+        <EmptyState icon={HandCoins} title={onlyPayments ? "No Payments Yet" : "Nothing In The Ledger Yet"} description="Payments you make show up here with their invoice, and stay here even if voided." />
       ) : (
         <ul className="divide-y divide-gray-100 rounded-xl border border-gray-100">
           {rows.map((e) => {
@@ -71,6 +74,11 @@ export function PaymentsTab({ detail }: { detail: PayrollCaptainDetail }) {
                     {isPayout && e.payment_kind ? `${PAYMENT_FOR[e.payment_kind] || e.payment_kind} Payment` : LEDGER_LABEL[e.kind] || e.kind}
                     {e.booking_number && <span className="font-mono-num text-xs text-[var(--color-text-secondary)]">{e.booking_number}</span>}
                     {e.method && <Badge tone="neutral">{e.method.toUpperCase() === "UPI" ? "UPI" : e.method.charAt(0).toUpperCase() + e.method.slice(1)}</Badge>}
+                    {e.invoice_number && (
+                      <Badge tone="info">
+                        <InvoiceLink numbers={[e.invoice_number]} ids={e.invoice_id ? [e.invoice_id] : undefined} />
+                      </Badge>
+                    )}
                     {e.voided && <Badge tone="error">Voided</Badge>}
                     {!e.finance_impact && isPayout && <Badge tone="neutral">Paid By Franchise</Badge>}
                   </p>
@@ -107,7 +115,8 @@ export function PaymentsTab({ detail }: { detail: PayrollCaptainDetail }) {
         </div>
       )}
 
-      <RecordPaymentModal captain={detail} open={paying} onClose={() => setPaying(false)} />
+      <PayWizard captain={detail} open={paying} onClose={() => setPaying(false)} onOther={() => { setPaying(false); setOther(true); }} />
+      <RecordPaymentModal captain={detail} open={other} onClose={() => setOther(false)} />
       <VoidPaymentModal ledgerId={voiding?.id || null} label={voiding ? `This payment of ${rupeesText(Math.abs(voiding.amount_paise))}` : "This payment"} onClose={() => setVoiding(null)} />
     </div>
   );

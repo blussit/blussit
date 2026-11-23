@@ -11,6 +11,7 @@ from app.schemas.content_schema import (
     TestimonialCreateRequest,
     TestimonialUpdateRequest,
 )
+from app.services.admin_inbox_service import announce
 from app.utils.serializers import serialize_doc, serialize_list
 
 
@@ -128,7 +129,9 @@ class ContactMessageService:
         self.repo = ContactMessageRepository(db)
 
     async def create(self, payload: ContactMessageCreateRequest) -> dict:
-        created = await self.repo.create(payload.model_dump())
+        # seen_at null = a NEW message (red dot in the admin sidebar).
+        created = await self.repo.create({**payload.model_dump(), "seen_at": None})
+        await announce(self.repo.db, "contact_messages")
         return serialize_doc(created)
 
     async def list_all(self, page: int, page_size: int):

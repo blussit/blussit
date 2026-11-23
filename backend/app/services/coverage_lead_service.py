@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.services.admin_inbox_service import announce
 from app.utils.serializers import serialize_list
 
 
@@ -24,7 +25,8 @@ class CoverageLeadService:
                       latitude: float | None = None, longitude: float | None = None) -> None:
         now = datetime.now(timezone.utc)
         update: dict = {
-            "$set": {"name": name.strip(), "last_requested_at": now, "updated_at": now},
+            # seen_at null = NEW (admin sidebar dot); a repeat request is new again.
+            "$set": {"name": name.strip(), "last_requested_at": now, "updated_at": now, "seen_at": None},
             "$setOnInsert": {"phone": phone, "pincode": pincode, "created_at": now, "is_deleted": False},
             "$inc": {"requests_count": 1},
         }
@@ -38,6 +40,7 @@ class CoverageLeadService:
             update["$set"]["latitude"] = latitude
             update["$set"]["longitude"] = longitude
         await self.collection.update_one({"phone": phone, "pincode": pincode}, update, upsert=True)
+        await announce(self.collection.database, "coverage_requests")
 
     async def list_for_admin(self, page: int, page_size: int) -> tuple[list[dict], int]:
         query: dict = {"is_deleted": {"$ne": True}}

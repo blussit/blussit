@@ -32,8 +32,9 @@ export function SocietyFormModal({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const centers = useQuery({
-    queryKey: ["admin-centers-all"],
-    queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }),
+    // A picker for NEW work: paused and archived centers are not offered.
+    queryKey: ["admin-centers-active"],
+    queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, active_only: true }),
     enabled: isAdmin && open && !society,
   });
 

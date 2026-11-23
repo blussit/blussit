@@ -229,7 +229,7 @@ function LegacyEarnings() {
           min={1}
           value={amount}
           placeholder={t("captain.earnings.amount")}
-          onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
+          onChange={(e) => setAmount(e.target.value.split(".")[0].replace(/\D/g, ""))}
         />
         {formError && <p className="mt-2 text-sm font-medium text-[#B91C1C]">{formError}</p>}
         <Btn className="mt-3 w-full" disabled={!amount || Number(amount) <= 0} loading={withdraw.isPending} onClick={() => withdraw.mutate()}>

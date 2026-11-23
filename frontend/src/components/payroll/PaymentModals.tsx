@@ -12,9 +12,8 @@ import { usePayrollWrite } from "./usePayrollWrite";
 /** A single payment at or above this asks "are you sure?" with the amount in words (₹50,000 unless the server says otherwise). */
 const DEFAULT_LARGE_PAISE = 5_000_000;
 
+// Salary months and commission periods are paid through the Pay wizard (§7.14) — this form is for the rest.
 const KIND_OPTIONS: { value: PaymentKind; label: string }[] = [
-  { value: "salary", label: "Salary" },
-  { value: "commission", label: "Commission" },
   { value: "petrol", label: "Petrol" },
   { value: "advance", label: "Advance" },
   { value: "other", label: "Other" },
@@ -48,7 +47,7 @@ export function RecordPaymentModal({
   defaultKind?: PaymentKind;
 }) {
   return (
-    <Modal open={open} onClose={onClose} title={`Record Payment — ${captain.full_name}`}>
+    <Modal open={open} onClose={onClose} title={`Advance Or Other Payment — ${captain.full_name}`}>
       <PaymentForm captain={captain} onClose={onClose} defaultKind={defaultKind} />
     </Modal>
   );
@@ -59,7 +58,7 @@ function PaymentForm({ captain, onClose, defaultKind }: { captain: CaptainLite; 
   const write = usePayrollWrite();
   const [key] = useState(newIdempotencyKey);
   const [amount, setAmount] = useState(captain.dues_paise > 0 ? String(Math.round(captain.dues_paise / 100)) : "");
-  const [kind, setKind] = useState<PaymentKind>(defaultKind || (captain.pay.basis === "commission" ? "commission" : "salary"));
+  const [kind, setKind] = useState<PaymentKind>(defaultKind || "advance");
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [date, setDate] = useState(todayIST());
   const [note, setNote] = useState("");
@@ -117,7 +116,7 @@ function PaymentForm({ captain, onClose, defaultKind }: { captain: CaptainLite; 
       {!captain.finance_impact && <Banner>{FRANCHISE_BANNER}</Banner>}
       {captain.dues_paise < 0 && <Banner tone="warning">This captain was already paid {rupeesText(Math.abs(captain.dues_paise))} ahead — this payment is another advance.</Banner>}
       <p className="text-sm text-[var(--color-text-secondary)]">
-        Dues right now: <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(captain.dues_paise)}</span>. You can pay any amount at any time.
+        Dues right now: <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(captain.dues_paise)}</span>. For salary or commission use Pay. Every payment here also creates an invoice.
       </p>
       <Input label="Amount (₹)" inputMode="numeric" value={amount} onChange={(e) => setAmount(cleanAmountInput(e.target.value))} placeholder="3000" autoFocus />
       {amountPaise > 0 && <p className="-mt-2 text-xs text-[var(--color-text-secondary)]">{rupeesInWords(amountPaise / 100)}</p>}

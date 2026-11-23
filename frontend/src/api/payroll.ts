@@ -29,8 +29,8 @@ export interface PayKit {
 export interface PayTerms {
   basis: PayBasis;
   salary_monthly_paise: number;
-  /** 0 = Monday … 6 = Sunday. */
-  weekly_off: number;
+  /** Weekly-off weekdays, 0 = Monday … 6 = Sunday (default Saturday + Sunday). */
+  weekly_off_days: number[];
   paid_leaves_per_month: number;
   petrol_per_day_paise: number;
   extra_day_on_off: boolean;
@@ -145,6 +145,8 @@ export interface LedgerEntry {
   period?: string | null;
   method?: string | null;
   note?: string | null;
+  invoice_id?: string | null;
+  invoice_number?: string | null;
   finance_impact: boolean;
   voided?: boolean;
   voids?: string | null;
@@ -233,15 +235,25 @@ export interface CommissionRow {
   completed_day?: string | null;
   /** Per-booking mode with no amount yet. */
   not_set: boolean;
+  /** A plan / pass covered the wash: its commission is set by hand, never auto-computed. */
+  plan_covered?: boolean;
+  plan_base_paise?: number;
+  plan_wash_paise?: number | null;
   max_paise: number;
   max_percent: number;
   reason?: string | null;
+  /** Paid / unpaid state against invoices (§7.14). */
+  payment_state?: "paid" | "part_paid" | "unpaid" | "not_set" | "none";
+  settled_paise?: number;
+  unsettled_paise?: number;
+  invoice_numbers?: string[];
+  invoice_ids?: string[];
 }
 
 export interface PayrollMe {
   basis: PayBasis;
   month: string;
-  pay: Pick<PayTerms, "basis" | "salary_monthly_paise" | "commission" | "petrol_per_day_paise" | "weekly_off" | "paid_leaves_per_month" | "deposit_expected_paise" | "kit">;
+  pay: Pick<PayTerms, "basis" | "salary_monthly_paise" | "commission" | "petrol_per_day_paise" | "weekly_off_days" | "paid_leaves_per_month" | "deposit_expected_paise" | "kit">;
   earned_paise: number;
   paid_paise: number;
   dues_paise: number;
@@ -251,6 +263,8 @@ export interface PayrollMe {
   entries: LedgerEntry[];
   attendance: AttendanceDay[];
   salary?: SalaryMonth | null;
+  /** The captain's latest paid invoices, newest first. */
+  invoices?: PayrollInvoice[];
 }
 
 export type PaymentKind = "salary" | "commission" | "petrol" | "advance" | "other";
@@ -283,7 +297,7 @@ export interface CommissionEditInput {
 export interface TermsInput {
   basis?: PayBasis;
   salary_monthly_paise?: number;
-  weekly_off?: number;
+  weekly_off_days?: number[];
   paid_leaves_per_month?: number;
   petrol_per_day_paise?: number;
   extra_day_on_off?: boolean;
@@ -317,13 +331,177 @@ export const PAY_LIMITS = { paidLeavesMax: 10, backdateMonths: 2, aheadMonths: 1
 export interface NewCaptainPay {
   basis: "salary" | "commission";
   salary_monthly_paise?: number;
-  weekly_off?: number;
+  weekly_off_days?: number[];
   paid_leaves_per_month?: number;
   petrol_per_day_paise?: number;
   commission?: { mode: CommissionMode; percent: number };
   deposit_expected_paise?: number;
   deposit_received?: boolean;
   kit?: { provided: boolean; items: KitItem[] };
+}
+
+export type InvoiceKind = "salary" | "commission" | "petrol" | "advance" | "other";
+export type InvoiceStatus = "paid" | "void";
+
+export interface InvoiceLine {
+  type: string;
+  label?: string;
+  amount_paise: number;
+  /** salary */
+  month?: string;
+  expected_working_days?: number;
+  present_days?: number;
+  half_days?: number;
+  leave_days?: number;
+  paid_leave_days?: number;
+  unpaid_days?: number;
+  holidays?: number;
+  paid_days?: number;
+  computed_paise?: number;
+  /** commission */
+  booking_id?: string;
+  booking_number?: string;
+  date?: string | null;
+  vehicle_type?: string | null;
+  service_name?: string | null;
+  base_paise?: number;
+  kind?: "new" | "revised";
+  settle?: boolean;
+}
+
+/** A payment's invoice / payslip (§7.14). Gross amounts, no tax. */
+export interface PayrollInvoice {
+  id: string;
+  number: string;
+  captain_id: string;
+  captain_name?: string | null;
+  captain_employee_id?: string | null;
+  service_center_id?: string | null;
+  service_center_name?: string | null;
+  kind: InvoiceKind;
+  month?: string | null;
+  period_from?: string | null;
+  period_to?: string | null;
+  gross_paise: number;
+  previously_paid_paise: number;
+  due_paise: number;
+  paid_paise: number;
+  adjustment_paise: number;
+  adjustment_reason?: string | null;
+  cash_offset_paise: number;
+  net_paise: number;
+  method: PaymentMethod;
+  paid_on: string;
+  paid_at?: string | null;
+  note?: string | null;
+  status: InvoiceStatus;
+  ledger_id?: string;
+  line_count: number;
+  actor_name?: string | null;
+  finance_impact?: boolean;
+  void?: { at?: string | null; by?: string | null; reason?: string | null } | null;
+  created_at: string;
+  lines?: InvoiceLine[];
+  /** Only on a pay response. */
+  duplicate?: boolean;
+  dues_paise?: number;
+}
+
+export interface InvoiceListFilters {
+  center_id?: string;
+  captain_id?: string;
+  kind?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface InvoicePage {
+  data: PayrollInvoice[];
+  meta: { page: number; page_size: number; total: number; total_pages: number };
+  totals: { paid_paise: number; count: number };
+}
+
+export interface SalaryMonthStatus {
+  month: string;
+  label: string;
+  status: "unpaid" | "part_paid" | "paid" | "none";
+  payable_paise: number;
+  paid_paise: number;
+  balance_paise: number;
+  finalized: boolean;
+  computed_paise: number;
+  month_open: boolean;
+}
+
+export interface SalaryMonthsResult {
+  applicable: boolean;
+  months: SalaryMonthStatus[];
+  default_month: string;
+  current_month: string;
+}
+
+export interface CommissionCandidate extends InvoiceLine {
+  booking_id: string;
+  total_paise: number;
+  settled_paise: number;
+  selected: boolean;
+  selectable: boolean;
+  not_set?: boolean;
+  plan_covered?: boolean;
+}
+
+export interface PayPreview {
+  captain_id: string;
+  captain_name?: string | null;
+  kind: "salary" | "commission";
+  lines: InvoiceLine[];
+  gross_paise: number;
+  due_paise: number;
+  can_pay: boolean;
+  default_amount_paise: number;
+  warnings: string[];
+  /** salary */
+  month?: string;
+  month_label?: string;
+  previously_paid_paise?: number;
+  finalized?: boolean;
+  computed_paise?: number;
+  stale?: boolean;
+  month_open?: boolean;
+  status?: "unpaid" | "part_paid" | "paid" | "none";
+  invoices?: string[];
+  /** commission */
+  period_from?: string;
+  period_to?: string;
+  candidates?: CommissionCandidate[];
+  not_set?: CommissionCandidate[];
+}
+
+export interface InvoicePayInput {
+  kind: InvoiceKind;
+  month?: string;
+  from_date?: string;
+  to_date?: string;
+  booking_ids?: string[];
+  amount_paise?: number;
+  expected_gross_paise?: number;
+  reason?: string;
+  method: PaymentMethod;
+  paid_on?: string;
+  note?: string;
+  idempotency_key: string;
+  cash_offset_paise?: number;
+}
+
+export interface ReconcileResult {
+  ok: boolean;
+  captains_checked: number;
+  invoices_checked: number;
+  truncated: boolean;
+  mismatches: { captain_id: string | null; check: string; expected_paise: number; actual_paise: number; detail?: string }[];
 }
 
 export interface PayrollListFilters {
@@ -374,6 +552,16 @@ export const payrollApi = {
   kit: (id: string, payload: KitInput) => apiClient.put<ApiSuccess<PayrollCaptainDetail>>(`/payroll/captains/${id}/kit`, payload).then(withMessage),
   returnKit: (id: string, payload: { returned_on?: string; note?: string }) =>
     apiClient.post<ApiSuccess<PayrollCaptainDetail>>(`/payroll/captains/${id}/kit/return`, payload).then(withMessage),
+  payPreview: (id: string, params: { kind: "salary" | "commission"; month?: string; from?: string; to?: string }) =>
+    apiClient.get<ApiSuccess<PayPreview>>(`/payroll/captains/${id}/pay-preview`, { params: clean({ ...params }) }).then((r) => r.data.data),
+  salaryMonths: (id: string) => apiClient.get<ApiSuccess<SalaryMonthsResult>>(`/payroll/captains/${id}/salary-months`).then((r) => r.data.data),
+  payInvoice: (id: string, payload: InvoicePayInput) =>
+    apiClient.post<ApiSuccess<PayrollInvoice>>(`/payroll/captains/${id}/pay-invoice`, payload).then(withMessage),
+  invoices: (filters: InvoiceListFilters) => apiClient.get<InvoicePage>("/payroll/invoices", { params: clean({ ...filters }) }).then((r) => r.data),
+  invoice: (id: string) => apiClient.get<ApiSuccess<PayrollInvoice>>(`/payroll/invoices/${id}`).then((r) => r.data.data),
+  voidInvoice: (id: string, reason: string) => apiClient.post<ApiSuccess<PayrollInvoice>>(`/payroll/invoices/${id}/void`, { reason }).then(withMessage),
+  reconcile: (center_id?: string) => apiClient.get<ApiSuccess<ReconcileResult>>("/payroll/reconcile", { params: clean({ center_id }) }).then((r) => r.data.data),
+  myInvoices: (page = 1) => apiClient.get<InvoicePage>("/payroll/me/invoices", { params: { page, page_size: 30 } }).then((r) => r.data),
   exportCsv: (filters: PayrollListFilters) =>
     apiClient.get<Blob>("/payroll/export.csv", { params: clean({ ...filters }), responseType: "blob" }).then((r) => r.data),
 

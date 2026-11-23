@@ -4,7 +4,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, NotFoundException
-from app.repositories.service_center_repository import ServiceCenterRepository
+from app.repositories.service_center_repository import STATUS_LABEL, ServiceCenterRepository, center_status
 from app.schemas.service_center_schema import ServiceCenterCreateRequest, ServiceCenterUpdateRequest, ensure_opens_before_closes
 from app.schemas.franchise_schema import SettlementCreate, today_ist
 from app.services import franchise_service as fr
@@ -35,6 +35,8 @@ class ServiceCenterService:
         out = []
         for c in centers:
             row = serialize_doc(c)
+            row["status"] = center_status(c)
+            row["status_label"] = STATUS_LABEL[row["status"]]
             op = fr.operation_of(c)
             row["operation"] = op
             row["operation_history"] = row.get("operation_history") or []
@@ -44,12 +46,16 @@ class ServiceCenterService:
             out.append(row)
         return out
 
-    async def list_centers(self, page: int, page_size: int, search: str | None, active_only: bool = False):
-        items, total = await self.repo.search(search, page, page_size, active_only)
+    async def list_centers(self, page: int, page_size: int, search: str | None, active_only: bool = False, include_archived: bool = False):
+        """`include_archived` (admin history views): archived centers too —
+        their records stay readable, each row says active / paused / archived.
+        `active_only` (pickers for new work) wins: paused and archived are out."""
+        items, total = await self.repo.search(search, page, page_size, active_only, include_archived and not active_only)
         return await self._decorate(items), total
 
     async def get(self, center_id: str, redact: bool = False) -> dict:
-        center = await self.repo.find_by_id(center_id)
+        # An archived center still opens (its history screens need it).
+        center = await self.repo.find_by_id(center_id, include_deleted=True)
         if not center:
             raise NotFoundException("Service center not found")
         row = (await self._decorate([center]))[0]
@@ -185,11 +191,15 @@ class ServiceCenterService:
             await CapacityPolicyService(self.db).rekey_for_current_slots(center_id)
         return (await self._decorate([updated]))[0]
 
-    async def delete(self, center_id: str) -> None:
-        """Audit ADM-05: deleting a center that still has live bookings,
-        staff, live passes or societies stranded all of them (no restore).
-        Refused while anything depends on it — deactivate it instead (it
-        then takes no new bookings and leaves every record readable)."""
+    async def delete(self, center_id: str, actor=None) -> None:
+        """ARCHIVE a center (the DELETE route). Nothing is removed: every
+        booking, plan, ledger row, payroll / franchise record and audit entry
+        that points at it stays readable, and it keeps showing as
+        "Name (Archived)" wherever history is viewed. An archived center is
+        also switched off (`is_active = false`), so it takes no new work, and
+        it can be restored (`restore`). Refused while live bookings, staff,
+        live passes or societies still depend on it (audit ADM-05) — pause it
+        instead (it stops taking new bookings and every record stays)."""
         if not ObjectId.is_valid(center_id) or not await self.repo.find_by_id(center_id):
             raise NotFoundException("Service center not found")
         reasons = []
@@ -212,9 +222,29 @@ class ServiceCenterService:
             reasons.append(f"{societies} societ{'ies' if societies != 1 else 'y'}")
         if reasons:
             raise BadRequestException(
-                f"This center can't be deleted while it still has {', '.join(reasons)}. "
-                "Deactivate it instead (it stops taking new bookings), or move them to another center first."
+                f"This center can't be archived while it still has {', '.join(reasons)}. "
+                "Pause it instead (it stops taking new bookings and every record stays), or move them to another center first."
             )
-        deleted = await self.repo.soft_delete(center_id)
-        if not deleted:
+        now = datetime.now(timezone.utc)
+        res = await self.repo.collection.update_one(
+            {"_id": ObjectId(center_id), "is_deleted": {"$ne": True}},
+            {"$set": {"is_deleted": True, "is_active": False, "deleted_at": now, "archived_at": now,
+                      "archived_by": getattr(actor, "id", None), "updated_at": now}},
+        )
+        if not res.modified_count:
             raise NotFoundException("Service center not found")
+
+    async def restore(self, center_id: str, actor=None) -> dict:
+        """Un-archive. The center comes back PAUSED — switching it on again
+        is a separate, deliberate step."""
+        if not ObjectId.is_valid(center_id):
+            raise NotFoundException("Service center not found")
+        now = datetime.now(timezone.utc)
+        res = await self.repo.collection.update_one(
+            {"_id": ObjectId(center_id), "is_deleted": True},
+            {"$set": {"is_deleted": False, "is_active": False, "updated_at": now},
+             "$unset": {"deleted_at": "", "archived_at": "", "archived_by": ""}},
+        )
+        if not res.matched_count:
+            raise NotFoundException("This center isn't archived")
+        return await self.get(center_id)

@@ -1,6 +1,6 @@
 import { apiClient, UPLOAD_TIMEOUT_MS, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
-import type { CaptainPayManagedBy, ServiceCenterOperationType, BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
+import type { CaptainPayManagedBy, ServiceCenterOperationType, BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, CouponStatus, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
 
 export const adminPricingApi = {
   get: () => apiClient.get<ApiSuccess<PricingConfig>>("/pricing-config").then((r) => r.data.data),
@@ -27,6 +27,21 @@ export const adminSettingsApi = {
 export const adminHomepageConfigApi = {
   get: () => apiClient.get<ApiSuccess<HomepageConfig>>("/homepage-config").then((r) => r.data.data),
   set: (payload: Partial<HomepageConfig>) => apiClient.put<ApiSuccess<HomepageConfig>>("/homepage-config", payload).then((r) => r.data.data),
+};
+
+/** New (unseen) entries behind the red dots in the admin sidebar. */
+export interface NavBadges {
+  contact_messages: number;
+  plan_enquiries: number;
+  coverage_requests: number;
+}
+export type InboxSection = keyof NavBadges;
+
+export const adminInboxApi = {
+  badges: () => apiClient.get<ApiSuccess<NavBadges>>("/admin/nav-badges").then((r) => r.data.data),
+  /** Marks the given rows (or, with no ids, every unseen row) of a section as seen. */
+  markSeen: (section: InboxSection, ids?: string[]) =>
+    apiClient.post<ApiSuccess<{ marked: number; counts: NavBadges }>>(`/admin/inbox/${section}/seen`, ids ? { ids } : {}).then((r) => r.data.data),
 };
 
 export const adminContactMessageApi = {
@@ -88,13 +103,19 @@ export interface ServiceCenterOperationInput {
 }
 
 export const adminServiceCenterApi = {
-  list: (params?: { page?: number; page_size?: number; search?: string; active_only?: boolean }) =>
+  /** `active_only`: pickers for NEW work (paused / archived left out).
+   *  `include_archived`: history views (archived too; every row has `status`). */
+  list: (params?: { page?: number; page_size?: number; search?: string; active_only?: boolean; include_archived?: boolean }) =>
     apiClient.get<ApiPaginated<ServiceCenter>>("/service-centers", { params }).then((r) => r.data),
   get: (id: string) => apiClient.get<ApiSuccess<ServiceCenter>>(`/service-centers/${id}`).then((r) => r.data.data),
   create: (payload: ServiceCenterPayload) =>
     apiClient.post<ApiSuccess<ServiceCenter>>("/service-centers", payload).then((r) => r.data.data),
   update: (id: string, payload: ServiceCenterPayload) =>
     apiClient.put<ApiSuccess<ServiceCenter>>(`/service-centers/${id}`, payload).then((r) => r.data.data),
+  /** Archive (the DELETE route): nothing is deleted, every record stays. */
+  archive: (id: string) => apiClient.delete(`/service-centers/${id}`).then((r) => r.data),
+  /** Un-archive: the center comes back paused. */
+  restore: (id: string) => apiClient.post<ApiSuccess<ServiceCenter>>(`/service-centers/${id}/restore`).then((r) => r.data.data),
 };
 
 export const adminSlotCapacityApi = {
@@ -152,7 +173,7 @@ export const adminSubscriptionPlanApi = {
 };
 
 export const adminCouponApi = {
-  list: (params?: { page?: number; page_size?: number; active_only?: boolean }) =>
+  list: (params?: { page?: number; page_size?: number; active_only?: boolean; status?: CouponStatus }) =>
     apiClient.get<ApiPaginated<Coupon>>("/coupons", { params }).then((r) => r.data),
   create: (payload: { [K in keyof Coupon]?: Coupon[K] | null }) => apiClient.post<ApiSuccess<Coupon>>("/coupons", payload).then((r) => r.data.data),
   update: (id: string, payload: { [K in keyof Coupon]?: Coupon[K] | null }) => apiClient.put<ApiSuccess<Coupon>>(`/coupons/${id}`, payload).then((r) => r.data.data),
@@ -221,6 +242,8 @@ export const staffDirectoryApi = {
 export interface ServiceCenterSummary {
   service_center_id: string;
   name: string;
+  /** A paused / archived center stays here while it has bookings. */
+  status?: "active" | "paused" | "archived";
   bookings: number;
   completed: number;
   pending: number;
@@ -282,6 +305,8 @@ export interface CoverageLead {
   requests_count: number;
   last_requested_at: string;
   created_at: string;
+  /** null = not opened by an admin yet (a "New" row). */
+  seen_at?: string | null;
 }
 
 export const coverageLeadApi = {

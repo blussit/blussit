@@ -9,10 +9,10 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.dependencies import CurrentUser, get_db, require_captain, require_manager_or_admin
+from app.core.dependencies import CurrentUser, get_db, require_admin, require_captain, require_manager_or_admin, require_staff
 from app.core.responses import paginated, success
 from app.schemas.payroll_schema import (
-    AdjustmentCreate, AttendanceOverride, CommissionSet, DepositAction, FinalizeRequest, KitReturn, KitUpdate, PaymentCreate,
+    AdjustmentCreate, AttendanceOverride, CommissionSet, DepositAction, FinalizeRequest, InvoicePay, KitReturn, KitUpdate, PaymentCreate,
     PayTermsUpdate, ReasonRequest,
 )
 from app.services.payroll_service import PayrollService
@@ -41,6 +41,56 @@ async def my_statement(
     month: str | None = Query(None, pattern=_MONTH), current_user: CurrentUser = Depends(require_captain), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     return success(await _svc(db).me_statement(current_user, month))
+
+
+@router.get("/me/invoices")
+async def my_invoices(
+    page: int = Query(1, ge=1, le=10_000), page_size: int = Query(30, ge=1, le=100),
+    current_user: CurrentUser = Depends(require_captain), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    items, total, totals = await _svc(db).my_invoices(current_user, page, page_size)
+    return {**paginated(items, page, page_size, total), "totals": totals}
+
+
+# ---------------------------------------------------------------- invoices (§7.14)
+
+
+@router.get("/invoices")
+async def list_invoices(
+    center_id: str | None = Query(None, max_length=40), captain_id: str | None = Query(None, max_length=40),
+    kind: str | None = Query(None, pattern=r"^(salary|commission|petrol|advance|other)$"),
+    status: str | None = Query(None, pattern=r"^(paid|void)$"),
+    date_from: str | None = Query(None, alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: str | None = Query(None, alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    page: int = Query(1, ge=1, le=10_000), page_size: int = Query(30, ge=1, le=100),
+    current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    items, total, totals = await _svc(db).list_invoices(
+        current_user, center_id=center_id, captain_id=captain_id, kind=kind, status=status, date_from=date_from, date_to=date_to,
+        page=page, page_size=page_size,
+    )
+    return {**paginated(items, page, page_size, total), "totals": totals}
+
+
+@router.get("/invoices/{invoice_id}")
+async def get_invoice(invoice_id: str, current_user: CurrentUser = Depends(require_staff), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await _svc(db).get_invoice(current_user, invoice_id))
+
+
+@router.post("/invoices/{invoice_id}/void")
+async def void_invoice(
+    invoice_id: str, payload: ReasonRequest, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).void_invoice(invoice_id, payload.reason, current_user)
+    return success(result, "Invoice already cancelled" if result.get("duplicate") else "Invoice cancelled")
+
+
+@router.get("/reconcile")
+async def reconcile(
+    center_id: str | None = Query(None, max_length=40), limit: int = Query(500, ge=1, le=2000),
+    current_user: CurrentUser = Depends(require_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return success(await _svc(db).reconcile(center_id, limit))
 
 
 # ---------------------------------------------------------------- the Salary page
@@ -126,6 +176,31 @@ async def captain_commissions(
 
 
 # ---------------------------------------------------------------- money in / out
+
+
+@router.get("/captains/{captain_id}/pay-preview")
+async def pay_preview(
+    captain_id: str,
+    kind: str = Query(..., pattern=r"^(salary|commission)$"),
+    month: str | None = Query(None, pattern=_MONTH),
+    date_from: str | None = Query(None, alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: str | None = Query(None, alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return success(await _svc(db).pay_preview(captain_id, kind, month, date_from, date_to, current_user))
+
+
+@router.get("/captains/{captain_id}/salary-months")
+async def salary_months(captain_id: str, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await _svc(db).salary_months(captain_id, current_user))
+
+
+@router.post("/captains/{captain_id}/pay-invoice")
+async def pay_invoice(
+    captain_id: str, payload: InvoicePay, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).pay_invoice(captain_id, payload, current_user)
+    return success(result, "Payment already recorded" if result.get("duplicate") else "Payment recorded — invoice created")
 
 
 @router.post("/captains/{captain_id}/payments")

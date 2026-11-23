@@ -669,6 +669,8 @@ class LegacyAnalyticsService:
             results.append({
                 "service_center_id": center_id,
                 "name": center.get("name"),
+                "status": "active",
+                "status_label": "Active",
                 "bookings": total,
                 "completed": completed,
                 "pending": pending,

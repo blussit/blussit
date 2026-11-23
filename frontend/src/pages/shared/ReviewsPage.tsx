@@ -13,6 +13,7 @@ import { useAuth } from "../../context/AuthContext";
 import { format } from "../../lib/date";
 import { carAndService, toTitle } from "../../lib/titleCase";
 import type { Review } from "../../types";
+import { centerLabel } from "../../lib/centerLabel";
 
 /**
  * Section 12 of the BLUSSIT UX update — one shared Reviews view for both
@@ -32,7 +33,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
   const [search, setSearch] = useState("");
   const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
 
-  const { data: centers } = useQuery({ queryKey: ["admin-centers-for-reviews"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }), enabled: role === "admin" });
+  const { data: centers } = useQuery({ queryKey: ["admin-centers-for-reviews"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }), enabled: role === "admin" });
   const { data: vehicleTypes } = useQuery({ queryKey: ["vehicle-types"], queryFn: () => vehicleTypeApi.list() });
   const typeLookup = useVehicleTypeNames();
   const typeNames = useMemo(() => ({ get: (id: string) => (id ? typeLookup.tagged(id) : "") }), [typeLookup]);
@@ -122,7 +123,7 @@ export default function ReviewsPage({ role }: { role: "admin" | "manager" }) {
               <option value="">All Service Centers</option>
               {(centers?.data || []).map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
+                  {centerLabel(c)}
                 </option>
               ))}
             </Select>

@@ -95,22 +95,33 @@ class CommissionMixin(PayrollBase):
                 mode, rate = pt.commission_percent_at(captain, ist_day(b.get("completed_at")) or today_ist())
                 set_fields.update({"commission_mode_snapshot": mode, "commission_rate_snapshot": rate})
                 if old_cid and old_cid != cid:  # reassigned: the old captain's override doesn't carry over
-                    unset_fields.update({"commission_override_paise": "", "commission_override_percent": "", "commission_override_reason": ""})
-                    b = {**b, "commission_override_paise": None, "commission_override_percent": None}
+                    unset_fields.update({
+                        "commission_override_paise": "", "commission_override_percent": "", "commission_override_reason": "", "commission_plan_wash_paise": "",
+                    })
+                    b = {**b, "commission_override_paise": None, "commission_override_percent": None, "commission_plan_wash_paise": None}
             override_pct = b.get("commission_override_percent")
             override_paise = b.get("commission_override_paise")
+            plan_base = bm.plan_covered_base_paise(b)
+            wash = b.get("commission_plan_wash_paise")
+            decided = override_pct is not None or override_paise is not None
             if override_pct is not None:
                 target = pct_of(base, float(override_pct))
                 if target != override_paise:
                     set_fields["commission_override_paise"] = target
             elif override_paise is not None:
                 target = int(override_paise)
+            elif plan_base > 0:
+                # A plan / pass-covered wash is never auto-computed (§7.14): the manager sets
+                # its amount; the paid extras on the booking follow the captain's own rule.
+                extras = max(0, base - plan_base)
+                target = (pct_of(extras, float(rate or 0)) if mode == "percent" else 0) + int(wash or 0)
             elif mode == "per_booking":
                 target = 0
             else:
                 target = pct_of(base, float(rate or 0))
             target = min(target, cap_of(base, cfg["max_commission_percent"]))
-            state = "pending" if (mode == "per_booking" and override_pct is None and override_paise is None) else "accrued"
+            waiting = (plan_base > 0 and wash is None) or (plan_base <= 0 and mode == "per_booking")
+            state = "pending" if (waiting and not decided) else "accrued"
 
         ops: list[tuple[str, int, str]] = []  # (captain, delta, note)
         number = b.get("booking_number")
@@ -130,6 +141,9 @@ class CommissionMixin(PayrollBase):
         }
         if eligible:
             fields["commission_captain_id"] = cid
+            mirror = int((b.get("commission_settled_by") or {}).get(cid, 0))  # §7.14: this captain's settled amount
+            if mirror != int(b.get("commission_settled_paise") or 0):
+                fields["commission_settled_paise"] = mirror
         changed = {k: v for k, v in fields.items() if b.get(k) != v}
         changed.update({k: v for k, v in set_fields.items() if b.get(k) != v})
         if not ops and not adj_ops and not changed and not unset_fields:
@@ -187,14 +201,18 @@ class CommissionMixin(PayrollBase):
         if rows:
             adj = int(rows[0]["paise"] or 0)
         mode = b.get("commission_mode_snapshot")
+        plan_base = bm.plan_covered_base_paise(b)
+        wash = b.get("commission_plan_wash_paise")
+        decided = b.get("commission_override_paise") is not None or b.get("commission_override_percent") is not None
         return {
             "id": str(b["_id"]), "booking_id": str(b["_id"]), "booking_number": b.get("booking_number"),
             "completed_at": b.get("completed_at").isoformat() if hasattr(b.get("completed_at"), "isoformat") else None,
-            "customer_name": b.get("customer_name"), "vehicle_type": b.get("vehicle_type"), "service_name": b.get("service_name"),
+            "customer_name": b.get("customer_name"), "vehicle_type": b.get("vehicle_label") or b.get("vehicle_type"), "service_name": b.get("service_name"),
             "base_paise": base, "rate_percent": b.get("commission_rate_snapshot"), "mode": mode,
             "amount_paise": posted + adj, "auto_paise": posted, "adjustments_paise": adj,
-            "edited": b.get("commission_override_paise") is not None or b.get("commission_override_percent") is not None,
+            "edited": decided or wash is not None,
             "not_set": b.get("commission_state") == "pending",
+            "plan_covered": plan_base > 0, "plan_base_paise": plan_base, "plan_wash_paise": wash,
             "max_paise": cap_of(base, cfg["max_commission_percent"]), "max_percent": cfg["max_commission_percent"],
             "reason": b.get("commission_override_reason"),
             "captain_id": b.get("commission_captain_id"),
@@ -220,29 +238,45 @@ class CommissionMixin(PayrollBase):
         cfg = await self.settings()
         base = bm.commission_base_paise(b)
         cap = cap_of(base, cfg["max_commission_percent"])
-        target = int(amount_paise) if amount_paise is not None else pct_of(base, float(percent))
+        plan_base = bm.plan_covered_base_paise(b)
+        extras_auto = 0
+        if plan_base > 0:
+            # The amount is for the plan-covered WASH; paid extras follow the captain's rule (§7.14).
+            mode_now, rate_now = b.get("commission_mode_snapshot"), b.get("commission_rate_snapshot")
+            if not mode_now:
+                mode_now, rate_now = pt.commission_percent_at(captain, ist_day(b.get("completed_at")) or today_ist())
+            extras_auto = pct_of(max(0, base - plan_base), float(rate_now or 0)) if mode_now == "percent" else 0
+            target = int(amount_paise) if amount_paise is not None else pct_of(plan_base, float(percent))
+            cap_target = target + extras_auto
+        else:
+            target = int(amount_paise) if amount_paise is not None else pct_of(base, float(percent))
+            cap_target = target
         adj = int((await self.ledger.aggregate([
             {"$match": {"booking_id": booking_id, "kind": "commission_adjust", "captain_id": cid}},
             {"$group": {"_id": None, "paise": {"$sum": "$amount_paise"}}},
         ]).to_list(length=1) or [{"paise": 0}])[0]["paise"] or 0)
-        if target + adj > cap:
+        if cap_target + adj > cap:
             raise BadRequestException(self.cap_message(cfg["max_commission_percent"], cap, base, "booking"))
         who = await self.actor_info(actor)
-        before = {"posted_paise": int(b.get("commission_posted_paise") or 0), "override_paise": b.get("commission_override_paise")}
+        before = {"posted_paise": int(b.get("commission_posted_paise") or 0), "override_paise": b.get("commission_override_paise"), "plan_wash_paise": b.get("commission_plan_wash_paise")}
 
         async def _do(s):
             fresh = await self.bookings.find_one({"_id": b["_id"]}, session=s)
             if fresh.get("status") != "completed" or fresh.get("is_deleted"):
                 raise BadRequestException("This booking just changed — refresh and try again.")
             sets = {
-                "commission_override_paise": target, "commission_override_reason": reason, "commission_override_by": who["id"],
-                "commission_override_at": datetime.now(timezone.utc),
+                "commission_override_reason": reason, "commission_override_by": who["id"], "commission_override_at": datetime.now(timezone.utc),
             }
             update: dict = {"$set": sets}
-            if percent is not None:
-                sets["commission_override_percent"] = float(percent)
+            if plan_base > 0:
+                sets["commission_plan_wash_paise"] = target
+                update["$unset"] = {"commission_override_percent": "", "commission_override_paise": ""}
             else:
-                update["$unset"] = {"commission_override_percent": ""}
+                sets["commission_override_paise"] = target
+                if percent is not None:
+                    sets["commission_override_percent"] = float(percent)
+                else:
+                    update["$unset"] = {"commission_override_percent": ""}
             if fresh.get("commission_captain_id") != cid:
                 sets["commission_captain_id"] = cid
             await self.bookings.update_one({"_id": b["_id"]}, update, session=s)
@@ -253,7 +287,7 @@ class CommissionMixin(PayrollBase):
         center = captain.get("service_center_id")
         await self.audit(who, "PAYROLL_COMMISSION_SET", booking_id, {
             "captain_id": cid, "reason": reason, "base_paise": base, "before": before,
-            "after": {"posted_paise": int(after.get("commission_posted_paise") or 0), "override_paise": target, "percent": percent},
+            "after": {"posted_paise": int(after.get("commission_posted_paise") or 0), "override_paise": target, "percent": percent, "plan_wash": plan_base > 0},
         }, center)
         if base > 0 and target * 100 / base > cfg["commission_alert_percent"]:
             await self.notify_admins(

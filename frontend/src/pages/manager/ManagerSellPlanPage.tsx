@@ -474,7 +474,7 @@ export default function ManagerSellPlanPage() {
                       label="Discount (₹)"
                       inputMode="numeric"
                       value={discountAmount}
-                      onChange={(e) => setDiscountAmount(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      onChange={(e) => setDiscountAmount(e.target.value.split(".")[0].replace(/\D/g, "").slice(0, 6))}
                       placeholder="0"
                       error={discountTooBig ? `You can give at most ₹${maxDiscount} off this plan.` : undefined}
                       hint={!discountTooBig && maxDiscount !== null ? `Up to ₹${maxDiscount}.` : undefined}

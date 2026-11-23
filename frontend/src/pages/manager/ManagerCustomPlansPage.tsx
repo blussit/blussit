@@ -732,7 +732,7 @@ function PlanBuilder({
           label="Discount (₹, Optional)"
           inputMode="numeric"
           value={discount}
-          onChange={(e) => setDiscount(e.target.value.replace(/\D/g, "").slice(0, 6))}
+          onChange={(e) => setDiscount(e.target.value.split(".")[0].replace(/\D/g, "").slice(0, 6))}
           placeholder="0"
           error={discountError}
           hint={!discountError && priced ? `Up to ₹${maxDiscount}${isAdmin ? "" : ` (${MANAGER_MAX_DISCOUNT_PCT}%)`}.` : undefined}

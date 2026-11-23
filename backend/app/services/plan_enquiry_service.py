@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.services.admin_inbox_service import announce
 from app.utils.serializers import serialize_list
 
 ENQUIRY_STATUSES = ("new", "contacted", "closed")
@@ -42,6 +43,8 @@ class PlanEnquiryService:
                 "services_wanted": services_wanted.strip(),
                 "last_requested_at": now,
                 "updated_at": now,
+                # seen_at null = NEW (admin sidebar dot); a repeat request is new again.
+                "seen_at": None,
             },
             "$setOnInsert": {"phone": phone, "status": "new", "created_at": now, "is_deleted": False},
             "$inc": {"requests_count": 1},
@@ -57,6 +60,7 @@ class PlanEnquiryService:
         if customer_id:
             update["$set"]["customer_id"] = customer_id
         await self.collection.update_one({"phone": phone}, update, upsert=True)
+        await announce(self.collection.database, "plan_enquiries")
 
     async def list_for_admin(self, page: int, page_size: int) -> tuple[list[dict], int]:
         query: dict = {"is_deleted": {"$ne": True}}
@@ -79,4 +83,10 @@ class PlanEnquiryService:
             {"_id": ObjectId(enquiry_id)},
             {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}},
         )
+        # Triaging a request means someone has seen it: clear its "new" mark.
+        await self.collection.update_one(
+            {"_id": ObjectId(enquiry_id), "seen_at": None}, {"$set": {"seen_at": datetime.now(timezone.utc)}},
+        )
+        if result.matched_count:
+            await announce(self.collection.database, "plan_enquiries")
         return result.matched_count > 0

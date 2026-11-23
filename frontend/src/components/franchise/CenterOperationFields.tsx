@@ -217,8 +217,8 @@ export function CenterOperationFields({
             required
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input label="Franchise Fee (₹)" inputMode="numeric" value={value.feeRupees} placeholder="0" onChange={(e) => set("feeRupees", e.target.value.replace(/\D/g, ""))} />
-            <Input label="Kits Purchased" inputMode="numeric" value={value.kitsPurchased} placeholder="0" onChange={(e) => set("kitsPurchased", e.target.value.replace(/\D/g, ""))} />
+            <Input label="Franchise Fee (₹)" inputMode="numeric" value={value.feeRupees} placeholder="0" onChange={(e) => set("feeRupees", e.target.value.split(".")[0].replace(/\D/g, ""))} />
+            <Input label="Kits Purchased" inputMode="numeric" value={value.kitsPurchased} placeholder="0" onChange={(e) => set("kitsPurchased", e.target.value.split(".")[0].replace(/\D/g, ""))} />
           </div>
           {Number(value.feeRupees) > 0 &&
             (editing ? (
@@ -244,14 +244,14 @@ export function CenterOperationFields({
             />
             <p className="mt-1.5 text-xs text-[var(--color-text-secondary)]">
               {value.franchisePaysCaptains
-                ? "Salary and commission tools still work for the manager, but nothing is counted in Blussit Finance."
+                ? "The partner pays the captains. The manager has no Salary page here; the admin can still record pay and invoices from Captain Salary, but nothing is counted in Blussit Finance."
                 : "Blussit Finance pays captains and records it."}
             </p>
           </div>
         </div>
       ) : (
         <div className="space-y-4">
-          <Input label="Kits Given" inputMode="numeric" className="max-w-xs" value={value.kitsGiven} placeholder="0" onChange={(e) => set("kitsGiven", e.target.value.replace(/\D/g, ""))} />
+          <Input label="Kits Given" inputMode="numeric" className="max-w-xs" value={value.kitsGiven} placeholder="0" onChange={(e) => set("kitsGiven", e.target.value.split(".")[0].replace(/\D/g, ""))} />
           <div className="rounded-xl border border-[var(--color-card-border)] p-3">
             <p className="text-sm font-medium text-[var(--color-text-primary)]">Default For New Captains</p>
             <p className="mb-2 mt-0.5 text-xs text-[var(--color-text-secondary)]">Prefills the Add Captain form for this center. It never forces a captain's pay.</p>
@@ -272,7 +272,7 @@ export function CenterOperationFields({
                   inputMode="numeric"
                   className="max-w-xs"
                   value={value.defaultSalaryRupees}
-                  onChange={(e) => set("defaultSalaryRupees", e.target.value.replace(/\D/g, ""))}
+                  onChange={(e) => set("defaultSalaryRupees", e.target.value.split(".")[0].replace(/\D/g, ""))}
                   hint="Prefilled when a manager adds a captain here"
                 />
               ) : (

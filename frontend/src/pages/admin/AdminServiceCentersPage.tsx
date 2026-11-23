@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { CalendarClock, LocateFixed, Pencil, Plus, Power } from "lucide-react";
+import { Archive, CalendarClock, LocateFixed, Pencil, Plus, Power, RotateCcw } from "lucide-react";
 import { adminServiceCenterApi, adminUserApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
 import {
@@ -18,6 +18,7 @@ import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { toTitle } from "../../lib/titleCase";
+import { centerState } from "../../lib/centerLabel";
 import type { ServiceCenter } from "../../types";
 
 const emptyForm = {
@@ -43,7 +44,12 @@ export default function AdminServiceCentersPage() {
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
-  const { data, isLoading, error: centersError, refetch: refetchCenters } = useQuery({ queryKey: ["admin-centers"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50 }) });
+  // Archived centers are kept (every record stays) — hidden here unless asked for.
+  const [showArchived, setShowArchived] = useState(false);
+  const { data, isLoading, error: centersError, refetch: refetchCenters } = useQuery({
+    queryKey: ["admin-centers", showArchived],
+    queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 50, include_archived: showArchived }),
+  });
   const { data: managers } = useQuery({ queryKey: ["admin-managers"], queryFn: () => adminUserApi.list({ role: "manager", page: 1, page_size: 100 }) });
 
   const [open, setOpen] = useState(false);
@@ -101,6 +107,28 @@ export default function AdminServiceCentersPage() {
   const toggleActiveMutation = useMutation({
     mutationFn: (center: ServiceCenter) => adminServiceCenterApi.update(center.id, { is_active: !center.is_active }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-centers"] }),
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
+  });
+
+  const afterArchiveChange = () => {
+    for (const key of ["admin-centers", "franchise-centers", "admin-center-summaries", "admin-centers-lite", "service-centers-all"]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+  const archiveMutation = useMutation({
+    mutationFn: (center: ServiceCenter) => adminServiceCenterApi.archive(center.id),
+    onSuccess: (_r, center) => {
+      afterArchiveChange();
+      pushToast({ tone: "success", title: `${toTitle(center.name)} Archived`, message: "All its records are kept." });
+    },
+    onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
+  });
+  const restoreMutation = useMutation({
+    mutationFn: (center: ServiceCenter) => adminServiceCenterApi.restore(center.id),
+    onSuccess: (_r, center) => {
+      afterArchiveChange();
+      pushToast({ tone: "success", title: `${toTitle(center.name)} Restored`, message: "It is paused — switch it on when it is ready." });
+    },
     onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
 
@@ -167,6 +195,10 @@ export default function AdminServiceCentersPage() {
           <Plus className="h-4 w-4" /> Add Service Center
         </Button>
       </div>
+      <label className="flex w-fit cursor-pointer items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+        <input type="checkbox" className="h-4 w-4 accent-[var(--color-primary)]" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+        Show Archived Centers
+      </label>
 
       <DataTable<ServiceCenter>
         isLoading={isLoading}
@@ -202,10 +234,38 @@ export default function AdminServiceCentersPage() {
               </div>
             ),
           },
-          { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
+          {
+            header: "Status",
+            accessor: (c) => {
+              const state = centerState(c);
+              return (
+                <Badge tone={state === "active" ? "success" : state === "paused" ? "warning" : "neutral"}>
+                  {state === "active" ? "Active" : state === "paused" ? "Paused" : "Archived"}
+                </Badge>
+              );
+            },
+          },
           {
             header: "",
-            accessor: (c) => (
+            accessor: (c) =>
+              centerState(c) === "archived" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label={`Restore ${c.name}`}
+                  isLoading={restoreMutation.isPending && restoreMutation.variables?.id === c.id}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: `Restore ${toTitle(c.name)}?`,
+                      message: "It comes back paused, with every record as it was. Switch it on when it is ready to take bookings.",
+                      confirmLabel: "Restore",
+                    });
+                    if (ok) restoreMutation.mutate(c);
+                  }}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> Restore
+                </Button>
+              ) : (
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" aria-label={`Edit ${c.name}`} title="Edit" onClick={() => openEdit(c)}>
                   <Pencil className="h-3.5 w-3.5" />
@@ -216,8 +276,8 @@ export default function AdminServiceCentersPage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  aria-label={c.is_active ? `Deactivate ${c.name}` : `Activate ${c.name}`}
-                  title={c.is_active ? "Deactivate" : "Activate"}
+                  aria-label={c.is_active ? `Pause ${c.name}` : `Resume ${c.name}`}
+                  title={c.is_active ? "Pause (keeps all records)" : "Resume"}
                   isLoading={toggleActiveMutation.isPending && toggleActiveMutation.variables?.id === c.id}
                   disabled={toggleActiveMutation.isPending}
                   onClick={async () => {
@@ -226,17 +286,37 @@ export default function AdminServiceCentersPage() {
                     const ok = await confirm(
                       c.is_active
                         ? {
-                            title: `Deactivate ${toTitle(c.name)}?`,
-                            message: "Customers in its area can't book until it's switched back on. Bookings already made are not cancelled.",
-                            confirmLabel: "Deactivate",
+                            title: `Pause ${toTitle(c.name)}?`,
+                            message:
+                              "Customers in its area can't book until it's resumed. Bookings already made are not cancelled, and every record (bookings, money, salary, franchise) stays exactly as it is.",
+                            confirmLabel: "Pause",
                             tone: "danger",
                           }
-                        : { title: `Activate ${toTitle(c.name)}?`, message: "It starts taking bookings for its area right away.", confirmLabel: "Activate" }
+                        : { title: `Resume ${toTitle(c.name)}?`, message: "It starts taking bookings for its area right away.", confirmLabel: "Resume" }
                     );
                     if (ok) toggleActiveMutation.mutate(c);
                   }}
                 >
                   <Power className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={`Archive ${c.name}`}
+                  title="Archive (keeps all records)"
+                  isLoading={archiveMutation.isPending && archiveMutation.variables?.id === c.id}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: `Archive ${toTitle(c.name)}?`,
+                      message:
+                        "Nothing is deleted. Every booking, plan, payment, salary and franchise record stays, and the center still shows as \"Archived\" wherever history is viewed. It stops taking new bookings, and you can restore it later. Archiving isn't possible while it still has live bookings, staff, active plans or societies — pause it instead.",
+                      confirmLabel: "Archive",
+                      tone: "danger",
+                    });
+                    if (ok) archiveMutation.mutate(c);
+                  }}
+                >
+                  <Archive className="h-3.5 w-3.5 text-[var(--color-error)]" />
                 </Button>
               </div>
             ),

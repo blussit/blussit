@@ -1,3 +1,5 @@
+from typing import Literal, Optional
+
 from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -12,8 +14,8 @@ router.include_router(bundle_router)
 
 
 @router.get("", dependencies=[Depends(require_admin)])
-async def list_coupons(active_only: bool = False, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await CouponController(db).list(pagination, active_only)
+async def list_coupons(active_only: bool = False, status: Optional[Literal["active", "scheduled", "inactive", "used_up", "expired"]] = None, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await CouponController(db).list(pagination, active_only, status)
 
 
 @router.get("/public/{code}")

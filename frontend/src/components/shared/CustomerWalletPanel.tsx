@@ -289,7 +289,7 @@ export function AdjustWalletDialog({
             </button>
           ))}
         </div>
-        <Input label="Amount (₹)" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))} />
+        <Input label="Amount (₹)" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value.split(".")[0].replace(/\D/g, "").slice(0, 7))} />
         <Input
           label="Reason"
           maxLength={300}

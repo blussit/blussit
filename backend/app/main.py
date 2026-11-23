@@ -23,6 +23,7 @@ from app.core.storage import MAX_UPLOAD_BYTES as STORAGE_MAX_UPLOAD_BYTES, uploa
 from app.models.enums import NotificationType
 from app.routes.v1 import (
     admin_booking_routes,
+    admin_inbox_routes,
     analytics_routes,
     audit_log_routes,
     auth_routes,
@@ -1401,6 +1402,13 @@ _OPTIONAL_BOOT_TASKS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (("app.services.payroll_service", "backfill_captain_pay"),),
     ),
     (
+        # INBOX: contact messages / custom-plan requests / coverage requests
+        # that predate `seen_at` count as seen (only untriaged plan requests
+        # stay new), so the first deploy does not light every sidebar dot.
+        "admin inbox seen marks",
+        (("app.services.admin_inbox_service", "backfill_inbox_seen"),),
+    ),
+    (
         # Account emails stored lower-case (login is case-insensitive).
         "lower-case account emails",
         (("app.repositories.user_repository", "lowercase_user_emails"),),
@@ -1831,6 +1839,7 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(booking_routes.router, prefix=api_prefix)
     target.include_router(booking_routes.charge_router, prefix=api_prefix)
     target.include_router(admin_booking_routes.router, prefix=api_prefix)
+    target.include_router(admin_inbox_routes.router, prefix=api_prefix)
     target.include_router(subscription_routes.plan_router, prefix=api_prefix)
     target.include_router(subscription_routes.subscription_router, prefix=api_prefix)
     target.include_router(coupon_routes.router, prefix=api_prefix)

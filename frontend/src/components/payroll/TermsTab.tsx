@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Button, Input, Select, Switch } from "../ui";
+import { Button, Input, Switch } from "../ui";
 import { PAY_LIMITS, payrollApi, type CommissionMode, type PayHistorySegment, type PayrollCaptainDetail, type TermsInput } from "../../api/payroll";
 import { getErrorMessage } from "../../lib/api-client";
 import { format, todayIST } from "../../lib/date";
 import { cleanAmountInput, rupeesInput, rupeesText, toPaise } from "../../lib/paise";
-import { ChoicePair, MAX_COMMISSION_PERCENT } from "./PayFields";
-import { Banner, BASIS_LABEL, WEEKDAYS, termsLine } from "./payrollUi";
+import { ChoicePair, MAX_COMMISSION_PERCENT, WeekdayChips } from "./PayFields";
+import { Banner, BASIS_LABEL, termsLine } from "./payrollUi";
 import { usePayrollWrite } from "./usePayrollWrite";
 
 /** Edit the pay terms (effective from a date) and see how they changed over time. */
@@ -17,8 +17,8 @@ export function TermsTab({ detail }: { detail: PayrollCaptainDetail }) {
   const maxPct = detail.max_commission_percent || MAX_COMMISSION_PERCENT;
   const [basis, setBasis] = useState<"" | "salary" | "commission">(p.basis === "legacy" ? "" : p.basis);
   const [salary, setSalary] = useState(rupeesInput(p.salary_monthly_paise));
-  const [weeklyOff, setWeeklyOff] = useState(String(p.weekly_off ?? 6));
-  const [leaves, setLeaves] = useState(String(p.paid_leaves_per_month ?? 1));
+  const [weeklyOff, setWeeklyOff] = useState<number[]>(p.weekly_off_days ?? [5, 6]);
+  const [leaves, setLeaves] = useState(String(p.paid_leaves_per_month ?? 0));
   const [petrol, setPetrol] = useState(rupeesInput(p.petrol_per_day_paise));
   const [extraDay, setExtraDay] = useState(!!p.extra_day_on_off);
   const [mode, setMode] = useState<CommissionMode>(p.commission?.mode || "percent");
@@ -48,7 +48,7 @@ export function TermsTab({ detail }: { detail: PayrollCaptainDetail }) {
       const l = Number(leaves);
       if (!Number.isInteger(l) || l < 0 || l > PAY_LIMITS.paidLeavesMax) return setError(`Paid leaves per month must be a whole number from 0 to ${PAY_LIMITS.paidLeavesMax}.`);
       if (petrol.trim() && toPaise(petrol) === null) return setError("Petrol per day must be a whole number of rupees.");
-      Object.assign(payload, { salary_monthly_paise: s, weekly_off: Number(weeklyOff), paid_leaves_per_month: l, petrol_per_day_paise: toPaise(petrol) || 0, extra_day_on_off: extraDay });
+      Object.assign(payload, { salary_monthly_paise: s, weekly_off_days: weeklyOff, paid_leaves_per_month: l, petrol_per_day_paise: toPaise(petrol) || 0, extra_day_on_off: extraDay });
     } else {
       const pct = Number(percent);
       if (mode === "percent" && (percent.trim() === "" || !Number.isFinite(pct) || pct < 0 || pct > maxPct)) return setError(`Enter a commission percent from 0 to ${maxPct}.`);
@@ -86,14 +86,8 @@ export function TermsTab({ detail }: { detail: PayrollCaptainDetail }) {
         {basis === "salary" && (
           <div className="space-y-3">
             <Input label="Monthly Salary (₹)" inputMode="numeric" value={salary} onChange={(e) => setSalary(cleanAmountInput(e.target.value))} />
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Select label="Working Off Day" value={weeklyOff} onChange={(e) => setWeeklyOff(e.target.value)}>
-                {WEEKDAYS.map((d, i) => (
-                  <option key={d} value={String(i)}>
-                    {d}
-                  </option>
-                ))}
-              </Select>
+            <div className="grid grid-cols-1 gap-3">
+              <WeekdayChips value={weeklyOff} onChange={setWeeklyOff} />
               <Input label="Paid Leaves Per Month" inputMode="numeric" value={leaves} onChange={(e) => setLeaves(cleanAmountInput(e.target.value).slice(0, 2))} />
             </div>
             <Input label="Petrol Per Day (₹, Optional)" inputMode="numeric" value={petrol} onChange={(e) => setPetrol(cleanAmountInput(e.target.value))} hint="Added for every day the captain is present." />

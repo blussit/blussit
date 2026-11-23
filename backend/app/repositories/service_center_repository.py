@@ -10,14 +10,45 @@ from app.utils.geo import haversine_km
 ACTIVE_CENTER = {"is_active": {"$ne": False}}
 
 
+def center_status(center: dict | None) -> str:
+    """Where a center stands, for labels: "archived" (deleted — every record
+    stays), "paused" (switched off — takes no new work), else "active"."""
+    if not center:
+        return "active"
+    if center.get("is_deleted"):
+        return "archived"
+    return "active" if center.get("is_active", True) is not False else "paused"
+
+
+STATUS_LABEL = {"active": "Active", "paused": "Paused", "archived": "Archived"}
+STATUS_SUFFIX = {"active": "", "paused": " (Paused)", "archived": " (Archived)"}
+
+
+def center_label(center: dict | None) -> str:
+    """"Name (Paused)" / "Name (Archived)" — for places that show history."""
+    name = (center or {}).get("name") or "Unknown Center"
+    return f"{name}{STATUS_SUFFIX[center_status(center)]}"
+
+
 class ServiceCenterRepository(BaseRepository):
     collection_name = "service_centers"
 
-    async def search(self, search: str | None, page: int, page_size: int, active_only: bool = False):
+    async def search(self, search: str | None, page: int, page_size: int, active_only: bool = False, include_archived: bool = False):
         filters: dict = dict(ACTIVE_CENTER) if active_only else {}
         if search:
             filters.update(build_search_filter(search, ["name", "code", "location.city", "location.pincode"]))
-        return await self.find_many(filters, page=page, page_size=page_size)
+        return await self.find_many(filters, page=page, page_size=page_size, include_deleted=include_archived)
+
+    async def find_by_ids(self, ids: list[str]) -> list[dict]:
+        """Names for records that point at a center. An archived (soft-deleted)
+        center still resolves — a record must never show "unknown" because
+        its center was archived or paused."""
+        from bson import ObjectId
+
+        valid = [ObjectId(i) for i in set(ids) if i and ObjectId.is_valid(i)]
+        if not valid:
+            return []
+        return await self.collection.find({"_id": {"$in": valid}}).to_list(length=None)
 
     async def find_by_pincode(self, pincode: str) -> list[dict]:
         return await self.find_all_no_paginate({"location.service_pincodes": pincode, **ACTIVE_CENTER})

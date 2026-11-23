@@ -8,7 +8,7 @@ amounts they add up to. Rules, in order, for each day:
     leave (+ `paid_leave`);
   - evidence of work — a check-in row, or a job the captain completed/started
     that day → present;
-  - the captain's weekly-off day → `weekly_off` (not in the pay at all; working
+  - the captain's weekly-off days (Saturday + Sunday by default) → `weekly_off` (not in the pay at all; working
     it adds a day only when the terms say `extra_day_on_off`);
   - an admin holiday covering the whole day → `holiday` (paid);
   - an approved leave covering the day → `leave` (paid while the month's
@@ -36,8 +36,10 @@ def month_days(month: str) -> list[date]:
     return [date(year, mon, d) for d in range(1, calendar.monthrange(year, mon)[1] + 1)]
 
 
-def working_days_in_month(days: list[date], weekly_off: int) -> int:
-    return sum(1 for d in days if d.weekday() != weekly_off)
+def working_days_in_month(days: list[date], weekly_off) -> int:
+    """Days that are not a weekly off. `weekly_off` is a weekday or a collection of weekdays."""
+    off = {weekly_off} if isinstance(weekly_off, int) else set(weekly_off or ())
+    return sum(1 for d in days if d.weekday() not in off)
 
 
 def round_paise(value: Fraction) -> int:
@@ -73,7 +75,7 @@ def compute_month(
     for d in days:
         iso = d.isoformat()
         terms = terms_at(user, iso)
-        wk_off = terms["weekly_off"]
+        wk_off = set(terms["weekly_off_days"])
         row = {"date": iso, "status": "absent", "paid_fraction": 0.0, "overridden": False, "paid_leave": False, "note": None, "marked_by": None, "source": None}
         att = attendance.get(iso) or {}
         manual = att.get("marked_by") and att.get("status") in MANUAL_STATUSES
@@ -88,7 +90,7 @@ def compute_month(
         last_active = iso
         presence = Fraction(0)  # 1 full day, 1/2 half day
         pay_fraction = Fraction(0)
-        is_off = d.weekday() == wk_off
+        is_off = d.weekday() in wk_off
         evidence = (att.get("status") == "present" and not att.get("marked_by")) or iso in job_days
         if manual:
             row.update({"overridden": True, "note": att.get("override_note"), "marked_by": att.get("marked_by"), "source": "manual"})
@@ -163,7 +165,7 @@ def compute_month(
         rows.append(row)
 
     ref_terms = terms_at(user, last_active or days[-1].isoformat())
-    expected_days = working_days_in_month(days, ref_terms["weekly_off"])
+    expected_days = working_days_in_month(days, ref_terms["weekly_off_days"])
     salary = int(ref_terms["salary_monthly_paise"] or 0)
     return {
         "month": month,

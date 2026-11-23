@@ -6,7 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.repositories.booking_repository import BookingRepository
 from app.repositories.catalog_repository import ServiceRepository
-from app.repositories.service_center_repository import ServiceCenterRepository
+from app.repositories.service_center_repository import STATUS_LABEL, ServiceCenterRepository, center_status
 from app.repositories.subscription_repository import UserSubscriptionRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vehicle_repository import VehicleRepository
@@ -73,7 +73,9 @@ class AnalyticsService:
         counts and average rating, computed live from stored data (never
         cached/manually entered). Two grouped aggregations for all centers
         at once (bookings, reviews) instead of five queries per center."""
-        centers, _ = await self.center_repo.find_many({"is_active": {"$ne": False}}, page=1, page_size=200)
+        # Paused and archived centers stay in the list while they have any
+        # bookings (their history must not vanish); an empty one is just noise.
+        centers, _ = await self.center_repo.find_many({}, page=1, page_size=200, include_deleted=True)
         center_ids = [str(c["_id"]) for c in centers]
         if not center_ids:
             return []
@@ -103,9 +105,14 @@ class AnalyticsService:
             center_id = str(center["_id"])
             b = bookings.get(center_id, {})
             r = ratings.get(center_id)
+            status = center_status(center)
+            if status != "active" and not b.get("bookings"):
+                continue
             results.append({
                 "service_center_id": center_id,
                 "name": center.get("name"),
+                "status": status,
+                "status_label": STATUS_LABEL[status],
                 "bookings": b.get("bookings", 0),
                 "completed": b.get("completed", 0),
                 "pending": b.get("pending", 0),

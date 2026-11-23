@@ -348,6 +348,10 @@ async def create_indexes() -> None:
     # Custom-plan enquiries — one row per phone (upserted), newest first.
     await db.plan_enquiries.create_index("phone", unique=True)
     await db.plan_enquiries.create_index([("last_requested_at", -1)])
+    # The admin sidebar's "new" dots count rows with seen_at = null (§8.3 inbox).
+    await db.plan_enquiries.create_index("seen_at")
+    await db.contact_messages.create_index("seen_at")
+    await db.coverage_leads.create_index("seen_at")
     # A pass belongs to ONE car and one car carries ONE pass — this is the
     # index behind _active_pass_for_vehicle, the guard that enforces it.
     await db.user_subscriptions.create_index([("customer_id", 1), ("vehicle_id", 1), ("status", 1)])

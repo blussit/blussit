@@ -13,8 +13,8 @@ class CouponController:
         self.service = CouponService(db)
         self.audit = AuditService(db)
 
-    async def list(self, pagination: PaginationParams, active_only: bool):
-        items, total = await self.service.list_all(pagination.page, pagination.page_size, active_only)
+    async def list(self, pagination: PaginationParams, active_only: bool, status: str | None = None):
+        items, total = await self.service.list_all(pagination.page, pagination.page_size, active_only, status)
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def create(self, current_user: CurrentUser, payload: CouponCreateRequest):

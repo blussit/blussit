@@ -16,6 +16,7 @@ import { useAuth } from "../../context/AuthContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { cleanMobileInput, validateIndianMobile } from "../../lib/validators";
 import type { User, UserRole } from "../../types";
+import { centerLabel } from "../../lib/centerLabel";
 
 /** A pasted "+91 98765 43210" should still find the stored 10-digit number. */
 function normaliseSearch(raw: string): string {
@@ -83,7 +84,10 @@ export default function AdminUsersPage() {
   });
 
   const facetsQuery = useQuery({ queryKey: ["admin-user-location-facets"], queryFn: () => adminUserApi.locationFacets(), staleTime: 60_000 });
-  const centersQuery = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  // Pickers for NEW work (assign a center) offer active centers only; the list
+  // filter also shows paused / archived ones (their staff and history stay).
+  const centersQuery = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, active_only: true }) });
+  const { data: historyCenters } = useQuery({ queryKey: ["admin-centers-history"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }) });
   const centers = centersQuery.data;
   // A failed centers read would leave the picker on "Not Assigned" only —
   // which reads as "this person has no center". Say it failed instead.
@@ -227,7 +231,7 @@ export default function AdminUsersPage() {
         <div className="sm:w-48">
           <Select label="Center" value={centerFilter} onChange={(e) => { setCenterFilter(e.target.value); setPage(1); }}>
             <option value="">All Centers</option>
-            {(centers?.data || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {(historyCenters?.data || []).map((c) => <option key={c.id} value={c.id}>{centerLabel(c)}</option>)}
           </Select>
         </div>
         <div className="sm:w-40">

@@ -9,6 +9,8 @@ import { AttendanceTab } from "./AttendanceTab";
 import { CommissionsTab } from "./CommissionsTab";
 import { DepositKitTab } from "./DepositKitTab";
 import { AdjustmentModal, RecordPaymentModal } from "./PaymentModals";
+import { InvoicesTab } from "./InvoicesTab";
+import { PayWizard } from "./PayWizard";
 import { PaymentsTab } from "./PaymentsTab";
 import { TermsTab } from "./TermsTab";
 import { Banner, BasisBadge, Dues, Fact, FRANCHISE_BANNER, LEDGER_LABEL, MonthPicker, SkeletonRows, TabStrip, monthLabel, termsLine } from "./payrollUi";
@@ -19,6 +21,7 @@ export const DRAWER_TABS = [
   { key: "attendance", label: "Attendance" },
   { key: "commissions", label: "Commissions" },
   { key: "payments", label: "Payments" },
+  { key: "invoices", label: "Invoices" },
   { key: "terms", label: "Terms" },
   { key: "deposit", label: "Deposit & Kit" },
 ] as const;
@@ -89,6 +92,7 @@ function DrawerBody({ captainId, month, onMonthChange, initialTab }: { captainId
       {tab === "attendance" && <AttendanceTab detail={detail} month={month} statement={statementQuery} />}
       {tab === "commissions" && <CommissionsTab detail={detail} month={month} />}
       {tab === "payments" && <PaymentsTab detail={detail} />}
+      {tab === "invoices" && <InvoicesTab captainId={detail.id} />}
       {tab === "terms" && <TermsTab detail={detail} />}
       {tab === "deposit" && <DepositKitTab detail={detail} />}
     </div>
@@ -99,6 +103,7 @@ type StatementQuery = ReturnType<typeof useQuery<PayrollStatement>>;
 
 function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptainDetail; month: string; statement: StatementQuery; onGo: (t: DrawerTab) => void }) {
   const [paying, setPaying] = useState(false);
+  const [other, setOther] = useState(false);
   const [adjusting, setAdjusting] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const s = statement.data;
@@ -107,7 +112,10 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
         <Button size="sm" onClick={() => setPaying(true)}>
-          <HandCoins className="h-4 w-4" /> Record Payment
+          <HandCoins className="h-4 w-4" /> Pay
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setOther(true)}>
+          Advance Or Other
         </Button>
         <Button size="sm" variant="outline" onClick={() => setAdjusting(true)}>
           <Plus className="h-4 w-4" /> Add Adjustment
@@ -211,7 +219,8 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
         )}
       </div>
 
-      <RecordPaymentModal captain={detail} open={paying} onClose={() => setPaying(false)} />
+      <PayWizard captain={detail} open={paying} onClose={() => setPaying(false)} onOther={() => { setPaying(false); setOther(true); }} />
+      <RecordPaymentModal captain={detail} open={other} onClose={() => setOther(false)} />
       <AdjustmentModal captain={detail} open={adjusting} onClose={() => setAdjusting(false)} />
       <FinalizeModal captainId={detail.id} month={month} computed={statement.data?.salary?.computed_paise} open={finalizing} onClose={() => setFinalizing(false)} />
     </div>

@@ -309,6 +309,8 @@ export interface ContactMessage {
   email: string;
   message: string;
   created_at: string;
+  /** null = not opened by an admin yet (a "New" row). */
+  seen_at?: string | null;
 }
 
 /** "None of the standard passes fit us" — captured from CustomPlanEnquiryModal.
@@ -328,6 +330,8 @@ export interface PlanEnquiry {
   requests_count?: number;
   created_at: string;
   last_requested_at?: string;
+  /** null = not opened by an admin yet (a "New" row). */
+  seen_at?: string | null;
 }
 
 export type BookingStatus =
@@ -767,6 +771,10 @@ export interface ServiceCenter {
   max_bookings_per_day?: number | null;
   default_slot_capacity?: number | null;
   is_active: boolean;
+  /** active | paused (switched off) | archived (deleted, every record kept). */
+  status?: "active" | "paused" | "archived";
+  status_label?: string;
+  is_deleted?: boolean;
   /** Operation model (ARCHITECTURE.md §7.13); the API always sends it (a legacy center is self-operated). */
   operation?: ServiceCenterOperation | null;
   /** Append-only change log — admin only, absent for managers. */
@@ -904,6 +912,8 @@ export interface InventoryItem {
   reorder_level: number;
 }
 
+export type CouponStatus = "active" | "scheduled" | "inactive" | "used_up" | "expired";
+
 export interface Coupon {
   id: string;
   code: string;
@@ -919,6 +929,9 @@ export interface Coupon {
   total_usage_limit?: number | null;
   total_used?: number;
   is_active: boolean;
+  /** Derived by the server (never stored): what the coupon is right now. */
+  status?: CouponStatus;
+  status_label?: string;
   valid_from: string;
   valid_until: string;
   // Use-type and restrictions (components/admin/CouponRulesFields.tsx).

@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Phone } from "lucide-react";
 import { adminPlanEnquiryApi } from "../../api/admin";
 import { Badge, Button, DataTable, Select } from "../../components/ui";
+import { MarkAllReadButton, NewMark } from "../../components/admin/NewMark";
+import { useInboxSeen } from "../../hooks/useInboxSeen";
 import { formatDateTime } from "../../lib/date";
 import { toTitle } from "../../lib/titleCase";
 import type { PlanEnquiry } from "../../types";
@@ -26,13 +28,18 @@ export default function AdminPlanEnquiriesPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-plan-enquiries"] }),
   });
 
+  const seen = useInboxSeen("plan_enquiries", data?.data);
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Custom Plan Requests</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          "Request A Custom Plan" submissions from the Monthly Pass section — a fleet, an odd schedule, anything the standard pass doesn't fit.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Custom Plan Requests</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            "Request A Custom Plan" submissions from the Monthly Pass section — a fleet, an odd schedule, anything the standard pass doesn't fit.
+          </p>
+        </div>
+        <MarkAllReadButton onClick={seen.markAll} disabled={seen.allRead} busy={seen.markingAll} />
       </div>
 
       <DataTable<PlanEnquiry>
@@ -43,7 +50,15 @@ export default function AdminPlanEnquiriesPage() {
         emptyTitle="No Requests Yet"
         emptyDescription="Custom-plan requests from the website will show up here."
         columns={[
-          { header: "Name", accessor: (e) => e.name },
+          {
+            header: "Name",
+            accessor: (e) => (
+              <span className={seen.isNew(e.id) ? "font-bold text-[var(--color-text-primary)]" : ""}>
+                {e.name}
+                {seen.isNew(e.id) && <NewMark />}
+              </span>
+            ),
+          },
           {
             header: "Contact",
             accessor: (e) => (

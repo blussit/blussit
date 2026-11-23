@@ -3,6 +3,8 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { MapPin, Users } from "lucide-react";
 import { coverageLeadApi, type CoverageLead } from "../../api/admin";
 import { Badge, Card, CardBody, DataTable } from "../../components/ui";
+import { MarkAllReadButton, NewMark } from "../../components/admin/NewMark";
+import { useInboxSeen } from "../../hooks/useInboxSeen";
 import { Pager } from "../../components/shared/ListControls";
 import { format } from "../../lib/date";
 import { toTitle } from "../../lib/titleCase";
@@ -22,14 +24,18 @@ export default function AdminCoverageLeadsPage() {
     placeholderData: keepPreviousData,
   });
   const { data: summary } = useQuery({ queryKey: ["coverage-leads-summary"], queryFn: coverageLeadApi.summary });
+  const seen = useInboxSeen("coverage_requests", data?.data);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Coverage Requests</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          People who tried to book from areas we don't serve yet — where demand is waiting for us.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Coverage Requests</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            People who tried to book from areas we don't serve yet — where demand is waiting for us.
+          </p>
+        </div>
+        <MarkAllReadButton onClick={seen.markAll} disabled={seen.allRead} busy={seen.markingAll} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -69,7 +75,15 @@ export default function AdminCoverageLeadsPage() {
         emptyTitle="No Coverage Requests Yet"
         emptyDescription="When someone from an unserved area tries to book on the website, their details will appear here."
         columns={[
-          { header: "Name", accessor: (l) => l.name },
+          {
+            header: "Name",
+            accessor: (l) => (
+              <span className={seen.isNew(l.id) ? "font-bold text-[var(--color-text-primary)]" : ""}>
+                {l.name}
+                {seen.isNew(l.id) && <NewMark />}
+              </span>
+            ),
+          },
           { header: "Phone", accessor: (l) => <span className="font-mono-num">{l.phone}</span> },
           { header: "Pincode", accessor: (l) => <span className="font-mono-num">{l.pincode}</span> },
           { header: "Area", accessor: (l) => l.city_area || "—" },

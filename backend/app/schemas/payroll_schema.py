@@ -47,6 +47,9 @@ class PayTermsIn(_Strip):
     basis: Optional[PayBasisLiteral] = None
     salary_monthly_paise: Optional[int] = Field(default=None, ge=0, le=MAX_SALARY_PAISE)
     commission: Optional[PayCommissionIn] = None
+    # Weekly-off weekdays (0 = Monday … 6 = Sunday); default Saturday + Sunday. The old
+    # single `weekly_off` day is still accepted (= that one day).
+    weekly_off_days: Optional[list[int]] = Field(default=None, max_length=6)
     weekly_off: Optional[int] = Field(default=None, ge=0, le=6)
     paid_leaves_per_month: Optional[int] = Field(default=None, ge=0, le=10)
     petrol_per_day_paise: Optional[int] = Field(default=None, ge=0, le=MAX_PETROL_PAISE)
@@ -56,6 +59,16 @@ class PayTermsIn(_Strip):
     # The captain's first / last paid day (default: the day the account was made).
     start_date: Optional[str] = Field(default=None, pattern=DAY_PATTERN)
     end_date: Optional[str] = Field(default=None, pattern=DAY_PATTERN)
+
+
+    @field_validator("weekly_off_days")
+    @classmethod
+    def _days(cls, value):
+        if value is None:
+            return value
+        if any((not isinstance(d, int)) or isinstance(d, bool) or d < 0 or d > 6 for d in value):
+            raise ValueError("Weekly off days are weekdays from Monday to Sunday.")
+        return sorted(set(value))
 
 
 class PayTermsCreate(PayTermsIn):
@@ -85,6 +98,40 @@ class PaymentCreate(_Strip):
     @model_validator(mode="after")
     def _offset_within_amount(self):
         if self.cash_offset_paise > self.amount_paise:
+            raise ValueError("The cash offset can't be more than the payment.")
+        return self
+
+
+class InvoicePay(_Strip):
+    """POST /payroll/captains/{id}/pay-invoice (§7.14). `salary` pays one month
+    (`month`), `commission` one period (`from_date` – `to_date`, optionally only
+    `booking_ids`); advance / petrol / other take an `amount_paise`. Without an
+    `amount_paise` the invoice's own total is paid; a different amount needs a
+    `reason`. `expected_gross_paise` (from the preview) refuses a stale screen."""
+
+    kind: Literal["salary", "commission", "petrol", "advance", "other"]
+    month: Optional[str] = Field(default=None, pattern=MONTH_PATTERN)
+    from_date: Optional[str] = Field(default=None, pattern=DAY_PATTERN)
+    to_date: Optional[str] = Field(default=None, pattern=DAY_PATTERN)
+    booking_ids: Optional[list[str]] = Field(default=None, max_length=1500)
+    amount_paise: Optional[int] = Field(default=None, gt=0, le=MAX_PAYMENT_PAISE)
+    expected_gross_paise: Optional[int] = Field(default=None, ge=-MAX_PAYMENT_PAISE, le=MAX_PAYMENT_PAISE)
+    reason: Optional[str] = Field(default=None, max_length=200)
+    method: Literal["cash", "upi", "bank", "other"] = "cash"
+    paid_on: Optional[str] = Field(default=None, pattern=DAY_PATTERN)
+    note: Optional[str] = Field(default=None, max_length=300)
+    idempotency_key: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9._:\-]+$")
+    cash_offset_paise: int = Field(default=0, ge=0, le=MAX_PAYMENT_PAISE)
+
+    @model_validator(mode="after")
+    def _shape(self):
+        if self.kind == "salary" and not self.month:
+            raise ValueError("Pick the salary month.")
+        if self.kind == "commission" and not (self.from_date or self.to_date):
+            raise ValueError("Pick the commission period.")
+        if self.kind in ("advance", "petrol", "other") and self.amount_paise is None:
+            raise ValueError("Enter the amount.")
+        if self.amount_paise is not None and self.cash_offset_paise > self.amount_paise:
             raise ValueError("The cash offset can't be more than the payment.")
         return self
 

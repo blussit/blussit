@@ -446,4 +446,11 @@ export const en = {
   "captain.mypay.kitReturned": "Returned",
   "captain.mypay.loadFailed": "Couldn't Load Your Pay",
   "captain.mypay.ledgerNote": "Amounts are before any tax.",
+  "captain.mypay.invoices": "Paid Invoices",
+  "captain.mypay.noInvoices": "No invoices yet.",
+  "captain.mypay.cancelled": "Cancelled",
+  "captain.mypay.paidInvoice": "Paid — {no}",
+  "captain.mypay.partPaid": "Part Paid",
+  "captain.mypay.unpaid": "Unpaid",
+  "captain.mypay.openInvoice": "Open",
 }

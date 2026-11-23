@@ -133,6 +133,10 @@ class MonthsMixin(PayMixin):
         end = (captain.get("pay") or {}).get("end_date")
         if end and day > end:
             raise BadRequestException(f"This captain's last day was {self.day_label(end)}.")
+        if payload.status == "leave":
+            message = pt.leave_on_off_day_message(captain, day)
+            if message:
+                raise BadRequestException(message)
         who = await self.actor_info(actor)
         now = datetime.now(timezone.utc)
         before = await self.db.attendance.find_one({"captain_id": captain_id, "attendance_date": day})
@@ -155,6 +159,37 @@ class MonthsMixin(PayMixin):
         row = next(d for d in month["days"] if d["date"] == day)
         return {**row, "month": day[:7]}
 
+    async def accrue_month(
+        self, s, captain_id: str, center_id: str | None, month: str, target_salary: int, target_petrol: int,
+        override_amount_paise, reason, who: dict, period_end: str,
+    ) -> list[dict]:
+        """Post (inside the caller's transaction) only the difference between
+        what the ledger already holds for `month` and the targets — the body of
+        Finalize Month, shared with the salary invoice (§7.14)."""
+        posted = []
+        for kind, component, target, prefix, note in (
+            ("salary_accrual", None, target_salary, "sal", f"Salary for {month_label(month)}"),
+            ("allowance", "petrol", target_petrol, "pet", f"Petrol for {month_label(month)}"),
+        ):
+            match = {"captain_id": captain_id, "period": month, "kind": kind, **({"component": component} if component else {})}
+            existing = await self.ledger.aggregate(
+                [{"$match": match}, {"$group": {"_id": None, "p": {"$sum": "$amount_paise"}, "n": {"$sum": 1}}}], session=s,
+            ).to_list(length=1)
+            have, n = (int(existing[0]["p"]), int(existing[0]["n"])) if existing else (0, 0)
+            delta = target - have
+            if delta == 0:
+                continue
+            key = f"{prefix}:{captain_id}:{month}" + (f":{n}" if n else "")
+            why = (f" — payable set to {rupees_text(target)}: {reason}" if kind == "salary_accrual" and override_amount_paise is not None else "")
+            row = await self.post({
+                "captain_id": captain_id, "service_center_id": center_id, "kind": kind, "amount_paise": delta, "period": month,
+                "component": component, "note": (note + why)[:300], "key": key, "entry_date": period_end,
+                "override_amount_paise": override_amount_paise if kind == "salary_accrual" else None,
+                "actor_id": who["id"], "actor_name": who["name"], "actor_role": who["role"],
+            }, session=s)
+            posted.append({"kind": kind, "delta": delta, "key": row["key"]})
+        return posted
+
     # ---------- finalize ----------
 
     async def finalize_month(self, captain_id: str, month: str, payload, actor) -> dict:
@@ -174,29 +209,9 @@ class MonthsMixin(PayMixin):
         center_id = captain.get("service_center_id")
 
         async def _do(s):
-            posted = []
-            for kind, component, target, prefix, note in (
-                ("salary_accrual", None, target_salary, "sal", f"Salary for {month_label(month)}"),
-                ("allowance", "petrol", target_petrol, "pet", f"Petrol for {month_label(month)}"),
-            ):
-                match = {"captain_id": captain_id, "period": month, "kind": kind, **({"component": component} if component else {})}
-                existing = await self.ledger.aggregate(
-                    [{"$match": match}, {"$group": {"_id": None, "p": {"$sum": "$amount_paise"}, "n": {"$sum": 1}}}], session=s,
-                ).to_list(length=1)
-                have, n = (int(existing[0]["p"]), int(existing[0]["n"])) if existing else (0, 0)
-                delta = target - have
-                if delta == 0:
-                    continue
-                key = f"{prefix}:{captain_id}:{month}" + (f":{n}" if n else "")
-                why = (f" — payable set to {rupees_text(target)}: {payload.reason}" if kind == "salary_accrual" and payload.override_amount_paise is not None else "")
-                row = await self.post({
-                    "captain_id": captain_id, "service_center_id": center_id, "kind": kind, "amount_paise": delta, "period": month,
-                    "component": component, "note": (note + why)[:300], "key": key, "entry_date": period_end,
-                    "override_amount_paise": payload.override_amount_paise if kind == "salary_accrual" else None,
-                    "actor_id": who["id"], "actor_name": who["name"], "actor_role": who["role"],
-                }, session=s)
-                posted.append({"kind": kind, "delta": delta, "key": row["key"]})
-            return posted
+            return await self.accrue_month(
+                s, captain_id, center_id, month, target_salary, target_petrol, payload.override_amount_paise, payload.reason, who, period_end,
+            )
 
         try:
             posted = await in_transaction(self.db, _do, None)

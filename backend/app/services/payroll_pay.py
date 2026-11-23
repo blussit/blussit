@@ -14,36 +14,20 @@ from app.core.exceptions import BadRequestException, ConflictException, NotFound
 from app.services import payroll_terms as pt
 from app.services.customer_wallet_service import in_transaction
 from app.services.payroll_base import PayrollBase, rupees_text, today_ist
-from app.services.payroll_commission import CommissionMixin, cap_of
+from app.services.payroll_commission import cap_of
+from app.services.payroll_invoice_core import InvoiceCore, MAX_BACKDATE_DAYS, METHOD_LABEL as _METHOD_LABEL, PAYMENT_KINDS as _PAYMENT_KINDS, check_day as _check_day, check_paid_on
 
 logger = logging.getLogger(__name__)
 
-# payment kind → (ledger kind, finance category, label)
-_PAYMENT_KINDS = {
-    "salary": ("payout", "Salary", "Salary"),
-    "commission": ("payout", "Commission", "Commission"),
-    "petrol": ("payout", "Petrol & Expenses", "Petrol & expenses"),
-    "advance": ("advance", "Advance", "Advance"),
-    "other": ("payout", "Other", "Payment"),
-}
-_METHOD_LABEL = {"cash": "Cash", "upi": "UPI", "bank": "Bank transfer", "other": "Other"}
 _ADJUSTMENT_KINDS = {
     "bonus": ("bonus", 1), "allowance": ("allowance", 1), "deduction": ("deduction", -1),
     "commission_extra": ("commission_adjust", 1), "commission_cut": ("commission_adjust", -1),
 }
-MAX_BACKDATE_DAYS = 400
 _TERMS_PAST_DAYS = 62
 _TERMS_FUTURE_DAYS = 31
 
 
-def _check_day(day: str, name: str) -> str:
-    try:
-        return date.fromisoformat(day).isoformat()
-    except ValueError:
-        raise BadRequestException(f"{name} must be a real date like 2026-11-23.") from None
-
-
-class PayMixin(CommissionMixin):
+class PayMixin(InvoiceCore):
     # ================= terms =================
 
     async def build_new_captain_pay(self, center_id: str | None, pay_in, *, start_date: str | None = None) -> dict:
@@ -193,84 +177,30 @@ class PayMixin(CommissionMixin):
         return max(0, int(round(-balance * 100)))
 
     async def record_payment(self, captain_id: str, payload, actor) -> dict:
+        """A plain payment — advance, petrol, other (and, for the old API, a free
+        salary / commission amount). It always produces an invoice (§7.14) with one
+        `payment` line; salary months and commission periods go through
+        `pay_invoice`, which also tracks what each invoice settles."""
         captain = await self.captain_or_404(captain_id, actor.role, actor.service_center_id)
-        key = f"pay:{captain_id}:{payload.idempotency_key}"
-        existing = await self.by_key(key)
-        if existing:
-            return {**await self.entry_view(existing), "duplicate": True, "dues_paise": (await self.repo.dues(captain_id))["dues_paise"]}
-        paid_on = _check_day(payload.paid_on or today_ist(), "The payment date")
-        if paid_on > today_ist():
-            raise BadRequestException("A payment can't be dated in the future.")
-        if paid_on < (date.fromisoformat(today_ist()) - timedelta(days=MAX_BACKDATE_DAYS)).isoformat():
-            raise BadRequestException("A payment can't be dated more than 400 days back.")
-        if pt.basis_of(captain) == "legacy":
-            # Legacy captains are paid through the wallet withdrawal flow; paying here is allowed
-            # (a manager may hand cash) but never mixes with the wallet unless an offset is asked.
-            pass
-        center_id = captain.get("service_center_id")
-        finance_impact = await self.finance_impact_for(center_id)
-        ledger_kind, category, label = _PAYMENT_KINDS[payload.kind]
+        paid_on = check_paid_on(payload.paid_on)
         who = await self.actor_info(actor)
-        oid = ObjectId()
-        net = payload.amount_paise - payload.cash_offset_paise
-        cfg = await self.settings()
+        _, _, label = _PAYMENT_KINDS[payload.kind]
+        amount = int(payload.amount_paise)
 
-        async def _do(s):
-            if payload.cash_offset_paise:
-                owed = await self._owed_cash_paise(captain_id, s)
-                if payload.cash_offset_paise > owed:
-                    raise BadRequestException(
-                        f"{captain.get('full_name') or 'This captain'} holds {rupees_text(owed)} of cash — the offset can't be more than that."
-                    )
-            entry_id = None
-            if finance_impact and net > 0:
-                from app.services.finance_service import FinanceService
+        async def prepare(_s):
+            return {
+                "lines": [{"type": "payment", "label": (payload.note or label)[:120], "amount_paise": amount}],
+                "gross_paise": amount, "due_paise": amount, "settle": [], "adjust": "none",
+            }
 
-                entry = await FinanceService(self.db).create_system_entry(
-                    title=f"{label} — {captain.get('full_name')}"[:120], type="debit", amount_paise=net, category=category,
-                    source="payroll", source_id=str(oid), service_center_id=center_id, done_by=who["name"], actor_id=who["id"] or "system",
-                    actor_role=who["role"], entry_date=paid_on, description=(payload.note or "")[:400], session=s,
-                )
-                entry_id = entry["id"]
-            if payload.cash_offset_paise:
-                from app.services.wallet_service import WalletService
-
-                await WalletService(self.db).post_delta(
-                    captain_id, payload.cash_offset_paise / 100, None, f"Cash handed over, set against pay ({label})", session=s, key=f"cashoff:{key}",
-                )
-            row = await self.post({
-                "_id": oid, "captain_id": captain_id, "service_center_id": center_id, "kind": ledger_kind, "payment_kind": payload.kind,
-                "amount_paise": -payload.amount_paise, "method": payload.method, "note": payload.note, "key": key,
-                "finance_impact": finance_impact, "finance_entry_id": entry_id, "cash_offset_paise": payload.cash_offset_paise,
-                "net_paise": net, "entry_date": paid_on, "actor_id": who["id"], "actor_name": who["name"], "actor_role": who["role"],
-            }, session=s)
-            return row
-
-        try:
-            row = await in_transaction(self.db, _do, None)
-        except DuplicateKeyError:
-            row = await self.by_key(key)
-            if not row:
-                raise
-            return {**await self.entry_view(row), "duplicate": True, "dues_paise": (await self.repo.dues(captain_id))["dues_paise"]}
-        dues = await self.repo.dues(captain_id)
-        await self.audit(who, "PAYROLL_PAYMENT", str(oid), {
-            "captain_id": captain_id, "kind": payload.kind, "method": payload.method, "amount_paise": payload.amount_paise,
-            "cash_offset_paise": payload.cash_offset_paise, "finance_impact": finance_impact, "paid_on": paid_on, "note": payload.note,
-        }, center_id)
-        how = _METHOD_LABEL.get(payload.method, payload.method)
-        await self.notify(
-            captain_id, f"{rupees_text(payload.amount_paise)} paid to you",
-            f"{label}: {rupees_text(payload.amount_paise)} by {how} on {self.day_label(paid_on)}."
-            + (f" {rupees_text(payload.cash_offset_paise)} of it was set against cash you held." if payload.cash_offset_paise else ""),
-            str(oid),
+        invoice, row, duplicate = await self.create_payment_invoice(
+            captain, kind=payload.kind, method=payload.method, paid_on=paid_on, note=payload.note, idempotency_key=payload.idempotency_key,
+            cash_offset_paise=int(payload.cash_offset_paise), amount_paise=amount, reason=None, who=who, prepare=prepare,
         )
-        if payload.amount_paise > cfg["payroll_alert_paise"]:
-            await self.notify_admins(
-                "Large captain payment",
-                f"{who['name']} paid {captain.get('full_name')} {rupees_text(payload.amount_paise)} ({label}, {how}).", str(oid),
-            )
-        return {**await self.entry_view(row), "duplicate": False, "dues_paise": dues["dues_paise"]}
+        dues = await self.repo.dues(captain_id)
+        view = await self.entry_view(row)
+        return {**view, "duplicate": duplicate, "dues_paise": dues["dues_paise"], "invoice_id": str(invoice.get("_id")) if invoice else None,
+                "invoice_number": (invoice or {}).get("number")}
 
     async def void_payment(self, ledger_id: str, reason: str, actor) -> dict:
         if not ObjectId.is_valid(ledger_id or ""):
@@ -298,9 +228,12 @@ class PayMixin(CommissionMixin):
                     orig["captain_id"], -orig["cash_offset_paise"] / 100, None, "Cash offset reversed — payment voided", session=s,
                     key=f"cashoff-void:{ledger_id}",
                 )
+            if orig.get("invoice_id"):
+                await self.void_invoice_in(s, orig, reason, who)
             return await self.post({
                 "captain_id": orig["captain_id"], "service_center_id": center_id, "kind": "payout_void", "payment_kind": orig.get("payment_kind"),
                 "amount_paise": -int(orig["amount_paise"]), "voids": ledger_id, "note": reason, "key": key, "finance_impact": orig.get("finance_impact", False),
+                "invoice_id": orig.get("invoice_id"), "invoice_number": orig.get("invoice_number"),
                 "actor_id": who["id"], "actor_name": who["name"], "actor_role": who["role"],
             }, session=s)
 
@@ -312,7 +245,8 @@ class PayMixin(CommissionMixin):
         await self.audit(who, "PAYROLL_PAYMENT_VOID", ledger_id, {"captain_id": orig["captain_id"], "amount_paise": -int(orig["amount_paise"]), "reason": reason}, center_id)
         await self.notify(
             orig["captain_id"], "A payment was cancelled",
-            f"The {rupees_text(-int(orig['amount_paise']))} payment dated {self.day_label(orig.get('entry_date') or '')} was cancelled by {who['name']}: {reason}", ledger_id,
+            f"The {rupees_text(-int(orig['amount_paise']))} payment dated {self.day_label(orig.get('entry_date') or '')}"
+            + (f" (invoice {orig['invoice_number']})" if orig.get("invoice_number") else "") + f" was cancelled by {who['name']}: {reason}", ledger_id,
         )
         return {**await self.entry_view(row), "duplicate": False}
 

@@ -1,8 +1,9 @@
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./staffTheme.css";
-import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { MandatoryGates } from "../shared/MandatoryGates";
+import { SidebarNav, flattenNav, type NavEntry } from "./SidebarNav";
 import {
   Bell,
   BellOff,
@@ -10,7 +11,6 @@ import {
   Menu,
   User as UserIcon,
   X,
-  type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,14 +22,8 @@ import { useLiveChannel } from "../../lib/socket";
 import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import type { Notification } from "../../types";
 
-export interface NavItem {
-  label: string;
-  to: string;
-  icon: LucideIcon;
-  end?: boolean;
-  /** Small red count pill after the label (e.g. unread WhatsApp chats). */
-  badge?: number;
-}
+// The nav types live with the sidebar; re-exported so existing imports keep working.
+export type { NavItem, NavGroup, NavEntry } from "./SidebarNav";
 
 function toastToneFor(notification: Notification): ToastTone {
   if (notification.notification_type === "complaint") return "warning";
@@ -42,7 +36,8 @@ export function DashboardShell({
   headerRight,
   children,
 }: {
-  navItems: NavItem[];
+  /** Plain links, or collapsible groups of links (see SidebarNav). */
+  navItems: NavEntry[];
   portalLabel: string;
   /** Custom element to render in the header next to the notification bell. */
   headerRight?: ReactNode;
@@ -55,7 +50,7 @@ export function DashboardShell({
   const queryClient = useQueryClient();
   const toast = useToast();
   // Tab title: "Booking Queue | Manager | Blussit" (the longest matching nav item wins).
-  const here = [...navItems]
+  const here = flattenNav(navItems)
     .sort((a, b) => b.to.length - a.to.length)
     .find((i) => (i.end ? pathname === i.to : pathname === i.to || pathname.startsWith(`${i.to}/`)));
   const pageTitle = [here?.label, portalLabel, "Blussit"].filter(Boolean).join(" | ");
@@ -282,27 +277,7 @@ export function DashboardShell({
             keeps growing past the viewport and overlaps the logout button
             pinned below it. */}
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 text-[14px] font-medium transition-colors ${
-                  isActive ? "bg-[#E8F0FE] font-semibold text-[#0A66F0]" : "text-[#5F6878] hover:bg-[#F3F6FA] hover:text-[#0E1A33]"
-                }`
-              }
-            >
-              <item.icon className="h-[18px] w-[18px]" />
-              {item.label}
-              {item.badge != null && item.badge > 0 && (
-                <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-[var(--color-error)] px-1.5 py-0.5 text-[10px] font-bold text-white">
-                  {item.badge > 99 ? "99+" : item.badge}
-                </span>
-              )}
-            </NavLink>
-          ))}
+          <SidebarNav entries={navItems} storageKey={user?.role || "staff"} onNavigate={() => setSidebarOpen(false)} />
         </nav>
         <div className="mt-auto w-full shrink-0 border-t border-[#E4E9F1] p-4">
           <button

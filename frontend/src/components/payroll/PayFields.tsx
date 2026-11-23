@@ -1,9 +1,43 @@
 import { Plus, Trash2 } from "lucide-react";
-import { Input, Select, Switch } from "../ui";
+import { Input, Switch } from "../ui";
 import { cn } from "../../lib/cn";
 import { cleanAmountInput, rupeesInput, toPaise } from "../../lib/paise";
 import { PAY_LIMITS, type CommissionMode, type DefaultCaptainPay, type KitItem, type NewCaptainPay, type PayKit } from "../../api/payroll";
 import { WEEKDAYS } from "./payrollUi";
+
+/** Mon–Sun toggle chips for the weekly off. At least one working day must stay. */
+export function WeekdayChips({ value, onChange }: { value: number[]; onChange: (days: number[]) => void }) {
+  const toggle = (i: number) => {
+    const on = value.includes(i);
+    if (!on && value.length >= 6) return; // one working day must remain
+    onChange(on ? value.filter((d) => d !== i) : [...value, i].sort((a, b) => a - b));
+  };
+  return (
+    <div>
+      <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Weekly Off Days</p>
+      <div role="group" aria-label="Weekly off days" className="flex flex-wrap gap-1.5">
+        {WEEKDAYS.map((d, i) => {
+          const on = value.includes(i);
+          return (
+            <button
+              key={d}
+              type="button"
+              aria-pressed={on}
+              onClick={() => toggle(i)}
+              className={cn(
+                "min-h-10 min-w-[3.25rem] rounded-xl border-2 px-2.5 text-sm font-semibold transition-colors",
+                on ? "border-[#0A66F0] bg-[#E8F0FE] text-[#0E1A33]" : "border-gray-200 bg-white text-[#5F6878] hover:border-gray-400",
+              )}
+            >
+              {d.slice(0, 3)}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Salary is for the other days. Leave can't be taken on a weekly off. Default is Saturday and Sunday.</p>
+    </div>
+  );
+}
 
 export const MAX_COMMISSION_PERCENT = 70;
 
@@ -20,7 +54,7 @@ export interface KitItemDraft {
 export interface PayDraft {
   basis: "" | "salary" | "commission";
   salary: string;
-  weekly_off: string;
+  weekly_off_days: number[];
   paid_leaves: string;
   petrol: string;
   mode: CommissionMode;
@@ -39,8 +73,8 @@ export function emptyPayDraft(def?: DefaultCaptainPay | null): PayDraft {
   return {
     basis,
     salary: basis === "salary" ? rupeesInput(def?.salary_monthly_paise) : "",
-    weekly_off: "6",
-    paid_leaves: "1",
+    weekly_off_days: [5, 6],
+    paid_leaves: "0",
     petrol: "",
     mode: "percent",
     percent: basis === "commission" && def?.commission_percent != null ? String(def.commission_percent) : "",
@@ -97,7 +131,7 @@ export function payDraftToPayload(d: PayDraft): NewCaptainPay {
     return {
       ...base,
       salary_monthly_paise: toPaise(d.salary) || 0,
-      weekly_off: Number(d.weekly_off),
+      weekly_off_days: d.weekly_off_days,
       paid_leaves_per_month: Number(d.paid_leaves) || 0,
       petrol_per_day_paise: toPaise(d.petrol) || undefined,
     };
@@ -199,14 +233,8 @@ export function PayFields({ value, onChange, prefilled }: { value: PayDraft; onC
       {value.basis === "salary" && (
         <div className="space-y-3">
           <Input label="Monthly Salary (₹)" inputMode="numeric" value={value.salary} onChange={(e) => set({ salary: cleanAmountInput(e.target.value) })} placeholder="15000" />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Select label="Working Off Day" value={value.weekly_off} onChange={(e) => set({ weekly_off: e.target.value })}>
-              {WEEKDAYS.map((d, i) => (
-                <option key={d} value={String(i)}>
-                  {d}
-                </option>
-              ))}
-            </Select>
+          <div className="grid grid-cols-1 gap-3">
+            <WeekdayChips value={value.weekly_off_days} onChange={(weekly_off_days) => set({ weekly_off_days })} />
             <Input label="Paid Leaves Per Month" inputMode="numeric" value={value.paid_leaves} onChange={(e) => set({ paid_leaves: cleanAmountInput(e.target.value).slice(0, 2) })} />
           </div>
           <Input

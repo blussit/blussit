@@ -50,3 +50,17 @@ async def ensure_payroll_indexes(db: AsyncIOMotorDatabase) -> None:
         partialFilterExpression={"commission_captain_id": {"$type": "string"}},
     )
     await db.attendance.create_index([("service_center_id", 1), ("attendance_date", 1)], name="center_date", sparse=True)
+    # Invoices and settlements (§7.14).
+    inv = db.payroll_invoices
+    await inv.create_index("number", unique=True, name="uniq_invoice_number")
+    await inv.create_index("key", unique=True, name="uniq_invoice_key")
+    await inv.create_index("ledger_id", unique=True, name="uniq_invoice_ledger")
+    await inv.create_index([("captain_id", 1), ("created_at", -1)], name="invoice_captain_created")
+    await inv.create_index([("service_center_id", 1), ("created_at", -1)], name="invoice_center_created")
+    await inv.create_index([("captain_id", 1), ("kind", 1), ("month", 1), ("status", 1)], name="invoice_captain_kind_month")
+    await inv.create_index("lines.booking_id", name="invoice_line_booking", sparse=True)
+    await inv.create_index([("paid_on", -1)], name="invoice_paid_on")
+    st = db.payroll_settlements
+    await st.create_index("key", unique=True, name="uniq_settlement_key")
+    await st.create_index([("captain_id", 1), ("booking_id", 1)], name="settlement_captain_booking")
+    await st.create_index("invoice_id", name="settlement_invoice")

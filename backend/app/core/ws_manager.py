@@ -46,7 +46,7 @@ ADMIN_CHANNEL = "admin:live"
 # admin-feed event (delivered on EVERY instance through the relay) expires
 # them — at most once per window, with a trailing expiry so the last change of
 # a burst is never left behind a cache filled just before it.
-_REPORT_NAMESPACES = ("analytics", "kpi")
+_REPORT_NAMESPACES = ("analytics", "kpi", "admin_nav")
 _REPORT_EXPIRE_WINDOW = 3.0
 _report_expired_at = 0.0
 _report_expiry_pending = False

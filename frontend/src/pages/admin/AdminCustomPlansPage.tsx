@@ -6,6 +6,7 @@ import { adminServiceCenterApi } from "../../api/admin";
 import { Button, Select } from "../../components/ui";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { CustomPlanList, RenewLoader, ReviseLoader, SavedPlan } from "../manager/ManagerCustomPlansPage";
+import { centerLabel } from "../../lib/centerLabel";
 
 /** Every custom multi-car plan managers built, across centers: status,
  *  per-car washes left, the open link, and any refund due. Admin builds no
@@ -16,8 +17,8 @@ export default function AdminCustomPlansPage() {
   const [params, setParams] = useSearchParams();
   const [centerId, setCenterId] = useState("");
   const [customerId, setCustomerId] = useState<string | null>(null);
-  const { data: centers } = useQuery({ queryKey: ["service-centers-all"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
-  const centerNames = useMemo(() => Object.fromEntries((centers?.data ?? []).map((c) => [c.id, c.name])), [centers]);
+  const { data: centers } = useQuery({ queryKey: ["service-centers-history"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }) });
+  const centerNames = useMemo(() => Object.fromEntries((centers?.data ?? []).map((c) => [c.id, centerLabel(c)])), [centers]);
   const renewId = params.get("renew");
   const reviseId = params.get("revise");
   const planId = params.get("plan");

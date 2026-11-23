@@ -20,6 +20,9 @@ export interface FranchiseCenterRow {
   name: string;
   code?: string | null;
   is_active?: boolean;
+  status?: "active" | "paused" | "archived";
+  status_label?: string;
+  is_deleted?: boolean;
   /** Current type — a center that stopped being a franchise still lists, as self_operated. */
   type: ServiceCenterOperationType;
   partner?: FranchisePartner | null;

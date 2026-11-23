@@ -177,6 +177,19 @@ async def test_type_switch_applies_from_effective_day(db, clean):
     assert await fx.accrued(db, cid) == 0 and len(await fx.ledger(db, cid)) == 2
 
 
+async def test_job_backdated_before_a_new_franchise_started_earns_no_share(db, clean):
+    admin = await fx.admin_h(db)
+    async with h.client() as c:
+        cid = await _franchise(c, admin)  # created as a franchise: its effective day is today
+    old = await fx.add_booking(db, cid, 1000, when=now_ist() - timedelta(days=3))
+    today = await fx.add_booking(db, cid, 1000)
+    await fx.sync(db, old)
+    await fx.sync(db, today)
+    assert "franchise_share_percent" not in await fx.booking(db, old)
+    assert (await fx.booking(db, today))["franchise_posted_paise"] == 70000
+    assert len(await fx.ledger(db, cid)) == 1
+
+
 async def test_concurrent_syncs_post_once(db, clean):
     admin = await fx.admin_h(db)
     async with h.client() as c:

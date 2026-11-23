@@ -5,6 +5,7 @@ import { adminServiceCenterApi } from "../../api/admin";
 import { ChargesList } from "../../components/shared/CancellationCharges";
 import { PaybacksList } from "../../components/shared/CustomerWalletPanel";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
+import { centerLabel } from "../../lib/centerLabel";
 
 const TABS = [
   { key: "charges", label: "Charges" },
@@ -17,8 +18,8 @@ export default function AdminChargesPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "payouts" ? "payouts" : "charges";
   const [customerId, setCustomerId] = useState<string | null>(null);
-  const { data: centers } = useQuery({ queryKey: ["service-centers-all"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
-  const centerNames = useMemo(() => Object.fromEntries((centers?.data ?? []).map((c) => [c.id, c.name])), [centers]);
+  const { data: centers } = useQuery({ queryKey: ["service-centers-history"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }) });
+  const centerNames = useMemo(() => Object.fromEntries((centers?.data ?? []).map((c) => [c.id, centerLabel(c)])), [centers]);
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">

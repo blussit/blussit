@@ -12,8 +12,8 @@ class ServiceCenterController:
         self.service = ServiceCenterService(db)
         self.audit = AuditService(db)
 
-    async def list(self, pagination: PaginationParams, active_only: bool):
-        items, total = await self.service.list_centers(pagination.page, pagination.page_size, pagination.search, active_only)
+    async def list(self, pagination: PaginationParams, active_only: bool, include_archived: bool = False):
+        items, total = await self.service.list_centers(pagination.page, pagination.page_size, pagination.search, active_only, include_archived)
         return paginated(items, pagination.page, pagination.page_size, total)
 
     async def get(self, center_id: str, redact: bool = False):
@@ -33,6 +33,11 @@ class ServiceCenterController:
         return success(result, "Service center updated successfully")
 
     async def delete(self, current_user: CurrentUser, center_id: str):
-        await self.service.delete(center_id)
-        await self.audit.log_action(current_user.id, current_user.role, "DELETE_SERVICE_CENTER", "service_centers", center_id)
-        return success(None, "Service center deleted successfully")
+        await self.service.delete(center_id, actor=current_user)
+        await self.audit.log_action(current_user.id, current_user.role, "ARCHIVE_SERVICE_CENTER", "service_centers", center_id)
+        return success(None, "Service center archived — all its records are kept")
+
+    async def restore(self, current_user: CurrentUser, center_id: str):
+        result = await self.service.restore(center_id, actor=current_user)
+        await self.audit.log_action(current_user.id, current_user.role, "RESTORE_SERVICE_CENTER", "service_centers", center_id)
+        return success(result, "Service center restored — it is paused until you switch it on")

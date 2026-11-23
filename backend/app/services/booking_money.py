@@ -224,6 +224,17 @@ def commission_base_paise(booking: dict) -> int:
     return max(0, paise(base))
 
 
+def plan_covered_base_paise(booking: dict) -> int:
+    """The list value of the wash a plan / pass covered on this booking
+    (§7.14): what `commission_base_paise` adds back for a plan booking. 0 for
+    a normal paid booking. A plan wash's commission is decided by the manager,
+    never computed from this."""
+    booking = booking or {}
+    if not booking.get("subscription_id"):
+        return 0
+    return max(0, paise(max(0.0, r2(booking.get("discount_amount")) - r2(booking.get("manager_discount")))))
+
+
 def captain_wallet_posted(booking: dict) -> float:
     """What was already posted to the captain's wallet for this booking.
     Bookings settled by the old completion code (wallet_settled_as) carry

@@ -23,7 +23,7 @@ import { useLiveChannel } from "../lib/socket";
  * something sees every screen it touched update, even with the socket down.
  */
 
-export type LiveKind = "booking" | "plan" | "wallet" | "payment" | "notification" | "all";
+export type LiveKind = "booking" | "plan" | "wallet" | "payment" | "notification" | "inbox" | "all";
 
 // First element of the react-query keys, by what changes them.
 const BOOKINGS = [
@@ -41,6 +41,8 @@ const PLANS = [
 ] as const;
 const WALLET = ["my-wallet", "customer-wallet", "wallet-payouts", "customer-360", "charges", "my-withdrawals", "pending-withdrawals"] as const;
 const NOTIFICATIONS = ["notifications"] as const;
+// New contact messages / custom-plan requests / coverage requests (the admin sidebar dots + those lists).
+const INBOX = ["admin-nav-badges", "admin-contact-messages", "admin-plan-enquiries", "coverage-leads", "coverage-leads-summary"] as const;
 // Tickets move with a message too (a customer's complaint, a manager's reply).
 const TICKETS = ["my-complaints", "center-complaints-page", "admin-complaints", "complaint", "complaint-booking"] as const;
 // Aggregates that cost the server real work: refreshed at most every few seconds.
@@ -55,7 +57,8 @@ const SETS: Record<LiveKind, ReadonlySet<string>> = {
   // about, including ones with no ping of their own (a sweep's flag, a
   // WhatsApp action): bell + tickets + bookings + plans, which is what those touch.
   notification: new Set([...NOTIFICATIONS, ...TICKETS, ...BOOKINGS, ...PLANS]),
-  all: new Set([...BOOKINGS, ...PLANS, ...WALLET, ...NOTIFICATIONS, ...TICKETS]),
+  inbox: new Set(INBOX),
+  all: new Set([...BOOKINGS, ...PLANS, ...WALLET, ...NOTIFICATIONS, ...TICKETS, ...INBOX]),
 };
 
 const DEBOUNCE_MS = 500;
@@ -146,7 +149,7 @@ export function refreshLiveData(client: QueryClient, kind: LiveKind = "all") {
   s.timer = setTimeout(() => flush(client, s), wait);
 }
 
-const KINDS: readonly string[] = ["booking", "plan", "wallet", "payment", "notification"];
+const KINDS: readonly string[] = ["booking", "plan", "wallet", "payment", "notification", "inbox"];
 
 /**
  * Mount once in each portal shell. Subscribes the signed-in user's own

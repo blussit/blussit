@@ -11,7 +11,26 @@ import { CouponRulesFields, emptyRules, rulesFromRecord, rulesToPayload, type Ru
 import { appliesText } from "./AdminCouponBundlesPage";
 import { getErrorMessage } from "../../lib/api-client";
 import { format } from "../../lib/date";
-import type { Coupon } from "../../types";
+import type { Coupon, CouponStatus } from "../../types";
+
+// The server derives the status (expired / used up / scheduled / switched
+// off / active) — here it only picks a badge tone. Expired and Used Up read
+// as "ended" (neutral / warning), Inactive is the admin's own switch.
+const STATUS_TONE: Record<CouponStatus, "success" | "neutral" | "warning" | "error" | "info"> = {
+  active: "success",
+  scheduled: "info",
+  inactive: "neutral",
+  used_up: "warning",
+  expired: "error",
+};
+const STATUS_FILTERS: { value: "" | CouponStatus; label: string }[] = [
+  { value: "", label: "All Statuses" },
+  { value: "active", label: "Active" },
+  { value: "scheduled", label: "Scheduled" },
+  { value: "inactive", label: "Inactive" },
+  { value: "used_up", label: "Used Up" },
+  { value: "expired", label: "Expired" },
+];
 
 const emptyForm = {
   code: "",
@@ -34,9 +53,10 @@ export default function AdminCouponsPage() {
   const confirm = useConfirm();
   const { push: pushToast } = useToast();
   const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<"" | CouponStatus>("");
   const { data, isLoading, isFetching, error: listError, refetch } = useQuery({
-    queryKey: ["admin-coupons", page],
-    queryFn: () => adminCouponApi.list({ page, page_size: 30 }),
+    queryKey: ["admin-coupons", page, statusFilter],
+    queryFn: () => adminCouponApi.list({ page, page_size: 30, ...(statusFilter ? { status: statusFilter } : {}) }),
     placeholderData: keepPreviousData,
   });
   const [open, setOpen] = useState(false);
@@ -129,7 +149,11 @@ export default function AdminCouponsPage() {
     mutationFn: (c: Coupon) => adminCouponApi.update(c.id, { is_active: !c.is_active }),
     onSuccess: (c) => {
       queryClient.invalidateQueries({ queryKey: ["admin-coupons"] });
-      pushToast({ tone: "success", title: c.is_active ? `${c.code} is live` : `${c.code} switched off` });
+      if (!c.is_active) pushToast({ tone: "success", title: `${c.code} switched off` });
+      else if (c.status === "expired") pushToast({ tone: "warning", title: `${c.code} is switched on but has expired`, message: "Extend its end date to make it live." });
+      else if (c.status === "used_up") pushToast({ tone: "warning", title: `${c.code} is switched on but fully used`, message: "Raise its total uses to make it live." });
+      else if (c.status === "scheduled") pushToast({ tone: "info", title: `${c.code} is switched on`, message: "It goes live on its start date." });
+      else pushToast({ tone: "success", title: `${c.code} is live` });
     },
     onError: (err) => pushToast({ tone: "error", title: getErrorMessage(err) }),
   });
@@ -156,12 +180,31 @@ export default function AdminCouponsPage() {
       </div>
       <CouponTabs />
 
+      <div className="flex flex-wrap items-end gap-3">
+        <Select
+          compact
+          label="Status"
+          value={statusFilter}
+          onChange={(e) => {
+            setStatusFilter(e.target.value as "" | CouponStatus);
+            setPage(1);
+          }}
+          wrapperClassName="w-44"
+        >
+          {STATUS_FILTERS.map((f) => (
+            <option key={f.value} value={f.value}>
+              {f.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+
       <DataTable<Coupon>
         isLoading={isLoading}
         data={data?.data || []}
         error={listError}
         onRetry={() => void refetch()}
-        emptyTitle="No Coupons Yet"
+        emptyTitle={statusFilter ? "No Coupons With This Status" : "No Coupons Yet"}
         columns={[
           { header: "Code", accessor: (c) => <span className="font-mono-num font-semibold">{c.code}</span> },
           { header: "Offer", accessor: (c) => (c.offer_kind === "free_addon_with_service" ? "Free Add-On" : "Standard") },
@@ -184,8 +227,14 @@ export default function AdminCouponsPage() {
             },
           },
           { header: "Used", accessor: (c) => <span className="font-mono-num">{c.total_used ?? 0}{c.total_usage_limit ? ` / ${c.total_usage_limit}` : ""}</span> },
-          { header: "Valid Until", accessor: (c) => format(c.valid_until) },
-          { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
+          { header: "Valid Until", accessor: (c) => <span className="whitespace-nowrap">{format(c.valid_until)}</span> },
+          {
+            header: "Status",
+            accessor: (c) => {
+              const status = c.status ?? (c.is_active ? "active" : "inactive");
+              return <Badge tone={STATUS_TONE[status]}>{c.status_label ?? (c.is_active ? "Active" : "Inactive")}</Badge>;
+            },
+          },
           {
             header: "",
             accessor: (c) => (
@@ -197,7 +246,14 @@ export default function AdminCouponsPage() {
                   size="sm"
                   variant="ghost"
                   aria-label={c.is_active ? `Switch ${c.code} off` : `Switch ${c.code} on`}
-                  title={c.is_active ? "Switch off" : "Switch on"}
+                  aria-pressed={c.is_active}
+                  title={
+                    c.is_active
+                      ? c.status && c.status !== "active" && c.status !== "inactive"
+                        ? `Switched on — currently ${c.status_label}. Switch off`
+                        : "Switch off"
+                      : "Switch on"
+                  }
                   isLoading={toggleActiveMutation.isPending && toggleActiveMutation.variables?.id === c.id}
                   onClick={() => toggleActiveMutation.mutate(c)}
                 >

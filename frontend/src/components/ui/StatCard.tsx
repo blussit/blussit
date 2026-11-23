@@ -59,8 +59,8 @@ export function StatCard({
         className
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--ui-muted,#5F6878)]">
+      <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
+        <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-[var(--ui-muted,#5F6878)]">
           {Icon && <Icon className="h-3.5 w-3.5 shrink-0" />}
           {label}
           {labelAfter}
@@ -71,7 +71,7 @@ export function StatCard({
           </span>
         )}
       </div>
-      <p className={cn("font-mono-num mt-3 text-[28px] font-bold leading-none", valueTone)}>{value}</p>
+      <p className={cn("font-mono-num mt-3 break-all text-[21px] font-bold leading-none sm:text-[28px]", valueTone)}>{value}</p>
       {hint && <p className="mt-1.5 break-words text-xs text-[var(--ui-muted,#5F6878)]">{hint}</p>}
     </div>
   );

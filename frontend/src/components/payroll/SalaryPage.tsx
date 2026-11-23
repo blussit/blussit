@@ -8,8 +8,10 @@ import { Badge, Button, DataTable, EmptyState, ErrorState, Input, Panel, Select,
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { cn } from "../../lib/cn";
+import { centerLabel } from "../../lib/centerLabel";
 import { rupeesText } from "../../lib/paise";
 import { CaptainPayDrawer, DRAWER_TABS, type DrawerTab } from "./CaptainPayDrawer";
+import { InvoicesSection } from "./InvoicesTab";
 import { Banner, BasisBadge, Dues, FRANCHISE_BANNER, MonthPicker, SkeletonRows, currentMonth, monthLabel, termsLine } from "./payrollUi";
 
 const TAB_KEYS = DRAWER_TABS.map((t) => t.key as string);
@@ -28,6 +30,13 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
   const [center, setCenter] = useState("");
 
   // A link from another screen can open one captain straight on a tab.
+  const view = params.get("view") === "invoices" ? "invoices" : "captains";
+  const setView = (v: "captains" | "invoices") => {
+    const next = new URLSearchParams(params);
+    if (v === "invoices") next.set("view", "invoices");
+    else next.delete("view");
+    setParams(next, { replace: true });
+  };
   const openId = params.get("captain");
   const tabParam = params.get("tab") || "";
   const openTab: DrawerTab = TAB_KEYS.includes(tabParam) ? (tabParam as DrawerTab) : "summary";
@@ -46,7 +55,7 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
 
   const centersQuery = useQuery({
     queryKey: ["admin-centers-lite"],
-    queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }),
+    queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }),
     enabled: scope === "admin",
   });
   const filters = { center_id: scope === "admin" ? center : "", month, basis, status };
@@ -90,6 +99,24 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
         </Button>
       </div>
 
+      <div role="tablist" aria-label="Salary views" className="flex gap-1 border-b border-gray-100">
+        {([["captains", "Captains"], ["invoices", "Invoices"]] as const).map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={view === k}
+            onClick={() => setView(k)}
+            className={cn("border-b-2 px-4 py-2 text-sm font-medium", view === k ? "border-[#0A66F0] text-[#0A66F0]" : "border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]")}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === "invoices" && <InvoicesSection admin={scope === "admin"} />}
+
+      {view === "captains" && (<>
       <div className="grid grid-cols-1 items-end gap-3 sm:flex sm:flex-wrap">
         <div>
           <p className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">Month</p>
@@ -101,7 +128,7 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
               <option value="">All Centers</option>
               {(centersQuery.data?.data || []).map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
+                  {centerLabel(c)}
                 </option>
               ))}
             </Select>
@@ -250,6 +277,8 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
           )}
         </>
       )}
+
+      </>)}
 
       <CaptainPayDrawer captainId={openId} month={month} onMonthChange={setMonth} onClose={() => setOpen(null)} initialTab={openTab} />
     </div>

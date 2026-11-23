@@ -86,7 +86,7 @@ export function RefundCarDialog({ target, onClose, onDone }: { target: RefundTar
             label="Refund Amount (₹)"
             inputMode="numeric"
             value={amount}
-            onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))}
+            onChange={(e) => setAmount(e.target.value.split(".")[0].replace(/\D/g, "").slice(0, 7))}
             error={amount.trim() !== "" && !amountOk ? `Between ₹1 and ${rupees(max)}.` : undefined}
             hint={`Up to ${rupees(max)}.`}
           />

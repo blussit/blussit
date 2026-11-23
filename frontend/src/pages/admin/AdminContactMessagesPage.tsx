@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Mail } from "lucide-react";
 import { adminContactMessageApi } from "../../api/admin";
 import { Button, DataTable, Modal } from "../../components/ui";
+import { MarkAllReadButton, NewMark } from "../../components/admin/NewMark";
+import { useInboxSeen } from "../../hooks/useInboxSeen";
 import { formatDateTime } from "../../lib/date";
 import type { ContactMessage } from "../../types";
 
@@ -16,11 +18,16 @@ export default function AdminContactMessagesPage() {
     queryFn: () => adminContactMessageApi.list({ page, page_size: 20 }),
   });
 
+  const seen = useInboxSeen("contact_messages", data?.data);
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Contact Messages</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Submissions from the landing page's "Contact Us" form.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Contact Messages</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Submissions from the landing page's "Contact Us" form.</p>
+        </div>
+        <MarkAllReadButton onClick={seen.markAll} disabled={seen.allRead} busy={seen.markingAll} />
       </div>
 
       <DataTable<ContactMessage>
@@ -32,7 +39,15 @@ export default function AdminContactMessagesPage() {
         emptyDescription="Contact form submissions from the landing page will show up here."
         onRowClick={setOpen}
         columns={[
-          { header: "Name", accessor: (m) => m.name },
+          {
+            header: "Name",
+            accessor: (m) => (
+              <span className={seen.isNew(m.id) ? "font-bold text-[var(--color-text-primary)]" : ""}>
+                {m.name}
+                {seen.isNew(m.id) && <NewMark />}
+              </span>
+            ),
+          },
           {
             header: "Contact",
             accessor: (m) => (

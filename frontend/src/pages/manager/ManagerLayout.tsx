@@ -2,6 +2,7 @@ import { Outlet } from "react-router-dom";
 import { AlertTriangle, Banknote, Building, CalendarDays, CalendarPlus, CalendarX2, CheckCircle2, CreditCard, Gift, Layers, LayoutDashboard, ListChecks, Package, SlidersHorizontal, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 import { CustomerLookup } from "../../components/shared/CustomerLookup";
+import { useFranchisePaysCaptains } from "../../components/payroll/useFranchisePaysCaptains";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/manager", icon: LayoutDashboard, end: true },
@@ -24,8 +25,10 @@ const navItems: NavItem[] = [
 ];
 
 export default function ManagerLayout() {
+  // A center whose captains the franchise partner pays has no Salary page.
+  const franchisePays = useFranchisePaysCaptains();
   return (
-    <DashboardShell navItems={navItems} portalLabel="Manager" headerRight={<CustomerLookup />}>
+    <DashboardShell navItems={franchisePays ? navItems.filter((i) => i.to !== "/manager/salary") : navItems} portalLabel="Manager" headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

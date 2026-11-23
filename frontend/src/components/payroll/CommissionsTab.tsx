@@ -4,10 +4,11 @@ import { Pencil } from "lucide-react";
 import { Badge, Button, EmptyState, ErrorState, Input, Modal } from "../ui";
 import { payrollApi, type CommissionRow, type PayrollCaptainDetail } from "../../api/payroll";
 import { getErrorMessage } from "../../lib/api-client";
-import { formatDateTime } from "../../lib/date";
+import { asUtcInstant, formatDateTime } from "../../lib/date";
 import { cleanAmountInput, rupeesInput, rupeesText, toPaise } from "../../lib/paise";
 import { cn } from "../../lib/cn";
 import { Banner, SkeletonRows, monthLabel } from "./payrollUi";
+import { InvoiceLink } from "./InvoiceLink";
 import { usePayrollWrite } from "./usePayrollWrite";
 
 /** Completed bookings with the commission each earned; edit one with a reason. */
@@ -20,6 +21,7 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
   const rows = query.data || [];
   const total = rows.reduce((s, r) => s + r.amount_paise, 0);
   const unset = rows.filter((r) => r.not_set).length;
+  const unsetPlan = rows.filter((r) => r.not_set && r.plan_covered).length;
 
   return (
     <div className="space-y-3">
@@ -28,6 +30,7 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
       {unset > 0 && (
         <Banner tone="warning">
           {unset} {unset === 1 ? "booking has" : "bookings have"} no commission set yet. Set the amount so the captain is credited.
+          {unsetPlan > 0 && ` ${unsetPlan} of them ${unsetPlan === 1 ? "was" : "were"} washes covered by a plan — a plan wash's commission is always set by you.`}
         </Banner>
       )}
       <p className="text-sm text-[var(--color-text-secondary)]">
@@ -45,15 +48,17 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
                   <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--color-text-primary)]">
                     <span className="font-mono-num">{r.booking_number}</span>
                     {r.edited && <Badge tone="info">Edited</Badge>}
+                    {r.plan_covered && <Badge tone="info">Plan Wash</Badge>}
                     {r.not_set && <Badge tone="warning">Commission Not Set</Badge>}
+                    <PaymentState row={r} />
                   </p>
                   <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-                    {[r.customer_name, [r.vehicle_type, r.service_name].filter(Boolean).join(" · "), r.completed_at ? formatDateTime(r.completed_at) : ""].filter(Boolean).join(" · ")}
+                    {[r.customer_name, [r.vehicle_type, r.service_name].filter(Boolean).join(" · "), r.completed_at ? formatDateTime(asUtcInstant(r.completed_at)) : ""].filter(Boolean).join(" · ")}
                   </p>
                   {r.reason && <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">Reason: {r.reason}</p>}
                 </div>
                 <Button size="sm" variant="outline" aria-label={`Edit commission for ${r.booking_number}`} onClick={() => setEditing(r)}>
-                  <Pencil className="h-3.5 w-3.5" /> {r.not_set ? "Set" : "Edit"}
+                  <Pencil className="h-3.5 w-3.5" /> {r.not_set ? "Set Amount" : "Edit"}
                 </Button>
               </div>
               <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
@@ -73,6 +78,19 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
   );
 }
 
+function PaymentState({ row }: { row: CommissionRow }) {
+  if (row.payment_state === "paid") {
+    return (
+      <Badge tone="success">
+        Paid — {row.invoice_numbers?.length ? <InvoiceLink numbers={row.invoice_numbers} ids={row.invoice_ids} /> : "Invoiced"}
+      </Badge>
+    );
+  }
+  if (row.payment_state === "part_paid") return <Badge tone="warning">Part Paid — {rupeesText(row.unsettled_paise || 0)} Unpaid</Badge>;
+  if (row.payment_state === "unpaid") return <Badge tone="neutral">Unpaid</Badge>;
+  return null;
+}
+
 function Stat({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
     <div>
@@ -85,12 +103,14 @@ function Stat({ label, value, strong }: { label: string; value: string; strong?:
 function EditForm({ row, onClose }: { row: CommissionRow; onClose: () => void }) {
   const write = usePayrollWrite();
   const [by, setBy] = useState<"amount" | "percent">("amount");
-  const [amount, setAmount] = useState(rupeesInput(row.amount_paise));
+  const plan = !!row.plan_covered;
+  const extras = plan ? Math.max(0, (row.auto_paise ?? 0) - (row.plan_wash_paise ?? 0)) : 0;
+  const [amount, setAmount] = useState(rupeesInput(plan ? (row.plan_wash_paise ?? 0) : row.amount_paise));
   const [percent, setPercent] = useState(row.rate_percent != null ? String(row.rate_percent) : "");
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
 
-  const amountPaise = by === "amount" ? toPaise(amount) : Math.round(((Number(percent) || 0) / 100) * row.base_paise);
+  const amountPaise = by === "amount" ? toPaise(amount) : Math.round(((Number(percent) || 0) / 100) * (plan ? row.plan_base_paise || row.base_paise : row.base_paise));
   const maxPct = row.max_percent;
   const preview = amountPaise !== null && amountPaise >= 0 ? amountPaise : null;
 
@@ -114,11 +134,17 @@ function EditForm({ row, onClose }: { row: CommissionRow; onClose: () => void })
         } else if (percent.trim() === "" || !Number.isFinite(Number(percent)) || Number(percent) < 0) {
           return setError("Enter a percent between 0 and the limit.");
         }
-        if (preview !== null && preview > row.max_paise) return setError(`That is above the limit — at most ${maxPct}% of the booking, ${rupeesText(row.max_paise)}.`);
+        if (preview !== null && preview + extras > row.max_paise) return setError(`That is above the limit — at most ${maxPct}% of the booking, ${rupeesText(row.max_paise)}.`);
         if (reason.trim().length < 3) return setError("A reason is required for every change.");
         if (!mutation.isPending) mutation.mutate();
       }}
     >
+      {plan && (
+        <Banner>
+          A plan covered this wash, so its commission isn't worked out for you — enter what the captain earns for the wash itself
+          {extras > 0 ? `. The ${rupeesText(extras)} for paid extras on this booking is added on top automatically` : ""}.
+        </Banner>
+      )}
       <p className="text-sm text-[var(--color-text-secondary)]">
         Booking value <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(row.base_paise)}</span>
         {" · "}
@@ -141,13 +167,13 @@ function EditForm({ row, onClose }: { row: CommissionRow; onClose: () => void })
         ))}
       </div>
       {by === "amount" ? (
-        <Input label="Commission (₹)" inputMode="numeric" value={amount} onChange={(e) => setAmount(cleanAmountInput(e.target.value))} autoFocus />
+        <Input label={plan ? "Commission For The Wash (₹)" : "Commission (₹)"} inputMode="numeric" value={amount} onChange={(e) => setAmount(cleanAmountInput(e.target.value))} autoFocus />
       ) : (
         <Input label={`Commission Percent (Max ${maxPct})`} inputMode="decimal" value={percent} onChange={(e) => setPercent(e.target.value.replace(/[^\d.]/g, "").slice(0, 5))} autoFocus />
       )}
       {preview !== null && (
         <p className="-mt-2 text-xs text-[var(--color-text-secondary)]">
-          The captain gets <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(preview)}</span> on this booking.
+          The captain gets <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(preview + extras)}</span> on this booking.
         </p>
       )}
       <Input label="Reason" maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Extra heavy cleaning" />
@@ -161,7 +187,7 @@ function EditForm({ row, onClose }: { row: CommissionRow; onClose: () => void })
           Cancel
         </Button>
         <Button type="submit" className="flex-1" isLoading={mutation.isPending}>
-          Save Commission
+          {row.not_set ? "Set Amount" : "Save Commission"}
         </Button>
       </div>
     </form>

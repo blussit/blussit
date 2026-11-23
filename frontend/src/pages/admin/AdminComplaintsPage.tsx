@@ -8,6 +8,7 @@ import { normalisePhoneSearch, Pager, SearchBox, useDebouncedValue } from "../..
 import { format } from "../../lib/date";
 import type { Complaint } from "../../types";
 import { toTitle } from "../../lib/titleCase";
+import { centerLabel } from "../../lib/centerLabel";
 
 const PRIORITY_TONE: Record<string, "error" | "warning" | "neutral"> = { urgent: "error", high: "error", medium: "warning", low: "neutral" };
 const PAGE_SIZE = 25;
@@ -28,7 +29,7 @@ export default function AdminComplaintsPage() {
   const [selected, setSelected] = useState<Complaint | null>(null);
   const debouncedSearch = useDebouncedValue(normalisePhoneSearch(search), 300);
 
-  const { data: centers } = useQuery({ queryKey: ["admin-centers-for-complaints"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  const { data: centers } = useQuery({ queryKey: ["admin-centers-for-complaints"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }) });
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["admin-complaints", status, centerFilter, category, debouncedSearch, page],
     queryFn: () =>
@@ -95,7 +96,7 @@ export default function AdminComplaintsPage() {
             <option value="">All Service Centers</option>
             {(centers?.data || []).map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name}
+                {centerLabel(c)}
               </option>
             ))}
           </Select>

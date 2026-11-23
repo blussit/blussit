@@ -4,11 +4,13 @@
  * per-job fee numbers for captains on salary or commission. Phone-first,
  * English + Hindi (captain i18n).
  */
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { payrollApi, type AttendanceStatus, type PayrollMe } from "../../api/payroll";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { formatShortDate } from "../../lib/date";
 import { rupeesText } from "../../lib/paise";
+import { rupeesExact } from "../payroll/money";
 import { monthLabel } from "../payroll/payrollUi";
 import { kitSummary } from "../payroll/PayFields";
 import { LoadError, Notice, PageTitle, Panel, Pill, StatTile } from "./ui";
@@ -75,6 +77,15 @@ export function MyPay({ pay }: { pay: PayrollMe }) {
                       {c.completed_at ? formatShortDate(c.completed_at) : ""}
                       {c.rate_percent != null && !c.not_set ? ` · ${c.rate_percent}%` : ""}
                     </p>
+                    {!c.not_set && c.payment_state && c.payment_state !== "none" && (
+                      <div className="mt-1">
+                        {c.payment_state === "paid" ? (
+                          <Pill tone="green">{fill(t("captain.mypay.paidInvoice"), { no: (c.invoice_numbers || []).join(", ") })}</Pill>
+                        ) : (
+                          <Pill tone="amber">{c.payment_state === "part_paid" ? t("captain.mypay.partPaid") : t("captain.mypay.unpaid")}</Pill>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {c.edited && <Pill tone="blue">{t("captain.mypay.edited")}</Pill>}
@@ -109,8 +120,27 @@ export function MyPay({ pay }: { pay: PayrollMe }) {
             {payments.slice(0, 10).map((e) => (
               <div key={e.id} className="flex min-h-[52px] items-center justify-between gap-3 px-4 py-2.5">
                 <p className="text-[14px] font-semibold text-[#5F6878]">{formatShortDate(e.entry_date || e.created_at)}</p>
-                <span className="tabular-nums text-[16px] font-extrabold text-[#0E1A33]">{rupeesText(Math.abs(e.amount_paise))}</span>
+                <span className="tabular-nums text-[16px] font-extrabold text-[#0E1A33]">{rupeesExact(Math.abs(e.amount_paise))}</span>
               </div>
+            ))}
+          </Panel>
+        )}
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-[15px] font-extrabold text-[#0E1A33]">{t("captain.mypay.invoices")}</h2>
+        {!(pay.invoices || []).length ? (
+          <Panel className="px-4 py-6 text-center text-sm font-semibold text-[#5F6878]">{t("captain.mypay.noInvoices")}</Panel>
+        ) : (
+          <Panel className="divide-y divide-[#E4E9F1]">
+            {(pay.invoices || []).slice(0, 10).map((inv) => (
+              <Link key={inv.id} to={`/captain/earnings/invoice/${inv.id}`} className={`flex min-h-[56px] items-center justify-between gap-3 px-4 py-2.5 ${inv.status === "void" ? "opacity-50" : ""}`}>
+                <div className="min-w-0">
+                  <p className="tabular-nums text-[14px] font-bold text-[#0E1A33]">{inv.number}</p>
+                  <p className="text-[13px] text-[#5F6878]">{formatShortDate(inv.paid_on)}{inv.status === "void" ? ` · ${t("captain.mypay.cancelled")}` : ""}</p>
+                </div>
+                <span className="tabular-nums text-[16px] font-extrabold text-[#0E1A33]">{rupeesExact(inv.paid_paise)}</span>
+              </Link>
             ))}
           </Panel>
         )}

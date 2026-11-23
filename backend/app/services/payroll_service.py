@@ -4,6 +4,8 @@
   payroll_commission  the commission engine + manager-done job commission (D4–D8, D17)
   payroll_pay         terms, payments + Finance, adjustments, deposit, kit (D1–D3, D12–D15)
   payroll_months      attendance override, month inputs, finalize (D9–D11)
+  payroll_invoice_core / payroll_invoices
+                      the invoice on every payment, the Pay wizard, settlements, reconcile (§7.14)
   this module         the reads: list / detail / statement / ledger / commissions /
                       summary / CSV / the captain's own view
 
@@ -17,7 +19,8 @@ from app.core.exceptions import NotFoundException
 from app.repositories.payroll_repository import DEPOSIT_KINDS, EARN_KINDS, PAID_KINDS
 from app.services import payroll_terms as pt
 from app.services.payroll_base import iso, ist_day, today_ist
-from app.services.payroll_months import MonthsMixin, _utc_bounds, check_month
+from app.services.payroll_invoices import InvoiceMixin
+from app.services.payroll_months import _utc_bounds, check_month
 from app.services.payroll_salary import month_bounds
 from app.utils.csv_safe_finance import build_csv
 
@@ -25,7 +28,7 @@ MAX_CAPTAINS = 500
 LEDGER_PAGE_MAX = 100
 
 
-class PayrollService(MonthsMixin):
+class PayrollService(InvoiceMixin):
     # ---------- shapes ----------
 
     async def entry_view(self, row: dict, voided: bool | None = None) -> dict:
@@ -43,6 +46,7 @@ class PayrollService(MonthsMixin):
             "finance_entry_id": row.get("finance_entry_id"), "cash_offset_paise": int(row.get("cash_offset_paise") or 0),
             "voided": voided, "voids": row.get("voids"), "actor_name": row.get("actor_name"), "actor_role": row.get("actor_role"),
             "entry_date": row.get("entry_date"), "created_at": iso(row.get("created_at")),
+            "invoice_id": row.get("invoice_id"), "invoice_number": row.get("invoice_number"),
         }
 
     async def _entries(self, rows: list[dict]) -> list[dict]:
@@ -58,7 +62,7 @@ class PayrollService(MonthsMixin):
         kit = {**pt.empty_kit(), **(pay.get("kit") or {})}
         return {
             "basis": pay.get("basis") or "legacy", "salary_monthly_paise": int(pay.get("salary_monthly_paise") or 0),
-            "weekly_off": pay.get("weekly_off", pt.DEFAULT_WEEKLY_OFF), "paid_leaves_per_month": pay.get("paid_leaves_per_month", pt.DEFAULT_PAID_LEAVES),
+            "weekly_off_days": pt.off_days_of(pay), "paid_leaves_per_month": pay.get("paid_leaves_per_month", pt.DEFAULT_PAID_LEAVES),
             "petrol_per_day_paise": int(pay.get("petrol_per_day_paise") or 0), "extra_day_on_off": bool(pay.get("extra_day_on_off")),
             "commission": {**pt.DEFAULT_COMMISSION, **(pay.get("commission") or {})},
             "deposit_expected_paise": int(pay.get("deposit_expected_paise") or 0), "kit": kit,
@@ -266,7 +270,46 @@ class PayrollService(MonthsMixin):
             row["service_name"] = ", ".join(services[str(s)] for s in (b.get("service_ids") or [])[:3] if str(s) in services) or None
             row["completed_day"] = ist_day(b.get("completed_at"))
             out.append(row)
+        await self._attach_payment_state(cid, out)
         return out
+
+    async def _attach_payment_state(self, captain_id: str, rows: list[dict]) -> None:
+        """Each commission row's paid / unpaid state and invoice numbers (§7.14)."""
+        ids = [r["booking_id"] for r in rows]
+        settled: dict[str, int] = {}
+        numbers: dict[str, list[str]] = {}
+        invoice_ids: dict[str, list[str]] = {}
+        if ids:
+            for r in await self.db.payroll_settlements.aggregate([
+                {"$match": {"captain_id": captain_id, "booking_id": {"$in": ids}}}, {"$group": {"_id": "$booking_id", "p": {"$sum": "$amount_paise"}}},
+            ]).to_list(length=None):
+                settled[r["_id"]] = int(r["p"] or 0)
+            for inv in await self.db.payroll_invoices.find(
+                {"captain_id": captain_id, "status": "paid", "lines.booking_id": {"$in": ids}}, {"number": 1, "lines.booking_id": 1, "paid_on": 1},
+            ).sort([("created_at", 1)]).to_list(length=2000):
+                for line in inv.get("lines") or []:
+                    if line.get("booking_id") in settled:
+                        numbers.setdefault(line["booking_id"], [])
+                        invoice_ids.setdefault(line["booking_id"], [])
+                        if inv["number"] not in numbers[line["booking_id"]]:
+                            numbers[line["booking_id"]].append(inv["number"])
+                            invoice_ids[line["booking_id"]].append(str(inv["_id"]))
+        for row in rows:
+            got, amount = settled.get(row["booking_id"], 0), int(row["amount_paise"])
+            row["settled_paise"] = got
+            row["unsettled_paise"] = amount - got
+            row["invoice_numbers"] = numbers.get(row["booking_id"], [])
+            row["invoice_ids"] = invoice_ids.get(row["booking_id"], [])
+            if row.get("not_set"):
+                row["payment_state"] = "not_set"
+            elif amount == 0 and got == 0:
+                row["payment_state"] = "none"
+            elif got == amount:
+                row["payment_state"] = "paid"
+            elif got != 0:
+                row["payment_state"] = "part_paid"
+            else:
+                row["payment_state"] = "unpaid"
 
     async def captain_commissions(self, captain_id: str, month: str | None, actor) -> list[dict]:
         captain = await self.captain_or_404(captain_id, actor.role, actor.service_center_id)
@@ -319,6 +362,7 @@ class PayrollService(MonthsMixin):
             "deposit_held_paise": figures["deposit_held_paise"], "statement": statement,
             "commissions": await self.commissions(captain, month) if summary["basis"] == "commission" else [],
             "entries": statement["entries"], "attendance": statement["attendance"], "salary": statement["salary"],
+            "invoices": (await self.my_invoices(actor, 1, 20))[0],
         }
 
     async def me_statement(self, actor, month: str | None) -> dict:

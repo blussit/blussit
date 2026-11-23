@@ -107,7 +107,7 @@ function buildPayload(d: Draft, car: StaffBooking): Record<string, unknown> {
       pincode: d.pincode.trim() || undefined, latitude: Number(d.latitude), longitude: Number(d.longitude),
     };
   }
-  if (d.recompute_center) p.recompute_center = true;
+  if (d.recompute_center && car.status !== "completed") p.recompute_center = true;
   if (d.recompute_travel) p.recompute_travel = true;
   const sameServices = d.service_ids.length === (car.service_ids || []).length && d.service_ids.every((s) => (car.service_ids || []).includes(s));
   if (!sameServices && d.service_ids.length) {
@@ -314,9 +314,15 @@ export function AdminEditPanel({ car, cars, open, onClose }: { car: StaffBooking
               <Input label="Map Pin Latitude" inputMode="decimal" value={draft.latitude} onChange={(e) => set("latitude", e.target.value.replace(/[^\d.-]/g, "").slice(0, 12))} hint="−90 to 90" />
               <Input label="Map Pin Longitude" inputMode="decimal" value={draft.longitude} onChange={(e) => set("longitude", e.target.value.replace(/[^\d.-]/g, "").slice(0, 12))} hint="−180 to 180" />
             </div>
-            <Check checked={draft.recompute_center} onChange={(v) => set("recompute_center", v)}>
-              Re-Check Which Service Center Serves This Pin
-            </Check>
+            {car.status === "completed" ? (
+              // A finished job stays with the center that did it (its money,
+              // commission and franchise share all point there).
+              <p className="text-xs text-[var(--color-text-secondary)]">A completed booking stays with the service center that did the job.</p>
+            ) : (
+              <Check checked={draft.recompute_center} onChange={(v) => set("recompute_center", v)}>
+                Re-Check Which Service Center Serves This Pin
+              </Check>
+            )}
             <Check checked={draft.recompute_travel} onChange={(v) => set("recompute_travel", v)}>
               Recalculate The Distance Charge
             </Check>

@@ -195,7 +195,8 @@ class BookingAdminEditService:
             )
         if cancelled and p.status and p.status != "cancelled":
             raise BadRequestException("A cancelled booking can't be re-opened — make a new booking (or restore it from the recycle bin if it was deleted).")
-        center = await self.svc.center_repo.find_by_id(booking["service_center_id"])
+        # An admin may correct a booking whose center was since paused or archived.
+        center = await self.svc.center_repo.find_by_id(booking["service_center_id"], include_deleted=True)
         if not center:
             raise NotFoundException("Service center not found")
         plan.center = center
@@ -321,6 +322,13 @@ class BookingAdminEditService:
             except BadRequestException as exc:
                 raise BadRequestException(f"The address can't be served: {exc.message}") from exc
             if p.recompute_center and str(served["_id"]) != booking["service_center_id"]:
+                # A finished job belongs to the center that did it: its money,
+                # commission, franchise share and history all point there.
+                if status == BookingStatus.COMPLETED.value or any(c.get("status") == BookingStatus.COMPLETED.value for c in visit):
+                    raise BadRequestException(
+                        "A completed booking stays with the center that did the job — it can't move to another center "
+                        "(nor can a visit that has a completed car)."
+                    )
                 if status not in _OPEN and status != BookingStatus.CANCELLED.value:
                     raise BadRequestException("Only a booking that hasn't started can move to another center.")
                 if p.scheduled_date is not None:
@@ -535,13 +543,15 @@ class BookingAdminEditService:
             changes.append(_change(lead, "service_center_id", "Service Center", plan.center.get("name"), plan.new_center.get("name")))
             if status_before in _OPEN:
                 for cid, car in fresh.items():
-                    if car.get("status") == BookingStatus.CANCELLED.value:
+                    if car.get("status") in (BookingStatus.CANCELLED.value, BookingStatus.COMPLETED.value):
                         continue
                     sets[cid].update({"service_center_id": center_id})
                     if car.get("status") in (BookingStatus.ASSIGNED.value,):
                         sets[cid].update({"captain_id": None, "status": BookingStatus.PENDING.value, "assigned_at": None, "estimated_start_at": None})
             else:
                 for cid in visit_ids:
+                    if (fresh.get(cid) or {}).get("status") == BookingStatus.COMPLETED.value:
+                        continue  # a finished job never changes center
                     sets[cid].update({"service_center_id": center_id})
 
         # -- captain

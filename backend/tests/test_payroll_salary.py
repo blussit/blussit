@@ -218,7 +218,7 @@ async def test_attendance_override_rules_and_audit(db):
 async def test_statement_and_finalize_twice_posts_only_the_difference(db):
     s = await rig(db)
     async with h.client() as c:
-        await make_payroll(c, s, "salary", salary_monthly_paise=SALARY, petrol_per_day_paise=5000, effective_from=last_month() + "-01")
+        await make_payroll(c, s, "salary", salary_monthly_paise=SALARY, petrol_per_day_paise=5000, weekly_off_days=[6], effective_from=last_month() + "-01")
         month = last_month()
         days = working_days(month)
         expected_days = len(days)
@@ -279,7 +279,7 @@ async def test_finalize_races_land_once(db):
 async def test_holiday_and_approved_leave_feed_the_statement(db):
     s = await rig(db)
     async with h.client() as c:
-        await make_payroll(c, s, "salary", salary_monthly_paise=SALARY, effective_from=last_month() + "-01")
+        await make_payroll(c, s, "salary", salary_monthly_paise=SALARY, weekly_off_days=[6], paid_leaves_per_month=1, effective_from=last_month() + "-01")
         month = last_month()
         days = working_days(month)
         from datetime import datetime, timezone

@@ -78,7 +78,10 @@ export default function AdminFranchisePage() {
                     {rows.map((r) => (
                       <tr key={r.id} className="border-b border-[var(--color-card-border)] last:border-0 hover:bg-[var(--ui-tint,#F6F8FC)]">
                         <td className="px-4 py-3">
-                          <p className="font-semibold text-[var(--color-text-primary)]">{toTitle(r.name)}</p>
+                          <p className="font-semibold text-[var(--color-text-primary)]">
+                            {toTitle(r.name)}
+                            {r.status && r.status !== "active" && <Badge className="ml-2" tone={r.status === "paused" ? "warning" : "neutral"}>{r.status === "paused" ? "Paused" : "Archived"}</Badge>}
+                          </p>
                           <p className="text-xs text-[var(--color-text-secondary)]">
                             {r.code}
                             {r.type !== "franchise" && <Badge className="ml-2" tone="neutral">No Longer Franchise</Badge>}
@@ -114,7 +117,10 @@ export default function AdminFranchisePage() {
                   <li key={r.id} className="rounded-2xl border border-[var(--color-card-border)] bg-white p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="font-semibold text-[var(--color-text-primary)]">{toTitle(r.name)}</p>
+                        <p className="font-semibold text-[var(--color-text-primary)]">
+                          {toTitle(r.name)}
+                          {r.status && r.status !== "active" && <Badge className="ml-2" tone={r.status === "paused" ? "warning" : "neutral"}>{r.status === "paused" ? "Paused" : "Archived"}</Badge>}
+                        </p>
                         <p className="text-xs text-[var(--color-text-secondary)]">{r.partner?.name ? toTitle(r.partner.name) : "No Partner Name"} · {r.revenue_share_percent ?? 0}% Share</p>
                       </div>
                       <NetBadge paise={r.net_payable_paise} />

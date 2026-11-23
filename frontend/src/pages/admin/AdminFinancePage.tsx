@@ -9,6 +9,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format as formatDate, todayIST } from "../../lib/date";
+import { centerLabel } from "../../lib/centerLabel";
 
 /** Entries another module wrote (payroll, franchise) carry a source; hand-made ones don't. */
 // The server filters on the exact source value, so each franchise source is its own option.
@@ -188,7 +189,7 @@ export default function AdminFinancePage() {
     ...LIVE,
   });
   const cats = useQuery({ queryKey: ["finance-categories"], queryFn: financeApi.categories, staleTime: 60_000 });
-  const centers = useQuery({ queryKey: ["admin-centers", "finance-filter"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }), staleTime: 5 * 60_000 });
+  const centers = useQuery({ queryKey: ["admin-centers-history", "finance-filter"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }), staleTime: 5 * 60_000 });
   const categoryOptions = cats.data?.all ?? SUGGESTED_FALLBACK;
   const s = summary.data;
 
@@ -413,7 +414,7 @@ export default function AdminFinancePage() {
           <Select compact aria-label="Service Center" value={centerId} onChange={(e) => setCenterId(e.target.value)}>
             <option value="">All Centers</option>
             {(centers.data?.data ?? []).map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
+              <option key={c.id} value={c.id}>{centerLabel(c)}</option>
             ))}
           </Select>
           <Select compact aria-label="Source" value={source} onChange={(e) => setSource(e.target.value)}>

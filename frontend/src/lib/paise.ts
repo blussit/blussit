@@ -27,7 +27,7 @@ export function rupeesInput(paise?: number | null): string {
 }
 
 /** Digits only, for an amount input. */
-export const cleanAmountInput = (raw: string) => raw.replace(/\D/g, "").slice(0, 9);
+export const cleanAmountInput = (raw: string) => raw.split(".")[0].replace(/\D/g, "").slice(0, 9);
 
 const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
 const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];

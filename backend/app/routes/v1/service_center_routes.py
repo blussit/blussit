@@ -30,8 +30,13 @@ class CapacityPolicyScheduleRequest(BaseModel):
 
 
 @router.get("", dependencies=[Depends(require_admin)])
-async def list_centers(active_only: bool = False, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
-    return await ServiceCenterController(db).list(pagination, active_only)
+async def list_centers(
+    active_only: bool = False, include_archived: bool = False, pagination: PaginationParams = Depends(), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """`active_only` = pickers for NEW work (paused and archived centers are out);
+    `include_archived` = history views (archived centers too, each row carries
+    `status`: active | paused | archived)."""
+    return await ServiceCenterController(db).list(pagination, active_only, include_archived)
 
 
 @router.get("/lookup")
@@ -171,6 +176,15 @@ async def update_center(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     return await ServiceCenterController(db).update(current_user, center_id, payload)
+
+
+@router.post("/{center_id}/restore", dependencies=[Depends(require_admin)])
+async def restore_center(
+    center_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    return await ServiceCenterController(db).restore(current_user, center_id)
 
 
 @router.delete("/{center_id}", dependencies=[Depends(require_admin)])

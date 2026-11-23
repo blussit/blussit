@@ -73,7 +73,7 @@ async def test_adm05_center_with_live_booking_cannot_be_deleted(db):
         assert (await h.book(c, db, cu, when, keys[0])).status_code == 200
         r = await c.delete(f"/api/v1/service-centers/{cid}", headers=adm["h"])
         assert r.status_code == 400, r.text
-        assert "deactivate" in r.json()["message"].lower()
+        assert "pause" in r.json()["message"].lower()
     assert (await db.service_centers.find_one({"_id": ObjectId(cid)}))["is_deleted"] is False
 
 

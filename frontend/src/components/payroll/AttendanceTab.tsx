@@ -104,7 +104,10 @@ export function AttendanceTab({ detail, month, statement }: { detail: PayrollCap
 
 function OverrideForm({ captainId, day, onClose }: { captainId: string; day: AttendanceDay; onClose: () => void }) {
   const write = usePayrollWrite();
-  const [status, setStatus] = useState<AttendanceOverrideStatus>((SETTABLE as string[]).includes(day.status) ? (day.status as AttendanceOverrideStatus) : "present");
+  const isOff = day.status === "weekly_off";
+  // Leave can't be taken on a weekly-off day (the server refuses it too, with its own message).
+  const options = SETTABLE.filter((s) => !(isOff && s === "leave"));
+  const [status, setStatus] = useState<AttendanceOverrideStatus>((options as string[]).includes(day.status) ? (day.status as AttendanceOverrideStatus) : "present");
   const [paidLeave, setPaidLeave] = useState(!!day.paid_leave);
   const [note, setNote] = useState(day.overridden ? day.note || "" : "");
   const [error, setError] = useState("");
@@ -128,12 +131,13 @@ function OverrideForm({ captainId, day, onClose }: { captainId: string; day: Att
     >
       {day.overridden && day.marked_by && <p className="text-xs text-[var(--color-text-secondary)]">Last set by {day.marked_by}.</p>}
       <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as AttendanceOverrideStatus)}>
-        {SETTABLE.map((s) => (
+        {options.map((s) => (
           <option key={s} value={s}>
             {ATTENDANCE_LABEL[s]}
           </option>
         ))}
       </Select>
+      {isOff && <p className="-mt-2 text-xs text-[var(--color-text-secondary)]">This is a weekly off day, so leave can't be set on it. Mark Present if the captain worked.</p>}
       {status === "leave" && <Switch checked={paidLeave} onChange={setPaidLeave} label="Paid Leave" description="Off = it only counts as paid while this month's paid leaves last." />}
       <Input label="Note" maxLength={300} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Forgot to check in — was on site" autoFocus />
       {error && (

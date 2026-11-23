@@ -121,6 +121,7 @@ const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPa
 const AdminHolidaysPage = lazy(() => import("./pages/admin/AdminHolidaysPage"));
 const AdminFinancePage = lazy(() => import("./pages/admin/AdminFinancePage"));
 const AdminSalaryPage = lazy(() => import("./pages/admin/AdminSalaryPage"));
+const PayrollInvoicePage = lazy(() => import("./components/payroll/InvoicePage"));
 const AdminFranchisePage = lazy(() => import("./pages/admin/AdminFranchisePage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
@@ -242,6 +243,7 @@ export default function App() {
                 <Route path="attendance" element={<CaptainAttendancePage />} />
                 <Route path="societies" element={<CaptainSocietiesPage />} />
                 <Route path="earnings" element={<CaptainEarningsPage />} />
+                <Route path="earnings/invoice/:id" element={<PayrollInvoicePage />} />
                 <Route path="profile" element={<CaptainProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>
@@ -261,6 +263,7 @@ export default function App() {
                 <Route path="bookings/:id" element={<StaffBookingRedirect base="/manager/bookings" />} />
                 <Route path="captains" element={<ManagerCaptainsPage />} />
                 <Route path="salary" element={<ManagerSalaryPage />} />
+                <Route path="salary/invoice/:id" element={<PayrollInvoicePage />} />
                 <Route path="subscribers" element={<ManagerSubscribersPage />} />
                 <Route path="sell-plan" element={<ManagerSellPlanPage />} />
                 <Route path="custom-plans" element={<ManagerCustomPlansPage />} />
@@ -317,6 +320,7 @@ export default function App() {
                 <Route path="holidays" element={<AdminHolidaysPage />} />
                 <Route path="finance" element={<AdminFinancePage />} />
                 <Route path="captain-salary" element={<AdminSalaryPage />} />
+                <Route path="captain-salary/invoice/:id" element={<PayrollInvoicePage />} />
                 <Route path="franchise" element={<AdminFranchisePage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />

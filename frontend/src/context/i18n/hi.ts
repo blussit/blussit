@@ -446,4 +446,11 @@ export const hi = {
   "captain.mypay.kitReturned": "लौटा दी",
   "captain.mypay.loadFailed": "आपका वेतन नहीं खुल सका",
   "captain.mypay.ledgerNote": "रकम किसी भी टैक्स से पहले की है।",
+  "captain.mypay.invoices": "भुगतान की रसीदें",
+  "captain.mypay.noInvoices": "अभी कोई रसीद नहीं।",
+  "captain.mypay.cancelled": "रद्द",
+  "captain.mypay.paidInvoice": "भुगतान हुआ — {no}",
+  "captain.mypay.partPaid": "आंशिक भुगतान",
+  "captain.mypay.unpaid": "बाकी",
+  "captain.mypay.openInvoice": "खोलें",
 }

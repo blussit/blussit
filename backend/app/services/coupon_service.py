@@ -24,7 +24,7 @@ from app.services.coupon_rules import USE_LABEL, WEEKDAYS, rules_of
 from app.utils.coupon_codes import mask_code
 from bson import ObjectId
 from app.schemas.coupon_schema import CouponCreateRequest, CouponUpdateRequest
-from app.utils.serializers import serialize_doc, serialize_list
+from app.utils.serializers import serialize_doc
 from app.utils.timezone import from_stored, now_ist
 from app.utils.money import round_rupees
 
@@ -72,6 +72,68 @@ class CouponHeldException(BadRequestException):
     error_code = "COUPON_HELD"
 
 
+# What a coupon is "right now", derived (never stored): the admin list shows
+# it and filters by it, so "Active" never sits on a coupon that has expired
+# or been used up. Order matters — an expired coupon that is still switched
+# on is Expired; a switched-off one that has not expired is Inactive.
+COUPON_STATUS_LABEL = {
+    "active": "Active",
+    "scheduled": "Scheduled",
+    "inactive": "Inactive",
+    "used_up": "Used Up",
+    "expired": "Expired",
+}
+
+
+def coupon_status(coupon: dict, now: datetime | None = None) -> str:
+    """One of COUPON_STATUS_LABEL's keys. The same instants `_valid_coupon`
+    compares (valid_until = end of the stated last day, 23:59:59 IST, as the
+    admin form sends it), so the badge and the customer-facing check agree."""
+    now = now or now_ist()
+    until = coupon.get("valid_until")
+    if until is not None and now > from_stored(until):
+        return "expired"
+    limit = coupon.get("total_usage_limit")
+    if limit and int(coupon.get("total_used") or 0) >= int(limit):
+        return "used_up"
+    if not coupon.get("is_active", True):
+        return "inactive"
+    start = coupon.get("valid_from")
+    if start is not None and now < from_stored(start):
+        return "scheduled"
+    return "active"
+
+
+def coupon_status_filter(status: str, now: datetime | None = None) -> dict:
+    """The Mongo filter for one status (the mirror of `coupon_status`)."""
+    now = now or now_ist()
+    expired = {"valid_until": {"$lt": now}}
+    used_up = {"$expr": {"$and": [
+        {"$gt": [{"$ifNull": ["$total_usage_limit", 0]}, 0]},
+        {"$gte": [{"$ifNull": ["$total_used", 0]}, "$total_usage_limit"]},
+    ]}}
+    inactive = {"is_active": {"$ne": True}}
+    scheduled = {"valid_from": {"$gt": now}}
+    if status == "expired":
+        return expired
+    if status == "used_up":
+        return {"$and": [{"$nor": [expired]}, used_up]}
+    if status == "inactive":
+        return {"$and": [{"$nor": [expired, used_up]}, inactive]}
+    if status == "scheduled":
+        return {"$and": [{"$nor": [expired, used_up, inactive]}, scheduled]}
+    if status == "active":
+        return {"$nor": [expired, used_up, inactive, scheduled]}
+    raise BadRequestException("Unknown coupon status")
+
+
+def serialize_with_status(coupon: dict, now: datetime | None = None) -> dict:
+    """The API shape: serialised, plus the derived `status` / `status_label`
+    (computed from the raw stored document, before dates become strings)."""
+    key = coupon_status(coupon, now)
+    return {**serialize_doc(coupon), "status": key, "status_label": COUPON_STATUS_LABEL[key]}
+
+
 class CouponService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.repo = CouponRepository(db)
@@ -81,10 +143,16 @@ class CouponService:
         self.codes = CouponCodeRepository(db)
         self.db = db
 
-    async def list_all(self, page: int, page_size: int, active_only: bool = False):
-        filters = {"is_active": True} if active_only else {}
+    async def list_all(self, page: int, page_size: int, active_only: bool = False, status: str | None = None):
+        now = now_ist()
+        clauses = []
+        if active_only:
+            clauses.append({"is_active": True})
+        if status:
+            clauses.append(coupon_status_filter(status, now))
+        filters = {"$and": clauses} if clauses else {}
         items, total = await self.repo.find_many(filters, page=page, page_size=page_size)
-        return serialize_list(items), total
+        return [serialize_with_status(c, now) for c in items], total
 
     async def ensure_default_launch_offer(self) -> None:
         """Kept only because app startup still calls it. The FREEBIKE launch
@@ -143,7 +211,7 @@ class CouponService:
         # method's own response — would be a KeyError/None instead of 0).
         doc["total_used"] = 0
         created = await self.repo.create(doc)
-        return serialize_doc(created)
+        return serialize_with_status(created)
 
     # Optional limits an admin can remove again (sent as null).
     _CLEARABLE = ("description", "max_discount_amount", "total_usage_limit", "time_window_start", "time_window_end")
@@ -176,7 +244,7 @@ class CouponService:
         updated = await self.repo.update_by_id(coupon_id, data)
         if not updated:
             raise NotFoundException("Coupon not found")
-        return serialize_doc(updated)
+        return serialize_with_status(updated)
 
     async def delete(self, coupon_id: str) -> None:
         if not await self.repo.soft_delete(coupon_id):

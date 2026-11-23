@@ -6,6 +6,7 @@ import { Badge, DataTable, Modal, Select } from "../../components/ui";
 import { Pager } from "../../components/shared/ListControls";
 import { formatDateTime } from "../../lib/date";
 import { toTitle } from "../../lib/titleCase";
+import { centerLabel } from "../../lib/centerLabel";
 
 const MODULES = [
   { key: "bookings", label: "Bookings" },
@@ -42,7 +43,7 @@ export default function AdminAuditLogsPage() {
   const [open, setOpen] = useState<AuditLogRow | null>(null);
   useEffect(() => setPage(1), [centerId, module, role, adminInCenter]);
 
-  const { data: centers } = useQuery({ queryKey: ["admin-centers-lite"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }) });
+  const { data: centers } = useQuery({ queryKey: ["admin-centers-history"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100, include_archived: true }) });
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["admin-audit-logs", page, centerId, module, role, adminInCenter],
     queryFn: () =>
@@ -70,7 +71,7 @@ export default function AdminAuditLogsPage() {
             <option value="">All Centers</option>
             {(centers?.data || []).map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name}
+                {centerLabel(c)}
               </option>
             ))}
           </Select>

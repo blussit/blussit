@@ -433,6 +433,7 @@ _COMMISSION_FIELDS = (
     "commission_captain_id", "commission_base_paise", "commission_paid_target_paise", "commission_posted_paise", "commission_rev",
     "commission_rate_snapshot", "commission_mode_snapshot", "commission_override_paise", "commission_override_percent",
     "commission_override_reason", "commission_override_by", "commission_override_at", "commission_state",
+    "commission_plan_wash_paise", "commission_settled_paise", "commission_settled_by",
     "captain_pay_mode", "captain_pay_mode_for",
 )
 _CUSTOMER_HIDDEN_FIELDS = (

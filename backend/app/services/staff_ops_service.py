@@ -96,6 +96,16 @@ class LeaveService:
         self.notifications = NotificationService(db)
 
     async def request_leave(self, captain_id: str, payload: LeaveRequestCreate) -> dict:
+        # A salary captain's weekly off (Saturday + Sunday by default) is not a leave day:
+        # a request may span one, but can't start or end on one (§7.14).
+        captain = await self.user_repo.find_by_id(captain_id)
+        if captain:
+            from app.services import payroll_terms as pt
+
+            for day in (payload.start_date.isoformat(), payload.end_date.isoformat()):
+                message = pt.leave_on_off_day_message(captain, day)
+                if message:
+                    raise BadRequestException(message)
         doc = payload.model_dump()
         doc["captain_id"] = captain_id
         doc["start_date"] = doc["start_date"].isoformat()
