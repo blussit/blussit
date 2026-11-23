@@ -83,6 +83,7 @@ const ManagerSocietyPlannerPage = lazy(() => import("./pages/manager/ManagerSoci
 const ManagerSocietyScheduleSettingsPage = lazy(() => import("./pages/manager/ManagerSocietyScheduleSettingsPage"));
 const ManagerChargesPage = lazy(() => import("./pages/manager/ManagerChargesPage"));
 const ManagerCustomPlansPage = lazy(() => import("./pages/manager/ManagerCustomPlansPage"));
+const ManagerSalaryPage = lazy(() => import("./pages/manager/ManagerSalaryPage"));
 
 const AdminLayout = lazy(() => import("./pages/admin/AdminLayout"));
 const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage"));
@@ -119,6 +120,8 @@ const AdminChargesPage = lazy(() => import("./pages/admin/AdminChargesPage"));
 const AdminCustomPlansPage = lazy(() => import("./pages/admin/AdminCustomPlansPage"));
 const AdminHolidaysPage = lazy(() => import("./pages/admin/AdminHolidaysPage"));
 const AdminFinancePage = lazy(() => import("./pages/admin/AdminFinancePage"));
+const AdminSalaryPage = lazy(() => import("./pages/admin/AdminSalaryPage"));
+const AdminFranchisePage = lazy(() => import("./pages/admin/AdminFranchisePage"));
 
 const ProfilePage = lazy(() => import("./pages/shared/ProfilePage"));
 const CustomerProfilePage = lazy(() => import("./pages/customer/CustomerProfilePage"));
@@ -257,6 +260,7 @@ export default function App() {
                     customer's read-only detail page. */}
                 <Route path="bookings/:id" element={<StaffBookingRedirect base="/manager/bookings" />} />
                 <Route path="captains" element={<ManagerCaptainsPage />} />
+                <Route path="salary" element={<ManagerSalaryPage />} />
                 <Route path="subscribers" element={<ManagerSubscribersPage />} />
                 <Route path="sell-plan" element={<ManagerSellPlanPage />} />
                 <Route path="custom-plans" element={<ManagerCustomPlansPage />} />
@@ -312,6 +316,8 @@ export default function App() {
                 <Route path="charges" element={<AdminChargesPage />} />
                 <Route path="holidays" element={<AdminHolidaysPage />} />
                 <Route path="finance" element={<AdminFinancePage />} />
+                <Route path="captain-salary" element={<AdminSalaryPage />} />
+                <Route path="franchise" element={<AdminFranchisePage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
               </Route>

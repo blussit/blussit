@@ -18,6 +18,12 @@ export interface FinanceEntry {
   updated_at: string | null;
   is_deleted: boolean;
   delete_reason: string | null;
+  /** Written by another module (payroll, franchise); null for hand-made entries. */
+  source?: string | null;
+  source_id?: string | null;
+  service_center_id?: string | null;
+  /** System entries are managed from Salary / Franchise, not edited here. */
+  locked?: boolean;
 }
 
 export interface FinanceEntryInput {
@@ -39,6 +45,8 @@ export interface FinanceFilters {
   q?: string;
   done_by?: string;
   include_voided?: boolean;
+  service_center_id?: string;
+  source?: string;
 }
 
 export interface FinanceSummary {
@@ -58,6 +66,10 @@ export interface FinanceSummary {
   by_category: { category: string; credit_paise: number; debit_paise: number }[];
   series_unit: "day" | "month";
   series: { key: string; credit_paise: number; debit_paise: number }[];
+  /** Franchise partners: what Blussit owes (net share minus cash they hold) —
+   *  informational, never part of any total above. */
+  franchise_payable_paise?: number;
+  franchise_receivable_paise?: number;
 }
 
 const clean = (f: FinanceFilters) => Object.fromEntries(Object.entries(f).filter(([, v]) => v !== "" && v !== undefined && v !== false));

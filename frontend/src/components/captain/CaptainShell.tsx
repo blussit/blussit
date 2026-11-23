@@ -20,6 +20,7 @@ import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { notificationTargetPath } from "../../lib/notifications";
 import { playNotificationChime } from "../../lib/notificationSound";
 import { MandatoryGates } from "../shared/MandatoryGates";
+import { isManagedPay, useMyPay } from "./MyPay";
 import { getErrorStatus } from "../../lib/api-client";
 import { fixFields, toPosition, type Position } from "./photo";
 
@@ -192,6 +193,7 @@ function useNotificationAlerts() {
 export function CaptainShell({ children }: { children: ReactNode }) {
   const { t } = useCaptainTranslation();
   const { pathname } = useLocation();
+  const myPay = useMyPay();
   useJobPlumbing();
   useNotificationAlerts();
   // Same as the manager/admin shell: `staff-v2` on <body>, so whatever is
@@ -208,7 +210,7 @@ export function CaptainShell({ children }: { children: ReactNode }) {
   const tabs = [
     { to: "/captain", end: true, label: t("captain.v2.tab.today"), icon: House },
     { to: "/captain/jobs", end: true, label: t("captain.v2.tab.jobs"), icon: ClipboardList },
-    { to: "/captain/earnings", end: false, label: t("captain.v2.tab.earnings"), icon: Wallet },
+    { to: "/captain/earnings", end: false, label: isManagedPay(myPay.data) ? t("captain.mypay.tab") : t("captain.v2.tab.earnings"), icon: Wallet },
     { to: "/captain/profile", end: false, label: t("captain.v2.tab.profile"), icon: User },
   ];
 

@@ -98,7 +98,11 @@ class AuthController:
             # Always the manager's own center — never the payload's — and a
             # manager with no center linked creates nobody (fail closed).
             payload.service_center_id = manager_center_or_raise(current_user.role, current_user.service_center_id)
-        result = await self.auth_service.create_staff_account(payload, created_by=current_user.id, creator_role=current_user.role)
+        result = await self.auth_service.create_staff_account(
+            payload, created_by=current_user.id, creator_role=current_user.role, require_pay=True,
+        )
+        if payload.role.value == "captain" and payload.pay and payload.pay.deposit_received:
+            await self._record_opening_deposit(result, payload, current_user)
         # ADM-02: every staff account (a new admin included) leaves a trail —
         # who created which role, for which center.
         await self.audit.log_action(
@@ -107,6 +111,19 @@ class AuthController:
             service_center_id=payload.service_center_id,
         )
         return success(result, "Staff account created successfully")
+
+    async def _record_opening_deposit(self, created: dict, payload: StaffCreateRequest, current_user: CurrentUser) -> None:
+        """The captain handed their deposit over at joining: the ledger row and
+        its Finance credit post now, through the same path as any deposit."""
+        expected = int((created.get("pay") or {}).get("deposit_expected_paise") or 0)
+        if expected <= 0:
+            return
+        from app.schemas.payroll_schema import DepositAction
+        from app.services.payroll_service import PayrollService
+
+        await PayrollService(self.db).deposit_action(
+            created["id"], DepositAction(action="received", amount_paise=expected, key=f"joining-{created['id']}", note="Received when joining"), current_user,
+        )
 
     async def staff_reset_staff_password(self, current_user: CurrentUser, user_id: str, temp_password: str):
         """The staff recovery path — see AuthService.staff_reset_staff_password.

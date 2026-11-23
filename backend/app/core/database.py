@@ -835,6 +835,22 @@ async def create_indexes() -> None:
     except Exception as exc:  # degrade, don't die — same rule as the scale pack
         logger.warning("Finance indexes skipped: %s", exc)
 
+    # Captain pay ledger (PayrollService, ARCHITECTURE.md §7.13).
+    try:
+        from app.repositories.payroll_repository import ensure_payroll_indexes
+
+        await ensure_payroll_indexes(db)
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("Payroll indexes skipped: %s", exc)
+
+    # Franchise share ledger (FranchiseService, ARCHITECTURE.md §7.13).
+    try:
+        from app.services.franchise_service import ensure_franchise_indexes
+
+        await ensure_franchise_indexes(db)
+    except Exception as exc:  # degrade, don't die — same rule as the scale pack
+        logger.warning("Franchise indexes skipped: %s", exc)
+
     # Society plans (docs/SOCIETY_PLANS.md) keep their own index list.
     from app.repositories.society_repository import ensure_society_indexes
 

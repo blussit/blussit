@@ -1,9 +1,15 @@
+from datetime import datetime, timezone
+
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import BadRequestException, NotFoundException
 from app.repositories.service_center_repository import ServiceCenterRepository
 from app.schemas.service_center_schema import ServiceCenterCreateRequest, ServiceCenterUpdateRequest, ensure_opens_before_closes
+from app.schemas.franchise_schema import SettlementCreate, today_ist
+from app.services import franchise_service as fr
+from app.services.audit_service import AuditService
+from app.services.customer_wallet_service import in_transaction
 from app.utils.serializers import serialize_doc, serialize_list
 
 
@@ -19,15 +25,35 @@ class ServiceCenterService:
         self.db = db
         self.repo = ServiceCenterRepository(db)
 
+    async def _decorate(self, centers: list[dict]) -> list[dict]:
+        """Serialised centers with `operation` always present (a legacy one is
+        self-operated) and the kit counts: `kits_assigned` (captains holding
+        an unreturned kit), `captains_count`, and `kits_warning` — a warning
+        only, never a block (H17)."""
+        ids = [str(c["_id"]) for c in centers]
+        kits = await fr.kits_assigned_map(self.db, ids)
+        out = []
+        for c in centers:
+            row = serialize_doc(c)
+            op = fr.operation_of(c)
+            row["operation"] = op
+            row["operation_history"] = row.get("operation_history") or []
+            kit = kits.get(str(c["_id"]), {"kits_assigned": 0, "captains_count": 0})
+            row.update(kit)
+            row["kits_warning"] = fr.kit_warning(op, kit["kits_assigned"], kit["captains_count"])
+            out.append(row)
+        return out
+
     async def list_centers(self, page: int, page_size: int, search: str | None, active_only: bool = False):
         items, total = await self.repo.search(search, page, page_size, active_only)
-        return serialize_list(items), total
+        return await self._decorate(items), total
 
-    async def get(self, center_id: str) -> dict:
+    async def get(self, center_id: str, redact: bool = False) -> dict:
         center = await self.repo.find_by_id(center_id)
         if not center:
             raise NotFoundException("Service center not found")
-        return serialize_doc(center)
+        row = (await self._decorate([center]))[0]
+        return fr.redact_operation(row) if redact else row
 
     async def find_for_pincode(self, pincode: str) -> list[dict]:
         """Anonymous lookup: which center serves a pincode — its id, name and
@@ -45,24 +71,67 @@ class ServiceCenterService:
             for c in centers
         ]
 
-    async def create(self, payload: ServiceCenterCreateRequest) -> dict:
-        doc = payload.model_dump()
+    async def create(self, payload: ServiceCenterCreateRequest, actor=None) -> dict:
+        doc = payload.model_dump(exclude={"operation"})
         # Stored explicitly: every lookup (nearest, pincode, bot, KPIs)
         # filters on it (QA 2026-10-07 — a new center was invisible).
         doc["is_active"] = True
         doc["code"] = self.repo.generate_code(payload.location.city)
-        created = await self.repo.create(doc)
-        return serialize_doc(created)
+        sent = payload.operation.model_dump(exclude_unset=True) if payload.operation else {}
+        fee_now = bool(sent.get("franchise_fee_received_now"))
+        fee_method = sent.get("franchise_fee_method") or "bank"
+        operation, _ = fr.normalise_operation(None, sent)
+        if fee_now and not (operation["type"] == "franchise" and operation["franchise_fee_paise"] > 0):
+            raise BadRequestException("Only a franchise center with a franchise fee can have the fee marked as received.")
+        # A new center starts with its operation (no history): it applies from today.
+        operation["effective_from"] = today_ist().isoformat()
+        doc["operation"] = operation
+        doc["operation_history"] = []
+        actor_id, actor_role = (getattr(actor, "id", None) or "system"), (getattr(actor, "role", None) or "system")
+
+        async def _do(s):
+            created = await self.repo.create(doc, session=s)
+            if fee_now:
+                # "Fee received now": the credit lands in Finance with the center, or neither does.
+                await fr.FranchiseService(self.db).post_settlement(
+                    str(created["_id"]),
+                    SettlementCreate(kind="franchise_fee", amount_paise=operation["franchise_fee_paise"], method=fee_method if fee_method in ("cash", "bank", "upi", "other") else "bank",
+                                     note="Franchise fee received when the center was added", idempotency_key="init-fee-0"),
+                    actor_id, actor_role, session=s, center=created,
+                )
+            return created
+
+        created = await in_transaction(self.db, _do, None)
+        if operation["type"] == "franchise" and actor is not None:
+            await AuditService(self.db).log_action(
+                actor_id, actor_role, "FRANCHISE_CENTER_CREATED", "franchise", str(created["_id"]),
+                {"after": fr.operation_snapshot(operation), "franchise_fee_paise": operation["franchise_fee_paise"], "fee_received_now": fee_now},
+                service_center_id=str(created["_id"]),
+            )
+        return (await self._decorate([created]))[0]
 
     # Optional fields an admin can clear again (sent as null): unassigning
     # the manager stops that person's new-booking WhatsApps for this center.
     _CLEARABLE = ("manager_id", "contact_phone", "contact_email", "slot_duration_minutes")
 
-    async def update(self, center_id: str, payload: ServiceCenterUpdateRequest) -> dict:
+    async def update(self, center_id: str, payload: ServiceCenterUpdateRequest, actor=None) -> dict:
         data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None or k in self._CLEARABLE}
+        op_sent = data.pop("operation", None) if "operation" in data else None
+        history_entry = None
+        before_op = None
+        if op_sent:
+            center = await self.repo.find_by_id(center_id)
+            if not center:
+                raise NotFoundException("Service center not found")
+            before_op = fr.operation_of(center) if center.get("operation") else None
+            fee_flag = op_sent.get("franchise_fee_received_now")
+            if fee_flag or op_sent.get("franchise_fee_method"):
+                raise BadRequestException("Record a franchise fee through a settlement (POST /franchise/centers/{id}/settlements).")
+            clean, history_entry = fr.normalise_operation(center.get("operation") or None, op_sent)
+            if history_entry:
+                history_entry["by"] = {"id": getattr(actor, "id", None), "role": getattr(actor, "role", None)}
+            data["operation"] = clean
         if data.get("manager_id"):
-            from bson import ObjectId
-
             manager = (
                 await self.repo.db.users.find_one({"_id": ObjectId(data["manager_id"]), "role": "manager", "is_deleted": {"$ne": True}}, {"_id": 1})
                 if ObjectId.is_valid(data["manager_id"]) else None
@@ -89,16 +158,32 @@ class ServiceCenterService:
                     "Can't change this center's opening hours or slot length yet: " + "; ".join(blockers) + "."
                 )
             reshaped = True
-        updated = await self.repo.update_by_id(center_id, data)
+        if history_entry:
+            # The operation and its history row are written together.
+            data["updated_at"] = datetime.now(timezone.utc)
+            res = await self.repo.collection.update_one(
+                {"_id": ObjectId(center_id), "is_deleted": {"$ne": True}}, {"$set": data, "$push": {"operation_history": history_entry}},
+            ) if ObjectId.is_valid(center_id) else None
+            updated = await self.repo.find_by_id(center_id) if res and res.matched_count else None
+        else:
+            updated = await self.repo.update_by_id(center_id, data)
         if not updated:
             raise NotFoundException("Service center not found")
+        if "operation" in data and actor is not None:
+            await AuditService(self.db).log_action(
+                getattr(actor, "id", None), getattr(actor, "role", None), "FRANCHISE_OPERATION_CHANGE" if history_entry else "FRANCHISE_OPERATION_EDIT",
+                "franchise", center_id,
+                {"before": fr.operation_snapshot(before_op or fr.DEFAULT_OPERATION), "after": fr.operation_snapshot(data["operation"]),
+                 "effective_from": data["operation"].get("effective_from"), "changed": (history_entry or {}).get("changed", [])},
+                service_center_id=center_id,
+            )
         if reshaped:
             from app.services.capacity_policy_service import CapacityPolicyService
 
             # Nothing live sat in the old slots; the policy in effect today
             # is re-split over the new ones (a no-op when they didn't change).
             await CapacityPolicyService(self.db).rekey_for_current_slots(center_id)
-        return serialize_doc(updated)
+        return (await self._decorate([updated]))[0]
 
     async def delete(self, center_id: str) -> None:
         """Audit ADM-05: deleting a center that still has live bookings,

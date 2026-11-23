@@ -57,6 +57,7 @@ from pymongo.errors import DuplicateKeyError
 from app.core.authz import ensure_own_center
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, NotFoundException, TooManyRequestsException
 from app.models.enums import BookingStatus, NotificationType
+from app.services.payroll_hooks import after_booking_money_change
 from app.services import booking_money as bm
 from app.services.booking_money import EPSILON, r2
 from app.services.booking_service import BookingService
@@ -287,6 +288,8 @@ class BookingAdjustService:
                 money_results.append(money)
                 after_docs.append(done)
                 cid = str(car["_id"])
+                # A discount after the job is done changes its commission / franchise base.
+                await after_booking_money_change(self.db, cid, session=session)
                 seq = await self.adjustments.count_documents({"booking_id": cid}, session=session) + 1
                 rows.append({
                     "booking_id": cid, "booking_number": car.get("booking_number"), "customer_id": customer_id,

@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.franchise_schema import OperationInput
 from app.models.service_center import DEFAULT_WORKING_HOURS_END, DEFAULT_WORKING_HOURS_START
 
 # 24-hour HH:MM, zero-padded ("07:00", "19:30") — the only form the slot
@@ -49,6 +50,7 @@ class ServiceCenterCreateRequest(BaseModel):
     slot_duration_minutes: Optional[int] = Field(default=None, ge=5, le=720)
     max_bookings_per_day: Optional[int] = Field(default=None, ge=0)
     default_slot_capacity: Optional[int] = Field(default=None, ge=0)
+    operation: Optional[OperationInput] = None
 
     _hours = field_validator("working_hours_start", "working_hours_end")(_hhmm)
 
@@ -70,6 +72,7 @@ class ServiceCenterUpdateRequest(BaseModel):
     max_bookings_per_day: Optional[int] = Field(default=None, ge=0)
     default_slot_capacity: Optional[int] = Field(default=None, ge=0)
     is_active: Optional[bool] = None
+    operation: Optional[OperationInput] = None
 
     _hours = field_validator("working_hours_start", "working_hours_end")(_hhmm)
 

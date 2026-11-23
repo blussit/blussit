@@ -10,17 +10,18 @@ import { ArrowUpCircle, Landmark, TriangleAlert } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { bookingPolicyApi } from "../../api/catalog";
 import { walletApi } from "../../api/wallet";
-import { getErrorMessage } from "../../lib/api-client";
+import { getErrorMessage, getErrorStatus } from "../../lib/api-client";
 import { todayIST, formatDay } from "../../lib/date";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { carService, clock, istDay, rupees, statusWord, useCarTypes, weekStartIST } from "../../components/captain/jobState";
 import { Btn, LoadError, Notice, PageTitle, Panel, Pill, Sheet } from "../../components/captain/ui";
 import type { Booking } from "../../types";
+import { MyPay, MyPayLoadError, isManagedPay, useMyPay } from "../../components/captain/MyPay";
 
 const field =
   "h-12 w-full rounded-2xl border border-[#E4E9F1] px-4 text-[15px] text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE]";
 
-export default function CaptainEarningsPage() {
+function LegacyEarnings() {
   const { t } = useCaptainTranslation();
   const queryClient = useQueryClient();
   const policyQuery = useQuery({ queryKey: ["booking-policy"], queryFn: bookingPolicyApi.get });
@@ -254,4 +255,23 @@ export default function CaptainEarningsPage() {
       </Sheet>
     </div>
   );
+}
+
+/**
+ * Captains on salary or commission see "My Pay" (what they earned, were paid
+ * and are owed). Captains still on the old per-job fee keep the earnings view
+ * above, unchanged. While the answer is loading nothing flashes; if it can't
+ * be read the legacy view stays (never a wrong set of numbers).
+ */
+export default function CaptainEarningsPage() {
+  const pay = useMyPay();
+  if (pay.isLoading) return <div className="mt-6 h-48 animate-pulse rounded-[18px] bg-[#EEF3FA]" aria-busy="true" />;
+  if (isManagedPay(pay.data)) return <MyPay pay={pay.data!} />;
+  // The server answering "no" (a 4xx) means this captain has no managed pay: the old view. A dropped
+  // connection or a server error says nothing about the basis, so don't show numbers that may be wrong.
+  if (pay.isError && !pay.data) {
+    const status = getErrorStatus(pay.error);
+    if (status === undefined || status >= 500) return <MyPayLoadError busy={pay.isFetching} onRetry={() => void pay.refetch()} />;
+  }
+  return <LegacyEarnings />;
 }

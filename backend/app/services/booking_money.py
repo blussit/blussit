@@ -194,14 +194,34 @@ def captain_cash_held(booking: dict) -> float:
     return 0.0
 
 
-def captain_wallet_target(booking: dict) -> float:
+def captain_wallet_target(booking: dict, *, pays_earning: bool = True) -> float:
     """Where this booking should leave its captain's wallet: his earning
-    once the job is done, minus the cash he holds for the platform."""
+    once the job is done, minus the cash he holds for the platform.
+    `pays_earning=False` (a salary / commission captain, §7.13 D2): the
+    per-job earning credit is off — his pay comes from the payroll ledger —
+    but the cash he holds is still owed to the business."""
     booking = booking or {}
     if captain_wallet_exempt(booking):
         return 0.0
-    earned = r2(booking.get("captain_earning")) if booking.get("status") == "completed" else 0.0
+    earned = r2(booking.get("captain_earning")) if booking.get("status") == "completed" and pays_earning else 0.0
     return r2(earned - captain_cash_held(booking))
+
+
+def commission_base_paise(booking: dict) -> int:
+    """The service value a captain's commission (and a franchise partner's
+    share) is a cut of (§7.13 D4): what the customer was billed for the
+    SERVICE after real discounts — a coupon / offer / manager discount comes
+    off, but a plan's waiver does not (a plan wash still earns on its list
+    value) — and never the tip, a carried previous balance, the customer's
+    distance charge, a legacy cancellation charge or tax. Whole paise."""
+    booking = booking or {}
+    base = (
+        r2(booking.get("total_amount")) - r2(booking.get("tip_amount")) - r2(booking.get("wallet_due_carried"))
+        - r2(booking.get("travel_charge")) - r2(booking.get("cancellation_charge")) - r2(booking.get("tax_amount"))
+    )
+    if booking.get("subscription_id"):
+        base += max(0.0, r2(booking.get("discount_amount")) - r2(booking.get("manager_discount")))
+    return max(0, paise(base))
 
 
 def captain_wallet_posted(booking: dict) -> float:

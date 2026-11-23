@@ -767,6 +767,51 @@ export interface ServiceCenter {
   max_bookings_per_day?: number | null;
   default_slot_capacity?: number | null;
   is_active: boolean;
+  /** Operation model (ARCHITECTURE.md §7.13); the API always sends it (a legacy center is self-operated). */
+  operation?: ServiceCenterOperation | null;
+  /** Append-only change log — admin only, absent for managers. */
+  operation_history?: ServiceCenterOperationHistoryRow[] | null;
+  /** Captains of this center holding an unreturned kit, and all its live captains. */
+  kits_assigned?: number | null;
+  captains_count?: number | null;
+  /** Plain-English kit mismatch from the server, or null. */
+  kits_warning?: string | null;
+}
+
+export type ServiceCenterOperationType = "self_operated" | "franchise";
+export type CaptainPayManagedBy = "blussit" | "franchise";
+
+export interface ServiceCenterOperation {
+  type: ServiceCenterOperationType;
+  partner?: { name?: string | null; phone?: string | null; email?: string | null } | null;
+  /** The PARTNER's share of each booking, 0-100 (Blussit keeps the rest). */
+  revenue_share_percent?: number | null;
+  franchise_fee_paise?: number | null;
+  kits_purchased?: number | null;
+  kits_given?: number | null;
+  captain_pay_managed_by?: CaptainPayManagedBy | null;
+  default_captain_pay?: {
+    basis?: "salary" | "commission" | null;
+    salary_monthly_paise?: number | null;
+    commission_percent?: number | null;
+  } | null;
+  effective_from?: string | null;
+}
+
+export interface OperationSnapshot {
+  type: ServiceCenterOperationType;
+  revenue_share_percent?: number | null;
+  captain_pay_managed_by?: CaptainPayManagedBy | null;
+  partner_name?: string | null;
+}
+
+export interface ServiceCenterOperationHistoryRow {
+  at?: string | null;
+  by?: { id?: string | null; role?: string | null } | null;
+  effective_from?: string | null;
+  changed?: string[];
+  before?: OperationSnapshot | null;
+  after?: OperationSnapshot | null;
 }
 
 export interface ComplaintReply {

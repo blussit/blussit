@@ -28,8 +28,13 @@ def _filters(
     q: str | None = Query(None, max_length=100),
     done_by: str | None = Query(None, max_length=100),
     include_voided: bool = Query(False),
+    service_center_id: str | None = Query(None, max_length=40),
+    source: str | None = Query(None, max_length=30),
 ) -> dict:
-    return {"type": type, "category": category, "date_from": date_from, "date_to": date_to, "q": q, "done_by": done_by, "include_voided": include_voided}
+    return {
+        "type": type, "category": category, "date_from": date_from, "date_to": date_to, "q": q, "done_by": done_by,
+        "include_voided": include_voided, "service_center_id": service_center_id, "source": source,
+    }
 
 
 @router.get("/entries")

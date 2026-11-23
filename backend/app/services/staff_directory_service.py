@@ -19,6 +19,7 @@ _PERFORMANCE_FIELDS = {
         "status", "captain_earning", "total_amount", "previous_captain_ids", "captain_start_stage", "delay_minutes",
         "heading_at", "vehicle_verified_at", "service_started_at", "actual_duration_minutes", "assigned_at", "closed_at",
         "scheduled_date", "scheduled_slot", "issue_flag", "arrival_flagged", "before_photo_flagged", "after_photo_flagged",
+        "captain_pay_mode", "commission_posted_paise",
     )
 }
 
@@ -121,7 +122,13 @@ class StaffDirectoryService:
         # The CAPTAIN's earnings, not the customer-paid gross — summing
         # total_amount here showed a captain "earnings" of the full booking
         # revenue on their own earnings page. Gross is exposed separately.
-        total_earnings = round(sum(b.get("captain_earning") or 0 for b in completed), 2)
+        # A salary / commission captain's job earns its commission (a salary is a
+        # finance expense, not a per-job figure — §7.13 H22); legacy jobs keep the old number.
+        total_earnings = round(sum(
+            (b.get("captain_earning") or 0) if (b.get("captain_pay_mode") or "legacy") == "legacy"
+            else (b.get("commission_posted_paise") or 0) / 100
+            for b in completed
+        ), 2)
         total_booking_value = round(sum(b.get("total_amount", 0) for b in completed), 2)
 
         reassigned_away = sum(1 for b in bookings if captain_id in (b.get("previous_captain_ids") or []))

@@ -200,6 +200,7 @@ class BookingController:
                 current_user.id, current_user.role, "MANAGER_LOG_COMPLETED", "bookings", b["id"],
                 {
                     "customer_id": result.get("customer_id"), "send_whatsapp": payload.send_whatsapp,
+                    "captain_id": payload.captain_id, "commission_amount_paise": payload.commission_amount_paise,
                     "discount_amount": payload.discount_amount, "tip_amount": payload.tip_amount,
                     "tip_method": payload.tip_method if payload.tip_amount else None,
                     "before": {"total_amount": round(float(b.get("total_amount") or 0) + manager_discount - tip, 2), "manager_discount": 0, "tip_amount": 0},
@@ -210,11 +211,15 @@ class BookingController:
 
     async def manager_mark_done(self, current_user: CurrentUser, booking_id: str, payload: ManagerMarkDoneRequest):
         result = await self.service.manager_mark_done(
-            booking_id, current_user.id, current_user.role, current_user.service_center_id, payload.send_whatsapp
+            booking_id, current_user.id, current_user.role, current_user.service_center_id, payload.send_whatsapp,
+            captain_id=payload.captain_id, commission_amount_paise=payload.commission_amount_paise,
         )
         await self.audit.log_action(
             current_user.id, current_user.role, "MANAGER_MARK_DONE", "bookings", booking_id,
-            {"send_whatsapp": payload.send_whatsapp, "completed": result["completed"], "booking_numbers": result["booking_numbers"]},
+            {
+                "send_whatsapp": payload.send_whatsapp, "completed": result["completed"], "booking_numbers": result["booking_numbers"],
+                "captain_id": payload.captain_id, "commission_amount_paise": payload.commission_amount_paise,
+            },
         )
         return success(result, "Marked as done")
 

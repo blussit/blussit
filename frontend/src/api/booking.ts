@@ -83,6 +83,16 @@ export interface ManagerLogPayload {
   tip_amount?: number;
   /** true = the customer gets ONE WhatsApp: "service is done". */
   send_whatsapp: boolean;
+  /** Who washed it (optional) — with none, nobody earns commission. */
+  captain_id?: string;
+  /** The captain's cut in paise (the form takes rupees) — at most 70% of the job. */
+  commission_amount_paise?: number;
+}
+
+/** Who did a manager-closed job and what they earn on it (optional). */
+export interface DoneCommission {
+  captain_id?: string;
+  commission_amount_paise?: number;
 }
 
 /** What POST /bookings/quick returns — one shape for one car or many. */
@@ -271,8 +281,8 @@ export const bookingApi = {
   managerLogCompleted: (payload: ManagerLogPayload) =>
     apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-log-completed", payload).then((r) => r.data.data),
   /** The manager did this (not-yet-started) booking himself — closes it, whole visit. */
-  markDone: (id: string, sendWhatsapp: boolean) =>
-    apiClient.post<ApiSuccess<{ completed: number; booking_numbers: string[] }>>(`/bookings/${id}/mark-done`, { send_whatsapp: sendWhatsapp }).then((r) => r.data.data),
+  markDone: (id: string, sendWhatsapp: boolean, commission: DoneCommission = {}) =>
+    apiClient.post<ApiSuccess<{ completed: number; booking_numbers: string[] }>>(`/bookings/${id}/mark-done`, { send_whatsapp: sendWhatsapp, ...commission }).then((r) => r.data.data),
   /** Same shape, booked by a manager/admin on a customer's behalf. */
   managerQuick: (payload: QuickBookingPayload) =>
     apiClient.post<ApiSuccess<QuickBookingResult>>("/bookings/manager-quick", payload).then((r) => r.data.data),

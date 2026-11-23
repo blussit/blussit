@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { whatsappCrmApi } from "../../api/admin";
 import {
   AlertTriangle,
+  Banknote,
   Building,
   Building2,
   CalendarDays,
@@ -13,6 +14,7 @@ import {
   CreditCard,
   FileClock,
   Gift,
+  Handshake,
   IndianRupee,
   Landmark,
   Layers,
@@ -49,6 +51,8 @@ const navItems: NavItem[] = [
   { label: "Service Zones", to: "/admin/service-zones", icon: MapPin },
   { label: "Holidays", to: "/admin/holidays", icon: CalendarOff },
   { label: "Finance", to: "/admin/finance", icon: Landmark },
+  { label: "Captain Salary", to: "/admin/captain-salary", icon: Banknote },
+  { label: "Franchise", to: "/admin/franchise", icon: Handshake },
   { label: "Services", to: "/admin/services", icon: Wrench },
   { label: "Subscription Plans", to: "/admin/subscription-plans", icon: Gift },
   { label: "Society Plans", to: "/admin/society-plans", icon: Layers },

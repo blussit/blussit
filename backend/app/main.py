@@ -60,6 +60,8 @@ from app.routes.v1 import (
     zone_routes,
     holiday_routes,
     finance_routes,
+    franchise_routes,
+    payroll_routes,
     whatsapp_webhook_routes,
     ws_routes,
 )
@@ -1387,6 +1389,18 @@ _OPTIONAL_BOOT_TASKS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (("app.services.auth_service", "clear_customer_password_gates"),),
     ),
     (
+        # CENTERS: every service center without an `operation` becomes
+        # self-operated (ARCHITECTURE.md §7.13 D18/H23); only fills what is missing.
+        "service center operation",
+        (("app.services.franchise_service", "backfill_center_operation"),),
+    ),
+    (
+        # CAPTAINS: every captain without a `pay` block becomes basis "legacy"
+        # (today's per-job wallet pay) with a start date (§7.13 D1/H23); only fills what is missing.
+        "captain pay terms",
+        (("app.services.payroll_service", "backfill_captain_pay"),),
+    ),
+    (
         # Account emails stored lower-case (login is case-insensitive).
         "lower-case account emails",
         (("app.repositories.user_repository", "lowercase_user_emails"),),
@@ -1862,6 +1876,8 @@ def include_business_routers(target: FastAPI) -> None:
     target.include_router(holiday_routes.public_router, prefix=api_prefix)
     target.include_router(holiday_routes.customer_router, prefix=api_prefix)
     target.include_router(finance_routes.router, prefix=api_prefix)
+    target.include_router(franchise_routes.router, prefix=api_prefix)
+    target.include_router(payroll_routes.router, prefix=api_prefix)
 
 
 if _serves_public_routes():

@@ -36,8 +36,20 @@ from app.utils.csv_safe_finance import build_csv
 from app.utils.timezone import now_ist
 
 SUGGESTED_CATEGORIES = [
-    "Salary", "Marketing", "Rent", "Product Purchase", "Product Sale", "Utilities", "Travel", "Equipment", "Repairs", "Other",
+    "Salary", "Commission", "Petrol & Expenses", "Advance", "Captain Deposit",
+    "Marketing", "Rent", "Product Purchase", "Product Sale", "Utilities", "Travel", "Equipment", "Repairs", "Other",
 ]
+LOCKED_MESSAGE = "Created by Salary — void it there"
+
+
+def locked_message(entry: dict) -> str:
+    """Where a locked (system-made) entry has to be changed from."""
+    source = str(entry.get("source") or "")
+    if source.startswith("franchise"):
+        return "Created by Franchise — void it there"
+    if source == "payroll_deposit":
+        return "Created by Captain Salary (deposit) — void it there"
+    return LOCKED_MESSAGE
 BOOKINGS_EARNING_DEFINITION = (
     "Money actually received for non-cancelled bookings (cash collected + paid online) minus what managers paid back "
     "to customers — the Collections page's net collected. Not the billed value; plan and society sales are their own line."
@@ -108,6 +120,10 @@ def _public(doc: dict) -> dict:
         "deleted_by": doc.get("deleted_by"),
         "deleted_at": iso(doc.get("deleted_at")),
         "delete_reason": doc.get("delete_reason"),
+        "source": doc.get("source"),
+        "source_id": doc.get("source_id"),
+        "service_center_id": doc.get("service_center_id"),
+        "locked": bool(doc.get("locked")),
     }
 
 
@@ -123,8 +139,16 @@ class FinanceService:
 
     # ---------- filters ----------
 
-    def _filters(self, *, type=None, category=None, date_from=None, date_to=None, q=None, done_by=None, include_voided=False) -> dict:
+    def _filters(
+        self, *, type=None, category=None, date_from=None, date_to=None, q=None, done_by=None, include_voided=False,
+        service_center_id=None, source=None,
+    ) -> dict:
         f: dict = {}
+        if service_center_id:
+            f["service_center_id"] = service_center_id
+        if source:
+            # "franchise" matches every franchise_* source (settlement, fee, kit sale).
+            f["source"] = {"$regex": f"^{re.escape(source)}"} if source in ("franchise", "payroll") else source
         if not include_voided:
             f["is_deleted"] = False
         if type:
@@ -178,6 +202,72 @@ class FinanceService:
         )
         return _public(created)
 
+    async def create_system_entry(
+        self, *, title: str, type: str, amount_paise: int, category: str, source: str, source_id: str,
+        service_center_id: str | None, done_by: str, actor_id: str, actor_role: str,
+        entry_date: str | None = None, description: str = "", session=None,
+    ) -> dict:
+        """A locked entry written by another module (payroll, franchise) inside
+        ITS transaction. Idempotent on (source, source_id): the same source row
+        returns the existing entry instead of a second one. Never edited or
+        voided from the Finance page — the owning module voids it."""
+        if type not in ("credit", "debit"):
+            raise BadRequestException("Finance entry type must be credit or debit.")
+        if not isinstance(amount_paise, int) or amount_paise <= 0:
+            raise BadRequestException("Finance entry amount must be more than zero.")
+        existing = await self.col.find_one({"source": source, "source_id": source_id}, session=session)
+        if existing:
+            return _public(existing)
+        doc = {
+            "title": (title or "Entry")[:120],
+            "type": type,
+            "amount_paise": amount_paise,
+            "entry_date": entry_date or _today().isoformat(),
+            "category": category,
+            "description": (description or "")[:500],
+            "done_by": (done_by or "System")[:100],
+            "reference": f"{source}:{source_id}"[:80],
+            "created_by": actor_id,
+            "deleted_by": None,
+            "deleted_at": None,
+            "delete_reason": None,
+            "source": source,
+            "source_id": source_id,
+            "service_center_id": service_center_id,
+            "locked": True,
+        }
+        created = await self.repo.create(doc, session=session)
+        await AuditService(self.db).log_action(
+            actor_id, actor_role, "FINANCE_ENTRY_CREATE", "finance", str(created["_id"]),
+            {"after": _audit_view(created), "source": source, "source_id": source_id}, service_center_id=service_center_id,
+        )
+        return _public(created)
+
+    async def void_system_entry(
+        self, source: str, source_id: str, reason: str, actor_id: str, actor_role: str, session=None,
+    ) -> dict | None:
+        """Void the entry a module wrote (idempotent: no entry or already voided
+        returns None / the voided entry)."""
+        before = await self.col.find_one({"source": source, "source_id": source_id}, session=session)
+        if not before:
+            return None
+        if before.get("is_deleted"):
+            return _public(before)
+        now = utcnow()
+        after = await self.col.find_one_and_update(
+            {"_id": before["_id"], "is_deleted": False},
+            {"$set": {"is_deleted": True, "deleted_by": actor_id, "deleted_at": now, "delete_reason": (reason or "Voided")[:200], "updated_at": now}},
+            return_document=ReturnDocument.AFTER, session=session,
+        )
+        if not after:
+            return _public(await self.col.find_one({"_id": before["_id"]}, session=session))
+        await AuditService(self.db).log_action(
+            actor_id, actor_role, "FINANCE_ENTRY_VOID", "finance", str(before["_id"]),
+            {"reason": reason, "before": _audit_view(before), "source": source, "source_id": source_id},
+            service_center_id=before.get("service_center_id"),
+        )
+        return _public(after)
+
     async def _get_live(self, entry_id: str) -> dict:
         if not ObjectId.is_valid(entry_id):
             raise NotFoundException("Entry not found")
@@ -190,6 +280,8 @@ class FinanceService:
 
     async def update(self, entry_id: str, payload: FinanceEntryUpdate, actor_id: str, actor_role: str) -> dict:
         before = await self._get_live(entry_id)
+        if before.get("locked"):
+            raise BadRequestException(locked_message(before))
         sent = payload.model_dump(exclude_unset=True)
         # Required fields can't be cleared; optional ones can (null).
         for key in ("title", "type", "amount_paise", "done_by"):
@@ -216,6 +308,8 @@ class FinanceService:
 
     async def void(self, entry_id: str, reason: str, actor_id: str, actor_role: str) -> dict:
         before = await self._get_live(entry_id)
+        if before.get("locked"):
+            raise BadRequestException(locked_message(before))
         now = utcnow()
         after = await self.col.find_one_and_update(
             {"_id": before["_id"], "is_deleted": False},
@@ -360,7 +454,16 @@ class FinanceService:
             "by_category": by_category,
             "series_unit": "day" if by_day else "month",
             "series": series_rows,
+            # "Owed To Franchise Partners" (D18): unsettled net per franchise center.
+            # Information only — never part of the totals or the balance above.
+            **await self._franchise_owed(),
         }
+
+    async def _franchise_owed(self) -> dict:
+        from app.services.franchise_service import FranchiseService
+
+        owed = await FranchiseService(self.db).owed_totals()
+        return {**owed, "franchise_payable": rupees(owed["franchise_payable_paise"]), "franchise_receivable": rupees(owed["franchise_receivable_paise"])}
 
     # ---------- export ----------
 
@@ -372,6 +475,7 @@ class FinanceService:
             [
                 d.get("entry_date"), d.get("type"), f"{(d.get('amount_paise') or 0) / 100:.2f}", d.get("title"), d.get("category"),
                 d.get("done_by"), d.get("description"), d.get("reference"), "Voided" if d.get("is_deleted") else "Active", d.get("delete_reason"),
+                d.get("source") or "Manual", d.get("service_center_id") or "",
             ]
             for d in docs
         ]
@@ -380,5 +484,5 @@ class FinanceService:
             {"rows": len(rows), "filters": {k: v for k, v in filters.items() if v}},
         )
         return build_csv(
-            ["Date", "Type", "Amount (INR)", "Name", "Category", "Done By", "Description", "Reference", "Status", "Void Reason"], rows,
+            ["Date", "Type", "Amount (INR)", "Name", "Category", "Done By", "Description", "Reference", "Status", "Void Reason", "Source", "Service Center"], rows,
         )

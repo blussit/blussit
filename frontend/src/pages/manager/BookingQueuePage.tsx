@@ -28,6 +28,7 @@ import type { SortOrder } from "../../lib/useBookingFilters";
 import { useLiveChannel } from "../../lib/socket";
 import type { ApiPaginated } from "../../lib/api-client";
 import type { Booking } from "../../types";
+import { CommissionFields, commissionError, commissionPayload, emptyCommissionDraft, useCenterPayCaptains, useCommissionEnabled, type CommissionDraft } from "../../components/payroll/CommissionFields";
 
 type View = "attention" | "late_starts" | "all";
 
@@ -206,6 +207,10 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const { push: pushToast } = useToast();
   const confirm = useConfirm();
   const [doneBooking, setDoneBooking] = useState<Booking | null>(null);
+  // Who washed it and their commission (optional) — defaults to the assigned captain.
+  const [doneCommission, setDoneCommission] = useState<CommissionDraft>(emptyCommissionDraft);
+  const commissionOn = useCommissionEnabled(!!doneBooking);
+  const doneCaptains = useCenterPayCaptains(!!doneBooking && commissionOn);
   const [doneWhatsApp, setDoneWhatsApp] = useState(true);
   // Add / edit the tip on a job the manager did (the visit's current tip alongside).
   const [tipFor, setTipFor] = useState<{ booking: Booking; tip: number; method: TipMethod } | null>(null);
@@ -505,7 +510,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const markDoneMutation = useMutation({
     // Closes the whole visit (the backend does that); the caller only needs
     // to know it worked.
-    mutationFn: () => bookingApi.markDone(doneBooking!.id, doneWhatsApp),
+    mutationFn: () => bookingApi.markDone(doneBooking!.id, doneWhatsApp, commissionOn ? commissionPayload(doneCommission, doneCaptains.data) : {}),
     onSuccess: (res) => {
       // The queue AND the dashboard tiles / KPIs (their keys share the
       // "center-bookings-" / "manager-kpi" prefixes) move with a done job.
@@ -549,6 +554,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   const openMarkDone = (b: Booking) => {
     setDoneBooking(b);
     setDoneWhatsApp(true);
+    setDoneCommission({ ...emptyCommissionDraft(), captainId: b.captain_id || "" });
     setError("");
   };
   // Every modal shares one `error` line — a failed mark-done must not
@@ -568,6 +574,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
       ? (doneGroup || [doneBooking]).filter((x) => x.status !== "cancelled")
       : [doneBooking]
     : [];
+  const doneBase = doneVisit.reduce((sum, x) => sum + Math.max(0, (x.subtotal || 0) - (x.discount_amount || 0)), 0);
   const doneDue = doneVisit.filter((x) => x.status !== "completed").reduce((sum, x) => sum + moneyOf(x as StaffBooking).due, 0);
   const doneUnpaid = doneDue > 0 || doneVisit.some((x) => x.status !== "completed" && x.payment_status !== "paid");
 
@@ -1083,7 +1090,7 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
             <p className="text-sm text-[var(--color-text-secondary)]">
               You did <span className="font-mono-num font-semibold text-[#0E1A33]">{doneVisit.map((x) => x.booking_number).join(" + ")}</span> yourself, so it closes right away — no photos needed.
               {doneBooking.booking_group_id && " Every vehicle on this visit is closed together."}
-              {doneBooking.captain_id && " The assigned captain is released and earns nothing for it."}
+              {doneBooking.captain_id ? " The assigned captain is released — keep them below if they should earn commission, or choose no captain." : " Choose a captain below if one washed it and should earn commission."}
             </p>
             {doneUnpaid && (
               <p className="rounded-xl bg-[#F7F9FC] p-3 text-xs text-gray-600">
@@ -1091,6 +1098,12 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
                 is recorded as <span className="font-semibold text-[#0E1A33]">cash you collected</span> — collect it before you close the job.
               </p>
             )}
+            <CommissionFields
+              value={doneCommission}
+              onChange={setDoneCommission}
+              baseRupees={doneBase}
+              vehicles={doneVisit.length}
+            />
             <Switch
               checked={doneWhatsApp}
               onChange={setDoneWhatsApp}
@@ -1102,7 +1115,16 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               <Button variant="outline" className="flex-1" onClick={closeDone}>
                 Back
               </Button>
-              <Button className="flex-1" isLoading={markDoneMutation.isPending} onClick={() => markDoneMutation.mutate()}>
+              <Button
+                className="flex-1"
+                isLoading={markDoneMutation.isPending}
+                disabled={commissionOn && !!commissionError(doneCommission, doneCaptains.data, doneBase)}
+                onClick={() => {
+                  const problem = commissionOn ? commissionError(doneCommission, doneCaptains.data, doneBase) : "";
+                  if (problem) return setError(problem);
+                  markDoneMutation.mutate();
+                }}
+              >
                 <ClipboardCheck className="h-4 w-4" /> Mark As Done
               </Button>
             </div>

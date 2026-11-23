@@ -48,6 +48,11 @@ _DEFAULT_SETTINGS = {
     # [{"date": "YYYY-MM-DD", "source": "instagram|facebook|organic|referral|offline|society|other",
     #   "campaign": str, "spend": float, "leads": int, "customers": int, "revenue": float}]
     "marketing_entries": [],
+    # Captain pay (§7.13): the most a booking's commission may be (percent of its value),
+    # a single payment that alerts the admins (paise), a commission that alerts them (percent).
+    "max_commission_percent": 70.0,
+    "payroll_alert_paise": 5_000_000,
+    "commission_alert_percent": 40.0,
 }
 
 _MARKETING_TEXT_FIELDS = ("date", "source", "campaign")
@@ -744,7 +749,14 @@ class KpiService:
                     "jobs": _count_if(completed),
                     "cancelled": _count_if({"$eq": ["$status", "cancelled"]}),
                     # The captain's own earnings, not the customer-paid gross.
-                    "earnings": _sum_if(completed, {"$ifNull": ["$captain_earning", 0]}),
+                    # Per-job earning for a legacy captain's jobs; a salary / commission
+                    # captain's job earns its commission (a salary is a finance expense —
+                    # §7.13 H22).
+                    "earnings": _sum_if(completed, {"$cond": [
+                        {"$eq": [{"$ifNull": ["$captain_pay_mode", "legacy"]}, "legacy"]},
+                        {"$ifNull": ["$captain_earning", 0]},
+                        {"$divide": [{"$ifNull": ["$commission_posted_paise", 0]}, 100]},
+                    ]}),
                     "started": _count_if(_truthy("$captain_start_stage")),
                     "on_time": _count_if({"$in": ["$captain_start_stage", ["early", "on_time"]]}),
                     "service_sum": _sum_if(has_service, "$actual_duration_minutes"),

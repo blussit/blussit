@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Pencil, Plus, Wallet, Ban } from "lucide-react";
+import { Download, Lock, Pencil, Plus, Wallet, Ban } from "lucide-react";
+import { adminServiceCenterApi } from "../../api/admin";
 import { financeApi, type FinanceEntry, type FinanceEntryInput, type FinanceType } from "../../api/finance";
 import { Badge, Button, Input, Modal, Panel, Select, StatCard } from "../../components/ui";
 import { Pager, SearchBox, useDebouncedValue } from "../../components/shared/ListControls";
@@ -8,6 +9,48 @@ import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
 import { getErrorMessage } from "../../lib/api-client";
 import { format as formatDate, todayIST } from "../../lib/date";
+
+/** Entries another module wrote (payroll, franchise) carry a source; hand-made ones don't. */
+// The server filters on the exact source value, so each franchise source is its own option.
+const SOURCE_FILTERS = [
+  { value: "payroll", label: "Salary & Pay" },
+  { value: "payroll_deposit", label: "Captain Deposits" },
+  { value: "franchise_settlement", label: "Franchise Settlements" },
+  { value: "franchise_fee", label: "Franchise Fees" },
+  { value: "franchise_kit_sale", label: "Kit Sales" },
+];
+const DEPOSIT_CATEGORY = "Captain Deposit";
+
+/** "Salary" / "Franchise" / "Deposit" — null for a hand-made entry. */
+function sourceLabel(e: Pick<FinanceEntry, "source" | "category">): string | null {
+  if (!e.source) return null;
+  if (e.category === DEPOSIT_CATEGORY || e.source === "payroll_deposit") return "Deposit";
+  if (e.source.startsWith("payroll")) return "Salary";
+  if (e.source.startsWith("franchise")) return "Franchise";
+  return e.source.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Where a locked entry is managed (shown as the tooltip on its disabled buttons). */
+const managedFrom = (e: Pick<FinanceEntry, "source">) => (e.source?.startsWith("franchise") ? "Managed from Franchise" : "Managed from Salary");
+
+function SourceTag({ entry }: { entry: FinanceEntry }) {
+  const label = sourceLabel(entry);
+  if (!label) return null;
+  return (
+    <span className="ml-2 inline-flex items-center gap-1 align-middle">
+      <Badge tone="info">{label}</Badge>
+      {entry.locked && (
+        <span title={managedFrom(entry)} aria-label={managedFrom(entry)} role="img" className="inline-flex">
+          <Lock className="h-3.5 w-3.5 text-[#5F6878]" aria-hidden />
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Deposits are money held for captains, not income — said wherever the category shows. */
+const LiabilityNote = ({ category }: { category: string | null | undefined }) =>
+  category === DEPOSIT_CATEGORY ? <span className="ml-1.5 whitespace-nowrap text-xs text-amber-700">Liability — refundable</span> : null;
 
 const rupees = (paise: number) => `${paise < 0 ? "-" : ""}₹${(Math.abs(paise) / 100).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: Math.abs(paise) % 100 ? 2 : 0 })}`;
 
@@ -50,7 +93,7 @@ function rangeOf(preset: Preset, custom: { from: string; to: string }): { from: 
   }
 }
 
-const SUGGESTED_FALLBACK = ["Salary", "Marketing", "Rent", "Product Purchase", "Product Sale", "Utilities", "Travel", "Other"];
+const SUGGESTED_FALLBACK = ["Salary", "Commission", "Petrol & Expenses", "Advance", "Captain Deposit", "Marketing", "Rent", "Product Purchase", "Product Sale", "Utilities", "Travel", "Other"];
 const TEXTAREA =
   "w-full rounded-[12px] border border-[var(--color-card-border)] bg-white px-3.5 py-2.5 text-sm text-[#0E1A33] placeholder:text-gray-400 transition-colors focus:border-black focus:outline-none";
 
@@ -123,11 +166,13 @@ export default function AdminFinancePage() {
   const [tFrom, setTFrom] = useState("");
   const [tTo, setTTo] = useState("");
   const [showVoided, setShowVoided] = useState(false);
+  const [centerId, setCenterId] = useState("");
+  const [source, setSource] = useState("");
   const [page, setPage] = useState(1);
   const q = useDebouncedValue(search, 350);
   const doneByQ = useDebouncedValue(doneBy, 350);
-  const filters = { type: typeFilter, category, from: tFrom, to: tTo, q, done_by: doneByQ, include_voided: showVoided };
-  useEffect(() => setPage(1), [typeFilter, category, tFrom, tTo, q, doneByQ, showVoided]);
+  const filters = { type: typeFilter, category, from: tFrom, to: tTo, q, done_by: doneByQ, include_voided: showVoided, service_center_id: centerId, source };
+  useEffect(() => setPage(1), [typeFilter, category, tFrom, tTo, q, doneByQ, showVoided, centerId, source]);
 
   const summary = useQuery({
     queryKey: ["finance-summary", range.from, range.to],
@@ -143,6 +188,7 @@ export default function AdminFinancePage() {
     ...LIVE,
   });
   const cats = useQuery({ queryKey: ["finance-categories"], queryFn: financeApi.categories, staleTime: 60_000 });
+  const centers = useQuery({ queryKey: ["admin-centers", "finance-filter"], queryFn: () => adminServiceCenterApi.list({ page: 1, page_size: 100 }), staleTime: 5 * 60_000 });
   const categoryOptions = cats.data?.all ?? SUGGESTED_FALLBACK;
   const s = summary.data;
 
@@ -286,6 +332,21 @@ export default function AdminFinancePage() {
         <StatCard label="Net For Period" value={money(s?.net_period_paise)} tone={s && s.net_period_paise < 0 ? "error" : "default"} hint="Bookings + plans + credits − debits" />
       </div>
 
+      {s && ((s.franchise_payable_paise ?? 0) > 0 || (s.franchise_receivable_paise ?? 0) > 0) && (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <StatCard
+            label="Owed To Franchise Partners"
+            value={money(s.franchise_payable_paise ?? 0)}
+            hint="Their share minus cash they hold — not in the totals above"
+            to="/admin/franchise"
+            linkLabel="Open Franchise"
+          />
+          {(s.franchise_receivable_paise ?? 0) > 0 && (
+            <StatCard label="Receivable From Franchise Partners" value={money(s.franchise_receivable_paise)} hint="Cash partners hold beyond their share" to="/admin/franchise" linkLabel="Open Franchise" />
+          )}
+        </div>
+      )}
+
       <Panel title="By Category" description="Credits and debits in the chosen period">
         {!s || s.by_category.length === 0 ? (
           <p className="text-sm text-[var(--color-text-secondary)]">No entries in this period.</p>
@@ -294,7 +355,7 @@ export default function AdminFinancePage() {
             {s.by_category.map((c) => (
               <li key={c.category}>
                 <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-sm">
-                  <span className="font-medium text-[#0E1A33]">{c.category}</span>
+                  <span className="font-medium text-[#0E1A33]">{c.category}<LiabilityNote category={c.category} /></span>
                   <span className="font-mono-num text-xs text-[var(--color-text-secondary)]">
                     {c.credit_paise > 0 && <>Credit {rupees(c.credit_paise)}</>}
                     {c.credit_paise > 0 && c.debit_paise > 0 && " · "}
@@ -349,7 +410,18 @@ export default function AdminFinancePage() {
             placeholder="Done By"
             className="h-10 min-w-0 rounded-xl border border-[var(--color-card-border)] bg-white px-3 text-sm focus:border-black focus:outline-none"
           />
-          <div />
+          <Select compact aria-label="Service Center" value={centerId} onChange={(e) => setCenterId(e.target.value)}>
+            <option value="">All Centers</option>
+            {(centers.data?.data ?? []).map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </Select>
+          <Select compact aria-label="Source" value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="">All Sources</option>
+            {SOURCE_FILTERS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </Select>
           <Input label="From" type="date" value={tFrom} max={todayIST()} onChange={(e) => setTFrom(e.target.value)} />
           <Input label="To" type="date" value={tTo} max={todayIST()} onChange={(e) => setTTo(e.target.value)} />
           {(tFrom || tTo) && (
@@ -382,12 +454,12 @@ export default function AdminFinancePage() {
                     <tr key={e.id} className={`border-b border-[var(--color-card-border)] align-top last:border-0 hover:bg-[#FFFCF0] ${e.is_deleted ? "bg-gray-50 text-gray-400" : ""}`}>
                       <td className="whitespace-nowrap px-3 py-3">{formatDate(e.entry_date)}</td>
                       <td className="px-3 py-3">
-                        <p className={`font-semibold ${e.is_deleted ? "line-through" : "text-[#0E1A33]"}`}>{e.title}</p>
+                        <p className={`font-semibold ${e.is_deleted ? "line-through" : "text-[#0E1A33]"}`}>{e.title}<SourceTag entry={e} /></p>
                         {e.description && <p className="max-w-[340px] text-xs text-[#5F6878]">{e.description}</p>}
-                        {e.reference && <p className="text-xs text-[#5F6878]">Ref: {e.reference}</p>}
+                        {e.reference && !e.locked && <p className="text-xs text-[#5F6878]">Ref: {e.reference}</p>}
                         {e.is_deleted && <p className="text-xs text-[var(--color-error)]">Voided: {e.delete_reason}</p>}
                       </td>
-                      <td className="px-3 py-3">{e.category || "—"}</td>
+                      <td className="px-3 py-3">{e.category || "—"}<LiabilityNote category={e.category} /></td>
                       <td className="px-3 py-3">{e.done_by}</td>
                       <td className={`font-mono-num whitespace-nowrap px-3 py-3 text-right font-semibold ${e.is_deleted ? "line-through" : e.type === "credit" ? "text-[var(--color-success)]" : "text-[#0E1A33]"}`}>
                         {SIGN[e.type]} {rupees(e.amount_paise)}
@@ -397,8 +469,12 @@ export default function AdminFinancePage() {
                           <Badge tone="neutral">Voided</Badge>
                         ) : (
                           <div className="flex justify-end gap-2">
-                            <Button size="sm" variant="ghost" aria-label={`Edit ${e.title}`} title="Edit" onClick={() => openEdit(e)}><Pencil className="h-3.5 w-3.5" /></Button>
-                            <Button size="sm" variant="outline" onClick={() => { setVoiding(e); setReason(""); setVoidError(""); }}><Ban className="h-3.5 w-3.5" /> Void</Button>
+                            <span title={e.locked ? managedFrom(e) : undefined}>
+                              <Button size="sm" variant="ghost" aria-label={`Edit ${e.title}`} title={e.locked ? managedFrom(e) : "Edit"} disabled={e.locked} onClick={() => openEdit(e)}><Pencil className="h-3.5 w-3.5" /></Button>
+                            </span>
+                            <span title={e.locked ? managedFrom(e) : undefined}>
+                              <Button size="sm" variant="outline" aria-label={e.locked ? `Void ${e.title} (${managedFrom(e)})` : undefined} disabled={e.locked} onClick={() => { setVoiding(e); setReason(""); setVoidError(""); }}><Ban className="h-3.5 w-3.5" /> Void</Button>
+                            </span>
                           </div>
                         )}
                       </td>
@@ -412,22 +488,23 @@ export default function AdminFinancePage() {
               {entries.map((e) => (
                 <li key={e.id} className={`rounded-xl border border-[var(--color-card-border)] p-3 ${e.is_deleted ? "bg-gray-50 text-gray-400" : ""}`}>
                   <div className="flex items-start justify-between gap-3">
-                    <p className={`min-w-0 break-words font-semibold ${e.is_deleted ? "line-through" : "text-[#0E1A33]"}`}>{e.title}</p>
+                    <p className={`min-w-0 break-words font-semibold ${e.is_deleted ? "line-through" : "text-[#0E1A33]"}`}>{e.title}<SourceTag entry={e} /></p>
                     <p className={`font-mono-num shrink-0 font-semibold ${e.is_deleted ? "line-through" : e.type === "credit" ? "text-[var(--color-success)]" : "text-[#0E1A33]"}`}>
                       {SIGN[e.type]} {rupees(e.amount_paise)}
                     </p>
                   </div>
                   <p className="mt-1 text-xs text-[#5F6878]">
-                    {formatDate(e.entry_date)} · {e.category || "No Category"} · {e.done_by}
+                    {formatDate(e.entry_date)} · {e.category || "No Category"}<LiabilityNote category={e.category} /> · {e.done_by}
                   </p>
                   {e.description && <p className="mt-1 break-words text-xs text-[#5F6878]">{e.description}</p>}
-                  {e.reference && <p className="text-xs text-[#5F6878]">Ref: {e.reference}</p>}
+                  {e.reference && !e.locked && <p className="text-xs text-[#5F6878]">Ref: {e.reference}</p>}
                   {e.is_deleted ? (
                     <p className="mt-2 text-xs text-[var(--color-error)]"><Badge tone="neutral">Voided</Badge> {e.delete_reason}</p>
                   ) : (
-                    <div className="mt-2 flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => openEdit(e)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>
-                      <Button size="sm" variant="outline" onClick={() => { setVoiding(e); setReason(""); setVoidError(""); }}><Ban className="h-3.5 w-3.5" /> Void</Button>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Button size="sm" variant="outline" disabled={e.locked} title={e.locked ? managedFrom(e) : undefined} onClick={() => openEdit(e)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>
+                      <Button size="sm" variant="outline" disabled={e.locked} title={e.locked ? managedFrom(e) : undefined} onClick={() => { setVoiding(e); setReason(""); setVoidError(""); }}><Ban className="h-3.5 w-3.5" /> Void</Button>
+                      {e.locked && <span className="text-xs text-[#5F6878]">{managedFrom(e)}</span>}
                     </div>
                   )}
                 </li>

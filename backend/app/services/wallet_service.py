@@ -170,6 +170,13 @@ class WalletService:
         return await self._atomic_balance_change(captain_id, amount, WalletTransactionType.ADJUSTMENT.value, None, description)
 
     async def request_withdrawal(self, captain_id: str, amount: float) -> dict:
+        # §7.13 D2: a salary / commission captain is paid from the Salary page (their
+        # per-job wallet earning is off), so there is nothing to withdraw here.
+        from app.services import payroll_terms as pt
+
+        user = await self.db.users.find_one({"_id": ObjectId(captain_id)}, {"pay": 1}) if ObjectId.is_valid(captain_id or "") else None
+        if pt.is_payroll(user):
+            raise BadRequestException("Your pay is managed from the Salary page — ask your manager. Withdrawals are only for per-job wallet earnings.")
         wallet = await self.get_or_create_wallet(captain_id)
         if amount > wallet["balance"]:
             raise BadRequestException(

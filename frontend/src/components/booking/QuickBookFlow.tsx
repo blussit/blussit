@@ -52,6 +52,7 @@ import { validateIndianMobile, cleanMobileInput } from "../../lib/validators";
 import { addonKit, baseGroups, bikeTypeIds, eligibleFor, offeredAddons, variantCount, type BaseGroup } from "../../lib/serviceMix";
 import { INR, parseIncludes, priceForType, priceView, titleCase } from "../public/landing/shared";
 import { subscriptionApi } from "../../api/engagement";
+import { CommissionFields, commissionError, commissionPayload, emptyCommissionDraft, useCenterPayCaptains, useCommissionEnabled, type CommissionDraft } from "../payroll/CommissionFields";
 import type { WalletQuoteLines, WalletResultLines } from "../customer/money";
 import type { Address, Service, TravelQuote, UserSubscription, VehicleTypeOption } from "../../types";
 
@@ -308,6 +309,10 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
   const [forceOtp, setForceOtp] = useState(false);
   // manager-log only: the clock time of the job, and the WhatsApp switch.
   const [logTime, setLogTime] = useState("");
+  // Log mode: who washed it and their commission (optional).
+  const [commission, setCommission] = useState<CommissionDraft>(emptyCommissionDraft);
+  const commissionOn = useCommissionEnabled(isLog);
+  const payCaptains = useCenterPayCaptains(isLog && commissionOn);
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const [discount, setDiscount] = useState("");
   // Log mode: the tip the customer gave — added to the job's total and revenue.
@@ -1344,6 +1349,11 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
 
   const submitLog = async () => {
     setError("");
+    const commissionProblem = commissionOn ? commissionError(commission, payCaptains.data, afterDiscount) : "";
+    if (commissionProblem) {
+      setError(commissionProblem);
+      return;
+    }
     setSubmitting(true);
     try {
       const logPayload: ManagerLogPayload & { tip_method?: TipMethod } = {
@@ -1374,6 +1384,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
         tip_amount: tipNum || undefined,
         tip_method: tipNum > 0 ? tipMethod : undefined,
         send_whatsapp: sendWhatsApp,
+        ...(commissionOn ? commissionPayload(commission, payCaptains.data) : {}),
       };
       const result = await bookingApi.managerLogCompleted(logPayload);
       try {
@@ -1674,7 +1685,7 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
             Continue
           </button>
         ) : (
-          <button type="button" className={MGR_CTA} disabled={!step2Ready || submitting || !priceConfirmed} aria-busy={submitting} onClick={() => void submit()}>
+          <button type="button" className={MGR_CTA} disabled={!step2Ready || submitting || !priceConfirmed || (isLog && commissionOn && !!commissionError(commission, payCaptains.data, afterDiscount))} aria-busy={submitting} onClick={() => void submit()}>
             {submitting && <Spinner className="h-4 w-4" />}
             {isLog ? "Save As Done" : !isManager && amountToPay > 0 && payMethod === "online" ? "Book And Pay" : "Book Now"}
           </button>
@@ -2629,6 +2640,8 @@ export function QuickBookFlow({ mode, layout }: { mode: Mode; layout?: "page" | 
                   )}
 
                   <Input label="Note (Optional)" maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} />
+
+                  <CommissionFields value={commission} onChange={setCommission} baseRupees={afterDiscount} vehicles={Math.max(1, lines.length)} />
 
                   <Switch checked={sendWhatsApp} onChange={setSendWhatsApp} label="Tell The Customer On WhatsApp" description="One message saying the service is done." />
                 </div>

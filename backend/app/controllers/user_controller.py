@@ -51,27 +51,28 @@ class UserController:
         await self.audit.log_action(current_user.id, current_user.role, "UPDATE_USER", "users", user_id, {"changes": changes})
         return success(result, "User updated successfully")
 
-    async def deactivate_user(self, current_user: CurrentUser, user_id: str):
+    async def deactivate_user(self, current_user: CurrentUser, user_id: str, override_reason: str | None = None):
         if user_id == current_user.id:
             raise BadRequestException("You can't suspend your own account.")
         await self.service.ensure_not_last_admin(user_id)
         before = await self.service.repo.find_by_id(user_id)
-        result = await self.service.deactivate_user(user_id)
+        result = await self.service.deactivate_user(user_id, override_reason)
         await self.audit.log_action(
             current_user.id, current_user.role, "SUSPEND_USER", "users", user_id,
-            {"changes": field_changes(before, result, ["status"])},
+            {"changes": field_changes(before, result, ["status"]), **({"override_reason": override_reason} if override_reason else {})},
         )
         return success(result, "User suspended successfully")
 
-    async def delete_user(self, current_user: CurrentUser, user_id: str):
+    async def delete_user(self, current_user: CurrentUser, user_id: str, override_reason: str | None = None):
         if user_id == current_user.id:
             raise BadRequestException("You can't delete your own account.")
         await self.service.ensure_not_last_admin(user_id)
         before = await self.service.repo.find_by_id(user_id)
         # 404 for an unknown / malformed id (it used to answer "deleted").
-        await self.service.delete_user(user_id)
+        await self.service.delete_user(user_id, override_reason)
         await self.audit.log_action(
             current_user.id, current_user.role, "DELETE_USER", "users", user_id,
-            {k: (before or {}).get(k) for k in ("full_name", "role", "phone", "email", "service_center_id")},
+            {**{k: (before or {}).get(k) for k in ("full_name", "role", "phone", "email", "service_center_id")},
+             **({"pay_override_reason": override_reason} if override_reason else {})},
         )
         return success(None, "User deleted successfully")

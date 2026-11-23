@@ -4,6 +4,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import UserRole, UserStatus
+from app.schemas.payroll_schema import PayTermsCreate
 from app.utils.timezone import from_stored
 
 
@@ -110,6 +111,9 @@ class StaffCreateRequest(BaseModel):
     # Profile picture, uploaded ahead via POST /uploads/photo — for captains
     # this is what customers see on their booking's "Your captain" card.
     photo_url: Optional[str] = Field(default=None, max_length=500)
+    # A captain's pay terms (salary or commission, deposit, kit) — §7.13 D1.
+    # The manager/admin forms must send it; gaps are filled from the center's default.
+    pay: Optional[PayTermsCreate] = None
 
     @field_validator("email")
     @classmethod
@@ -195,6 +199,17 @@ def _verification_stale(doc: dict) -> bool:
     return _dt.now(_tz.utc) - at > _td(days=90)
 
 
+def _pay_public(doc: dict) -> dict:
+    """A captain's pay terms as the staff / own-profile shape: the terms in force
+    today, no history or audit fields."""
+    from app.services import payroll_terms as pt
+
+    pay = pt.pay_view(doc) if doc.get("pay") else pt.blank_pay("legacy")
+    out = {k: v for k, v in pay.items() if k not in ("pay_history", "updated_by", "updated_at", "effective_from")}
+    out["start_date"] = pt.start_day(doc)
+    return out
+
+
 class UserPublic(BaseModel):
     id: str
     full_name: str
@@ -222,6 +237,9 @@ class UserPublic(BaseModel):
     # Managers: "WhatsApp me new bookings" (on unless switched off — see
     # PUT /notifications/preferences). In-app alerts are unaffected.
     whatsapp_new_booking_alerts: bool = True
+    # Captains only (§7.13): their pay terms — never present for a customer, a
+    # manager or an admin, and never copied onto a booking or a public profile.
+    pay: Optional[dict] = None
     # Optional: an account written by a script or an old import may lack it,
     # and /auth/me answering a 500 for that is worse than a null date.
     created_at: Optional[datetime] = None
@@ -244,6 +262,7 @@ class UserPublic(BaseModel):
             phone_self_verified=bool(doc.get("phone") and doc.get("phone_verified") and doc.get("self_verified_phone") == doc.get("phone")),
             marketing_opt_out=bool(doc.get("marketing_opt_out", False)),
             whatsapp_new_booking_alerts=doc.get("whatsapp_new_booking_alerts") is not False,
+            pay=_pay_public(doc) if doc.get("role") == "captain" else None,
             # created_at is a computed timestamp (aware at write time) — Mongo
             # hands it back naive-holding-UTC-digits, so it must go through
             # from_stored() here too. This bypasses serialize_doc entirely

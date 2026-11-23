@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   BadgeCheck,
+  Banknote,
   Briefcase,
   CalendarCheck,
   Camera,
@@ -21,12 +22,16 @@ import {
   UserRound,
   UserX,
 } from "lucide-react";
-import { adminUserApi, staffDirectoryApi } from "../../api/admin";
+import { staffDirectoryApi } from "../../api/admin";
 import { leaveApi } from "../../api/staffOps";
 import { bookingApi } from "../../api/booking";
 import { kycApi } from "../../api/staffOps";
 import { reviewApi } from "../../api/engagement";
 import { uploadApi } from "../../api/upload";
+import { payrollApi } from "../../api/payroll";
+import { PayFields, emptyPayDraft, payDraftError, payDraftToPayload, type PayDraft } from "../../components/payroll/PayFields";
+import { CaptainSalaryGlance } from "../../components/payroll/CaptainSalaryGlance";
+import { useDefaultCaptainPay } from "../../components/payroll/useDefaultCaptainPay";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, PageLoader, StatusBadge } from "../../components/ui";
 import { LiveCaptainMap } from "../../components/manager/LiveCaptainMap";
 import { StaffResetPasswordDialog } from "../../components/shared/StaffResetPasswordDialog";
@@ -58,6 +63,7 @@ const DETAIL_TABS = [
   { key: "overview", label: "Overview", icon: UserRound },
   { key: "kyc", label: "Verification", icon: BadgeCheck },
   { key: "attendance", label: "Attendance", icon: CalendarCheck },
+  { key: "salary", label: "Salary", icon: Banknote },
   { key: "jobs", label: "Jobs & Reviews", icon: ClipboardList },
 ] as const;
 type DetailTab = (typeof DETAIL_TABS)[number]["key"];
@@ -99,6 +105,8 @@ export default function ManagerCaptainsPage() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
+  const [pay, setPay] = useState<PayDraft>(() => emptyPayDraft());
+  const [payPrefilled, setPayPrefilled] = useState(false);
   const [error, setError] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -219,21 +227,37 @@ export default function ManagerCaptainsPage() {
     onError: (err) => setKycError(getErrorMessage(err)),
   });
 
+  // The center's suggested pay, when it has one — a prefill, never forced.
+  const { defaultPay } = useDefaultCaptainPay(centerId, open);
+  useEffect(() => {
+    if (!open || payPrefilled || !defaultPay) return;
+    setPay(emptyPayDraft(defaultPay));
+    setPayPrefilled(true);
+  }, [open, payPrefilled, defaultPay]);
+  const openAdd = () => {
+    setPay(emptyPayDraft(defaultPay));
+    setPayPrefilled(!!defaultPay);
+    setError("");
+    setOpen(true);
+  };
+
   const createMutation = useMutation({
     mutationFn: () =>
-      adminUserApi.createStaff({
+      payrollApi.createCaptain({
         full_name: form.full_name,
         email: form.email.trim().toLowerCase() || undefined,
         phone: validateIndianMobile(form.phone) || form.phone,
         password: form.password,
-        role: "captain",
         photo_url: form.photo_url || undefined,
+        pay: payDraftToPayload(pay),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["center-captains-page"] });
       queryClient.invalidateQueries({ queryKey: ["center-captains-list"] });
+      queryClient.invalidateQueries({ queryKey: ["payroll-captains"] });
       setOpen(false);
       setForm(emptyForm);
+      setPay(emptyPayDraft());
       setError("");
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -276,7 +300,7 @@ export default function ManagerCaptainsPage() {
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Captains</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">Your service center's field team.</p>
         </div>
-        <Button onClick={() => setOpen(true)}>
+        <Button onClick={openAdd}>
           <Plus className="h-4 w-4" /> Add Captain
         </Button>
       </div>
@@ -313,7 +337,7 @@ export default function ManagerCaptainsPage() {
       ) : isError && !data ? (
         <ErrorState message="Couldn't load your captains." busy={isFetching} onRetry={() => void refetch()} />
       ) : !captains.length ? (
-        <EmptyState icon={UserRound} title="No Captains Assigned Yet" action={<Button onClick={() => setOpen(true)}>Add Captain</Button>} />
+        <EmptyState icon={UserRound} title="No Captains Assigned Yet" action={<Button onClick={openAdd}>Add Captain</Button>} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {captains.map((c, i) => {
@@ -406,6 +430,8 @@ export default function ManagerCaptainsPage() {
             if (!validateIndianMobile(form.phone)) return setError("Enter a valid 10-digit mobile number.");
             if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) return setError("Enter a valid email or leave it blank.");
             if (form.password.length < 8) return setError("The password needs at least 8 characters.");
+            const payError = payDraftError(pay);
+            if (payError) return setError(payError);
             createMutation.mutate();
           }}
         >
@@ -477,7 +503,8 @@ export default function ManagerCaptainsPage() {
               Generate
             </Button>
           </div>
-          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+          <PayFields value={pay} onChange={setPay} prefilled={payPrefilled} />
+          {error && <p role="alert" className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" disabled={photoUploading || form.password.length < 8 || form.phone.trim().length < 10} isLoading={createMutation.isPending}>
             Add Captain
           </Button>
@@ -688,6 +715,8 @@ export default function ManagerCaptainsPage() {
                   )}
                 </div>
               )}
+
+              {detailTab === "salary" && <CaptainSalaryGlance captainId={live.id} base="/manager/salary" />}
 
               {detailTab === "jobs" && (
                 <div>

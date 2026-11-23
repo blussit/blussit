@@ -238,10 +238,24 @@ class UserService:
             raise NotFoundException("User not found")
         return UserPublic.from_doc(updated).model_dump()
 
-    async def deactivate_user(self, user_id: str) -> dict:
+    async def _pay_exit_blockers(self, user: dict, override_reason: str | None, session=None) -> list[str]:
+        """§7.13 D15: a captain can't leave (suspend / delete) with pay owed either
+        way, a deposit held or a kit out — unless an admin overrides with a reason."""
+        if user.get("role") != "captain" or (override_reason or "").strip():
+            return []
+        from app.services.payroll_service import PayrollService
+
+        return await PayrollService(self.db).exit_blockers(user, session=session)
+
+    async def deactivate_user(self, user_id: str, override_reason: str | None = None) -> dict:
         user = await self.repo.find_by_id(user_id)
         if not user:
             raise NotFoundException("User not found")
+        pay_blockers = await self._pay_exit_blockers(user, override_reason)
+        if pay_blockers:
+            raise BadRequestException(
+                "This captain still has " + "; ".join(pay_blockers) + ". Settle it, or suspend with an override reason."
+            )
         # Every refresh token dies now; a later reactivation needs a fresh login.
         # Admin-only route — recorded so a manager can't lift it. A captain
         # mid-job (or merely assigned) is refused until his jobs are
@@ -253,7 +267,7 @@ class UserService:
             raise NotFoundException("User not found")
         return UserPublic.from_doc(updated).model_dump()
 
-    async def _delete_blockers(self, user: dict, session=None) -> list[str]:
+    async def _delete_blockers(self, user: dict, session=None, pay_override: str | None = None) -> list[str]:
         """Everything that makes a hard delete unsafe (ADM-03): money the
         account holds or owes, and live obligations other records point at.
         Deleting through any of these orphaned a wallet balance, a paid
@@ -279,6 +293,7 @@ class UserService:
             _jobs, societies = await self._captain_live_work(uid, session=session)
             if societies:
                 reasons.append("the society captain slot for " + ", ".join(s.get("name") or str(s["_id"]) for s in societies))
+            reasons.extend(await self._pay_exit_blockers(user, pay_override, session=session))
         now = datetime.now(timezone.utc)
         passes = await self.db.user_subscriptions.count_documents(
             {
@@ -308,7 +323,7 @@ class UserService:
             reasons.append("the manager slot of " + ", ".join(c.get("name") or str(c["_id"]) for c in centers) + " — link another manager there")
         return reasons
 
-    async def delete_user(self, user_id: str) -> bool:
+    async def delete_user(self, user_id: str, override_reason: str | None = None) -> bool:
         """PERMANENTLY removes the account's row from the database — a real
         delete, not the soft is_deleted flag most other records use. An
         admin clicking Delete on a person's account means gone, not merely
@@ -349,7 +364,7 @@ class UserService:
                     upsert=True, session=session,
                 )
             result = await self.db.users.delete_one({"_id": user["_id"]}, session=session)
-            reasons = await self._delete_blockers(user, session=session)
+            reasons = await self._delete_blockers(user, session=session, pay_override=override_reason)
             if reasons:
                 raise BadRequestException(
                     "This account can't be deleted — it still has " + "; ".join(reasons)

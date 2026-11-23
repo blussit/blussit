@@ -36,6 +36,7 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import RegisterRequest, StaffCreateRequest, UserPublic
 from app.services.sms_service import SmsService
 from app.services.whatsapp_service import WhatsAppService
+from app.utils.timezone import now_ist
 from app.utils.phone import BUSINESS_NUMBER_MESSAGE, is_business_whatsapp_number, validate_indian_mobile
 from pymongo import ReturnDocument
 
@@ -264,7 +265,12 @@ class AuthService:
             raise ConflictException("An account with this email or phone number already exists")
         return self._issue_tokens(created)
 
-    async def create_staff_account(self, payload: StaffCreateRequest, created_by: str, creator_role: str = "admin") -> dict:
+    async def create_staff_account(
+        self, payload: StaffCreateRequest, created_by: str, creator_role: str = "admin", require_pay: bool = False,
+    ) -> dict:
+        """`require_pay`: the HTTP route asks that a new captain's pay basis is
+        chosen (or comes from the center's default). Other callers may omit it —
+        the captain then starts on the legacy per-job wallet pay (§7.13 D1)."""
         if payload.role == UserRole.CUSTOMER:
             raise BadRequestException("Use the public registration endpoint for customers")
         if creator_role == "manager" and payload.role != UserRole.CAPTAIN:
@@ -301,6 +307,8 @@ class AuthService:
             # captain_profile falls back to (kyc.photo_url or profile_image).
             user_doc["profile_image"] = payload.photo_url
         if payload.role == UserRole.CAPTAIN:
+            # Validated before the employee id is taken (a refusal burns no number).
+            user_doc["pay"] = await self._new_captain_pay(payload, require_pay)
             user_doc["employee_id"] = await next_captain_employee_id(self.db)
         try:
             created = await self.users.create(user_doc)
@@ -308,6 +316,20 @@ class AuthService:
             # Same check-then-act race as register_customer — see there.
             raise ConflictException("An account with this email or phone number already exists")
         return UserPublic.from_doc(created).model_dump()
+
+    async def _new_captain_pay(self, payload: StaffCreateRequest, require_pay: bool) -> dict:
+        from app.services import payroll_terms as pt
+        from app.services.payroll_service import PayrollService
+
+        try:
+            return await PayrollService(self.db).build_new_captain_pay(payload.service_center_id, payload.pay)
+        except BadRequestException:
+            if require_pay or payload.pay is not None:
+                raise
+            legacy = pt.blank_pay("legacy")
+            day = now_ist().date().isoformat()
+            legacy.update({"start_date": day, "end_date": None, "effective_from": day, "pay_history": []})
+            return legacy
 
     async def _ensure_live_center(self, center_id: str) -> None:
         """A staff account may only be attached to a center that exists and

@@ -68,7 +68,8 @@ async def test_staff_creation_is_audited_and_center_validated(db, cleanup):
 
         # A manager creates captains in their own center only — audited too.
         r = await c.post("/api/v1/auth/staff", headers=_auth(manager, "manager", A["id"]),
-                         json={**base, "role": "captain", "phone": "9766600004", "service_center_id": off})
+                         json={**base, "role": "captain", "phone": "9766600004", "service_center_id": off,
+                               "pay": {"basis": "commission", "commission": {"mode": "percent", "percent": 30}}})
         assert r.status_code == 200, r.text
         cap = await db.users.find_one({"_id": ObjectId(r.json()["data"]["id"])})
         assert cap["service_center_id"] == A["id"]

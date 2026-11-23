@@ -1049,6 +1049,17 @@ class PaymentService:
             await self._alert_attention(doc)
         return added
 
+    async def _resync_pay(self, booking_ids) -> None:
+        """A refund (or its undoing) changes what a completed job is worth:
+        re-run the captain commission and the franchise share for it. Best
+        effort — a failure is logged and the next booking change corrects it."""
+        try:
+            from app.services.payroll_hooks import after_bookings_money_change
+
+            await after_bookings_money_change(self.db, [str(i) for i in booking_ids if i])
+        except Exception:  # noqa: BLE001
+            logger.exception("Pay re-sync after a refund change failed for %s", booking_ids)
+
     async def _mark_refund_due(self, booking_id: str) -> None:
         """The booking itself says the money is owed back — a cancelled (or
         recycle-binned) booking left "paid" read as money kept. Raw
@@ -1058,6 +1069,7 @@ class PaymentService:
                 {"_id": ObjectId(booking_id), "payment_status": PaymentStatus.PAID.value},
                 {"$set": {"payment_status": REFUND_DUE, "refund_due_at": now_ist(), "updated_at": now_ist()}},
             )
+            await self._resync_pay([booking_id])
 
     async def clear_refund_due(self, booking_ids: list[str], note: str) -> int:
         """For a booking that comes back to life (restored from the recycle
@@ -1080,6 +1092,8 @@ class PaymentService:
                     {"$set": {"payment_status": PaymentStatus.PAID.value, "updated_at": now_ist()}, "$unset": {"refund_due_at": ""}},
                 )
                 restored += result.modified_count
+                if result.modified_count:
+                    await self._resync_pay([booking_id])
         return restored
 
     # -- Auto-pay: Razorpay Subscriptions --------------------------------
@@ -2970,6 +2984,7 @@ class PaymentService:
                     "refunded_amount": round(float(car.get("total_amount") or 0), 2), "updated_at": now,
                 }},
             )
+            await self._resync_pay([car["_id"]])
             # "Refund Due" -> "Refunded" on the booking page, the customer's
             # list and the center's / admin's money views.
             await ws_manager.notify_changed(

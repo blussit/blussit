@@ -56,6 +56,7 @@ from app.services.customer_charge_service import CustomerChargeService, late_can
 from app.services.geo_integrity_service import STEPS as GEO_STEPS, Fix, GeoIntegrityService
 from app.services.holiday_service import HolidayException, HolidayService, overlaps as holiday_overlaps
 from app.services.money_service import MoneyService
+from app.services.payroll_hooks import after_booking_money_change, after_bookings_money_change
 from app.services.notification_service import NotificationService
 from app.services.pricing_service import PricingService
 from app.services.profile_service import AddressService, VehicleService, address_snapshot
@@ -428,6 +429,12 @@ def format_slot_start_12h(scheduled_slot: str) -> str:
 # this only in the frontend still leaks it to anyone opening devtools/the
 # network tab, so it's stripped from the actual API response here, not just
 # left unrendered client-side.
+_COMMISSION_FIELDS = (
+    "commission_captain_id", "commission_base_paise", "commission_paid_target_paise", "commission_posted_paise", "commission_rev",
+    "commission_rate_snapshot", "commission_mode_snapshot", "commission_override_paise", "commission_override_percent",
+    "commission_override_reason", "commission_override_by", "commission_override_at", "commission_state",
+    "captain_pay_mode", "captain_pay_mode_for",
+)
 _CUSTOMER_HIDDEN_FIELDS = (
     "captain_earning", "platform_earning", "captain_travel_pay", "captain_service_pay", "wallet_settled",
     "wallet_settled_as", "captain_start_stage", "late_penalty_pct", "late_penalty_amount",
@@ -452,6 +459,11 @@ _CUSTOMER_HIDDEN_FIELDS = (
     "admin_edited_at", "admin_edited_by", "payment_adjustments", "version",
     # The payment rows carry internal keys and who recorded each one.
     "payments", "payment_keys", "cash_collected_by",
+    # Franchise partner share (FranchiseService): between Blussit and the partner.
+    "franchise_share_percent", "franchise_share_paise", "franchise_posted_paise", "franchise_rev", "franchise_base_paise", "franchise_center_id",
+    # Captain commission (PayrollService, §7.13): a captain's pay is between him and the
+    # Salary page (/payroll/me) — managers and admins read these on the booking.
+    *_COMMISSION_FIELDS,
 )
 _CAPTAIN_HIDDEN_FIELDS = (
     "platform_earning", "bill",
@@ -462,6 +474,11 @@ _CAPTAIN_HIDDEN_FIELDS = (
     # between the center and the customer — the captain never sees it. The
     # customer's own view keeps it (it's their money).
     "manager_paybacks", "paid_back_total",
+    # Franchise partner share (FranchiseService): between Blussit and the partner.
+    "franchise_share_percent", "franchise_share_paise", "franchise_posted_paise", "franchise_rev", "franchise_base_paise", "franchise_center_id",
+    # Captain commission (PayrollService, §7.13): a captain's pay is between him and the
+    # Salary page (/payroll/me) — managers and admins read these on the booking.
+    *_COMMISSION_FIELDS,
 )
 
 
@@ -2411,6 +2428,12 @@ class BookingService:
         center = await self.center_repo.find_by_id(manager_center_id)
         if not center:
             raise NotFoundException("Service center not found")
+        # Who washed it and what they earn (§7.13 D17) — checked before anything is written.
+        from app.services.payroll_service import PayrollService
+
+        commission_spec = await PayrollService(self.db).validate_done_job_commission(
+            manager_center_id, payload.captain_id, payload.commission_amount_paise,
+        )
 
         # -- when: a clock time in the past, filed under the slot holding it --
         try:
@@ -2452,7 +2475,7 @@ class BookingService:
                 {"_id": 1},
             ):
                 raise BadRequestException("This job is already logged for that customer at that time — check the booking queue.")
-            return await self._log_visit_for(customer_id, payload, center, service_at, slot, manager_id)
+            return await self._log_visit_for(customer_id, payload, center, service_at, slot, manager_id, commission_spec)
         finally:
             await self.db.booking_locks.delete_one({"_id": lock_id})
 
@@ -2474,7 +2497,8 @@ class BookingService:
             return taken is not None
 
     async def _log_visit_for(
-        self, customer_id: str, payload: ManagerLogBookingRequest, center: dict, service_at: datetime, slot: dict, manager_id: str
+        self, customer_id: str, payload: ManagerLogBookingRequest, center: dict, service_at: datetime, slot: dict, manager_id: str,
+        commission_spec: dict | None = None,
     ) -> dict:
         """create_manager_logged_visit's write half, run while it holds the
         (customer, minute) claim."""
@@ -2553,6 +2577,13 @@ class BookingService:
                 offset += int(booking.get("duration_minutes") or 60)
             if payload.discount_amount > 0:
                 created = await self._apply_logged_discount(created, payload.discount_amount, manager_id)
+            if commission_spec:
+                # The commission can't exceed its cap on the FINAL bill — refused here, with the job unwound.
+                from app.services.payroll_service import PayrollService
+
+                PayrollService(self.db).done_job_fields(
+                    commission_spec, [c for c in [await self.repo.find_by_id(b["id"]) for b in created] if c],
+                )
         except Exception:
             # All-or-nothing, like a real visit: nothing was announced, so
             # the half-logged cars are simply removed (and any pass value
@@ -2563,6 +2594,12 @@ class BookingService:
 
         if payload.tip_amount > 0:
             await self._record_tip(created[0]["id"], [b["id"] for b in created], payload.tip_amount, manager_id, payload.tip_method)
+        # Commission for the named captain, then the franchise share — each car, its own transaction.
+        if commission_spec:
+            from app.services.payroll_service import PayrollService
+
+            await PayrollService(self.db).apply_done_job_commission(commission_spec, [b["id"] for b in created])
+        await after_bookings_money_change(self.db, [b["id"] for b in created])
         raw_cars = [c for c in [await self.repo.find_by_id(b["id"]) for b in created] if c]
         # A wash taken off the customer's pass is ALWAYS told to them (MGR-01)
         # — the "service done" message carries the plan note ("3 washes
@@ -2749,7 +2786,7 @@ class BookingService:
         }.get(status, "This booking can't be marked done right now.")
 
     @staticmethod
-    def _manager_done_fields(car: dict, actor_id: str, now: datetime) -> dict:
+    def _manager_done_fields(car: dict, actor_id: str, now: datetime, extra: dict | None = None) -> dict:
         total = round(float(car.get("total_amount") or 0), 2)
         fields: dict = {
             "status": BookingStatus.COMPLETED.value,
@@ -2781,13 +2818,15 @@ class BookingService:
         # The money: what is still due is recorded as cash the manager
         # collected — by _close_as_manager_done, through
         # MoneyService.apply_payment in the same transaction (spec 1.5).
+        if extra:
+            fields.update(extra)  # the captain + commission the manager named (§7.13 D17)
         return fields
 
     # How often a money-guarded close re-reads after losing to a concurrent
     # payment write before giving up (each loss means the money changed).
     _MONEY_GUARD_ATTEMPTS = 3
 
-    async def _close_as_manager_done(self, car: dict, actor_id: str, now: datetime) -> tuple[dict | None, dict]:
+    async def _close_as_manager_done(self, car: dict, actor_id: str, now: datetime, extra: dict | None = None) -> tuple[dict | None, dict]:
         """One car's manager-done close, in ONE transaction: the car is
         re-read, closed guarded on the state it was read in, and whatever it
         still owes (amount_due — after wallet credit and anything already
@@ -2809,7 +2848,7 @@ class BookingService:
             seen["car"] = fresh
             done = await self.repo.update_if(
                 car_id, {"status": fresh["status"], "captain_id": fresh.get("captain_id")},
-                self._manager_done_fields(fresh, actor_id, now), session=session,
+                self._manager_done_fields(fresh, actor_id, now, extra), session=session,
             )
             if done is None:
                 return None
@@ -2820,6 +2859,8 @@ class BookingService:
                     actor_id=actor_id, actor_role="manager", collected_by=actor_id,
                     note=f"Collected by the manager for {done.get('booking_number')}",
                 )
+            # Franchise share, and the commission of a captain the manager named (D17).
+            await after_booking_money_change(self.db, car_id, session=session)
             return await self.repo.find_by_id(car_id, session=session)
 
         async with await self.db.client.start_session() as session:
@@ -2827,7 +2868,8 @@ class BookingService:
         return updated, seen["car"]
 
     async def manager_mark_done(
-        self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None, send_whatsapp: bool = True
+        self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None, send_whatsapp: bool = True,
+        *, captain_id: str | None = None, commission_amount_paise: int | None = None,
     ) -> dict:
         """The manager did an existing booking himself. Only jobs the captain
         hasn't started qualify (pending / rescheduled / assigned): once a
@@ -2850,12 +2892,23 @@ class BookingService:
             )
         now = now_ist()
         done: list[dict] = []
+        # Who washed it and what they earn (§7.13 D17): the named captain, else the one
+        # it was assigned to when a commission is given; checked before anything closes.
+        from app.services.payroll_service import PayrollService
+
+        payroll = PayrollService(self.db)
+        closing = sorted([c for c in cars if c["status"] in self._MANAGER_DONE_FROM], key=lambda c: str(c["_id"]) != booking_id)
+        spec = await payroll.validate_done_job_commission(
+            booking["service_center_id"], captain_id, commission_amount_paise,
+            default_captain_id=booking.get("captain_id"),
+        )
+        extras = payroll.done_job_fields(spec, closing) if spec else {}
         # The tapped car goes first: if it lost a race nothing was closed yet,
         # so the refusal is clean (siblings that lose theirs are just skipped).
-        for car in sorted([c for c in cars if c["status"] in self._MANAGER_DONE_FROM], key=lambda c: str(c["_id"]) != booking_id):
+        for car in closing:
             car_id = str(car["_id"])
             _ensure_transition_allowed(car["status"], BookingStatus.COMPLETED.value)
-            updated, car = await self._close_as_manager_done(car, actor_id, now)
+            updated, car = await self._close_as_manager_done(car, actor_id, now, extras.get(car_id))
             if updated is None:
                 if car_id == booking_id:
                     raise BadRequestException("This booking just changed state — refresh and try again.")
@@ -6425,6 +6478,8 @@ class BookingService:
             if done is None:
                 return None
             await self.money.settle_captain_wallet([booking_id], session=session)
+            # Commission / franchise share for this completion — same transaction.
+            await after_booking_money_change(self.db, booking_id, session=session)
             return await self.repo.find_by_id(booking_id, session=session)
 
         try:
@@ -8250,6 +8305,8 @@ class BookingService:
             )
             if done is None:
                 raise BadRequestException("This booking just changed — refresh and try again.")
+            # An extra on a job that is already done moves its commission / franchise base.
+            await after_booking_money_change(self.db, booking_id, session=session)
             paid_how = self._paid_on_the_spot(fresh, payment, actor_role)
             if paid_how:
                 # Same transaction as the add: never a moment (or a crash) where the
@@ -8656,6 +8713,8 @@ class BookingService:
                 await self.repo.collection.update_many(
                     {"_id": {"$in": [r["_id"] for r in wallet_rows]}}, {"$set": {"delete_money_settled": True}}, session=session,
                 )
+            # A deleted job stops earning commission / franchise share (reversed, same transaction).
+            await after_bookings_money_change(self.db, [str(r["_id"]) for r in claimed], session=session)
             return claimed
 
         async with await self.db.client.start_session() as session:
@@ -8788,6 +8847,7 @@ class BookingService:
                             f"{datetime.strptime(key['date'], '%Y-%m-%d').strftime('%d %b %Y')}) has no free seat: it is full, "
                             "closed or not set up. Free a seat or raise that slot's capacity, then restore it."
                         )
+            await after_bookings_money_change(self.db, [str(r["_id"]) for r in restored], session=session)
             return restored
 
         async with await self.db.client.start_session() as session:

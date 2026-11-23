@@ -634,13 +634,20 @@ class BookingAdminEditService:
         captain_delta = 0.0
         after_doc = await self.repo.find_by_id(booking_id, session=session)
         if lead.get("status") != BookingStatus.CANCELLED.value and not plan.cancel:
-            target = bm.captain_wallet_target(after_doc)
+            pay_mode, _stamp = await self.money._pay_mode(after_doc, session) if after_doc.get("captain_id") else ("legacy", {})
+            target = bm.captain_wallet_target(after_doc, pays_earning=pay_mode != "payroll")
             posted_now = bm.captain_wallet_posted(after_doc)
             captain_delta = r2(target - posted_now) if not wallet_move else r2(target)
             if p.dry_run:
                 pass
             else:
                 await self.money.settle_captain_wallet([booking_id], session=session)
+        if not p.dry_run:
+            # Commission and franchise share follow the booking as it now stands (status
+            # away from completed, a new captain, a discount …) — same transaction.
+            from app.services.payroll_hooks import after_bookings_money_change
+
+            await after_bookings_money_change(self.db, list(written), session=session)
         after_doc = await self.repo.find_by_id(booking_id, session=session)
         after = money_snapshot(after_doc)
         credit = r2((money_result or {}).get("wallet_credit"))

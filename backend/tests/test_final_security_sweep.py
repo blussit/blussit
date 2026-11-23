@@ -100,7 +100,8 @@ async def test_staff_created_captain_must_change_the_password_on_first_login(db,
     async with _client() as client:
         res = await client.post(
             "/api/v1/auth/staff",
-            json={"full_name": "New Captain", "phone": phone, "password": "Chosen@123", "role": "captain"},
+            json={"full_name": "New Captain", "phone": phone, "password": "Chosen@123", "role": "captain",
+                  "pay": {"basis": "salary", "salary_monthly_paise": 1500000}},
             headers=_auth(centers["manager_a"], "manager", centers["center_a"]),
         )
         assert res.status_code == 200, res.text

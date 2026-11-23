@@ -529,6 +529,22 @@ class MoneyService:
     # Captain wallet: delta settlement
     # ------------------------------------------------------------------
 
+    async def _pay_mode(self, booking: dict, session=None) -> tuple[str, dict]:
+        """("legacy" | "payroll", fields to stamp on the booking). The mode is
+        decided once — when the job is COMPLETED — from the captain's basis that
+        day, then frozen per (booking, captain). Before completion nothing is
+        earned either way, so nothing is stamped."""
+        captain_id = booking.get("captain_id")
+        if booking.get("captain_pay_mode") and booking.get("captain_pay_mode_for") == captain_id:
+            return booking["captain_pay_mode"], {}
+        from app.services import payroll_terms as pt
+
+        captain = await self.db.users.find_one({"_id": _oid(captain_id)}, {"pay": 1}, session=session) if _oid(captain_id) else None
+        mode = "payroll" if pt.is_payroll(captain) else "legacy"
+        if booking.get("status") != "completed":
+            return mode, {}
+        return mode, {"captain_pay_mode": mode, "captain_pay_mode_for": captain_id}
+
     async def settle_captain_wallet(self, booking_ids: list[str], session=None) -> list[dict]:
         """For each booking, post to its captain's wallet only the difference
         between where it should leave him (captain_earning once completed −
@@ -552,12 +568,20 @@ class MoneyService:
                 if not b or bm.captain_wallet_exempt(b):
                     return None
                 posted = bm.captain_wallet_posted(b)
-                target = bm.captain_wallet_target(b)
+                # §7.13 D2: a salary / commission captain is paid from the payroll
+                # ledger, never per job through the wallet — the earning credit is
+                # off, the cash he holds is still owed. The mode is frozen on the
+                # booking once it completes, so a later change of terms never
+                # claws back (or double-pays) a job already settled.
+                mode, stamp = await self._pay_mode(b, s)
+                target = bm.captain_wallet_target(b, pays_earning=mode != "payroll")
                 delta = r2(target - posted)
                 if abs(delta) <= EPSILON:
                     if b.get("captain_wallet_posted") is None and (b.get("wallet_settled") or posted):
+                        stamp = {**stamp, "captain_wallet_posted": posted}
+                    if stamp:
                         await self.bookings.update_one(
-                            {"_id": oid, "captain_wallet_posted": None}, {"$set": {"captain_wallet_posted": posted}}, session=s,
+                            {"_id": oid, "captain_wallet_rev": b.get("captain_wallet_rev")}, {"$set": stamp}, session=s,
                         )
                     return None
                 rev = int(b.get("captain_wallet_rev") or 0) + 1
@@ -565,7 +589,7 @@ class MoneyService:
                 done = await self.bookings.update_one(
                     guard,
                     {"$set": {"captain_wallet_posted": target, "captain_wallet_rev": rev, "captain_wallet_captain_id": b["captain_id"],
-                              "captain_cash_collected": bm.captain_cash_held(b), "updated_at": _now()}},
+                              "captain_cash_collected": bm.captain_cash_held(b), "updated_at": _now(), **stamp}},
                     session=s,
                 )
                 if not done.modified_count:

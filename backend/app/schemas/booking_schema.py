@@ -318,6 +318,11 @@ class ManagerLogBookingRequest(BaseModel):
     tip_method: Literal["cash", "online"] = "cash"
     # True = the customer gets ONE WhatsApp: "service is done". Nothing else.
     send_whatsapp: bool = True
+    # Who washed it, and what they earn (§7.13 D17) — optional. A commission is a
+    # RUPEE amount (paise) for the whole visit, at most 70 % of the job's value,
+    # for a commission-basis captain of this (self-operated) center.
+    captain_id: Optional[str] = Field(default=None, min_length=24, max_length=24)
+    commission_amount_paise: Optional[int] = Field(default=None, ge=0, le=10_000_000_00)
 
     _phone = field_validator("customer_phone")(_canonical_phone)
     _tip = field_validator("tip_amount")(_whole_rupee_tip)
@@ -367,6 +372,10 @@ class ManagerLogBookingRequest(BaseModel):
 
 class ManagerMarkDoneRequest(BaseModel):
     send_whatsapp: bool = True
+    # Who washed it (default: the captain it was assigned to) and what they
+    # earn on it — see ManagerLogBookingRequest (§7.13 D17).
+    captain_id: Optional[str] = Field(default=None, min_length=24, max_length=24)
+    commission_amount_paise: Optional[int] = Field(default=None, ge=0, le=10_000_000_00)
 
 
 class BookingTipRequest(BaseModel):

@@ -4,6 +4,15 @@ import { useNavigate } from "react-router-dom";
 import { CalendarClock, LocateFixed, Pencil, Plus, Power } from "lucide-react";
 import { adminServiceCenterApi, adminUserApi } from "../../api/admin";
 import { Badge, Button, DataTable, Input, Modal, Select } from "../../components/ui";
+import {
+  CenterOperationFields,
+  buildOperationPayload,
+  emptyOperation,
+  operationFromCenter,
+  operationLabel,
+  validateOperation,
+  type OperationForm,
+} from "../../components/franchise/CenterOperationFields";
 import { MapPicker } from "../../components/shared/MapPicker";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
@@ -40,6 +49,7 @@ export default function AdminServiceCentersPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ServiceCenter | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [op, setOp] = useState<OperationForm>(emptyOperation);
   const [error, setError] = useState("");
   const [locating, setLocating] = useState(false);
 
@@ -63,12 +73,15 @@ export default function AdminServiceCentersPage() {
     working_hours_start: form.working_hours_start,
     working_hours_end: form.working_hours_end,
     slot_duration_minutes: form.slot_duration_minutes ? Number(form.slot_duration_minutes) : null,
+    operation: buildOperationPayload(op, !!editing, editing?.operation),
   });
 
   const createMutation = useMutation({
     mutationFn: () => adminServiceCenterApi.create(buildPayload()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-centers"] });
+      queryClient.invalidateQueries({ queryKey: ["franchise-centers"] });
+      pushToast({ tone: "success", title: "Service Center Added" });
       closeModal();
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -78,6 +91,8 @@ export default function AdminServiceCentersPage() {
     mutationFn: () => adminServiceCenterApi.update(editing!.id, buildPayload()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-centers"] });
+      queryClient.invalidateQueries({ queryKey: ["franchise-centers"] });
+      pushToast({ tone: "success", title: "Service Center Saved" });
       closeModal();
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -93,6 +108,7 @@ export default function AdminServiceCentersPage() {
     setOpen(false);
     setEditing(null);
     setForm(emptyForm);
+    setOp(emptyOperation);
     setError("");
   };
 
@@ -115,6 +131,7 @@ export default function AdminServiceCentersPage() {
       working_hours_end: center.working_hours_end || "19:00",
       slot_duration_minutes: center.slot_duration_minutes != null ? String(center.slot_duration_minutes) : "",
     });
+    setOp(operationFromCenter(center.operation));
     setOpen(true);
   };
 
@@ -172,6 +189,19 @@ export default function AdminServiceCentersPage() {
                 <span className="text-xs text-[var(--color-text-secondary)]">Pincode Only</span>
               ),
           },
+          {
+            header: "Operation",
+            accessor: (c) => (
+              <div className="space-y-0.5">
+                <Badge tone={c.operation?.type === "franchise" ? "info" : "neutral"}>{operationLabel(c.operation)}</Badge>
+                {c.operation?.type === "franchise" && c.operation.partner?.name && (
+                  <p className="text-xs text-[var(--color-text-secondary)]">
+                    {toTitle(c.operation.partner.name)} · {c.operation.revenue_share_percent ?? 70}%
+                  </p>
+                )}
+              </div>
+            ),
+          },
           { header: "Status", accessor: (c) => <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge> },
           {
             header: "",
@@ -220,6 +250,8 @@ export default function AdminServiceCentersPage() {
           onSubmit={(e) => {
             e.preventDefault();
             setError("");
+            const problem = validateOperation(op, editing?.operation, !!editing);
+            if (problem) return setError(problem);
             editing ? updateMutation.mutate() : createMutation.mutate();
           }}
         >
@@ -310,7 +342,9 @@ export default function AdminServiceCentersPage() {
             ))}
           </Select>
 
-          {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
+          <CenterOperationFields value={op} onChange={setOp} center={editing} />
+
+          {error && <p role="alert" className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createMutation.isPending || updateMutation.isPending}>
             {editing ? "Save Changes" : "Add Service Center"}
           </Button>

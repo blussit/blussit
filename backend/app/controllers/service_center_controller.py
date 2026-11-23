@@ -16,19 +16,19 @@ class ServiceCenterController:
         items, total = await self.service.list_centers(pagination.page, pagination.page_size, pagination.search, active_only)
         return paginated(items, pagination.page, pagination.page_size, total)
 
-    async def get(self, center_id: str):
-        return success(await self.service.get(center_id))
+    async def get(self, center_id: str, redact: bool = False):
+        return success(await self.service.get(center_id, redact=redact))
 
     async def find_for_pincode(self, pincode: str):
         return success(await self.service.find_for_pincode(pincode))
 
     async def create(self, current_user: CurrentUser, payload: ServiceCenterCreateRequest):
-        result = await self.service.create(payload)
+        result = await self.service.create(payload, actor=current_user)
         await self.audit.log_action(current_user.id, current_user.role, "CREATE_SERVICE_CENTER", "service_centers", result["id"])
         return success(result, "Service center created successfully")
 
     async def update(self, current_user: CurrentUser, center_id: str, payload: ServiceCenterUpdateRequest):
-        result = await self.service.update(center_id, payload)
+        result = await self.service.update(center_id, payload, actor=current_user)
         await self.audit.log_action(current_user.id, current_user.role, "UPDATE_SERVICE_CENTER", "service_centers", center_id)
         return success(result, "Service center updated successfully")
 

@@ -22,6 +22,21 @@ class ServiceCenterLocation(BaseModel):
     radius_km: float = 6.0
 
 
+class ServiceCenterOperation(BaseModel):
+    """How the center is run (ARCHITECTURE.md §7.13 D18/D19). Missing on a
+    legacy center = self-operated (the boot backfill stamps it)."""
+
+    type: str = "self_operated"  # self_operated | franchise
+    partner: Optional[dict] = None  # {name, phone, email} — franchise only
+    revenue_share_percent: Optional[float] = None  # the PARTNER's share, franchise only
+    franchise_fee_paise: int = 0
+    kits_purchased: int = 0  # franchise
+    kits_given: int = 0  # self-operated
+    captain_pay_managed_by: str = "blussit"  # blussit | franchise
+    default_captain_pay: dict = {}  # {basis, salary_monthly_paise, commission_percent}
+    effective_from: Optional[str] = None  # IST day
+
+
 class ServiceCenterModel(BusinessRecordBase):
     name: str
     code: str
@@ -49,3 +64,7 @@ class ServiceCenterModel(BusinessRecordBase):
     # BookingService._default_slot_capacity. It used to mean 999 seats.
     default_slot_capacity: Optional[int] = None
     is_active: bool = True
+    operation: Optional[ServiceCenterOperation] = None
+    # Append-only: one row per change of type / share % / pay manager
+    # ({at, by, effective_from, before, after}).
+    operation_history: list[dict] = []

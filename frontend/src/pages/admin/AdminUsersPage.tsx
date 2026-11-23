@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
+import { Banknote, KeyRound, Pencil, Plus, RotateCcw, Trash2, UserX } from "lucide-react";
 import { adminUserApi, adminServiceCenterApi } from "../../api/admin";
+import { payrollApi } from "../../api/payroll";
+import { PayFields, emptyPayDraft, payDraftError, payDraftToPayload, type PayDraft } from "../../components/payroll/PayFields";
+import { useDefaultCaptainPay } from "../../components/payroll/useDefaultCaptainPay";
 import { Button, DataTable, ErrorState, Input, Modal, Select, StatusBadge } from "../../components/ui";
 import { CustomerDetailDrawer } from "../../components/shared/CustomerDetailDrawer";
 import { StaffResetPasswordDialog } from "../../components/shared/StaffResetPasswordDialog";
@@ -40,6 +44,9 @@ export default function AdminUsersPage() {
   const [sortKey, setSortKey] = useState("created_at");
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
+  // Captains are created with how they are paid (salary / commission), a deposit and a kit.
+  const [pay, setPay] = useState<PayDraft>(() => emptyPayDraft());
+  const [payPrefilled, setPayPrefilled] = useState(false);
   const [error, setError] = useState("");
   // Editing an EXISTING account — most often to link/relink a manager's
   // service center. adminUserApi.update (PUT /users/:id) already existed
@@ -85,23 +92,37 @@ export default function AdminUsersPage() {
       <ErrorState message="Couldn't load service centers." onRetry={() => void centersQuery.refetch()} busy={centersQuery.isFetching} className="p-4" />
     ) : null;
 
+  // The picked center's suggested captain pay — a prefill, never forced.
+  const { defaultPay } = useDefaultCaptainPay(form.service_center_id, open && form.role === "captain");
+  useEffect(() => {
+    if (!open || form.role !== "captain" || payPrefilled || !defaultPay) return;
+    setPay(emptyPayDraft(defaultPay));
+    setPayPrefilled(true);
+  }, [open, form.role, payPrefilled, defaultPay]);
+
   const createStaffMutation = useMutation({
     // Blank optional fields go as "absent", never "" — an empty email was a
     // 422 ("not a valid email address"), so a phone-only captain could
     // never be created from here.
-    mutationFn: () =>
-      adminUserApi.createStaff({
+    mutationFn: () => {
+      const common = {
         full_name: form.full_name.trim(),
         password: form.password,
-        role: form.role,
         email: form.email.trim().toLowerCase() || undefined,
         phone: form.phone || undefined,
         service_center_id: form.service_center_id || undefined,
-      }),
+      };
+      return form.role === "captain"
+        ? payrollApi.createCaptain({ ...common, pay: payDraftToPayload(pay) })
+        : adminUserApi.createStaff({ ...common, role: form.role });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["payroll-captains"] });
       setOpen(false);
       setForm(emptyForm);
+      setPay(emptyPayDraft());
+      setPayPrefilled(false);
       pushToast({ tone: "success", title: "Staff account created" });
     },
     onError: (err) => setError(getErrorMessage(err)),
@@ -174,6 +195,8 @@ export default function AdminUsersPage() {
           onClick={() => {
             setError("");
             setForm(emptyForm);
+            setPay(emptyPayDraft());
+            setPayPrefilled(false);
             setOpen(true);
           }}
         >
@@ -275,6 +298,14 @@ export default function AdminUsersPage() {
                 <Button size="sm" variant="outline" onClick={() => openEdit(u)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>
+                {u.role === "captain" && (
+                  <Link
+                    to={`/admin/captain-salary?captain=${u.id}&tab=terms`}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] transition-all hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+                  >
+                    <Banknote className="h-3.5 w-3.5" /> Pay Terms
+                  </Link>
+                )}
                 {u.role !== "customer" && u.id !== me?.id && (
                   <Button size="sm" variant="outline" onClick={() => setResetFor(u)}>
                     <KeyRound className="h-3.5 w-3.5" /> Reset Password
@@ -359,6 +390,13 @@ export default function AdminUsersPage() {
               setError("Pick the service center this manager runs.");
               return;
             }
+            if (form.role === "captain") {
+              const payError = payDraftError(pay);
+              if (payError) {
+                setError(payError);
+                return;
+              }
+            }
             createStaffMutation.mutate();
           }}
         >
@@ -396,6 +434,7 @@ export default function AdminUsersPage() {
             ))}
           </Select>
           {centersError}
+          {form.role === "captain" && <PayFields value={pay} onChange={setPay} prefilled={payPrefilled} />}
           {error && <p className="text-sm text-[var(--color-error)]">{error}</p>}
           <Button type="submit" className="w-full" isLoading={createStaffMutation.isPending}>
             Create Account
@@ -446,6 +485,15 @@ export default function AdminUsersPage() {
                 ))}
               </Select>
               {centersError}
+              {editUser.role === "captain" && (
+                <p className="text-xs text-[var(--color-text-secondary)]">
+                  Pay, deposit and kit are edited on the{" "}
+                  <Link to={`/admin/captain-salary?captain=${editUser.id}&tab=terms`} className="font-semibold text-[#0A66F0] hover:underline">
+                    Captain Salary page
+                  </Link>
+                  .
+                </p>
+              )}
               {editForm.role === "manager" && !editForm.service_center_id && (
                 <p className="text-xs text-amber-600">
                   A manager with no center can't sell/assign plans, or see their own Subscriptions or KPI pages.

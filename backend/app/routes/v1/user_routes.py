@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.controllers.user_controller import UserController
@@ -67,16 +67,18 @@ async def admin_update_user(
 @router.post("/{user_id}/suspend", dependencies=[Depends(require_admin)])
 async def suspend_user(
     user_id: str,
+    override_reason: str | None = Query(None, min_length=3, max_length=200),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return await UserController(db).deactivate_user(current_user, user_id)
+    return await UserController(db).deactivate_user(current_user, user_id, override_reason)
 
 
 @router.delete("/{user_id}", dependencies=[Depends(require_admin)])
 async def delete_user(
     user_id: str,
+    override_reason: str | None = Query(None, min_length=3, max_length=200),
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    return await UserController(db).delete_user(current_user, user_id)
+    return await UserController(db).delete_user(current_user, user_id, override_reason)

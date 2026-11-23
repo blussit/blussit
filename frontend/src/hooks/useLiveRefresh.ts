@@ -32,6 +32,8 @@ const BOOKINGS = [
   "admin-center-summaries", "admin-highlight-booking", "admin-recycle-bin", "booking-adjustments", "travel-status", "geo-status",
   "my-jobs", "captain-visit", "collect-status", "available-slots", "society-slots", "my-society-schedule", "center-captains-page",
   "charges", "customer-360", "my-reviews", "reviews-list", "eligible-captains",
+  // Captain pay moves with a completed / edited booking and with every payroll write.
+  "payroll-captains", "payroll-captain", "payroll-statement", "payroll-commissions", "payroll-ledger", "payroll-me",
 ] as const;
 const PLANS = [
   "my-subscriptions", "my-custom-plans", "subscription-usage", "center-subscription-overview", "admin-subscriptions-overview",

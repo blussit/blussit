@@ -1,6 +1,6 @@
 import { apiClient, UPLOAD_TIMEOUT_MS, type ApiPaginated, type ApiSuccess } from "../lib/api-client";
 import type { AttendanceRecord } from "./staffOps";
-import type { BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
+import type { CaptainPayManagedBy, ServiceCenterOperationType, BookingPolicy, CapacityPolicyChange, CapacityPolicyOverview, Category, ComboOffer, ContactMessage, Coupon, DailyCapacitySummary, HomepageConfig, InventoryItem, PlanEnquiry, PricingConfig, Service, ServiceCenter, SlotCapacityDetail, SubscriptionPlan, User, VehicleTypeOption, VisitorStats } from "../types";
 
 export const adminPricingApi = {
   get: () => apiClient.get<ApiSuccess<PricingConfig>>("/pricing-config").then((r) => r.data.data),
@@ -61,13 +61,39 @@ export const adminUserApi = {
     apiClient.post<ApiSuccess<User>>("/auth/staff", payload).then((r) => r.data.data),
 };
 
+/** What the center form sends; `operation` is the §7.13 block (money in paise). */
+export type ServiceCenterPayload = Omit<
+  { [K in keyof ServiceCenter]?: ServiceCenter[K] | null },
+  "operation" | "operation_history" | "kits_assigned" | "captains_count" | "kits_warning"
+> & {
+  operation?: ServiceCenterOperationInput;
+};
+
+/** Mirrors backend OperationInput (extra fields are refused). Send only what
+ *  applies to the chosen type — the server clears the other type's fields. */
+export interface ServiceCenterOperationInput {
+  type: ServiceCenterOperationType;
+  partner?: { name: string; phone?: string | null; email?: string | null };
+  revenue_share_percent?: number;
+  franchise_fee_paise?: number;
+  kits_purchased?: number;
+  kits_given?: number;
+  captain_pay_managed_by?: CaptainPayManagedBy;
+  default_captain_pay?: { basis?: "salary" | "commission"; salary_monthly_paise?: number; commission_percent?: number };
+  /** IST day, today or later (never backdated). */
+  effective_from?: string;
+  /** Create only: the fee is received now, so its Finance credit is posted with the center. */
+  franchise_fee_received_now?: boolean;
+  franchise_fee_method?: "cash" | "bank" | "upi" | "other";
+}
+
 export const adminServiceCenterApi = {
   list: (params?: { page?: number; page_size?: number; search?: string; active_only?: boolean }) =>
     apiClient.get<ApiPaginated<ServiceCenter>>("/service-centers", { params }).then((r) => r.data),
   get: (id: string) => apiClient.get<ApiSuccess<ServiceCenter>>(`/service-centers/${id}`).then((r) => r.data.data),
-  create: (payload: { [K in keyof ServiceCenter]?: ServiceCenter[K] | null }) =>
+  create: (payload: ServiceCenterPayload) =>
     apiClient.post<ApiSuccess<ServiceCenter>>("/service-centers", payload).then((r) => r.data.data),
-  update: (id: string, payload: { [K in keyof ServiceCenter]?: ServiceCenter[K] | null }) =>
+  update: (id: string, payload: ServiceCenterPayload) =>
     apiClient.put<ApiSuccess<ServiceCenter>>(`/service-centers/${id}`, payload).then((r) => r.data.data),
 };
 

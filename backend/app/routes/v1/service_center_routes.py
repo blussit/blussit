@@ -147,9 +147,11 @@ async def get_center(center_id: str, current_user: CurrentUser = Depends(get_cur
     """Manager/admin — a manager needs this for their own center (e.g. its
     working hours, to bound the reschedule time picker). Their OWN center
     only: the doc carries the manager and contact details of whichever
-    center is asked for."""
+    center is asked for. A manager sees the center's operation (type, share,
+    who pays captains, default pay, kits) without the partner's phone/email,
+    the franchise fee or the history — those are admin only."""
     ensure_own_center(current_user.role, current_user.service_center_id, center_id)
-    return await ServiceCenterController(db).get(center_id)
+    return await ServiceCenterController(db).get(center_id, redact=current_user.role != "admin")
 
 
 @router.post("", dependencies=[Depends(require_admin)])
