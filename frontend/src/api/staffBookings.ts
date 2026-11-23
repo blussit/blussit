@@ -189,6 +189,8 @@ export interface DiscountResult {
   total_after: number;
   amount_due_after: number;
   wallet_credit: number;
+  /** Paid money above the new bill that was NOT put in the wallet (discount only). */
+  not_credited?: number;
   cars: DiscountCar[];
   message: string;
   version: string;
@@ -199,6 +201,8 @@ export interface DiscountInput {
   percent?: number;
   reason: string;
   scope?: "booking" | "visit";
+  /** "wallet" (default) returns already-paid money to the wallet; "none" is a discount only. */
+  payback?: "wallet" | "none";
   idempotency_key?: string;
   expected_version?: string;
   dry_run?: boolean;

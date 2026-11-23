@@ -396,3 +396,17 @@ async def test_customer_whatsapp_is_throttled_but_every_change_has_an_in_app_lin
     assert queued == 1, queued     # one WhatsApp for the burst (the cooldown), not three
     rows = await db.booking_adjustments.find({"booking_id": b["id"]}).to_list(None)
     assert sum(1 for r in rows if r.get("notified_at")) == 1
+
+
+async def test_discount_only_on_a_paid_booking_adds_nothing_to_the_wallet(db):
+    s = await fb.rig(db)
+    b = await fb.book(db, s["cu"], s["when"], s["keys"][0])
+    total = bm.total_of(await fb.doc(db, b["id"]))
+    await fb.pay_online(db, b["id"])
+    result = await give(db, s, b["id"], 70, payback="none")
+    after = await fb.doc(db, b["id"])
+    assert result["wallet_credit"] == 0 and result["not_credited"] == 70 and result["payback"] == "none"
+    assert "not added to the wallet" in result["message"]
+    assert await fb.balance(db, s["cu"]["id"]) == 0
+    assert after["total_amount"] == total - 70 and after["amount_due"] == 0 and after["payment_status"] == "paid"
+    assert not await db.customer_wallet_ledger.find_one({"booking_id": b["id"], "kind": "price_reduced"})

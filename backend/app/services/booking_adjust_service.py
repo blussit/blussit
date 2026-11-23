@@ -272,7 +272,7 @@ class BookingAdjustService:
                 }
                 money = await self.money.on_price_change(
                     car, {**car, **fields}, actor=who, reason="Discount" if share else "Discount removed", session=session,
-                    credit_cap=payback_cap(car),
+                    credit_cap=0.0 if payload.payback == "none" else payback_cap(car),
                 )
                 fields.update(money["fields"])
                 guard = {
@@ -329,6 +329,7 @@ class BookingAdjustService:
         cars = []
         by_after = {str(c["_id"]): c for c in after}
         credits = {r["booking_id"]: r["wallet_credit"] for r in money_results}
+        surplus = {r["booking_id"]: r.get("surplus") or 0.0 for r in money_results}
         for old in before:
             cid = str(old["_id"])
             new = by_after.get(cid, old)
@@ -339,6 +340,7 @@ class BookingAdjustService:
                 "amount_due_before": bm.amount_due(old), "amount_due_after": bm.amount_due(new),
                 "amount_paid_after": bm.amount_paid_of(new), "payment_status": bm.money_view(new)["payment_status"],
                 "wallet_credit": r2(credits.get(cid)),
+                "not_credited": r2(max(0.0, surplus.get(cid, 0.0) - credits.get(cid, 0.0))),
             })
         credit = r2(sum(c["wallet_credit"] for c in cars))
         total_due = r2(sum(c["amount_due_after"] for c in cars))
@@ -353,12 +355,16 @@ class BookingAdjustService:
             message = f"Discount removed. New total ₹{total_after:g}, amount due ₹{total_due:g}."
         else:
             message = f"Discount set to ₹{discount_after:g}. New total ₹{total_after:g}, amount due ₹{total_due:g}."
+        not_credited = r2(sum(c["not_credited"] for c in cars))
         if credit > EPSILON:
             message += f" ₹{credit:g} goes back to the customer's wallet."
+        if not_credited > EPSILON:
+            message += f" ₹{not_credited:g} was not added to the wallet (discount only)."
         return {
             "booking_id": lead_id, "booking_number": lead["booking_number"], "scope": payload.scope, "changed": changed,
             "dry_run": bool(payload.dry_run), "discount_before": discount_before, "discount_after": discount_after,
             "target": float(target), "total_after": total_after, "amount_due_after": total_due, "wallet_credit": credit,
+            "not_credited": not_credited, "payback": payload.payback,
             "cars": cars, "message": message, "version": booking_version(by_after.get(lead_id, before[0])),
             "already_applied": False,
         }
@@ -373,7 +379,7 @@ class BookingAdjustService:
         action = "ADMIN_GIVE_DISCOUNT" if role == "admin" else "MANAGER_GIVE_DISCOUNT"
         await post("discount audit", lead, AuditService(self.db).log_action(
             actor["id"], role, action, "bookings", str(booking["_id"]),
-            {"scope": payload.scope, "reason": payload.reason, "idempotency_key": payload.idempotency_key,
+            {"scope": payload.scope, "reason": payload.reason, "idempotency_key": payload.idempotency_key, "payback": payload.payback,
              "before": {"manager_discount": result["discount_before"]},
              "after": {"manager_discount": result["discount_after"], "total": result["total_after"],
                        "amount_due": result["amount_due_after"]},

@@ -40,6 +40,7 @@ export function DiscountDialog({
   const [mode, setMode] = useState<"amount" | "percent">("amount");
   const [value, setValue] = useState("");
   const [reason, setReason] = useState("");
+  const [payback, setPayback] = useState<"wallet" | "none">("wallet");
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<DiscountResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -55,6 +56,7 @@ export function DiscountDialog({
     setMode("amount");
     setValue("");
     setReason("");
+    setPayback("wallet");
     setError("");
     setPreview(null);
     keyRef.current = newIdempotencyKey();
@@ -71,8 +73,8 @@ export function DiscountDialog({
     if (mode === "amount" && !Number.isInteger(n)) return null;
     if (mode === "percent" && n > 100) return null;
     if (reason.trim().length < 5) return null;
-    return { [mode === "amount" ? "amount" : "percent"]: n, reason: reason.trim(), scope: isVisit ? scope : "booking", expected_version: car.version } as const;
-  }, [value, mode, reason, scope, isVisit, car.version]);
+    return { [mode === "amount" ? "amount" : "percent"]: n, reason: reason.trim(), scope: isVisit ? scope : "booking", payback, expected_version: car.version } as const;
+  }, [value, mode, reason, scope, isVisit, car.version, payback]);
 
   // Live preview: the real transaction, aborted (dry_run).
   useEffect(() => {
@@ -115,6 +117,7 @@ export function DiscountDialog({
         `Discount ${rupees(preview.discount_before)} → ${rupees(preview.discount_after)}. ` +
         `Total ${rupees(total)} → ${rupees(preview.total_after)}. Amount due → ${rupees(preview.amount_due_after)}.` +
         (preview.wallet_credit > 0 ? ` ${rupees(preview.wallet_credit)} goes back to the customer's wallet (money they already paid).` : "") +
+        ((preview.not_credited ?? 0) > 0 ? ` ${rupees(preview.not_credited ?? 0)} is NOT added to the wallet — settle it with the customer yourself.` : "") +
         " The customer is told.",
       confirmLabel: "Yes, Save It",
       tone: "default",
@@ -187,6 +190,33 @@ export function DiscountDialog({
           placeholder="Customer waited 40 minutes for the captain"
           hint="A short reason (at least 5 characters) — it stays in the booking's history."
         />
+        {preview && ((preview.wallet_credit ?? 0) > 0 || (preview.not_credited ?? 0) > 0) && (
+          <div data-testid="discount-payback" className="space-y-2">
+            <p className="text-sm font-medium text-[#0E1A33]">The Customer Has Already Paid — What About The Extra?</p>
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Extra Money Already Paid">
+              {([
+                ["wallet", "Add To Wallet"],
+                ["none", "Discount Only"],
+              ] as const).map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={payback === k}
+                  onClick={() => setPayback(k)}
+                  className={`min-h-11 rounded-xl border px-3 text-sm font-medium transition-colors ${payback === k ? "border-black bg-[var(--color-primary-light)] text-black" : "border-gray-200 text-gray-600 hover:border-gray-400"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              {payback === "wallet"
+                ? "The extra they paid goes into their wallet."
+                : "Nothing is added to the wallet. The bill just drops — hand back any extra yourself (cash or UPI)."}
+            </p>
+          </div>
+        )}
         {preview && body && (
           <div className="rounded-xl border border-[#F3E5B5] bg-white p-3 text-sm" data-testid="discount-preview">
             <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">After This Change</p>
@@ -200,6 +230,11 @@ export function DiscountDialog({
             {preview.wallet_credit > 0 && (
               <p className="text-[var(--color-text-secondary)]">
                 {rupees(preview.wallet_credit)} goes back to the customer&apos;s wallet.
+              </p>
+            )}
+            {(preview.not_credited ?? 0) > 0 && (
+              <p className="text-[var(--color-text-secondary)]">
+                {rupees(preview.not_credited ?? 0)} is not added to the wallet — discount only.
               </p>
             )}
             {unchanged && <p className="text-[var(--color-text-secondary)]">That is already the discount.</p>}

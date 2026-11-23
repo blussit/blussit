@@ -84,6 +84,11 @@ class BookingDiscountRequest(BaseModel):
     percent: Optional[float] = Field(default=None, ge=0, le=100, allow_inf_nan=False)
     reason: str = Field(min_length=5, max_length=300)
     scope: Literal["booking", "visit"] = "booking"
+    # What happens to money the customer ALREADY paid above the new bill:
+    # "wallet" returns it to their wallet (default); "none" is a discount
+    # only — nothing is credited, the bill just drops (the manager settles
+    # the difference with the customer directly).
+    payback: Literal["wallet", "none"] = "wallet"
     idempotency_key: Optional[str] = None
     expected_version: Optional[str] = Field(default=None, max_length=64)
     dry_run: bool = False
