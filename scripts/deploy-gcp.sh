@@ -70,9 +70,11 @@ TIMEOUT="${CLOUD_RUN_TIMEOUT:-3600}"
 # deploy) below the Atlas tier's connection limit, or a traffic spike
 # exhausts Atlas and every instance fails.
 MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-10}"
-# 1Gi, not the 512Mi default: up to 250 concurrent requests, open sockets
-# and spooled uploads (up to ~9 MB each) share one instance.
-MEMORY="${CLOUD_RUN_MEMORY:-1Gi}"
+# 512Mi (2026-11-23): measured over 7 days the API's memory peaked at ~245 MB
+# (24 % of 1Gi) with up to 80 concurrent requests, open sockets and spooled
+# uploads (~9 MB each) sharing the instance, and memory is billed all day.
+# If memory use ever nears the limit, set CLOUD_RUN_MEMORY=1Gi and redeploy.
+MEMORY="${CLOUD_RUN_MEMORY:-512Mi}"
 # The API runs no loops any more, but it still does work OUTSIDE a request:
 # background WhatsApp sends handed off by a request (<= 1 s wait, then the
 # send finishes in the background) and the websocket relay. With request-only
@@ -100,7 +102,7 @@ READY_DELAY="${DEPLOY_READY_DELAY:-6}"
 # unauthenticated invocations; it serves only /api/health and /api/ready
 # (probes) and 404s everything else.
 WORKER_CONCURRENCY="${CLOUD_RUN_WORKER_CONCURRENCY:-10}"
-WORKER_MEMORY="${CLOUD_RUN_WORKER_MEMORY:-1Gi}"
+WORKER_MEMORY="${CLOUD_RUN_WORKER_MEMORY:-512Mi}"   # peak ~170 MB measured over 7 days
 WORKER_CPU="${CLOUD_RUN_WORKER_CPU:-1}"
 WORKER_TIMEOUT="${CLOUD_RUN_WORKER_TIMEOUT:-300}"
 # The worker builds the indexes its own /api/ready checks — same 3 minutes.
