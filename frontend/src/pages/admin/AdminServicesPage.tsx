@@ -589,10 +589,15 @@ export default function AdminServicesPage() {
                 blank falls back to the selling / first-time / actual price above. Columns: selling, first-time, actual.
               </p>
               <div className="space-y-2">
-                {form.vehicle_types.map((vt) => (
-                  <div key={vt} className="grid grid-cols-4 items-center gap-2">
-                    <span className="text-sm font-medium text-[var(--color-text-primary)]">{toTitle(vehicleTypeName(vt))}</span>
+                {form.vehicle_types.map((vt) => {
+                  // A deleted type keeps its saved prices but can't be edited: struck through and locked.
+                  const removed = !!vehicleTypes && !vehicleTypes.some((t) => t.id === vt);
+                  return (
+                  <div key={vt} className={`grid grid-cols-4 items-center gap-2 ${removed ? "opacity-60" : ""}`} title={removed ? "This vehicle type was deleted — its prices can't be changed" : undefined}>
+                    <span className={`text-sm font-medium ${removed ? "text-gray-400 line-through" : "text-[var(--color-text-primary)]"}`}>{toTitle(vehicleTypeName(vt))}</span>
                     <Input
+                      disabled={removed}
+                      className={removed ? "line-through" : undefined}
                       placeholder={`₹${form.price || 0}`}
                       type="number"
                       step="any"
@@ -600,19 +605,24 @@ export default function AdminServicesPage() {
                       onChange={(e) => setForm({ ...form, vehicle_type_prices: { ...form.vehicle_type_prices, [vt]: e.target.value } })}
                     />
                     <Input
+                      disabled={removed}
+                      className={removed ? "line-through" : undefined}
                       placeholder={form.discounted_price ? `₹${form.discounted_price}` : "First-time"}
                       type="number"
                       value={form.vehicle_type_discounted_prices[vt] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_discounted_prices: { ...form.vehicle_type_discounted_prices, [vt]: e.target.value } })}
                     />
                     <Input
+                      disabled={removed}
+                      className={removed ? "line-through" : undefined}
                       placeholder={form.original_price ? `₹${form.original_price}` : "Actual"}
                       type="number"
                       value={form.vehicle_type_original_prices[vt] || ""}
                       onChange={(e) => setForm({ ...form, vehicle_type_original_prices: { ...form.vehicle_type_original_prices, [vt]: e.target.value } })}
                     />
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
