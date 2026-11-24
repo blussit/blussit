@@ -572,9 +572,11 @@ class GpsFixMeta(BaseModel):
 
 class HeadingRequest(GpsFixMeta):
     """Captain taps 'Heading to customer' — captures departure time + their
-    current GPS location, and the equipment they're carrying from the store."""
-    latitude: Latitude
-    longitude: Longitude
+    current GPS location, and the equipment they're carrying from the store.
+    The position is optional: a phone that can't give one never blocks the
+    trip (the server just has no trail start to compare against)."""
+    latitude: Optional[Latitude] = None
+    longitude: Optional[Longitude] = None
     equipment_used: list[EquipmentUsedInput] = []
 
 
@@ -588,10 +590,12 @@ class CaptainLocationPingRequest(GpsFixMeta):
 class PhotoCaptureRequest(GpsFixMeta):
     """Used for both the before-service and after-service photo steps. The
     image must come from a live camera capture on the frontend (never a
-    file picker) and always carries the device's GPS coordinates."""
+    file picker) and carries the device's GPS coordinates when it has them —
+    a phone that can't give a position never blocks the step; the server
+    flags it to the manager instead."""
     image_url: str = Field(max_length=MAX_STORED_URL_LENGTH)
-    latitude: Latitude
-    longitude: Longitude
+    latitude: Optional[Latitude] = None
+    longitude: Optional[Longitude] = None
 
     @field_validator("image_url")
     @classmethod
@@ -655,6 +659,24 @@ class GeoOverrideRequest(BaseModel):
     step: GeoStep
     approve: bool = True
     reason: str = Field(min_length=5, max_length=300)
+
+
+class ManagerStepRequest(BaseModel):
+    """Manager/admin acting for a stuck captain (Mark Arrived / Complete For
+    Captain): the reason is required and goes to the history and audit log."""
+    reason: str = Field(min_length=5, max_length=300)
+
+
+class CompleteForCaptainRequest(ManagerStepRequest):
+    """Manager/admin completing a job for a captain who is stuck. When the car
+    still owes money, `payment` says how it was collected: `cash` / `online`
+    (the manager received it) or `captain` (he collects it from his app)."""
+    payment: Optional[Literal["cash", "online", "captain"]] = None
+
+
+class LocationWarningIgnoreRequest(BaseModel):
+    """Manager/admin: 'Ignore' the red location warning on a booking."""
+    note: Optional[str] = Field(default=None, max_length=300)
 
 
 class PriorityUpdateRequest(BaseModel):

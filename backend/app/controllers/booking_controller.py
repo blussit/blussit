@@ -20,12 +20,15 @@ from app.schemas.booking_schema import (
     BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
+    CompleteForCaptainRequest,
     GeoApprovalRequest,
     GeoOverrideRequest,
     HeadingRequest,
+    LocationWarningIgnoreRequest,
     ManagerBookingCreateRequest,
     ManagerLogBookingRequest,
     ManagerMarkDoneRequest,
+    ManagerStepRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
     QuickBookingRequest,
@@ -433,17 +436,33 @@ class BookingController:
 
     async def geo_request_approval(self, current_user: CurrentUser, booking_id: str, payload: GeoApprovalRequest):
         result = await self.service.geo_request_approval(booking_id, payload.step, current_user.id, payload.note)
-        return success(result, "Your manager has been asked")
+        return success(result, "Nothing to approve — location no longer blocks any step")
 
     async def geo_override(self, current_user: CurrentUser, booking_id: str, payload: GeoOverrideRequest):
+        # Old screens only: location never blocks a step now, so there is
+        # nothing to approve or decline — nothing is written or audited.
         result = await self.service.geo_decide(
             booking_id, payload.step, payload.approve, payload.reason, current_user.id, current_user.role, current_user.service_center_id,
         )
-        await self.audit.log_action(
-            current_user.id, current_user.role, "GEO_OVERRIDE_APPROVED" if payload.approve else "GEO_OVERRIDE_DECLINED",
-            "bookings", booking_id, {"step": payload.step, "reason": payload.reason},
+        return success(result, "Location no longer blocks any step — nothing to approve")
+
+    async def ignore_location_warning(self, current_user: CurrentUser, booking_id: str, payload: LocationWarningIgnoreRequest):
+        result = await self.service.ignore_location_warning(
+            booking_id, payload.note, current_user.id, current_user.role, current_user.service_center_id,
         )
-        return success(result, "Approved" if payload.approve else "Declined")
+        return success(result, "Location warning ignored")
+
+    async def manager_mark_arrived(self, current_user: CurrentUser, booking_id: str, payload: ManagerStepRequest):
+        result = await self.service.manager_mark_arrived(
+            booking_id, payload.reason, current_user.id, current_user.role, current_user.service_center_id,
+        )
+        return success(result, "Arrival confirmed")
+
+    async def complete_for_captain(self, current_user: CurrentUser, booking_id: str, payload: CompleteForCaptainRequest):
+        result = await self.service.complete_for_captain(
+            booking_id, payload.reason, payload.payment, current_user.id, current_user.role, current_user.service_center_id,
+        )
+        return success(result, "Completed for the captain")
 
     async def geo_status(self, current_user: CurrentUser, booking_id: str):
         return success(await self.service.geo_status(booking_id, current_user.id, current_user.role, current_user.service_center_id))

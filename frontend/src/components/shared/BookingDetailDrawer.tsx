@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BadgePercent, Ban, Calendar, CalendarClock, Car, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, Navigation, Pencil, Plus, ShieldCheck, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
+import { AlertTriangle, BadgePercent, Ban, Calendar, CalendarClock, Car, CheckCheck, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, MapPinCheck, Navigation, Pencil, Plus, ShieldCheck, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
@@ -22,8 +22,13 @@ import { isArrivalLocked, issueLabel, vehicleLabel } from "../../lib/constants";
 import { bookingServiceLabel, combinedStatus } from "../../lib/bookingGroups";
 import { toTitle } from "../../lib/titleCase";
 import { GeoReview } from "./GeoReview";
+import { StuckCaptainDialog } from "./StuckCaptainDialog";
 import { PriceBreakup } from "./PriceBreakup";
 import type { Booking } from "../../types";
+
+// Statuses a captain is working in — the drawer re-reads these every so often on top of the live pings.
+const LIVE_STATUSES = ["assigned", "captain_on_the_way", "service_started"];
+const LIVE_POLL_MS = 20_000;
 
 /** "Sedan" (quick booking) or "Sedan · Honda City · MP09AB1234" (older
  *  saved vehicle) — staff always see the car TYPE first. */
@@ -82,6 +87,9 @@ export function BookingDetailDrawer({
     queryKey: ["booking-group", groupId],
     queryFn: () => bookingApi.getGroup(groupId as string),
     enabled: !!groupId,
+    // A job in the field changes without anyone touching this screen: if the
+    // live ping is missed (socket down, tab asleep) it still catches up.
+    refetchInterval: (q) => (q.state.data?.some((c) => LIVE_STATUSES.includes(c.status)) ? LIVE_POLL_MS : false),
   });
   const visitBookings = visitQuery.data;
   // Without the group read a multi-car visit would show as one car.
@@ -94,6 +102,7 @@ export function BookingDetailDrawer({
     queryKey: ["staff-booking", booking?.id],
     queryFn: () => staffBookingApi.get(booking!.id),
     enabled: !!booking && !groupId && staffViewer,
+    refetchInterval: (q) => (q.state.data && LIVE_STATUSES.includes(q.state.data.status) ? LIVE_POLL_MS : false),
   });
   const single: Booking | null = booking ? ({ ...booking, ...(freshQuery.data && freshQuery.data.id === booking.id ? freshQuery.data : {}) } as Booking) : null;
   const cars: StaffBooking[] = groupId && visitBookings?.length ? visitBookings : single ? [single] : [];
@@ -193,6 +202,16 @@ export function BookingDetailDrawer({
   const refundedAt = refundCars.map((c) => c.refunded_at).filter(Boolean).sort().pop() || null;
   const lockedCar = cars.find(isArrivalLocked) || null;
   const noGps = cars.some((c) => c.arrival_no_gps);
+  // The RED location warning (a step accepted from outside the boundary /
+  // without GPS): stays until a manager or admin taps Ignore. One line per
+  // visit (the cars carry the same one).
+  const warnedCars = cars.filter((c) => c.location_warning && !c.location_warning.resolved);
+  const warnings = warnedCars.filter((c, i, all) => all.findIndex((o) => o.location_warning?.message === c.location_warning?.message) === i);
+  const ignoredWarning = !warnedCars.length ? (cars.find((c) => c.location_warning?.resolved)?.location_warning ?? null) : null;
+  // Helping a captain who is stuck (own center / admin).
+  const stuckArrive = isStaff && !!car && car.status === "captain_on_the_way" && !car.vehicle_verified && !!car.captain_id;
+  const stuckComplete = isStaff && !!car && ["captain_on_the_way", "service_started"].includes(car.status) && !!car.captain_id;
+  const [stuckMode, setStuckMode] = useState<"arrived" | "complete" | null>(null);
 
   const queryClient = useQueryClient();
   const { push: pushToast } = useToast();
@@ -208,6 +227,17 @@ export function BookingDetailDrawer({
     onError: (err) => pushToast({ tone: "error", title: "Couldn't Unlock", message: getErrorMessage(err) }),
   });
 
+  const ignoreWarning = useMutation({
+    mutationFn: () => bookingApi.ignoreLocationWarning((warnedCars[0] ?? car!).id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        predicate: (q) => typeof q.queryKey[0] === "string" && /^(center-bookings|admin-center-bookings|admin-bookings|booking|staff-booking|booking-group|manager-dashboard)/.test(q.queryKey[0]),
+      });
+      pushToast({ tone: "success", title: "Location Warning Ignored", message: "It is back to normal for this booking." });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Ignore", message: getErrorMessage(err) }),
+  });
+
   return (
     <Modal
       open={!!booking}
@@ -217,7 +247,7 @@ export function BookingDetailDrawer({
     >
       {booking && car && (
         <div className="space-y-5">
-          {(onEdit || onDelete || (onCancel && editableCar) || (isStaff && lockedCar) || (isStaff && car.status !== "cancelled") || (isStaff && paybackChoices.length > 0) || isAdmin) && (
+          {(onEdit || onDelete || (onCancel && editableCar) || (isStaff && lockedCar) || stuckArrive || stuckComplete || (isStaff && car.status !== "cancelled") || (isStaff && paybackChoices.length > 0) || isAdmin) && (
             <div className="flex flex-wrap justify-end gap-2 border-b border-gray-100 pb-3">
               {isStaff && paybackChoices.length > 0 && booking.customer_id && (
                 <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setPaybackOpen(true)} data-testid="drawer-payback">
@@ -245,8 +275,18 @@ export function BookingDetailDrawer({
                 </Button>
               )}
               {isStaff && lockedCar && (
-                <Button size="sm" isLoading={unlock.isPending} onClick={() => unlock.mutate(lockedCar.id)}>
+                <Button size="sm" isLoading={unlock.isPending} onClick={() => unlock.mutate(lockedCar.id)} data-testid="drawer-unlock-arrival">
                   <LockOpen className="h-3.5 w-3.5" /> Unlock Arrival Check
+                </Button>
+              )}
+              {stuckArrive && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setStuckMode("arrived")} data-testid="drawer-mark-arrived">
+                  <MapPinCheck className="h-3.5 w-3.5" /> Mark Arrived
+                </Button>
+              )}
+              {stuckComplete && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setStuckMode("complete")} data-testid="drawer-complete-for-captain">
+                  <CheckCheck className="h-3.5 w-3.5" /> Complete For Captain{isVisit ? ` · Car ${cars.indexOf(car) + 1}` : ""}
                 </Button>
               )}
               {onCancel && editableCar && (
@@ -283,6 +323,35 @@ export function BookingDetailDrawer({
               >
                 Try Again
               </button>
+            </p>
+          )}
+          {warnings.map((w) => (
+            <div
+              key={w.id}
+              role="alert"
+              data-testid="drawer-location-warning"
+              className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5"
+            >
+              <span className="flex min-w-0 items-start gap-2 text-sm font-semibold text-[var(--color-error)]">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  {w.location_warning!.message}
+                  <span className="mt-0.5 block text-xs font-medium text-red-700">
+                    Nothing is blocked — the captain carries on. Ignore it once you have looked into it.
+                  </span>
+                </span>
+              </span>
+              {isStaff && (
+                <Button size="sm" variant="outline" className="min-h-11 shrink-0 sm:min-h-0" isLoading={ignoreWarning.isPending} onClick={() => ignoreWarning.mutate()} data-testid="drawer-ignore-location-warning">
+                  Ignore
+                </Button>
+              )}
+            </div>
+          ))}
+          {ignoredWarning && (
+            <p className="text-xs text-[var(--color-text-secondary)]" data-testid="drawer-location-warning-ignored">
+              Location warning ignored{ignoredWarning.ignored_by_name ? ` by ${ignoredWarning.ignored_by_name}` : ""}
+              {ignoredWarning.ignored_at ? ` · ${formatDateTime(asUtcInstant(ignoredWarning.ignored_at))}` : ""} — {ignoredWarning.message}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-2">
@@ -328,6 +397,23 @@ export function BookingDetailDrawer({
                 </span>
               </div>
             ))}
+
+          {isStaff && (car.arrival_confirmed_by_name || car.completed_on_behalf_by_name) && (
+            <div className="space-y-0.5 text-xs text-[var(--color-text-secondary)]" data-testid="drawer-acted-for-captain">
+              {car.arrival_confirmed_by_name && (
+                <p>
+                  Arrival confirmed by <span className="font-semibold">{car.arrival_confirmed_by_name}</span>
+                  {car.arrival_confirmed_reason ? ` — ${car.arrival_confirmed_reason}` : ""}
+                </p>
+              )}
+              {car.completed_on_behalf_by_name && (
+                <p>
+                  Completed for the captain by <span className="font-semibold">{car.completed_on_behalf_by_name}</span>
+                  {car.completed_on_behalf_reason ? ` — ${car.completed_on_behalf_reason}` : ""}
+                </p>
+              )}
+            </div>
+          )}
 
           <Section title={isVisit ? "Customer & Vehicles" : "Customer & Vehicle"} icon={UserIcon}>
             <Row label="Customer" value={booking.customer_name} />
@@ -729,6 +815,7 @@ export function BookingDetailDrawer({
       {discountable && car && <DiscountDialog open={discountOpen} onClose={() => setDiscountOpen(false)} car={car} cars={cars.filter((c) => c.status !== "cancelled")} />}
       {reschedulable && car && <RescheduleDialog open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} booking={car} />}
       {isAdmin && car && <AdminEditPanel open={adminEditOpen} onClose={() => setAdminEditOpen(false)} car={car} cars={cars} />}
+      {isStaff && car && stuckMode && <StuckCaptainDialog mode={stuckMode} car={car} open onClose={() => setStuckMode(null)} />}
       {isStaff && booking?.customer_id && (
         <PaybackDialog
           open={paybackOpen}
@@ -779,13 +866,13 @@ function LocationCheckRow({
 }) {
   if (!point || point.latitude == null || point.longitude == null) return null;
   return (
-    <div className={`flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-sm ${flagged ? "bg-amber-50" : ""}`}>
+    <div className={`flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-sm ${flagged ? "bg-red-50" : ""}`}>
       <span className="min-w-0">
-        <span className={flagged ? "font-semibold text-amber-800" : "text-[var(--color-text-secondary)]"}>{label}</span>
+        <span className={flagged ? "font-semibold text-[var(--color-error)]" : "text-[var(--color-text-secondary)]"}>{label}</span>
         {at && <span className="ml-1.5 font-mono-num text-xs text-gray-400">{formatDateTime(at)}</span>}
         {distanceM != null && (
-          <span className={`ml-1.5 text-xs ${flagged ? "font-bold text-amber-700" : "text-gray-400"}`}>
-            {Math.round(distanceM)}m from the customer's address{flagged ? " — flagged" : ""}
+          <span className={`ml-1.5 text-xs ${flagged ? "font-bold text-[var(--color-error)]" : "text-gray-400"}`}>
+            {distanceM >= 1000 ? `${(distanceM / 1000).toFixed(1)} km` : `${Math.round(distanceM)} m`} from the customer's address{flagged ? " — flagged" : ""}
           </span>
         )}
       </span>

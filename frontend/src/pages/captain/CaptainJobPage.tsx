@@ -35,7 +35,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
-import { getErrorCode, getErrorDetails, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
+import { getErrorCode, getErrorMessage, getErrorStatus, retryUnlessClientError } from "../../lib/api-client";
 import { translateCaptainError } from "../../lib/captainErrorTranslations";
 import { useCaptainTranslation } from "../../context/i18n/CaptainI18nContext";
 import { useActiveJobs } from "../../components/captain/CaptainShell";
@@ -43,8 +43,8 @@ import { CollectPayment } from "../../components/captain/CollectPayment";
 import { AddServicesSheet } from "../../components/captain/AddServicesSheet";
 import { CustomerEditedNote, JobMoney } from "../../components/captain/JobMoney";
 import { PhotoTile, usePhotoShot } from "../../components/captain/PhotoShot";
-import { fixFields, getPosition } from "../../components/captain/photo";
-import { type GeoBlock, GeoBlockNotice, LocationCheckChip } from "../../components/captain/GeoGate";
+import { fixFields, getJobPosition } from "../../components/captain/photo";
+import { LocationCheckChip } from "../../components/captain/GeoGate";
 import {
   addressLine,
   blockedByFlag,
@@ -107,14 +107,7 @@ function JobScreen({ id }: { id: string }) {
   const [afterMode, setAfterMode] = useState(false);
   const [summary, setSummary] = useState(false);
   const [sheet, setSheet] = useState<SheetKind>(() => ((location.state as { open?: string } | null)?.open === "arrive" ? "arrive" : null));
-  const [error, setErrorText] = useState("");
-  // The server refused a step on the location check: shown with an
-  // "Ask Manager To Approve" button; cleared with the error text.
-  const [geoBlock, setGeoBlock] = useState<GeoBlock | null>(null);
-  const setError = (message: string) => {
-    setErrorText(message);
-    if (!message) setGeoBlock(null);
-  };
+  const [error, setError] = useState("");
   const [code, setCode] = useState("");
   const [note, setNote] = useState("");
   // "Added — collect ₹X at the end." after an on-site add.
@@ -125,9 +118,10 @@ function JobScreen({ id }: { id: string }) {
     return () => clearInterval(timer);
   }, []);
 
-  const geoFail = t("captain.error.geoFailed");
-  const beforeShot = usePhotoShot(geoFail);
-  const afterShot = usePhotoShot(geoFail);
+  // Location never blocks a step: each one reads the phone's position without
+  // waiting on it to succeed (the server flags a missing one to the manager).
+  const beforeShot = usePhotoShot();
+  const afterShot = usePhotoShot();
 
   const cars = visit.data ?? [];
   const types = useCarTypes(cars);
@@ -156,12 +150,6 @@ function JobScreen({ id }: { id: string }) {
   // offers the same step again.
   const [retryStep, setRetryStep] = useState<"before" | "after" | null>(null);
   const fail = (e: unknown) => {
-    if (getErrorCode(e) === "GEO_CHECK_FAILED") {
-      const step = String(getErrorDetails(e)?.step || "arrival") as GeoBlock["step"];
-      setGeoBlock({ step, message: getErrorMessage(e) });
-      setErrorText("");
-      return;
-    }
     setError(
       axios.isAxiosError(e) ? translateCaptainError(getErrorMessage(e), language) : e instanceof Error && e.message ? e.message : getErrorMessage(e),
     );
@@ -172,7 +160,7 @@ function JobScreen({ id }: { id: string }) {
   const failPhoto = (e: unknown, shot: typeof beforeShot, which: "before" | "after") => {
     if (getErrorCode(e) === "GEO_CHECK_FAILED") {
       fail(e);
-      return; // the photo is fine — only the location needs a manager; keep it for the retry
+      return; // the "too soon after starting" time rule: the photo is fine — keep it for the retry
     }
     if (getErrorCode(e) === "STORAGE_UNAVAILABLE") {
       setRetryStep(which);
@@ -186,7 +174,7 @@ function JobScreen({ id }: { id: string }) {
 
   const heading = useMutation({
     mutationFn: async () => {
-      const at = await getPosition(geoFail);
+      const at = await getJobPosition();
       return bookingApi.startHeading(car!.id, { ...fixFields(at), equipment_used: [] });
     },
     onMutate: () => setError(""),
@@ -199,8 +187,8 @@ function JobScreen({ id }: { id: string }) {
     // caught up yet); the button sends what's in the field.
     mutationFn: async (typed?: string) => {
       const value = typed ?? code;
-      const at = await getPosition(geoFail);
-      return bookingApi.verifyVehicle(car!.id, byCode ? { service_code: value } : { registration_number: value.trim() }, at);
+      const at = await getJobPosition();
+      return bookingApi.verifyVehicle(car!.id, byCode ? { service_code: value } : { registration_number: value.trim() }, fixFields(at));
     },
     onMutate: () => setError(""),
     onSuccess: async () => {
@@ -556,6 +544,7 @@ function JobScreen({ id }: { id: string }) {
             locatingText={t("captain.v2.locating")}
             retakeText={t("captain.v2.retake")}
             gpsText={t("captain.v2.gpsTagged")}
+            noGpsText={t("captain.v2.photoReady")}
           />
           {flagged && <Notice tone="amber" icon={<TriangleAlert className="h-4 w-4" />}>{t("captain.v2.flagged")}</Notice>}
           {addedNotice}
@@ -587,6 +576,7 @@ function JobScreen({ id }: { id: string }) {
             locatingText={t("captain.v2.locating")}
             retakeText={t("captain.v2.retake")}
             gpsText={t("captain.v2.gpsTagged")}
+            noGpsText={t("captain.v2.photoReady")}
           />
           {lastOpen && pay.due > 0.004 && (
             pay.prepaid ? (
@@ -630,7 +620,6 @@ function JobScreen({ id }: { id: string }) {
       {/* ------------------------------------------------------------ actions */}
       {!summary && (
         <BottomBar>
-          {geoBlock && sheet !== "arrive" && <GeoBlockNotice bookingId={car.id} block={geoBlock} />}
           {error && (
             <p className="mb-2 text-sm font-medium text-[#B91C1C]" role="alert">
               {error}
@@ -743,7 +732,6 @@ function JobScreen({ id }: { id: string }) {
             className="mt-4 h-14 w-full rounded-2xl border border-[#E4E9F1] px-4 tabular-nums text-xl font-bold text-[#0E1A33] outline-none focus:border-[#0A66F0] focus:ring-2 focus:ring-[#E8F0FE]"
           />
         )}
-        {geoBlock && <div className="mt-3"><GeoBlockNotice bookingId={car.id} block={geoBlock} /></div>}
         {error && <p className="mt-2 text-sm font-medium text-[#B91C1C]" role="alert">{error}</p>}
         <Btn
           className="mt-4 w-full"

@@ -182,13 +182,15 @@ export interface BookingQuote {
 }
 
 /** Server-side manager-queue filters for GET /bookings/center/{id}. */
-export type CenterQueueScope = "needs_captain" | "open_issues" | "attention" | "active" | "late_starts";
+export type CenterQueueScope = "needs_captain" | "open_issues" | "location_warnings" | "attention" | "active" | "late_starts";
 export type CenterQueueSort = "scheduled_asc" | "scheduled_desc" | "created_desc";
 
 /** What the device says about a fix; the server cross-checks it (never trusts it alone). */
 export interface GpsFix {
-  latitude: number;
-  longitude: number;
+  // Both absent when the phone couldn't give a position: the step still goes
+  // through (the server flags it to the manager — location never blocks).
+  latitude?: number;
+  longitude?: number;
   accuracy_m?: number;
   fix_at?: string;
   speed_mps?: number;
@@ -220,7 +222,7 @@ export interface GeoApproval {
 }
 
 export interface GeoCheckRecord {
-  status: "verified" | "override" | "unpinned" | "unverified";
+  status: "verified" | "override" | "unpinned" | "unverified" | "confirmed";
   distance_m?: number | null;
   allowed_m?: number | null;
   accuracy_m?: number | null;
@@ -400,13 +402,18 @@ export const bookingApi = {
   captureAfterPhoto: (id: string, payload: PhotoCapturePayload) =>
     apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/after-photo`, payload).then((r) => r.data.data),
 
-  /** Captain: "Ask Manager To Approve" after the location check refused a step. */
-  geoRequestApproval: (id: string, step: GeoStep, note?: string) =>
-    apiClient.post<ApiSuccess<{ status: string }>>(`/bookings/${id}/geo-approval-request`, { step, note }).then((r) => r.data.data),
+  /** Manager / admin: "Ignore" the red location warning (idempotent; own center / admin). */
+  ignoreLocationWarning: (id: string, note?: string) =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/location-warning/ignore`, { note }).then((r) => r.data.data),
 
-  /** Manager / admin: approve or decline ONE step of ONE job (reason required, audit-logged). */
-  geoOverride: (id: string, step: GeoStep, approve: boolean, reason: string) =>
-    apiClient.post<ApiSuccess<{ status: string }>>(`/bookings/${id}/geo-override`, { step, approve, reason }).then((r) => r.data.data),
+  /** Manager / admin: confirm the arrival for a captain who is stuck at the door (reason required). */
+  markArrived: (id: string, reason: string) =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/mark-arrived`, { reason }).then((r) => r.data.data),
+
+  /** Manager / admin: complete the job for a stuck captain — he stays the earner. `payment` says how
+   *  any amount due was collected: cash / online (the manager took it) or captain (he collects it). */
+  completeForCaptain: (id: string, reason: string, payment?: "cash" | "online" | "captain") =>
+    apiClient.post<ApiSuccess<Booking>>(`/bookings/${id}/complete-for-captain`, { reason, payment }).then((r) => r.data.data),
 
   geoStatus: (id: string) => apiClient.get<ApiSuccess<GeoStatus>>(`/bookings/${id}/geo-status`).then((r) => r.data.data),
 

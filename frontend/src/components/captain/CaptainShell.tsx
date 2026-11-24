@@ -22,7 +22,7 @@ import { playNotificationChime } from "../../lib/notificationSound";
 import { MandatoryGates } from "../shared/MandatoryGates";
 import { isManagedPay, useMyPay } from "./MyPay";
 import { getErrorStatus } from "../../lib/api-client";
-import { fixFields, toPosition, type Position } from "./photo";
+import { fixFields, toPosition, type FixedPosition } from "./photo";
 
 // A manager watching the live map sees real movement; sparse enough for a
 // phone battery. Only while he has at least one active job.
@@ -78,7 +78,7 @@ function useJobPlumbing() {
     // fix's own time): a failed send is queued and retried oldest-first, so
     // a patch of bad network doesn't leave a hole in the trail. Bounded —
     // the server drops anything older than ~10 minutes anyway.
-    const queue: Position[] = [];
+    const queue: FixedPosition[] = [];
     let flushing = false;
     const flush = async () => {
       if (flushing) return;

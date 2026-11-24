@@ -166,6 +166,8 @@ class BookingModel(BusinessRecordBase):
     arrival_location: Optional[GeoPoint] = None
     arrival_flagged: bool = False
     arrival_distance_m: Optional[float] = None
+    # The manager's red location warning (never blocks anything); see BookingService._build_location_warning.
+    location_warning: Optional[dict] = None
 
     distance_km: Optional[float] = None
     # Real-road distance/ETA snapshot from creation (Routes API, haversine

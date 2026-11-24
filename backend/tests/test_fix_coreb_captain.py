@@ -177,7 +177,7 @@ async def test_cap02_arrival_without_gps_is_flagged_never_blocked(db, sent):
     svc = BookingService(db)
     out = await svc.verify_vehicle(jid, VerifyVehicleRequest(service_code=job["service_code"]), s["cap"]["id"])
     assert out["vehicle_verified"] is True and out["arrival_flagged"] is True and out["arrival_no_gps"] is True
-    assert any(x["user_id"] == s["mgr"]["id"] and "Location flagged" in x["title"] and "without sharing" in x["message"] for x in sent)
+    assert any(x["user_id"] == s["mgr"]["id"] and "Location Flagged" in x["title"] and "without sharing" in x["message"] for x in sent)
     started = await svc.capture_before_photo(jid, await hb.snap(db, s["cap"]["id"], "before"), s["cap"]["id"])
     assert started["status"] == "service_started"
 

@@ -37,12 +37,15 @@ from app.schemas.booking_schema import (
     BookingTipRequest,
     BookingUpdateDetailsRequest,
     CaptainCancelRequest,
+    CompleteForCaptainRequest,
     GeoApprovalRequest,
     GeoOverrideRequest,
     HeadingRequest,
+    LocationWarningIgnoreRequest,
     ManagerBookingCreateRequest,
     ManagerLogBookingRequest,
     ManagerMarkDoneRequest,
+    ManagerStepRequest,
     PhotoCaptureRequest,
     PriorityUpdateRequest,
     QuickBookingRequest,
@@ -189,7 +192,7 @@ async def list_for_center(
     uses, scoped to their center.
 
     The queue filters, all server-side so a busy center never loses a job
-    past the first page: `scope` = needs_captain | open_issues | attention
+    past the first page: `scope` = needs_captain | open_issues | location_warnings | attention
     (both) | active (not yet finished) | late_starts; `date_from`/`date_to`
     (YYYY-MM-DD, scheduled day, inclusive); `q` = booking number, phone or
     customer name; `sort` = scheduled_asc | scheduled_desc | created_desc
@@ -325,6 +328,44 @@ async def unlock_arrival_code(
     """Too many wrong arrival codes locked this visit's check — the manager
     (own center) or admin resets it."""
     return await BookingController(db).unlock_arrival_code(current_user, booking_id)
+
+
+@router.post("/{booking_id}/mark-arrived", dependencies=[Depends(require_manager_or_admin)])
+async def mark_arrived(
+    payload: ManagerStepRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Mark Arrived: the captain is at the door but stuck on the arrival
+    check — the manager (own center) or admin confirms it for him (reason
+    required). He continues with the photos from his app."""
+    return await BookingController(db).manager_mark_arrived(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/complete-for-captain", dependencies=[Depends(require_manager_or_admin)])
+async def complete_for_captain(
+    payload: CompleteForCaptainRequest,
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Complete For Captain: a captain on the way / working who can't finish
+    in his app. Completes it crediting HIM (same money path as his after
+    photo); reason required; says how any amount due was collected."""
+    return await BookingController(db).complete_for_captain(current_user, booking_id, payload)
+
+
+@router.post("/{booking_id}/location-warning/ignore", dependencies=[Depends(require_manager_or_admin)])
+async def ignore_location_warning(
+    payload: LocationWarningIgnoreRequest = Body(default_factory=LocationWarningIgnoreRequest),
+    booking_id: str = Path(pattern=r"^[0-9a-fA-F]{24}$"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Ignore: the manager (own center) or admin has seen the red location
+    warning and turns it back to normal. Idempotent; audit-logged."""
+    return await BookingController(db).ignore_location_warning(current_user, booking_id, payload)
 
 
 @router.post("/{booking_id}/assign-captain", dependencies=[Depends(require_manager_or_admin)])

@@ -223,8 +223,6 @@ export const en = {
   "captain.visit.pick": "Tap To Do Next",
   "captain.visit.total": "Visit Total",
   "captain.payment.vehicles": "{n} Vehicles",
-  "captain.error.geoUnsupported": "Geolocation isn't supported on this device.",
-  "captain.error.geoFailed": "Couldn't get your location. Enable location access and try again.",
   "captain.modal.explainWhy": "Please explain why.",
 
   // Captain app v2 (Today · Jobs · Earnings · Profile)
@@ -296,6 +294,7 @@ export const en = {
   "captain.v2.tapPhoto": "Tap To Take Photo",
   "captain.v2.locating": "Getting location…",
   "captain.v2.retake": "Retake",
+  "captain.v2.photoReady": "Photo Ready",
   "captain.v2.gpsTagged": "Location Saved",
   "captain.v2.step.arrived": "Arrived · Code Checked",
   "captain.v2.step.washStarted": "Before Photo · Wash Started",

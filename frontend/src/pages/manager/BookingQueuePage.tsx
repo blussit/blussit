@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import RemovedTypeTag from "../../components/shared/RemovedTypeTag";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, HandCoins, LockOpen, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
+import { AlertTriangle, Ban, CalendarClock, CheckCircle2, ClipboardCheck, Clock, EyeOff, HandCoins, LockOpen, MapPinOff, Pencil, Phone, Sparkles, Trash2 } from "lucide-react";
 import { bookingApi } from "../../api/booking";
 import { adminServiceCenterApi, staffDirectoryApi } from "../../api/admin";
 import { Button, Card, DataTable, ErrorState, Input, Modal, Select, StatusBadge, Switch } from "../../components/ui";
@@ -23,7 +23,7 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { format, minutesUntilSlotStart, URGENT_ASSIGNMENT_MINUTES, formatSlot } from "../../lib/date";
 import { getErrorMessage } from "../../lib/api-client";
-import { isArrivalLocked, isOpenIssue, issueLabel, needsCaptain } from "../../lib/constants";
+import { hasLocationWarning, isArrivalLocked, isOpenIssue, issueLabel, needsCaptain } from "../../lib/constants";
 import type { SortOrder } from "../../lib/useBookingFilters";
 import { useLiveChannel } from "../../lib/socket";
 import type { ApiPaginated } from "../../lib/api-client";
@@ -137,6 +137,28 @@ function BookingCardHead({ b, ids, label, chip, after }: { b: Booking; ids: stri
 /** The single clear answer to "what's going on with this booking" — blank
  * for a normal healthy booking, since there's nothing to explain. */
 function WhatHappened({ booking }: { booking: Booking }) {
+  // The location warning is RED and sits above everything else (never blocks the captain).
+  if (hasLocationWarning(booking) && booking.status !== "cancelled") {
+    return (
+      <span className="flex flex-col gap-1">
+        <LocationWarningLine booking={booking} />
+        <WhatHappenedBase booking={booking} />
+      </span>
+    );
+  }
+  return <WhatHappenedBase booking={booking} />;
+}
+
+/** "Captain Ravi entered the service code 2.0 km away from the customer's address" — red. */
+function LocationWarningLine({ booking }: { booking: Booking }) {
+  return (
+    <span className="flex items-start gap-1 text-xs font-semibold text-[var(--color-error)]" data-testid="queue-location-warning">
+      <MapPinOff className="mt-0.5 h-3 w-3 shrink-0" /> {booking.location_warning?.message}
+    </span>
+  );
+}
+
+function WhatHappenedBase({ booking }: { booking: Booking }) {
   if (booking.status === "cancelled") {
     return (
       <span className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
@@ -319,6 +341,12 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
   // confusing double-listing this line exists to prevent.
   const newBookings = useMemo(() => attentionItems.filter((b) => needsCaptain(b) && !isOpenIssue(b)).sort(byPriorityThenScheduled), [attentionItems]);
   const openIssues = useMemo(() => attentionItems.filter(isOpenIssue).sort(byPriorityThenScheduled), [attentionItems]);
+  // Red: a step accepted from outside the boundary / without GPS. Bookings that are
+  // ALSO flagged show it inside their flagged card instead (WhatHappened), once.
+  const locationWarned = useMemo(
+    () => attentionItems.filter((b) => hasLocationWarning(b) && !isOpenIssue(b)).sort(byPriorityThenScheduled),
+    [attentionItems],
+  );
   const lateStartBookings = useMemo(
     () => lateItems.filter(startedLate).sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime()),
     [lateItems]
@@ -493,6 +521,16 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
     onError: (err) => pushToast({ tone: "error", title: "Couldn't Unlock", message: getErrorMessage(err) }),
   });
 
+  // The red location warning: the manager has looked into it — back to normal.
+  const ignoreMutation = useMutation({
+    mutationFn: (id: string) => bookingApi.ignoreLocationWarning(id),
+    onSuccess: () => {
+      invalidate();
+      pushToast({ tone: "success", title: "Location Warning Ignored", message: "It is back to normal for this booking." });
+    },
+    onError: (err) => pushToast({ tone: "error", title: "Couldn't Ignore", message: getErrorMessage(err) }),
+  });
+
   const resolveMutation = useMutation({
     // The server requires a reason (3–300 characters) — the old "optional"
     // field sent nothing and every blank resolve failed with a 422.
@@ -609,6 +647,18 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
           }}
         >
           <LockOpen className="h-3.5 w-3.5" /> Unlock Arrival Check
+        </Button>
+      )}
+      {hasLocationWarning(b) && (
+        <Button
+          size="sm"
+          variant="outline"
+          isLoading={ignoreMutation.isPending && ignoreMutation.variables === b.id}
+          disabled={ignoreMutation.isPending}
+          onClick={() => ignoreMutation.mutate(b.id)}
+          data-testid="queue-ignore-location-warning"
+        >
+          <EyeOff className="h-3.5 w-3.5" /> Ignore
         </Button>
       )}
       {needsCaptain(b) && (
@@ -788,6 +838,32 @@ export default function BookingQueuePage({ centerIdOverride }: { centerIdOverrid
               </div>
             )}
           </section>
+
+          {locationWarned.length > 0 && (
+            <section data-testid="queue-location-warnings">
+              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--color-error)]">
+                <MapPinOff className="h-4 w-4" /> Location Warnings ({locationWarned.length})
+              </h2>
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {locationWarned.map((b) => (
+                  <Card
+                    key={b.id}
+                    className="cursor-pointer border-l-4 border-l-[var(--color-error)] bg-red-50/40 p-4 transition-shadow hover:shadow-[var(--shadow-lifted)]"
+                    onClick={() => setSelectedBooking(b)}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <BookingCardHead b={b} ids={b.booking_number} label={bookingLabel(b)} after={`Captain: ${captainName(b.captain_id)}`} />
+                      <StatusBadge status={b.status} />
+                    </div>
+                    <div className="mt-2">
+                      <LocationWarningLine booking={b} />
+                    </div>
+                    <div className="mt-3">{bookingActions(b)}</div>
+                  </Card>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section>
             <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-amber-700">

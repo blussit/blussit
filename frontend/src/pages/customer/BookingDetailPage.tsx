@@ -537,12 +537,17 @@ export default function BookingDetailPage() {
     completed: ["Wash Complete", completedAt ? `Finished ${stamp(completedAt, booking.scheduled_date.slice(0, 10))}` : "Thanks for washing with Blussit."],
     cancelled: ["Booking Cancelled", booking.cancellation_reason ? `Reason: ${booking.cancellation_reason}` : "This booking won't go ahead."],
   };
-  const [heading, subline] = headline[status] || ["Booking", ""];
+  // The captain has entered the code (or the manager confirmed the arrival): he is at the door,
+  // no longer "on the way", and the code has done its job.
+  const captainArrived = status === "captain_on_the_way" && trailCars.some((b) => b.status === "captain_on_the_way" && b.vehicle_verified);
+  const [heading, subline] = captainArrived
+    ? ["Your Captain Has Arrived", "Your wash starts in a moment."]
+    : headline[status] || ["Booking", ""];
   const hero = HERO[status] || HERO.pending;
   const HeroIcon = hero.icon;
   const timeline = buildTimeline(trailCars, status);
   const currentIndex = status === "cancelled" ? -1 : timeline.findIndex((s) => !s.done);
-  const showCode = !!booking.service_code && !["completed", "cancelled"].includes(booking.status);
+  const showCode = !!booking.service_code && !captainArrived && !["completed", "cancelled"].includes(booking.status);
   const contactable = !["completed", "cancelled"].includes(status);
   const address = booking.address_snapshot;
   const hasPhotos = trailCars.some((car) => car.before_photo || car.after_photo);

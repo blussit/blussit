@@ -7,10 +7,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, Loader2, MapPin, RefreshCw } from "lucide-react";
 import { uploadApi } from "../../api/upload";
-import { fixFields, getPosition, shrinkPhoto, type Position } from "./photo";
+import { fixFields, getJobPosition, hasFix, shrinkPhoto, type Position } from "./photo";
 
 export interface Shot {
   ready: boolean;
+  /** A position was captured with the photo (the "Location Saved" tick). */
+  hasLocation: boolean;
   busy: boolean;
   error: string | null;
   /** Uploads (once) and returns what the photo endpoints take. */
@@ -23,13 +25,19 @@ export interface Shot {
   };
 }
 
-export function usePhotoShot(geoFailMessage: string): Shot {
+/** LOCATION NEVER BLOCKS THE CAPTAIN: the photo is ready the moment it is shot.
+ * The position is looked up beside it (and again, fresh, when the step is
+ * submitted); a phone that can't give one still submits — the server flags it
+ * to the manager. */
+export function usePhotoShot(): Shot {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [geo, setGeo] = useState<Position | null>(null);
   const [status, setStatus] = useState<"idle" | "locating" | "ready">("idle");
   const [error, setError] = useState<string | null>(null);
   const uploaded = useRef<string | null>(null);
+  // A late position from a photo that was since retaken must not land on the new one.
+  const shotNo = useRef(0);
 
   useEffect(() => {
     if (!preview) return;
@@ -39,20 +47,25 @@ export function usePhotoShot(geoFailMessage: string): Shot {
   const onFile = async (selected: File) => {
     setError(null);
     setStatus("locating");
+    const mine = ++shotNo.current;
     try {
-      const [photo, pos] = await Promise.all([shrinkPhoto(selected), getPosition(geoFailMessage)]);
+      const photo = await shrinkPhoto(selected);
       uploaded.current = null;
       setFile(photo);
-      setGeo(pos);
+      setGeo(null);
       setPreview(URL.createObjectURL(photo));
       setStatus("ready");
+      void getJobPosition().then((pos) => {
+        if (mine === shotNo.current && hasFix(pos)) setGeo(pos);
+      });
     } catch (e) {
       setStatus(preview ? "ready" : "idle");
-      setError(e instanceof Error ? e.message : geoFailMessage);
+      setError(e instanceof Error ? e.message : null);
     }
   };
 
   const reset = () => {
+    shotNo.current++;
     uploaded.current = null;
     setFile(null);
     setGeo(null);
@@ -62,17 +75,18 @@ export function usePhotoShot(geoFailMessage: string): Shot {
   };
 
   const submit = async () => {
-    if (!file || !geo) throw new Error(geoFailMessage);
+    if (!file) throw new Error("Take the photo first.");
     if (!uploaded.current) uploaded.current = await uploadApi.photo(file);
-    // The position sent is taken NOW (the server refuses a stale fix and
-    // the photo may have been taken minutes ago); the photo-time fix is the
-    // fallback if a second fix can't be had in time.
-    const fresh = await getPosition(geoFailMessage).catch(() => geo);
-    return { image_url: uploaded.current, ...fixFields(fresh) };
+    // The position sent is taken NOW (the photo may have been shot minutes
+    // ago); the photo-time one is only the fallback, and a phone with no
+    // position at all submits without — never blocked.
+    const fresh = await getJobPosition();
+    return { image_url: uploaded.current, ...fixFields(hasFix(fresh) ? fresh : (geo ?? fresh)) };
   };
 
   return {
-    ready: status === "ready" && !!file && !!geo,
+    ready: status === "ready" && !!file,
+    hasLocation: hasFix(geo),
     busy: status === "locating",
     error,
     submit,
@@ -87,6 +101,7 @@ export function PhotoTile({
   locatingText,
   retakeText,
   gpsText,
+  noGpsText,
 }: {
   shot: Shot;
   label: string;
@@ -94,6 +109,8 @@ export function PhotoTile({
   locatingText: string;
   retakeText: string;
   gpsText: string;
+  /** Shown instead of the location tick while no position is attached (neutral — never a warning). */
+  noGpsText?: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   const { preview, status, onFile, reset } = shot.input;
@@ -118,7 +135,7 @@ export function PhotoTile({
           <img src={preview} alt={label} className="aspect-[4/3] w-full object-cover" />
           <div className="flex items-center justify-between gap-2 px-3 py-2">
             <span className="flex items-center gap-1.5 text-xs font-semibold text-[#15803D]">
-              <MapPin className="h-3.5 w-3.5" /> {gpsText}
+              <MapPin className="h-3.5 w-3.5" /> {shot.hasLocation || !noGpsText ? gpsText : noGpsText}
             </span>
             <button
               type="button"

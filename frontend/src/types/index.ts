@@ -214,7 +214,6 @@ export interface BookingPolicy {
   geo_min_trail_pings?: number;
   geo_max_speed_kmh?: number;
   geo_min_service_seconds?: number;
-  geo_override_valid_minutes?: number;
   late_start_grace_minutes: number;
   // Minutes a captain gets from a LAST-MINUTE assignment before the late
   // clock starts (the booking was late, not the captain).
@@ -347,6 +346,22 @@ export type BookingStatus =
   | "cancelled"
   | "rescheduled";
 
+export interface LocationWarning {
+  step: "arrival" | "start" | "complete";
+  distance_m?: number | null;
+  allowed_m?: number | null;
+  reasons: string[];
+  /** "Captain Ravi entered the service code 2.0 km away from the customer's address" */
+  message: string;
+  at?: string;
+  captain_id?: string;
+  captain_name?: string | null;
+  resolved: boolean;
+  ignored_by_name?: string | null;
+  ignored_at?: string | null;
+  ignore_note?: string | null;
+}
+
 export interface GeoPoint {
   latitude: number;
   longitude: number;
@@ -464,7 +479,7 @@ export interface Booking {
   // GPS-integrity evidence (staff + the captain's own screen; never the customer):
   // per-step verdict, a faked-looking trail, a manager-approved step, refusals.
   geo_checks?: Partial<Record<"heading" | "arrival" | "start" | "complete", {
-    status: "verified" | "override" | "unpinned" | "unverified";
+    status: "verified" | "override" | "unpinned" | "unverified" | "confirmed";
     distance_m?: number | null;
     allowed_m?: number | null;
     accuracy_m?: number | null;
@@ -472,6 +487,14 @@ export interface Booking {
     override_by_name?: string | null;
     override_reason?: string | null;
   }>>;
+  /** The RED warning for the manager: a step accepted from outside the
+   *  boundary / without GPS / with a weak fix. Never blocks the captain;
+   *  cleared by the manager's Ignore (staff + admin only). */
+  location_warning?: LocationWarning | null;
+  arrival_confirmed_by_name?: string | null;
+  arrival_confirmed_reason?: string | null;
+  completed_on_behalf_by_name?: string | null;
+  completed_on_behalf_reason?: string | null;
   geo_suspect?: boolean;
   geo_suspect_reasons?: string[];
   geo_override?: boolean;

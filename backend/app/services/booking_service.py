@@ -48,12 +48,13 @@ from app.schemas.booking_schema import (
     VerifyVehicleRequest,
 )
 from app.schemas.profile_schema import AddressCreateRequest
+from app.services.audit_service import AuditService
 from app.services.booking_policy_service import BookingPolicyService
 from app.services.capacity_policy_service import CapacityPolicyService
 from app.services import booking_money as bm
 from app.services.coupon_service import CouponService
 from app.services.customer_charge_service import CustomerChargeService, late_cancellation_quote
-from app.services.geo_integrity_service import STEPS as GEO_STEPS, Fix, GeoIntegrityService
+from app.services.geo_integrity_service import Fix, GeoIntegrityService
 from app.services.holiday_service import HolidayException, HolidayService, overlaps as holiday_overlaps
 from app.services.money_service import MoneyService
 from app.services.payroll_hooks import after_booking_money_change, after_bookings_money_change
@@ -218,7 +219,11 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
         BookingStatus.RESCHEDULED.value,
         BookingStatus.COMPLETED.value,
     },
-    BookingStatus.CAPTAIN_ON_THE_WAY.value: {BookingStatus.SERVICE_STARTED.value, BookingStatus.PENDING.value, BookingStatus.CANCELLED.value},
+    # -> COMPLETED from on the way is complete_for_captain only (a manager
+    # finishing for a stuck captain, who stays the earner).
+    BookingStatus.CAPTAIN_ON_THE_WAY.value: {
+        BookingStatus.SERVICE_STARTED.value, BookingStatus.PENDING.value, BookingStatus.CANCELLED.value, BookingStatus.COMPLETED.value,
+    },
     BookingStatus.SERVICE_STARTED.value: {BookingStatus.COMPLETED.value, BookingStatus.CANCELLED.value},
     BookingStatus.RESCHEDULED.value: {BookingStatus.ASSIGNED.value, BookingStatus.RESCHEDULED.value, BookingStatus.CANCELLED.value, BookingStatus.COMPLETED.value},
 }
@@ -449,7 +454,10 @@ _CUSTOMER_HIDDEN_FIELDS = (
     "arrival_code_failures", "arrival_code_locked", "arrival_code_locked_at", "arrival_code_unlocked_by", "arrival_code_unlocked_at",
     "arrival_no_gps", "quick_completion_flagged",
     # GPS-integrity evidence (geo_integrity_service): staff + the captain's own job screen only.
-    "geo_checks", "geo_override", "geo_suspect", "geo_suspect_reasons", "geo_refusals", "geo_last_fix_at",
+    "geo_checks", "geo_override", "geo_suspect", "geo_suspect_reasons", "geo_refusals", "geo_last_fix_at", "location_warning",
+    # A manager acting for a stuck captain (Mark Arrived / Complete For Captain): between staff.
+    "arrival_confirmed_by", "arrival_confirmed_by_name", "arrival_confirmed_reason", "arrival_confirmed_at",
+    "completed_on_behalf_by", "completed_on_behalf_by_name", "completed_on_behalf_reason", "completed_on_behalf_at",
     # Captain-wallet bookkeeping (MoneyService.settle_captain_wallet):
     # captain_wallet_posted is his earning minus the cash he holds — the
     # captain's pay by another name (security review 2026-10-07).
@@ -468,6 +476,8 @@ _CUSTOMER_HIDDEN_FIELDS = (
 )
 _CAPTAIN_HIDDEN_FIELDS = (
     "platform_earning", "bill",
+    # The manager's red location warning: the captain sees nothing different.
+    "location_warning",
     "manager_discount", "manager_discount_by", "manager_discount_reason", "manager_discount_by_name", "manager_discount_at",
     "admin_notes", "admin_edit_rev", "admin_edited_at", "admin_edited_by", "payment_adjustments", "version",
     "payments", "payment_keys",
@@ -534,10 +544,18 @@ _OPEN_ISSUE = {
     "issue_flag": {"$nin": [None, ""]},
     "issue_resolved": {"$ne": True},
 }
+# A step accepted from outside the boundary / without GPS: red until the
+# manager taps Ignore — kept on a finished job too (it is exactly then that
+# the manager reviews it). Never an issue flag: it blocks nothing.
+_LOCATION_WARNED = {
+    "status": {"$in": [*_ACTIVE_STATUSES, BookingStatus.COMPLETED.value]},
+    "location_warning.resolved": False,
+}
 _QUEUE_SCOPES = {
     "needs_captain": {"status": {"$in": _NEEDS_CAPTAIN}},
     "open_issues": _OPEN_ISSUE,
-    "attention": {"$or": [{"status": {"$in": _NEEDS_CAPTAIN}}, _OPEN_ISSUE]},
+    "location_warnings": _LOCATION_WARNED,
+    "attention": {"$or": [{"status": {"$in": _NEEDS_CAPTAIN}}, _OPEN_ISSUE, _LOCATION_WARNED]},
     "active": {"status": {"$in": _ACTIVE_STATUSES}},
     "late_starts": {"captain_start_stage": {"$in": ["late", "severely_late"]}},
 }
@@ -2780,8 +2798,8 @@ class BookingService:
     def _mark_done_refusal(status: str) -> str:
         return {
             BookingStatus.AWAITING_PAYMENT.value: "This booking is still waiting for the customer's online payment, so it can't be marked done yet.",
-            BookingStatus.CAPTAIN_ON_THE_WAY.value: "The captain is already on the way — let them finish it from their app, or cancel the booking.",
-            BookingStatus.SERVICE_STARTED.value: "The captain has already started this job — let them finish it from their app, or cancel the booking.",
+            BookingStatus.CAPTAIN_ON_THE_WAY.value: "The captain is already on the way — use Mark Arrived or Complete For Captain if he is stuck, or cancel the booking.",
+            BookingStatus.SERVICE_STARTED.value: "The captain has already started this job — use Complete For Captain if he is stuck, or cancel the booking.",
             BookingStatus.COMPLETED.value: "This booking is already completed.",
             BookingStatus.CANCELLED.value: "This booking was cancelled.",
         }.get(status, "This booking can't be marked done right now.")
@@ -3954,46 +3972,103 @@ class BookingService:
             return booking["address_snapshot"]
         return await self.address_repo.find_by_id(booking["address_id"]) if booking.get("address_id") else None
 
-    async def _check_geofence(self, booking: dict, latitude: float, longitude: float) -> tuple[bool, float | None]:
-        """Flags (never blocks) a photo whose GPS is further than the policy
-        radius from the booking's address — the manager sees the flag and
-        distance, service addresses aren't pinpoint-accurate so we don't want
-        false positives stopping a captain mid-job."""
-        address = await self._address_of(booking)
-        if not address or address.get("latitude") is None or address.get("longitude") is None:
+    @staticmethod
+    def _pin_of(address: dict | None) -> tuple[float, float] | None:
+        """The customer's map pin, or None when there isn't a real one — a
+        missing coordinate or the (0, 0) a bad client/import writes is NOT a
+        place, so it never yields a distance (unpinned = no location check)."""
+        if not address:
+            return None
+        lat, lng = address.get("latitude"), address.get("longitude")
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            return None
+        if lat == 0.0 and lng == 0.0:
+            return None
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            return None
+        return lat, lng
+
+    async def _check_geofence(
+        self, booking: dict, latitude: float | None, longitude: float | None, accuracy_m: float | None = None,
+    ) -> tuple[bool, float | None]:
+        """(outside the boundary?, distance in metres). Only ever FLAGS — the
+        captain is never blocked; the manager gets the red location warning.
+        Same boundary as the GPS-integrity gate: the policy radius (500 m)
+        plus the phone's own accuracy up to the accuracy cap. No position or
+        no pin on the address -> (False, None)."""
+        if latitude is None or longitude is None:
+            return False, None
+        site = self._pin_of(await self._address_of(booking))
+        if site is None:
             return False, None
         policy = await self.policy_service.get_policy()
-        distance_km = haversine_km(latitude, longitude, address["latitude"], address["longitude"])
-        distance_m = round(distance_km * 1000, 1)
-        return distance_m > policy["photo_geofence_radius_m"], distance_m
+        distance_m = round(haversine_km(latitude, longitude, site[0], site[1]) * 1000, 1)
+        slack = min(float(accuracy_m or 0.0), float(policy.get("geo_accuracy_cap_m", 100)))
+        return distance_m > float(policy["photo_geofence_radius_m"]) + slack, distance_m
 
     async def _site_of(self, booking: dict) -> tuple[float, float] | None:
         """The customer's pin for the GPS-integrity checks (None = unpinned)."""
-        address = await self._address_of(booking)
-        if not address or address.get("latitude") is None or address.get("longitude") is None:
-            return None
-        return float(address["latitude"]), float(address["longitude"])
+        return self._pin_of(await self._address_of(booking))
 
-    async def _notify_location_flag(self, booking: dict, stage: str, distance_m: float | None) -> None:
-        center = await self.center_repo.find_by_id(booking["service_center_id"])
-        if center and center.get("manager_id"):
-            if stage == "arrival_no_gps":
-                text = "The captain pressed 'reached' without sharing his location — worth a quick call."
-            else:
-                what = (
-                    "The captain pressed 'reached'"
-                    if stage == "arrival"
-                    else f"The {stage}-photo was captured"
+    # What the manager reads, per step: "Captain <name> <phrase> <where>".
+    _LOCATION_STEP_PHRASES = {
+        "arrival": "entered the service code",
+        "start": "started the service",
+        "complete": "completed the job",
+    }
+
+    @staticmethod
+    def _location_warning_text(name: str, step: str, codes: list[str], distance_m: float | None) -> str:
+        phrase = BookingService._LOCATION_STEP_PHRASES.get(step, "worked on the job")
+        if "outside_geofence" in codes and distance_m is not None:
+            tail = f"{distance_m / 1000:.1f} km away from the customer's address"
+        elif "no_fix" in codes:
+            tail = "without sharing a location"
+        elif "poor_accuracy" in codes:
+            tail = "with a weak GPS signal"
+        else:
+            tail = "from a location that could not be verified"
+        return f"Captain {name} {phrase} {tail}"
+
+    def _build_location_warning(
+        self, step: str, verdict, *, has_gps: bool, captain: dict | None, captain_id: str,
+    ) -> dict | None:
+        """The manager's RED warning for a step accepted from outside the
+        boundary / without GPS / with a weak or odd fix. None = nothing to
+        warn about. It never blocks anything (it is not an issue flag)."""
+        codes = [r["code"] for r in verdict.location_reasons]
+        if not codes and step == "arrival" and not has_gps:
+            codes = ["no_fix"]  # no position at all on 'reached' is always worth a look
+        if not codes:
+            return None
+        name = (captain or {}).get("full_name") or "The captain"
+        return {
+            "step": step,
+            "distance_m": verdict.distance_m,
+            "allowed_m": verdict.allowed_m,
+            "reasons": codes,
+            "message": self._location_warning_text(name, step, codes, verdict.distance_m),
+            "at": datetime.now(timezone.utc),
+            "captain_id": captain_id,
+            "captain_name": (captain or {}).get("full_name"),
+            "resolved": False,
+        }
+
+    async def _notify_location_warning(self, booking: dict, warning: dict) -> None:
+        """In-app, to every working manager of the center (admins when there
+        is none). Raised mid-request on the captain's phone: never waits on
+        Meta, never raises."""
+        try:
+            center = await self.center_repo.find_by_id(booking["service_center_id"])
+            for user_id in await self._manager_recipients(booking.get("service_center_id"), (center or {}).get("manager_id")):
+                await self.notifications.notify(
+                    user_id, f"🚨 Location Flagged — Booking {booking['booking_number']}", warning["message"],
+                    NotificationType.BOOKING, str(booking["_id"]), send_whatsapp=False, background=True,
                 )
-                text = f"{what} {distance_m}m from the customer's address — worth a quick review."
-            await self.notifications.notify(
-                center["manager_id"],
-                f"🚨 Location flagged — booking {booking['booking_number']}",
-                text,
-                NotificationType.BOOKING,
-                str(booking["_id"]),
-                background=True,  # raised mid-request on the captain's phone
-            )
+        except Exception:  # noqa: BLE001 — the step itself already stands
+            logger.exception("Could not send the location warning for booking %s", booking.get("booking_number"))
 
     async def available_slots(self, service_center_id: str, date_str: str) -> list[dict]:
         """Customer-facing availability for one center/date — deliberately
@@ -5736,6 +5811,7 @@ class BookingService:
             release = {
                 "captain_id": None, "status": BookingStatus.PENDING.value, "previous_captain_ids": previous,
                 "heading_at": None, "heading_location": None, "geo_checks": {}, "geo_last_fix_at": None, "geo_override": False,
+                "location_warning": None,
                 "vehicle_verified": False, "vehicle_verified_at": None,
                 "arrival_location": None, "arrival_flagged": False, "arrival_distance_m": None,
                 "captain_start_stage": None, "late_penalty_pct": 0, "late_penalty_amount": 0,
@@ -5879,7 +5955,10 @@ class BookingService:
         update_data: dict = {
             "status": BookingStatus.CAPTAIN_ON_THE_WAY.value,
             "heading_at": now,
-            "heading_location": {"latitude": payload.latitude, "longitude": payload.longitude},
+            "heading_location": (
+                {"latitude": payload.latitude, "longitude": payload.longitude}
+                if payload.latitude is not None and payload.longitude is not None else None
+            ),
             "equipment_used": [item.model_dump() for item in payload.equipment_used],
             "captain_start_stage": stage,
             "late_penalty_pct": penalty_pct,
@@ -5926,7 +6005,6 @@ class BookingService:
         # center — checked before anything is written (audit VAL-3: a bad
         # id was a 500 AFTER the job had already moved to "on the way").
         await self._ensure_equipment_in_store(booking, payload)
-        await self.geo.claim(geo_gate)
         update_data.update(geo_gate.fields("heading"))
 
         # CLAIM the transition atomically: exactly one "start heading" wins
@@ -5939,7 +6017,6 @@ class BookingService:
             update_data,
         )
         if updated is None:
-            await self.geo.release(geo_gate)
             raise BadRequestException("This booking is no longer waiting to be started — refresh your jobs list.")
 
         for item in payload.equipment_used:
@@ -5958,7 +6035,8 @@ class BookingService:
                 },
                 {"$inc": {"quantity_available": -item.quantity}},
             )
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="heading", booking_id=booking_id, fix=geo_fix)
+        if geo_fix.present:  # a phone with no position still heads out — just no trail point
+            await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="heading", booking_id=booking_id, fix=geo_fix)
         await self._record_history(
             booking_id,
             BookingStatus.CAPTAIN_ON_THE_WAY,
@@ -6126,8 +6204,10 @@ class BookingService:
         _ensure_no_open_issue(booking, exempt_flags=ARRIVAL_STAGE_EXEMPT_FLAGS)
         if booking["status"] != BookingStatus.CAPTAIN_ON_THE_WAY.value:
             raise BadRequestException("Vehicle verification happens after you've started heading to the customer")
-        # Location first: a captain who isn't at the door can't even try
-        # codes. (The override, if any, is used up only once the code passes.)
+        # The location is judged and RECORDED but never refuses: a captain at
+        # the door must always be able to type the code (only the code itself
+        # can be wrong). A weak/missing/outside fix becomes the manager's red
+        # location warning below.
         geo_fix = Fix.from_payload(payload) if payload.latitude is not None and payload.longitude is not None else None
         geo_gate = await self.geo.gate(
             "arrival", booking, captain_id, geo_fix, await self._site_of(booking), await self.policy_service.get_policy(),
@@ -6154,7 +6234,6 @@ class BookingService:
         else:
             raise BadRequestException("Ask the customer for their 4-digit service code and enter it to start.")
 
-        await self.geo.claim(geo_gate)
         now = now_ist()
         update_data: dict = {"vehicle_verified": True, "vehicle_verified_at": now, **geo_gate.fields("arrival")}
         flagged = False
@@ -6164,7 +6243,7 @@ class BookingService:
         # same geofence treatment as the photos: flag + tell the manager,
         # never block (service addresses aren't pinpoint-accurate).
         if has_gps:
-            flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
+            flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude, payload.accuracy_m)
             update_data.update({
                 "arrival_location": {"latitude": payload.latitude, "longitude": payload.longitude},
                 "arrival_flagged": flagged,
@@ -6176,13 +6255,17 @@ class BookingService:
             # the manager sees it like an out-of-range arrival; the captain
             # carries on (GPS stays optional: old apps, a denied permission).
             update_data.update({"arrival_location": None, "arrival_flagged": True, "arrival_distance_m": None, "arrival_no_gps": True})
+        warning = self._build_location_warning(
+            "arrival", geo_gate.verdict, has_gps=has_gps, captain=await self.user_repo.find_by_id(captain_id), captain_id=captain_id,
+        )
+        if warning:
+            update_data["location_warning"] = warning
         first_arrival = not any(c.get("vehicle_verified") for c in visit if str(c["_id"]) != booking_id)
         # Guarded on the state checked above: a cancel or the captain's own
         # release landing in between must not be stamped "verified".
         on_the_way = {"status": BookingStatus.CAPTAIN_ON_THE_WAY.value, "captain_id": captain_id, "arrival_code_locked": {"$ne": True}}
         updated = await self.repo.update_if(booking_id, on_the_way, update_data)
         if updated is None:
-            await self.geo.release(geo_gate)
             raise BadRequestException("This booking just changed — it may have been cancelled or released. Refresh your jobs list.")
         if has_gps:
             await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="arrival", booking_id=booking_id, fix=geo_fix)
@@ -6208,13 +6291,16 @@ class BookingService:
                 await self._record_history(
                     str(sib["_id"]), ARRIVAL_HISTORY_MARKER, captain_id, "Service code verified on arrival (visit)"
                 )
-        if not has_gps:
-            await self._notify_location_flag(booking, "arrival_no_gps", None)
-        elif flagged:
-            await self._notify_location_flag(booking, "arrival", distance_m)
+                await self._broadcast_booking_changed(await self.repo.find_by_id(str(sib["_id"])) or sib)
+        if warning:
+            await self._notify_location_warning(booking, warning)
         if first_arrival:
             # "Your captain has arrived" — once per visit (NTF-03).
             await self._post_commit("arrival message", booking, self._notify_captain_arrived(booking, visit))
+        # The manager's queue, the customer's page and the admin lists read
+        # "on the way" until this ping lands (a stale-status bug: arrival was
+        # the one captain step that never announced itself).
+        await self._broadcast_booking_changed(updated)
         return serialize_doc(updated)
 
     async def _notify_captain_arrived(self, booking: dict, visit: list[dict]) -> None:
@@ -6239,6 +6325,9 @@ class BookingService:
             return_document=ReturnDocument.AFTER,
         )
         failures = int((counted or {}).get("arrival_code_failures") or 0)
+        if counted:
+            # The manager's drawer shows the wrong-try count: ping it too.
+            await self._broadcast_booking_changed(counted)
         if failures < self.ARRIVAL_CODE_MAX_ATTEMPTS:
             left = self.ARRIVAL_CODE_MAX_ATTEMPTS - failures
             raise BadRequestException(f"{message} ({left} {'try' if left == 1 else 'tries'} left)")
@@ -6303,6 +6392,225 @@ class BookingService:
                 await self._broadcast_booking_changed(car)
         return serialize_doc(await self.repo.find_by_id(booking_id))
 
+    # -- Manager acts for a stuck captain (founder rule 2026-11-24) -------------
+
+    async def _staff_name(self, actor_id: str) -> str:
+        actor = await self.user_repo.find_by_id(actor_id)
+        return (actor or {}).get("full_name") or "A manager"
+
+    async def _tell_captain(self, booking: dict, title: str, message: str) -> None:
+        """In-app note to the job's captain; his app also refetches through
+        the booking broadcast that every caller sends."""
+        if booking.get("captain_id"):
+            await self.notifications.notify(
+                booking["captain_id"], title, message, NotificationType.BOOKING, str(booking["_id"]),
+                send_whatsapp=False, background=True,
+            )
+
+    async def ignore_location_warning(
+        self, booking_id: str, note: str | None, actor_id: str, actor_role: str, actor_center_id: str | None,
+    ) -> dict:
+        """POST /bookings/{id}/location-warning/ignore — the manager (own
+        center) or an admin has looked at the red location warning and turns
+        it back to normal. The warning is the VISIT's: every car carrying an
+        open one is cleared. Idempotent: ignoring again changes nothing.
+        Nothing financial hangs on it."""
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        cars = {str(c["_id"]): c for c in await self._visit_cars(booking)}
+        cars[booking_id] = booking
+        if not any(c.get("location_warning") for c in cars.values()):
+            raise BadRequestException("This booking has no location warning.")
+        name = await self._staff_name(actor_id)
+        now = datetime.now(timezone.utc)
+        cleared: list[str] = []
+        for car_id, car in cars.items():
+            warning = car.get("location_warning") or {}
+            if not warning or warning.get("resolved") is not False:
+                continue  # none, or already ignored
+            done = await self.repo.collection.update_one(
+                {"_id": car["_id"], "location_warning.resolved": False},
+                {"$set": {
+                    "location_warning.resolved": True, "location_warning.ignored_by": actor_id,
+                    "location_warning.ignored_by_name": name, "location_warning.ignored_by_role": actor_role,
+                    "location_warning.ignored_at": now, "location_warning.ignore_note": (note or "").strip() or None,
+                }},
+            )
+            if done.modified_count:
+                cleared.append(car_id)
+        for car_id in cleared:
+            car = await self.repo.find_by_id(car_id)
+            await self._record_history(car_id, BookingStatus(car["status"]), actor_id, f"Location warning ignored by {name}")
+            await self._broadcast_booking_changed(car)
+        if cleared:
+            await AuditService(self.db).log_action(
+                actor_id, actor_role, "IGNORE_LOCATION_WARNING", "bookings", booking_id,
+                {"booking_ids": cleared, "note": (note or "").strip() or None}, service_center_id=booking["service_center_id"],
+            )
+        return serialize_doc(await self.repo.find_by_id(booking_id))
+
+    async def manager_mark_arrived(
+        self, booking_id: str, reason: str, actor_id: str, actor_role: str, actor_center_id: str | None,
+    ) -> dict:
+        """POST /bookings/{id}/mark-arrived — the captain is at the door but
+        can't pass the arrival check (a lost message, a locked code, a phone
+        that won't share a location). The manager (own center) or an admin
+        confirms the arrival FOR him, with a reason: the car(s) on the way
+        become verified exactly as after a correct code, the lock is cleared,
+        the captain's app moves to the before-photo, and the customer hears
+        'arrived' once. The captain stays on the job and the earner."""
+        reason = (reason or "").strip()
+        if len(reason) < 5:
+            raise BadRequestException("Say why you are confirming the arrival (at least 5 characters).")
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        if booking["status"] != BookingStatus.CAPTAIN_ON_THE_WAY.value or not booking.get("captain_id"):
+            raise BadRequestException("Arrival can be confirmed only while the captain is on the way.")
+        if booking.get("vehicle_verified"):
+            raise BadRequestException("The arrival is already confirmed on this booking.")
+        captain_id = booking["captain_id"]
+        name = await self._staff_name(actor_id)
+        visit = await self._visit_cars(booking)
+        first_arrival = not any(c.get("vehicle_verified") for c in visit if str(c["_id"]) != booking_id)
+        now = now_ist()
+        fields = {
+            "vehicle_verified": True, "vehicle_verified_at": now,
+            "arrival_code_locked": False, "arrival_code_failures": 0,
+            "arrival_confirmed_by": actor_id, "arrival_confirmed_by_name": name,
+            "arrival_confirmed_reason": reason, "arrival_confirmed_at": now,
+            "geo_checks.arrival": {
+                "status": "confirmed", "distance_m": None, "allowed_m": None, "accuracy_m": None, "fix_at": None,
+                "received_at": datetime.now(timezone.utc), "reasons": [], "trail_pings": None,
+                "confirmed_by": actor_id, "confirmed_by_name": name, "confirmed_reason": reason,
+            },
+        }
+        on_the_way = {"status": BookingStatus.CAPTAIN_ON_THE_WAY.value, "captain_id": captain_id, "vehicle_verified": {"$ne": True}}
+        updated = await self.repo.update_if(booking_id, on_the_way, fields)
+        if updated is None:
+            raise BadRequestException("This booking just changed — refresh and try again.")
+        done = [updated]
+        for sib in await self._visit_siblings(booking):
+            if sib.get("captain_id") != captain_id or sib.get("status") != BookingStatus.CAPTAIN_ON_THE_WAY.value or sib.get("vehicle_verified"):
+                continue
+            mirrored = await self.repo.update_if(str(sib["_id"]), on_the_way, fields)
+            if mirrored:
+                done.append(mirrored)
+        # The arrival-stage flags that existed only because he hadn't arrived
+        # stop blocking his next step (a stuck captain is usually flagged).
+        for car in done:
+            if car.get("issue_flag") in ("arrival_code_locked", "captain_not_reached") and not car.get("issue_resolved"):
+                await self.repo.update_by_id(str(car["_id"]), {
+                    "issue_flag": None, "issue_resolved": True, "resolved_issue_flag": car["issue_flag"],
+                })
+            await self._record_history(str(car["_id"]), ARRIVAL_HISTORY_MARKER, actor_id, f"Arrival confirmed by {name} — {reason}")
+        await AuditService(self.db).log_action(
+            actor_id, actor_role, "MANAGER_MARK_ARRIVED", "bookings", booking_id,
+            {"reason": reason, "booking_ids": [str(c["_id"]) for c in done]}, service_center_id=booking["service_center_id"],
+        )
+        await self._tell_captain(
+            updated, "Arrival Confirmed", f"{name} confirmed that you have arrived at {updated['booking_number']}. Go on with the before photo.",
+        )
+        if first_arrival:
+            await self._post_commit("arrival message", booking, self._notify_captain_arrived(booking, visit))
+        for car in done:
+            await self._broadcast_booking_changed(await self.repo.find_by_id(str(car["_id"])) or car)
+        return serialize_doc(await self.repo.find_by_id(booking_id))
+
+    async def complete_for_captain(
+        self, booking_id: str, reason: str, payment: str | None, actor_id: str, actor_role: str, actor_center_id: str | None,
+    ) -> dict:
+        """POST /bookings/{id}/complete-for-captain — the captain finished the
+        wash but his app can't (no signal, a broken camera, a dead phone).
+        The manager (own center) or an admin completes THIS car for him, with
+        a reason. It runs the same completion write as his after-photo
+        (_complete_for_captain_money): the captain stays the earner — his
+        wallet delta, commission and the franchise share post exactly as for
+        a job he completed — no photos are needed, `completed_on_behalf_*`
+        records who and why, and `completed_by_role` is NOT set (that value
+        means 'the manager did the job himself').
+
+        Money: when the car still owes something the manager must say how it
+        was collected — `cash` / `online` (the manager received it: recorded
+        in the same transaction, never the captain's cash) or `captain` (the
+        captain collects it from his app afterwards, the normal flow). Nothing
+        is ever recorded as the captain's cash here, so nothing can be
+        counted twice."""
+        reason = (reason or "").strip()
+        if len(reason) < 5:
+            raise BadRequestException("Say why you are completing it for the captain (at least 5 characters).")
+        booking = await self.repo.find_by_id(booking_id)
+        if not booking:
+            raise NotFoundException("Booking not found")
+        ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
+        from_status = booking["status"]
+        if from_status not in (BookingStatus.CAPTAIN_ON_THE_WAY.value, BookingStatus.SERVICE_STARTED.value) or not booking.get("captain_id"):
+            raise BadRequestException("A job can be completed for the captain only while he is on the way or working on it.")
+        _ensure_transition_allowed(from_status, BookingStatus.COMPLETED.value)
+        due = bm.amount_due(booking)
+        if payment not in (None, "cash", "online", "captain"):
+            raise BadRequestException("Choose how the payment was collected: cash, online or by the captain.")
+        if due > bm.EPSILON and payment is None:
+            raise BadRequestException(
+                f"₹{due:g} is still to be collected on this booking — say how: cash (you took it), online, or by the captain from his app."
+            )
+        if payment in ("cash", "online") and due > bm.EPSILON and booking.get("prepaid_only") and payment == "cash":
+            raise BadRequestException("This booking is prepaid — it cannot be paid in cash.")
+        captain_id = booking["captain_id"]
+        name = await self._staff_name(actor_id)
+        now = now_ist()
+        update_data: dict = {
+            "status": BookingStatus.COMPLETED.value, "completed_at": now, "closed_at": now,
+            "completed_on_behalf_by": actor_id, "completed_on_behalf_by_name": name,
+            "completed_on_behalf_reason": reason, "completed_on_behalf_at": now,
+        }
+        if from_status == BookingStatus.CAPTAIN_ON_THE_WAY.value:
+            update_data.update({"vehicle_verified": True, "vehicle_verified_at": booking.get("vehicle_verified_at") or now})
+        elif booking.get("service_started_at"):
+            update_data["actual_duration_minutes"] = max(0, round((now - from_stored(booking["service_started_at"])).total_seconds() / 60))
+        if booking.get("issue_flag") and not booking.get("issue_resolved"):
+            update_data["issue_resolved"] = True  # same as a captain finishing it: nothing left to act on
+
+        async def _do_complete(session):
+            done = await self.repo.update_if(booking_id, {"status": from_status, "captain_id": captain_id}, update_data, session=session)
+            if done is None:
+                return None
+            taken = None
+            owed = bm.amount_due(done)
+            if payment in ("cash", "online") and owed > bm.EPSILON:
+                taken = await self.money.apply_payment(
+                    [booking_id], owed, method=payment, key=f"complete_for_captain:{booking_id}", session=session,
+                    actor_id=actor_id, actor_role=actor_role, collected_by=actor_id,
+                    note=f"Collected by {name} when completing {done.get('booking_number')} for the captain",
+                )
+            await self.money.settle_captain_wallet([booking_id], session=session)
+            await after_booking_money_change(self.db, booking_id, session=session)
+            return await self.repo.find_by_id(booking_id, session=session), taken
+
+        async with await self.db.client.start_session() as session:
+            outcome = await session.with_transaction(_do_complete)
+        if outcome is None:
+            raise BadRequestException("This booking just changed — refresh and try again.")
+        updated, taken = outcome
+        if taken:
+            await self._post_commit("complete-for-captain payment", updated, self.money.after_payment(taken))
+        await self._record_history(booking_id, BookingStatus.COMPLETED, actor_id, f"Completed for the captain by {name} — {reason}")
+        await AuditService(self.db).log_action(
+            actor_id, actor_role, "MANAGER_COMPLETE_FOR_CAPTAIN", "bookings", booking_id,
+            {"reason": reason, "payment": payment, "from_status": from_status, "amount_due_before": due},
+            service_center_id=booking["service_center_id"],
+        )
+        await self._tell_captain(
+            updated, "Job Completed By Your Manager",
+            f"{name} completed {updated['booking_number']} for you — your earning stands. "
+            + ("Collect the payment from the job screen." if payment in (None, "captain") and due > bm.EPSILON else "Nothing more to do on it."),
+        )
+        await self._after_captain_completion(booking, updated, now)
+        return serialize_doc(updated)
+
     async def capture_before_photo(self, booking_id: str, payload: PhotoCaptureRequest, captain_id: str) -> dict:
         booking = await self.repo.find_by_id(booking_id)
         if not booking:
@@ -6321,15 +6629,13 @@ class BookingService:
         geo_fix = Fix.from_payload(payload)
         geo_gate = await self.geo.gate("start", booking, captain_id, geo_fix, await self._site_of(booking), await self.policy_service.get_policy())
         claimed_photo = await self._claim_step_photo(booking, payload.image_url, captain_id, "before")
-        try:
-            await self.geo.claim(geo_gate)
-        except Exception:
-            if claimed_photo:
-                await self._unclaim_step_photo(booking_id, payload.image_url, "before")
-            raise
 
         now = now_ist()
-        flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
+        has_gps = payload.latitude is not None and payload.longitude is not None
+        flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude, payload.accuracy_m)
+        warning = self._build_location_warning(
+            "start", geo_gate.verdict, has_gps=has_gps, captain=await self.user_repo.find_by_id(captain_id), captain_id=captain_id,
+        )
         # CLAIM the transition: a manager cancel or the captain's own release
         # landing between the check above and this write used to be
         # overwritten — a cancelled job came back as SERVICE_STARTED (or
@@ -6344,20 +6650,21 @@ class BookingService:
                 "before_photo_distance_m": distance_m,
                 "service_started_at": now,
                 **geo_gate.fields("start"),
+                **({"location_warning": warning} if warning else {}),
             },
         )
         if updated is None:
-            await self.geo.release(geo_gate)
             current = await self.repo.find_by_id(booking_id)
             if current and current.get("status") == BookingStatus.SERVICE_STARTED.value and current.get("captain_id") == captain_id:
                 return serialize_doc(current)  # a double-submitted photo: the first one started it
             if claimed_photo:
                 await self._unclaim_step_photo(booking_id, payload.image_url, "before")
             raise BadRequestException("This booking just changed — it may have been cancelled or released. Refresh your jobs list.")
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="before_photo", booking_id=booking_id, fix=geo_fix)
+        if has_gps:
+            await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="before_photo", booking_id=booking_id, fix=geo_fix)
         await self._record_history(booking_id, BookingStatus.SERVICE_STARTED, captain_id, "Service started (before photo captured)")
-        if flagged:
-            await self._notify_location_flag(booking, "before", distance_m)
+        if warning:
+            await self._notify_location_warning(booking, warning)
         # "Started" is said once per visit — when the first car starts, not
         # again for each of the others.
         if not any(c.get("service_started_at") for c in await self._visit_siblings(booking)):
@@ -6393,15 +6700,13 @@ class BookingService:
         geo_fix = Fix.from_payload(payload)
         geo_gate = await self.geo.gate("complete", booking, captain_id, geo_fix, await self._site_of(booking), policy)
         claimed_photo = await self._claim_step_photo(booking, payload.image_url, captain_id, "after")
-        try:
-            await self.geo.claim(geo_gate)
-        except Exception:
-            if claimed_photo:
-                await self._unclaim_step_photo(booking_id, payload.image_url, "after")
-            raise
 
         now = now_ist()
-        flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude)
+        has_gps = payload.latitude is not None and payload.longitude is not None
+        flagged, distance_m = await self._check_geofence(booking, payload.latitude, payload.longitude, payload.accuracy_m)
+        warning = self._build_location_warning(
+            "complete", geo_gate.verdict, has_gps=has_gps, captain=await self.user_repo.find_by_id(captain_id), captain_id=captain_id,
+        )
         update_data = {
             "status": BookingStatus.COMPLETED.value,
             "after_photo": {"image_url": payload.image_url, "latitude": payload.latitude, "longitude": payload.longitude, "captured_at": now},
@@ -6410,6 +6715,7 @@ class BookingService:
             "completed_at": now,
             "closed_at": now,
             **geo_gate.fields("complete"),
+            **({"location_warning": warning} if warning else {}),
         }
 
         # Wash-duration KPI capture. booking["service_started_at"] just came
@@ -6472,25 +6778,8 @@ class BookingService:
         # the same moment conflicts with this transaction and is retried —
         # the delta is always computed from the money actually on the
         # booking).
-        async def _do_complete(session):
-            done = await self.repo.update_if(
-                booking_id, {"status": BookingStatus.SERVICE_STARTED.value, "captain_id": captain_id}, update_data, session=session,
-            )
-            if done is None:
-                return None
-            await self.money.settle_captain_wallet([booking_id], session=session)
-            # Commission / franchise share for this completion — same transaction.
-            await after_booking_money_change(self.db, booking_id, session=session)
-            return await self.repo.find_by_id(booking_id, session=session)
-
-        try:
-            async with await self.db.client.start_session() as session:
-                updated = await session.with_transaction(_do_complete)
-        except Exception:
-            await self.geo.release(geo_gate)
-            raise
+        updated = await self._complete_for_captain_money(booking_id, BookingStatus.SERVICE_STARTED.value, captain_id, update_data)
         if updated is None:
-            await self.geo.release(geo_gate)
             current = await self.repo.find_by_id(booking_id)
             if current and current.get("status") == BookingStatus.COMPLETED.value and current.get("captain_id") == captain_id:
                 return serialize_doc(current)
@@ -6500,10 +6789,11 @@ class BookingService:
                 "This booking just changed — it may have been cancelled or reassigned. Refresh your jobs list."
             )
 
-        await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="after_photo", booking_id=booking_id, fix=geo_fix)
+        if has_gps:
+            await self.update_captain_location(captain_id, payload.latitude, payload.longitude, source="after_photo", booking_id=booking_id, fix=geo_fix)
         await self._record_history(booking_id, BookingStatus.COMPLETED, captain_id, "Service completed (after photo captured)")
-        if flagged:
-            await self._notify_location_flag(booking, "after", distance_m)
+        if warning:
+            await self._notify_location_warning(booking, warning)
         if quick_minutes is not None:
             note = f"{booking['booking_number']} was completed {quick_minutes:g} minutes after its before-photo — worth checking the photos."
             await self._post_commit("quick-completion alert", booking, self.notify_center_manager_for_booking(
@@ -6512,9 +6802,39 @@ class BookingService:
             await self._post_commit("quick-completion alert", booking, self._alert_other_managers(
                 booking, f"⚠️ Very quick completion — booking {booking['booking_number']}", note,
             ))
-        # "Complete" is said when the VISIT is complete — the last car's
-        # after-photo, not each car's. Until then the customer sees each
-        # car's progress live on the booking page anyway.
+        await self._after_captain_completion(booking, updated, now)
+        return serialize_doc(updated)
+
+    async def _complete_for_captain_money(self, booking_id: str, from_status: str, captain_id: str, update_data: dict) -> dict | None:
+        """THE completion write of a captain-earned job (after photo, or a
+        manager completing for a stuck captain): claims the in-progress job
+        atomically — the write only lands while it is still `from_status`
+        with this captain (a manager cancel racing it used to be
+        overwritten) — and posts the captain's wallet delta + the commission
+        / franchise share in the SAME transaction, so a failed post leaves
+        the job in progress for a retry and a duplicate submit posts nothing
+        (PAY-04). Returns the completed doc, None when the claim was lost.
+
+        Spec 1.5 (founder 2026-10-07): completion never marks a cash booking
+        paid — the captain COLLECTS what is due afterwards (cash or QR), and
+        that collection is what pays it."""
+        async def _do_complete(session):
+            done = await self.repo.update_if(booking_id, {"status": from_status, "captain_id": captain_id}, update_data, session=session)
+            if done is None:
+                return None
+            await self.money.settle_captain_wallet([booking_id], session=session)
+            await after_booking_money_change(self.db, booking_id, session=session)
+            return await self.repo.find_by_id(booking_id, session=session)
+
+        async with await self.db.client.start_session() as session:
+            return await session.with_transaction(_do_complete)
+
+    async def _after_captain_completion(self, booking: dict, updated: dict, now: datetime) -> None:
+        """What follows a captain-earned completion, however it happened:
+        the customer's "complete" message (said when the VISIT is complete —
+        the last car, not each car), the visit bookkeeping and the ping."""
+        booking_id = str(booking["_id"])
+        # Until then the customer sees each car's progress live on the booking page.
         still_open = [c for c in await self._visit_siblings(booking) if c.get("status") != BookingStatus.COMPLETED.value]
         if not still_open:
             cars = await self._visit_cars(booking)
@@ -6535,7 +6855,6 @@ class BookingService:
             )
         await self._after_visit_completed(booking["customer_id"], [updated], now)
         await self._broadcast_booking_changed(updated)
-        return serialize_doc(updated)
 
     @staticmethod
     def _ensure_customer_may_cancel(cars: list[dict]) -> None:
@@ -7285,6 +7604,7 @@ class BookingService:
                     "geo_checks": {},
                     "geo_last_fix_at": None,
                     "geo_override": False,
+                    "location_warning": None,
                     "service_started_at": None,
                 }
             )
@@ -9571,7 +9891,7 @@ class BookingService:
         photo geofence so ordinary GPS wobble around the address never
         fires."""
         policy = await self.policy_service.get_policy()
-        radius_m = policy.get("photo_geofence_radius_m", 300) * 2
+        radius_m = policy.get("photo_geofence_radius_m", 500) * 2
         candidates = await self.repo.find_all_no_paginate(
             {
                 "status": BookingStatus.SERVICE_STARTED.value,
@@ -9740,18 +10060,6 @@ class BookingService:
 
     # -- GPS integrity: pings, approvals, status (geo_integrity_service) ----------
 
-    @staticmethod
-    def _geo_step_is_pending(booking: dict, step: str) -> bool:
-        """The step an approval is for must be the one the job is waiting on."""
-        status = booking.get("status")
-        verified = bool(booking.get("vehicle_verified"))
-        return {
-            "heading": status == BookingStatus.ASSIGNED.value,
-            "arrival": status == BookingStatus.CAPTAIN_ON_THE_WAY.value and not verified,
-            "start": status == BookingStatus.CAPTAIN_ON_THE_WAY.value and verified,
-            "complete": status == BookingStatus.SERVICE_STARTED.value,
-        }.get(step, False)
-
     async def record_captain_ping(self, captain_id: str, payload) -> dict:
         """The periodic on-job ping. Keeps the device's own fix time (an
         offline phone's queued pings arrive late but keep their time) —
@@ -9775,41 +10083,28 @@ class BookingService:
         return {"accepted": True}
 
     async def geo_request_approval(self, booking_id: str, step: str, captain_id: str, note: str | None) -> dict:
+        """Kept so an old cached captain app answers cleanly: a location
+        problem no longer refuses any step, so there is nothing to approve
+        (the app should just try the step again)."""
         booking = await self.repo.find_by_id(booking_id)
         if not booking:
             raise NotFoundException("Booking not found")
         await self._ensure_captain_job(booking, captain_id)
-        if step not in GEO_STEPS or not self._geo_step_is_pending(booking, step):
-            raise BadRequestException("That step isn't waiting on this job right now.")
-        return await self.geo.request_approval(booking, step, captain_id, note)
+        return {"status": "not_needed", "message": "Location no longer blocks any step — go ahead and try it again."}
 
     async def geo_decide(
         self, booking_id: str, step: str, approve: bool, reason: str, actor_id: str, actor_role: str, actor_center_id: str | None,
     ) -> dict:
-        """A manager of THIS center (or an admin) approves / declines ONE
-        step of ONE job. A captain can never reach this (route guard), and
-        the captain being decided about is the job's own captain only."""
+        """Kept so an old staff screen answers cleanly: there is no approval
+        to give any more (location never blocks a step) — nothing is written.
+        The red location warning is cleared with `ignore_location_warning`."""
         booking = await self.repo.find_by_id(booking_id)
         if not booking:
             raise NotFoundException("Booking not found")
         if actor_role not in ("manager", "admin"):
-            raise ForbiddenException("Only a manager or admin can approve a location check.")
+            raise ForbiddenException("Only a manager or admin can review a location check.")
         ensure_own_center(actor_role, actor_center_id, booking["service_center_id"])
-        if step not in GEO_STEPS or not booking.get("captain_id") or not self._geo_step_is_pending(booking, step):
-            raise BadRequestException("That step isn't waiting on this job right now.")
-        actor = await self.user_repo.find_by_id(actor_id)
-        result = await self.geo.decide(booking, step, {"id": actor_id, "role": actor_role, "name": (actor or {}).get("name")}, approve, reason)
-        note = f"Location check {'approved' if approve else 'declined'} for {step.replace('_', ' ')}: {reason.strip()}"
-        await self._record_history(booking_id, BookingStatus(booking["status"]), actor_id, note)
-        captain_id = booking["captain_id"]
-        await self.notifications.notify(
-            captain_id,
-            "Location Check Approved" if approve else "Location Check Declined",
-            ("Your manager approved it — try the step again now." if approve else f"Your manager declined: {reason.strip()}"),
-            NotificationType.BOOKING, booking_id, send_whatsapp=False, background=True,
-        )
-        await ws_manager.broadcast(f"user:{captain_id}", {"type": "changed", "channel": f"user:{captain_id}", "booking_id": booking_id})
-        return result
+        return {"status": "not_needed", "message": "Location no longer blocks any step — use Ignore on the red warning instead."}
 
     async def geo_status(self, booking_id: str, actor_id: str, actor_role: str, actor_center_id: str | None) -> dict:
         booking = await self.repo.find_by_id(booking_id)
@@ -9823,9 +10118,10 @@ class BookingService:
         else:
             raise ForbiddenException("You do not have permission to view this.")
         summary = await self.geo.summary(booking)
-        pending = next((s for s in GEO_STEPS if self._geo_step_is_pending(booking, s)), None)
-        summary["waiting_step"] = pending
-        summary["approval"] = await self.geo.approval_status(booking_id, pending) if pending else {"status": "none"}
+        summary["waiting_step"] = None
+        summary["approval"] = {"status": "none"}
+        if actor_role != "captain":
+            summary["location_warning"] = booking.get("location_warning")
         return summary
 
     async def update_captain_location(self, captain_id: str, latitude: float, longitude: float,

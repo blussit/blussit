@@ -189,7 +189,7 @@ async def test_after_photo_cannot_resurrect_a_cancelled_booking(db, cleanup, sen
     captain_svc = BookingService(db)
     real_geofence = captain_svc._check_geofence
 
-    async def geofence_then_manager_cancels(booking, lat, lng):
+    async def geofence_then_manager_cancels(booking, lat, lng, *rest):
         result = await real_geofence(booking, lat, lng)
         await BookingService(db).cancel_booking(
             r["booking_id"], BookingCancelRequest(reason="Customer called to cancel"), r["manager_id"], "manager", r["center_id"]
@@ -246,7 +246,7 @@ async def test_before_photo_cannot_restart_a_cancelled_or_released_job(db, clean
         captain_svc = BookingService(db)
         real_geofence = captain_svc._check_geofence
 
-        async def geofence_then_race(booking, lat, lng, r=r, race=race):
+        async def geofence_then_race(booking, lat, lng, *rest, r=r, race=race):
             result = await real_geofence(booking, lat, lng)
             if race == "cancel":
                 await BookingService(db).cancel_booking(
@@ -271,7 +271,7 @@ async def test_verify_vehicle_cannot_stamp_a_cancelled_booking(db, cleanup):
     captain_svc = BookingService(db)
     real_geofence = captain_svc._check_geofence
 
-    async def geofence_then_cancel(booking, lat, lng):
+    async def geofence_then_cancel(booking, lat, lng, *rest):
         result = await real_geofence(booking, lat, lng)
         await BookingService(db).cancel_booking(r["booking_id"], BookingCancelRequest(reason="no show"), r["manager_id"], "manager", r["center_id"])
         return result

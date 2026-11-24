@@ -17,10 +17,21 @@ plausible fake trail, and leaves evidence when someone tries:
                                  machine) and a wash can't finish sooner than
                                  a minimum time after it started.
 
-Any failure REFUSES the step (HTTP 409 GEO_CHECK_FAILED) unless a manager /
-admin of that center approved ONE step of THAT job (geo_overrides). Captains
-can never approve themselves. GEOFENCE_ENFORCE=false is the kill switch:
+LOCATION NEVER BLOCKS THE CAPTAIN (founder rule, 2026-11-24). A captain
+standing at the customer's door must always be able to enter the service
+code, start and finish — a weak or missing fix, a pin that is a bit off, a
+stale phone clock all used to refuse the step and strand the job. Now every
+location reason (no_fix, outside_geofence, poor_accuracy, stale/future/
+replayed fix, trail_*) is RECORDED and let through: the step's verdict is
+"unverified", a geo_events row + the geo_refusals counter are written, a
+fake-looking trail still sets geo_suspect, and the booking service raises a
+manager-facing `location_warning` (red, cleared by the manager's Ignore).
+The only things that still refuse are non-location rules — `too_quick` (a
+time rule), the status order, and the wrong service code itself.
+GEOFENCE_ENFORCE=false is the kill switch for that one remaining time rule:
 everything is still evaluated and recorded, nothing is refused.
+The old approval machinery (geo_overrides) is kept only so old rows and old
+clients keep working; nothing creates a requirement for it any more.
 
 Thresholds live in Business Settings (booking_policy geo_* keys + the
 existing photo_geofence_radius_m); see docs/ARCHITECTURE.md "Captain GPS
@@ -35,7 +46,6 @@ from typing import Any
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ReturnDocument
 
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -59,11 +69,14 @@ OUTSIDE_MESSAGES = {
 
 # Reasons that point at a fake / replayed trail rather than a weak signal.
 SUSPECT_CODES = frozenset({"trail_teleport", "trail_frozen", "trail_accuracy_constant", "replayed_fix"})
+# The only reasons that still REFUSE a step: time rules, not location rules.
+HARD_CODES = frozenset({"too_quick"})
 
 
 class GeoCheckException(AppException):
-    """409: the location check refused this step. `details` carries the
-    reasons and whether the captain may ask a manager to approve."""
+    """409: a hard rule (today only `too_quick`, a time rule) refused this
+    step. `details` carries the reasons; `can_request_approval` is always
+    False now — a location problem never refuses a step."""
     status_code = 409
     error_code = "GEO_CHECK_FAILED"
 
@@ -127,7 +140,7 @@ class Fix:
 @dataclass
 class GeoVerdict:
     step: str
-    reasons: list[dict] = field(default_factory=list)       # hard failures (refuse)
+    reasons: list[dict] = field(default_factory=list)       # every failed check (only HARD_CODES refuse)
     notes: list[dict] = field(default_factory=list)         # soft signals (record only)
     distance_m: float | None = None
     allowed_m: float | None = None
@@ -143,11 +156,21 @@ class GeoVerdict:
     def suspect_reasons(self) -> list[str]:
         return [r["code"] for r in self.reasons if r["code"] in SUSPECT_CODES]
 
-    def record(self, status: str, override: dict | None = None) -> dict:
+    @property
+    def hard_reasons(self) -> list[dict]:
+        """Reasons that still refuse the step (time rules)."""
+        return [r for r in self.reasons if r["code"] in HARD_CODES]
+
+    @property
+    def location_reasons(self) -> list[dict]:
+        """Reasons that are only flagged to the manager (never refuse)."""
+        return [r for r in self.reasons if r["code"] not in HARD_CODES]
+
+    def record(self, status: str) -> dict:
         """The per-step evidence stored on the booking (geo_checks.<step>)."""
         fix = self.fix
         data = {
-            "status": status,  # verified | override | unpinned | unchecked
+            "status": status,  # verified | unverified | unpinned (| override: old rows)
             "distance_m": self.distance_m,
             "allowed_m": self.allowed_m,
             "accuracy_m": fix.accuracy_m if fix else None,
@@ -156,34 +179,22 @@ class GeoVerdict:
             "reasons": [r["code"] for r in self.reasons + self.notes],
             "trail_pings": self.trail_pings,
         }
-        if override:
-            data.update({
-                "override_by": override.get("decided_by"), "override_by_name": override.get("decided_by_name"),
-                "override_role": override.get("decided_by_role"), "override_reason": override.get("reason"),
-                "override_at": override.get("decided_at"),
-            })
         return data
 
 
 @dataclass
 class Gate:
     verdict: GeoVerdict
-    override: dict | None = None
-    claimed: bool = False
 
     def fields(self, step: str, key_prefix: str = "geo_checks") -> dict:
         """What to $set on the booking with the step's own write."""
         if self.verdict.ok:
             status = "verified" if self.verdict.pinned else "unpinned"
-        elif self.override:
-            status = "override"
         else:
-            status = "unverified"  # GEOFENCE_ENFORCE=false: failed but let through (flag only)
-        out: dict[str, Any] = {f"{key_prefix}.{step}": self.verdict.record(status, self.override)}
+            status = "unverified"  # failed a location check, let through and flagged
+        out: dict[str, Any] = {f"{key_prefix}.{step}": self.verdict.record(status)}
         if self.verdict.fix and self.verdict.fix.present:
             out["geo_last_fix_at"] = self.verdict.fix.effective_at
-        if not self.verdict.ok and self.override:
-            out["geo_override"] = True
         if self.verdict.suspect_reasons:
             out["geo_suspect"] = True
         return out
@@ -294,7 +305,7 @@ class GeoIntegrityService:
             if fix.accuracy_m is not None and fix.accuracy_m > cap:
                 v.reasons.append(_reason("poor_accuracy", f"Your GPS Signal Is Too Weak ({int(fix.accuracy_m)} M) — Move To An Open Area And Try Again"))
             if site is not None:
-                radius = float(policy.get("photo_geofence_radius_m", 300))
+                radius = float(policy.get("photo_geofence_radius_m", 500))
                 slack = min(fix.accuracy_m or 0.0, cap)
                 v.allowed_m = round(radius + slack, 1)
                 v.distance_m = round(haversine_km(fix.latitude, fix.longitude, site[0], site[1]) * 1000, 1)
@@ -347,51 +358,25 @@ class GeoIntegrityService:
     async def gate(
         self, step: str, booking: dict, captain_id: str, fix: Fix | None, site: tuple[float, float] | None, policy: dict,
     ) -> Gate:
-        """Evaluates; refuses with GeoCheckException unless an approved,
-        unused, unexpired override exists for this step of this job. With
-        GEOFENCE_ENFORCE=false it records and lets everything through."""
+        """Evaluates and records. A LOCATION problem (outside the boundary, no
+        or weak fix, stale/future/replayed fix, a suspicious trail) never
+        refuses: the evidence is stored and the step goes through as
+        "unverified" — the booking service raises the manager's red warning.
+        Only a hard rule (`too_quick`) refuses, and GEOFENCE_ENFORCE=false
+        switches even that off."""
         verdict = await self.evaluate(step, booking, captain_id, fix, site, policy)
         if verdict.ok:
             return Gate(verdict)
-        override = await self.active_override(str(booking["_id"]), step, captain_id)
-        if not settings.GEOFENCE_ENFORCE:
-            await self.record_refusal(booking, step, captain_id, verdict, enforced=False)
-            return Gate(verdict, override=None)
-        if override:
-            await self.record_refusal(booking, step, captain_id, verdict, enforced=True, overridden=True)
-            return Gate(verdict, override=override)
-        await self.record_refusal(booking, step, captain_id, verdict, enforced=True)
-        status = await self.approval_status(str(booking["_id"]), step)
-        reasons = verdict.reasons
-        raise GeoCheckException(reasons[0]["message"], {
-            "step": step, "step_label": STEP_LABELS[step], "reasons": reasons,
-            "distance_m": verdict.distance_m, "allowed_m": verdict.allowed_m,
-            "can_request_approval": True, "approval": status,
-        })
-
-    async def claim(self, gate: Gate) -> None:
-        """Use up the override (once). Raises if it was just used/expired."""
-        if gate.override is None or gate.claimed:
-            return
-        won = await self.db[GEO_OVERRIDES].find_one_and_update(
-            {"_id": gate.override["_id"], "status": "approved", "used_at": None, "expires_at": {"$gt": _now()}},
-            {"$set": {"status": "used", "used_at": _now()}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if won is None:
-            raise GeoCheckException(gate.verdict.reasons[0]["message"], {
-                "step": gate.verdict.step, "reasons": gate.verdict.reasons, "can_request_approval": True, "approval": {"status": "none"},
+        hard = verdict.hard_reasons
+        if hard and settings.GEOFENCE_ENFORCE:
+            await self.record_refusal(booking, step, captain_id, verdict, enforced=True)
+            raise GeoCheckException(hard[0]["message"], {
+                "step": step, "step_label": STEP_LABELS[step], "reasons": verdict.reasons,
+                "distance_m": verdict.distance_m, "allowed_m": verdict.allowed_m,
+                "can_request_approval": False, "approval": {"status": "none"},
             })
-        gate.claimed = True
-
-    async def release(self, gate: Gate) -> None:
-        """The step didn't happen: hand the approval back (still unexpired)."""
-        if gate.override is None or not gate.claimed:
-            return
-        await self.db[GEO_OVERRIDES].update_one(
-            {"_id": gate.override["_id"], "status": "used"}, {"$set": {"status": "approved", "used_at": None}},
-        )
-        gate.claimed = False
+        await self.record_refusal(booking, step, captain_id, verdict, enforced=False)
+        return Gate(verdict)
 
     # -- evidence ----------------------------------------------------------------
 
@@ -426,7 +411,7 @@ class GeoIntegrityService:
             if first_suspect:
                 await self._notify_manager(
                     booking, f"🚨 Suspicious Location — Booking {booking.get('booking_number')}",
-                    "The captain's location trail looks faked (" + ", ".join(suspects).replace("_", " ") + "). Review before approving anything.",
+                    "The captain's location trail looks faked (" + ", ".join(suspects).replace("_", " ") + "). Worth a look.",
                 )
         except Exception:  # noqa: BLE001 — evidence must never break the step's own answer
             logger.exception("geo evidence write failed for booking %s", booking_id)
@@ -439,76 +424,6 @@ class GeoIntegrityService:
             await NotificationService(self.db).notify(
                 center["manager_id"], title, text, NotificationType.BOOKING, str(booking["_id"]), send_whatsapp=False, background=True,
             )
-
-    # -- approvals -----------------------------------------------------------------
-
-    async def active_override(self, booking_id: str, step: str, captain_id: str) -> dict | None:
-        return await self.db[GEO_OVERRIDES].find_one({
-            "booking_id": booking_id, "step": step, "captain_id": captain_id, "status": "approved",
-            "used_at": None, "expires_at": {"$gt": _now()},
-        })
-
-    async def approval_status(self, booking_id: str, step: str) -> dict:
-        doc = await self.db[GEO_OVERRIDES].find_one({"booking_id": booking_id, "step": step}, sort=[("requested_at", -1)])
-        if not doc:
-            return {"status": "none"}
-        status = doc["status"]
-        if status == "approved" and _utc(doc.get("expires_at")) <= _now():
-            status = "expired"
-        return {"status": status, "reason": doc.get("reason") if status in ("denied", "approved") else None}
-
-    async def request_approval(self, booking: dict, step: str, captain_id: str, note: str | None = None) -> dict:
-        """The captain's 'Ask Manager To Approve'. One pending ask per
-        job+step; asking again only re-notifies after two minutes."""
-        booking_id = str(booking["_id"])
-        now = _now()
-        existing = await self.db[GEO_OVERRIDES].find_one({"booking_id": booking_id, "step": step, "captain_id": captain_id}, sort=[("requested_at", -1)])
-        if existing and existing["status"] == "approved" and _utc(existing["expires_at"]) > now:
-            return {"status": "approved"}
-        if existing and existing["status"] == "pending":
-            renotify = (now - _utc(existing.get("notified_at") or existing["requested_at"])).total_seconds() > 120
-            if renotify:
-                await self.db[GEO_OVERRIDES].update_one({"_id": existing["_id"]}, {"$set": {"notified_at": now}})
-                await self._notify_ask(booking, step)
-            return {"status": "pending"}
-        await self.db[GEO_OVERRIDES].insert_one({
-            "booking_id": booking_id, "step": step, "captain_id": captain_id, "status": "pending",
-            "requested_at": now, "notified_at": now, "note": (note or "")[:200] or None, "used_at": None,
-        })
-        await self._notify_ask(booking, step)
-        return {"status": "pending"}
-
-    async def _notify_ask(self, booking: dict, step: str) -> None:
-        await self._notify_manager(
-            booking, f"Location Approval Needed — Booking {booking.get('booking_number')}",
-            f"The captain can't pass the location check to {STEP_LABELS[step].lower()}. Open the booking to approve or decline.",
-        )
-
-    async def decide(
-        self, booking: dict, step: str, actor: dict, approve: bool, reason: str,
-    ) -> dict:
-        """Manager/admin: approve (ONE step of ONE job, expires) or decline."""
-        booking_id = str(booking["_id"])
-        captain_id = booking.get("captain_id")
-        now = _now()
-        valid = timedelta(minutes=int((await self._policy()).get("geo_override_valid_minutes", 30)))
-        doc = {
-            "status": "approved" if approve else "denied", "reason": reason.strip(), "decided_by": actor["id"],
-            "decided_by_name": actor.get("name"), "decided_by_role": actor["role"], "decided_at": now,
-            "expires_at": now + valid, "used_at": None,
-        }
-        existing = await self.db[GEO_OVERRIDES].find_one(
-            {"booking_id": booking_id, "step": step, "captain_id": captain_id, "status": {"$in": ["pending", "denied", "approved"]}}, sort=[("requested_at", -1)],
-        )
-        if existing:
-            await self.db[GEO_OVERRIDES].update_one({"_id": existing["_id"]}, {"$set": doc})
-            override_id = existing["_id"]
-        else:
-            ins = await self.db[GEO_OVERRIDES].insert_one({"booking_id": booking_id, "step": step, "captain_id": captain_id, "requested_at": now, **doc})
-            override_id = ins.inserted_id
-        if approve:
-            await self.db.bookings.update_one({"_id": booking["_id"]}, {"$set": {"geo_override": True}})
-        return {"id": str(override_id), "status": doc["status"], "expires_at": doc["expires_at"]}
 
     async def _policy(self) -> dict:
         from app.services.booking_policy_service import BookingPolicyService

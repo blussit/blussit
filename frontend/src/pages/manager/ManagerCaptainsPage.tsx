@@ -178,6 +178,13 @@ export default function ManagerCaptainsPage() {
     queryFn: () => bookingApi.forCenter(centerId, { page: 1, page_size: 100 }),
     enabled: !!detailFor && !!centerId,
   });
+  // "Has an active job" must not depend on the newest 100 bookings: every job still
+  // in progress at this center (assigned / on the way / working), read on its own.
+  const { data: activeCenterJobs } = useQuery({
+    queryKey: ["center-bookings-for-captain-detail", centerId, "active"],
+    queryFn: () => bookingApi.forCenter(centerId, { scope: "active", page: 1, page_size: 100 }),
+    enabled: !!detailFor && !!centerId,
+  });
   const captainBookings = (centerBookings?.data || [])
     .filter((b) => b.captain_id === detailFor?.id)
     .sort((a, b) => new Date(b.scheduled_date).getTime() - new Date(a.scheduled_date).getTime());
@@ -517,7 +524,9 @@ export default function ManagerCaptainsPage() {
           // at click time, so the status/button here update immediately
           // after a suspend/reactivate without needing to close and reopen.
           const live = captains.find((c) => c.id === detailFor.id) || detailFor;
-          const hasActiveJob = captainBookings.some((b) => ACTIVE_JOB_STATUSES.includes(b.status));
+          const hasActiveJob =
+            captainBookings.some((b) => ACTIVE_JOB_STATUSES.includes(b.status)) ||
+            (activeCenterJobs?.data || []).some((b) => b.captain_id === detailFor.id && ACTIVE_JOB_STATUSES.includes(b.status));
           return (
             <div className="space-y-5">
               {/* Identity header — always visible, whatever tab is open. */}

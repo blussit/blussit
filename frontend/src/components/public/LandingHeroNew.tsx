@@ -23,9 +23,9 @@ const HERO_MOBILE_SRCSET = "/img/hero-mobile-v2-720.webp 720w, /img/hero-mobile-
 const NO_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 // The trust row. Change the numbers here as they grow.
-const CARS_wash = { to: 140, suffix: "+" };
-const RATING = { to: 4.9, decimals: 1, suffix: "/5" };
-const WATER_SAVED = { to: 2000, suffix: "+ L" };
+const BOOKINGS = { to: 300, suffix: "+" };
+const HAPPY_CUSTOMERS = { to: 300, suffix: "+" };
+const WATER_SAVED = { to: 15, suffix: "K+ L" };
 // Three illustrated (not real) customer faces beside the rating.
 type Avatar = { bg: string; skin: string; hair: string; shirt: string; long?: boolean; beard?: boolean };
 const AVATARS: Avatar[] = [
@@ -265,7 +265,7 @@ function WatchButton({ className = "" }: { className?: string }) {
   );
 }
 
-/** "140+ Cars wash | 2000+ L Water Saved | 4.9/5 Rating (faces)" — the
+/** "300+ Bookings | 15K+ L Water Saved | 300+ Happy Customers (faces)" — the
  * layout of the design's trust row, on a hairline. */
 function TrustRow({ compact = false, className = "" }: { compact?: boolean; className?: string }) {
   // Clean bold sans for the numbers (as in the design), not the display face.
@@ -276,11 +276,11 @@ function TrustRow({ compact = false, className = "" }: { compact?: boolean; clas
     <div className={`flex items-center border-t border-[#EDF0F5] ${compact ? "justify-between pt-[3vw]" : "gap-6 pt-4"} ${className}`}>
       <div>
         <p className={num} style={{ color: BLUE }}>
-          <CountUp to={CARS_wash.to} />
-          {CARS_wash.suffix}
+          <CountUp to={BOOKINGS.to} />
+          {BOOKINGS.suffix}
         </p>
         <p className={label} style={{ color: MUTED }}>
-          Cars Wash
+          Bookings
         </p>
       </div>
       {divider}
@@ -297,11 +297,11 @@ function TrustRow({ compact = false, className = "" }: { compact?: boolean; clas
       <div className={`flex items-center ${compact ? "gap-[2vw]" : "gap-3"}`}>
         <div>
           <p className={num} style={{ color: BLUE }}>
-            <CountUp to={RATING.to} decimals={RATING.decimals} />
-            {RATING.suffix}
+            <CountUp to={HAPPY_CUSTOMERS.to} />
+            {HAPPY_CUSTOMERS.suffix}
           </p>
           <p className={label} style={{ color: MUTED }}>
-            {compact ? "Rating" : "Customer Rating"}
+            Happy Customers
           </p>
         </div>
         <Faces size={compact ? "clamp(24px, 6.4vw, 42px)" : "34px"} />

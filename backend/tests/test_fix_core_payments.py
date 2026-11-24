@@ -153,7 +153,7 @@ async def test_pay04_completion_after_customer_paid_online_credits_captain(db, m
     svc = BookingService(db)
     real = svc._check_geofence
 
-    async def customer_pays_mid_completion(b, lat, lng):
+    async def customer_pays_mid_completion(b, lat, lng, *rest):
         await _pay(db, cu["id"], order["order_id"], "pay_fc_b1")
         return await real(b, lat, lng)
 

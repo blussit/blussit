@@ -1290,20 +1290,35 @@ booking, payment or KPI collection.
 
 ### 7.10 Captain GPS integrity (the location check)
 
+**Rule since 2026-11-24 — location NEVER blocks the captain.** A captain
+standing at the customer's door could not enter the 4-digit service code (the
+app said he was away), so the job sat "on the way" and he was flagged. Now
+arrival (service code), start (before photo) and complete (after photo) are
+**always accepted** whatever the fix says — outside the boundary, weak, missing,
+stale, replayed, a suspicious trail. The location only produces **evidence** and
+a **red warning for the manager** (below). What still refuses is non-location:
+the wrong service code itself (5 tries then the manager unlocks), the status
+order and `too_quick` (a time rule). Everything below describes the *checks*
+(unchanged) and what they now do with a failure.
+
 **Goal and honest limit.** The founder asked that nobody can skip the
 location check. A browser/PWA can never *prove* a real GPS: coordinates come
 from the phone, and an Android mock-location app can feed any value that a web
-page cannot detect. What the server can do — and now does — is make remote
-completion need a **sustained, physically plausible fake trail**, refuse
-everything else, and leave evidence. The only path to stronger guarantees is a
+page cannot detect. What the server can do is make a remote completion leave a
+**flagged, evidenced** record a manager sees in red, and mark a fake-looking
+trail `geo_suspect`. The only path to stronger guarantees is a
 native captain app using Play Integrity and mock-location detection
 (recommended if cheating shows up in the flags below).
 
-Code: `services/geo_integrity_service.py` (evaluation, approvals, evidence),
-hooks in `BookingService` (`start_heading`, `verify_vehicle`,
-`capture_before_photo`, `capture_after_photo_and_complete`,
-`record_captain_ping`, `geo_*`), schemas `GpsFixMeta` / `GeoApprovalRequest` /
-`GeoOverrideRequest`. Tests: `tests/test_gps_integrity.py`.
+Code: `services/geo_integrity_service.py` (evaluation + evidence; `gate` never
+refuses a location reason — only `HARD_CODES = {too_quick}`), hooks in
+`BookingService` (`start_heading`, `verify_vehicle`, `capture_before_photo`,
+`capture_after_photo_and_complete`, `record_captain_ping`, `_build_location_warning`,
+`ignore_location_warning`, `manager_mark_arrived`, `complete_for_captain`),
+schemas `GpsFixMeta` / `ManagerStepRequest` / `CompleteForCaptainRequest`.
+Tests: `tests/test_gps_integrity.py` (evidence matrix),
+`tests/test_location_warning.py` (warning, Ignore, manager actions, broadcast
+regression, 500 m, migration).
 
 **Layers (all server-side).**
 
@@ -1314,10 +1329,13 @@ hooks in `BookingService` (`start_heading`, `verify_vehicle`,
    (older than `geo_max_fix_age_s`), `future_fix` (clock ahead by more than
    `geo_future_tolerance_s`), `replayed_fix` (not newer than the previous
    accepted step's fix — a fix is never reusable), `poor_accuracy` (> cap),
-   `outside_geofence` (distance > `photo_geofence_radius_m` + min(accuracy,
-   `geo_accuracy_cap_m`)). The server's own receive time is stored with each.
-   An address without a map pin cannot be geofenced: that stays the old manager
-   flag (`arrival_no_gps`), not a dead end.
+   `outside_geofence` (distance > `photo_geofence_radius_m` — **500 m**, was
+   300 — + min(accuracy, `geo_accuracy_cap_m`)). Each of these is now a
+   *reason that is recorded and flagged*, not a refusal. The server's own
+   receive time is stored with each. An address without a real map pin (no
+   coordinates, or the (0, 0) a bad client writes — `BookingService._pin_of`)
+   cannot be geofenced: no distance, no warning; a 'reached' press with no
+   position at all still warns ("without sharing a location").
 2. *The server-held trail* (`captain_locations`, written by the 25 s on-job
    ping + every step): `trail_teleport` (implied speed > `geo_max_speed_kmh`
    between consecutive fixes; hops under 300 m / 10 s are noise),
@@ -1334,36 +1352,83 @@ hooks in `BookingService` (`start_heading`, `verify_vehicle`,
    (default 120 s, env `GEOFENCE_MIN_SERVICE_SECONDS`) after the before-photo
    is refused; the older 5-minute `completed_too_fast` flag stays.
 4. *Client signals* (extra evidence only; never claimed to detect mock apps):
-   the captain panel takes a fresh fix (`maximumAge: 0`), reads
-   accuracy/speed/heading/altitude/secure-context/permission, blocks with a
-   clear message when permission is denied or the position is unavailable,
-   shows a "Location Check" chip (green Location Verified / blue Approved By
-   Manager / amber Not Verified), queues pings through bad network (the server
+   the captain panel (`components/captain/photo.ts:getJobPosition`) takes a
+   fresh high-accuracy fix (`maximumAge: 0`, 15 s), and when it is weak (> 100 m)
+   or missing listens for 8 s more and keeps the best; it reads
+   accuracy/speed/heading/altitude/secure-context/permission and **never
+   throws and never blocks** — a denied / timed-out / unavailable phone submits
+   the step WITHOUT coordinates (the server flags it, the captain sees no
+   error; the photo tile just says "Photo Ready" instead of "Location Saved").
+   The only chip is a green "Location Verified"; there is no refusal screen and
+   no "ask your manager" sheet any more. Pings queue through bad network (the server
    keeps their original time; older than `geo_ping_max_age_s` are dropped, from
    the future are rejected), pings immediately when the app returns to the
    foreground and holds a screen wake lock while a job is live.
 
-**Refusal and approval.** A refusal is HTTP 409 `GEO_CHECK_FAILED` with
-`details = {step, reasons[], distance_m, allowed_m, can_request_approval,
-approval}`. The captain sees e.g. "You Must Be At The Customer's Location To
-Mark Arrived" and **Ask Manager To Approve**
-(`POST /bookings/{id}/geo-approval-request`, notifies the center's manager). A
-manager of that center or an admin approves or declines ONE step of ONE job
-(`POST /bookings/{id}/geo-override {step, approve, reason>=5}`: audit-logged
-`GEO_OVERRIDE_APPROVED/DECLINED`, history row, captain notified + pushed). The
-approval is single-use (claimed atomically right before the step's write, handed
-back if the write loses a race), expires after `geo_override_valid_minutes`,
-sets `geo_override`, and a captain can never approve (route guard + service
-check). A wrong service code does not burn an approval; the location is
-checked *before* the code so a remote captain cannot guess codes.
+**The red location warning (the manager's side).** When a step is accepted
+from outside the boundary, without GPS, or with a weak / stale / suspicious
+fix, `BookingService._build_location_warning` writes
+`location_warning: {step, distance_m, allowed_m, reasons[], message, at,
+captain_id, captain_name, resolved: false}` in the SAME write as the step (per
+car — a code entered once warns every car of the visit), and every working
+manager of the center gets an in-app note, e.g. "Captain Ravi entered the
+service code 2.0 km away from the customer's address" (km, 1 decimal; "without
+sharing a location" with no GPS; "with a weak GPS signal"). It is deliberately
+**not an issue flag** (`_ensure_no_open_issue` / `flag_issue` can block steps;
+this blocks nothing) and counts toward nothing financial. It shows RED in the
+manager Booking Queue (a "Location Warnings" section + the red line in every
+card / "What Happened" cell, `scope=location_warnings` and `attention`), in the
+booking drawer (manager + admin) and as a red count on the manager's Booking
+Queue sidebar item. **Ignore** (`POST /bookings/{id}/location-warning/ignore`,
+manager of that center or admin; 403 otherwise; clears the whole visit;
+idempotent; history row + `IGNORE_LOCATION_WARNING` audit; keeps the evidence,
+adds `ignored_by/_at`) turns it back to normal. A later failing step raises a
+new warning. The captain and the customer never receive the field (it is in
+the hidden-field lists); the old `arrival_flagged` / `arrival_no_gps` /
+`before_photo_flagged` / `after_photo_flagged` fields are still written (same
+boundary incl. accuracy slack) for the captain flag counts and old data.
+
+**Old approval endpoints.** `POST /bookings/{id}/geo-approval-request` and
+`POST /bookings/{id}/geo-override` still exist so a cached app / old screen
+answers cleanly: both return `{status: "not_needed"}` and write nothing (the
+override keeps its role / own-center checks). `geo_overrides` rows from before
+stay readable in `geo-status`. `geo_override_valid_minutes` is unused.
+
+**Manager acts for a stuck captain** (drawer, own center / admin; reason >= 5
+characters; each writes a history row, an `AuditService` row and pings
+`booking:{id}`, `center-bookings:{center}`, `user:{customer}`, `user:{captain}`,
+`admin:live`):
+- *Unlock Arrival Check* (existing, `unlock-arrival-code`) — after 5 wrong codes.
+- *Mark Arrived* (`POST /bookings/{id}/mark-arrived`) — verifies the car(s) on
+  the way as after a correct code without one: `vehicle_verified`,
+  `arrival_confirmed_*`, `geo_checks.arrival.status = "confirmed"`, clears the
+  lock and an open `arrival_code_locked` / `captain_not_reached` flag, tells the
+  captain (his app moves to the before photo) and the customer ("arrived", once
+  per visit). The customer's booking page reads `vehicle_verified`: while the
+  status is still `captain_on_the_way` it shows "Your Captain Has Arrived" and
+  hides the service code (after a correct code or a Mark Arrived alike). The
+  manager's live captain map swallows a Google Maps marker failure (blocked key,
+  quota) instead of crashing the Captains page.
+- *Complete For Captain* (`POST /bookings/{id}/complete-for-captain`, only
+  `captain_on_the_way` / `service_started`) — `_complete_for_captain_money`
+  is THE completion write also used by the after photo (claim + captain wallet
+  delta + commission / franchise share in one transaction), so the **captain
+  stays the earner**; `completed_by_role` is NOT set (that value means "the
+  manager did it himself"), `completed_on_behalf_by/_name/_reason/_at` are.
+  No photos. When the car still owes money the manager must say how:
+  `cash` / `online` (recorded as collected by the manager in the same
+  transaction — never the captain's cash) or `captain` (he collects from his
+  app afterwards, the normal flow); a due amount with no answer is refused.
+- Mark Done keeps refusing these two states, now pointing at the actions.
 
 **Evidence.** Per step `geo_checks.<step>` on the booking (status
-verified / override / unpinned / unverified, distance, accuracy, reasons,
-approver), `geo_suspect(+_reasons)`, `geo_override`, `geo_refusals`,
-`geo_last_fix_at`; every failed check inserts a `geo_events` row (90-day TTL);
-approvals live in `geo_overrides`. `GET /bookings/{id}/geo-status` (assigned
-captain / center manager / admin) summarises it; the staff booking drawer shows
-"Location Verdict" with Approve / Decline; the captain flags view
+verified / unverified / unpinned / confirmed (manager Mark Arrived) / override
+(old rows), distance, accuracy, reasons), `geo_suspect(+_reasons)`,
+`geo_override` (old), `geo_refusals` (= failed location checks — none refused a
+step), `geo_last_fix_at`; every failed check inserts a `geo_events` row (90-day
+TTL, `enforced: false`). `GET /bookings/{id}/geo-status` (assigned captain /
+center manager / admin) summarises it; the staff booking drawer shows
+"Location Verdict" (read-only now); the captain flags view
 (`flags_by_type`) gains `geo_suspect`, `geo_override`, `geo_refused`.
 Customers never receive any `geo_*` field.
 
@@ -1375,18 +1440,23 @@ endpoints take the captain from the token (a captain cannot step another
 captain's job: `_ensure_captain_job`).
 
 **Tunables** (Business Settings → Checks & Reminders; defaults in
-`DEFAULT_BOOKING_POLICY`): `photo_geofence_radius_m` 300, `geo_accuracy_cap_m`
-100, `geo_max_fix_age_s` 120, `geo_future_tolerance_s` 60, `geo_ping_max_age_s`
-600, `geo_trail_grace_s` 120, `geo_min_trail_pings` 2, `geo_max_speed_kmh` 150,
-`geo_min_service_seconds` 120, `geo_override_valid_minutes` 30. Env:
-`GEOFENCE_ENFORCE` (default true; `false` = kill switch: everything is still
-evaluated and recorded, nothing refused) and `GEOFENCE_MIN_SERVICE_SECONDS`.
+`DEFAULT_BOOKING_POLICY`): `photo_geofence_radius_m` **500** (labelled "Location
+Boundary"; boot task `migrate_geofence_radius_to_500` moves a stored 300 to 500
+once, only when `settings_history` shows no admin ever changed the radius —
+saving any other policy field had written the old default 300 next to it),
+`geo_accuracy_cap_m` 100, `geo_max_fix_age_s` 120, `geo_future_tolerance_s` 60,
+`geo_ping_max_age_s` 600, `geo_trail_grace_s` 120, `geo_min_trail_pings` 2,
+`geo_max_speed_kmh` 150, `geo_min_service_seconds` 120. Env: `GEOFENCE_ENFORCE`
+(default true; now it governs only the one remaining refusal, `too_quick`;
+`false` = nothing is refused at all, everything is still evaluated and
+recorded) and `GEOFENCE_MIN_SERVICE_SECONDS`. The "walked off mid-service"
+sweep still uses 2 x the radius (now 1 km).
 
 **Known gaps.** A mock-location app that produces a smooth, jittered, plausible
 trail from the first minute defeats every software check (it also keeps the app
 pinging as if present); photos' EXIF GPS/time are not compared (no image
 library installed — a native app or `Pillow` would add it); a phone that sleeps
-all trip produces a sparse trail, which needs a manager approval at *Arrived*.
+all trip produces a sparse trail, which is flagged (red warning) at *Arrived*.
 
 ### 7.11 Coupon bundles (bulk single-use codes — admin only)
 
@@ -1921,6 +1991,20 @@ sockets per account per instance → close code 4429, frames ≤ 64 KiB via
 
 Frontend: `useLiveRefresh` is mounted once per shell, debounces 500 ms (max 3 s), waits while the tab is hidden, refreshes everything after 60 s away or after a socket re-ack, and throttles heavy aggregates (kpi, manager-dashboard, collections) to once per 10 s. Separately `onApiWrite` in `lib/api-client.ts` refreshes the live keys after every successful write (and after a 409/404/410 "changed under you"). Customers now hold one shared socket while the app is open — budget socket capacity for that (cap stays 20 per account). Known gaps: no optimistic UI (actor sees the change after ~0.5 s refetch), bulk status sweeps only ping if they go through `BookingService` or send a notification, the bot's payment-method change sends no ping.
 
+**Every booking-changing step announces itself** (`BookingService._broadcast_booking_changed`
+→ `booking:{id}`, `center-bookings:{center}`, `user:{customer}`, `user:{captain}`,
+`admin:live`). The audit of 2026-11-24 found `verify_vehicle` (the arrival step)
+was the only captain step that never pinged — a manager's queue and drawer
+read "captain on the way" until some other ping or the 60 s poll; fixed, along
+with a ping on every wrong-code try (the drawer shows the count), and
+`tests/test_location_warning.py` parametrises over every captain / manager step
+(`test_every_booking_step_pings_…`) and over the booking write routes
+(`test_every_state_changing_booking_route_is_accounted_for` — a new POST/PATCH
+route fails until someone decides it pings). Frontend: `captain-perf` /
+`captain-live-position` joined the booking refresh set, and the booking drawer
+re-reads a live (assigned / on the way / in service) booking every 20 s on top
+of the pings.
+
 Messages are "something changed — refetch" pings (captain location carries
 coordinates). Everything authoritative comes from REST; screens also poll.
 
@@ -2256,6 +2340,7 @@ system and is updated with every change.** When you change the project:
 
 | Date | Change |
 |---|---|
+| 2026-11-24 | **Location never blocks the captain:** (1) arrival / start / complete accept any fix (outside, weak, missing, stale, replayed, suspicious trail) — `GeoIntegrityService.gate` refuses only `too_quick`; evidence + `geo_suspect` kept; old geo-approval endpoints answer `not_needed`, the captain's "Ask Manager To Approve" sheet is gone, heading/photo schemas take no coordinates; (2) boundary 300 -> **500 m** (`photo_geofence_radius_m`, boot migration only for an unedited 300, admin label "Location Boundary"); (3) booking-level red `location_warning` (cleared by manager/admin **Ignore**, `POST /bookings/{id}/location-warning/ignore`), in-app note to the center's managers, red in the queue (section + `scope=location_warnings`), drawer and a sidebar count; unpinned / (0, 0) address = no distance; (4) captain app `getJobPosition` (fresh fix, retry/listen for a weak one, never throws); (5) manager **Mark Arrived** and **Complete For Captain** (captain stays the earner, shared `_complete_for_captain_money`, payment choice cash / online / captain); (6) stale "on the way": `verify_vehicle` never broadcast — fixed + wrong-code ping + broadcast regression tests + refresh keys / drawer poll (§7.10, §8.3). Tests: `test_location_warning.py` (37), `test_gps_integrity.py` and `test_arrival_geofence_and_sweeps.py` rewritten. |
 | 2026-11-23 | **Admin console round:** (1) **coupon status** — the admin list derives Expired / Used Up / Inactive / Scheduled / Active on the server (`status`, `status_label`, `?status=` filter; an expired coupon that is still switched on reads Expired) (§7.11); (2) **admin sidebar groups** — Dashboard, WhatsApp, Bookings on top, everything else in collapsible dropdowns with persisted state, auto-open on the active route, red dot / count roll-up (`components/layout/SidebarNav.tsx`, §8.2); (3) **red dots for new requests** — `GET /admin/nav-badges`, `seen_at` on contact messages / custom-plan requests / coverage requests, `POST /admin/inbox/{section}/seen`, live `inbox` ping, "New" rows, "Mark All As Read", boot backfill (§8.2/§8.3); (4) **pausing or archiving a service center never hides records** — Archive (soft delete + off, restorable) vs Pause, `status` on every center row, archived centers still resolve in names / Franchise / statements / settlements / Bookings-by-center, "(Paused)" / "(Archived)" labels in history filters, new-work pickers active-only; the self-operated ↔ franchise switch is a full timestamp (`effective_at`) so only jobs completed at/after the switch use the new terms (§7.13); (5) a completed booking can never be moved to another center (admin edit refuses it and any visit holding a completed car). Tests: `test_coupon_status.py`, `test_admin_inbox_badges.py`, `test_center_archive_records.py`. |
 | 2026-11-23 | **Captain pay invoices and settlements (§7.14):** every captain payment now creates a numbered invoice (`BLS-PAY-YYYY-NNNNNN`, gap-free counter) in the same transaction as the ledger row and Finance entry; salary invoices are per month (part payments tracked, no double full invoice), commission invoices cover a chosen period and settle each booking exactly once (`commission_settled_by`, per-captain, conditional update; void un-settles); admin reconcile endpoint; printable invoice pages, Pay wizard, Invoices tabs, My Pay paid/unpaid. Weekly off is now a weekday set (default Saturday + Sunday, leave refused on off days), default paid leaves 0, and a plan-covered wash's commission is set by the manager, never auto-computed. |
 | 2026-11-23 | **Captain pay and franchise centers (§7.13):** salary / commission / legacy basis per captain (effective-dated terms, deposit, kit), append-only `payroll_ledger` with idempotent commission accrual on every completion/edit/refund path, rupee commission on manager-done jobs (max 70 % of the job, self-operated centers only), salary maths from derived attendance with manager overrides, payments that land in Finance in the same transaction (locked entries), no double pay with the per-job wallet; service-center `operation` (self-operated / franchise, share %, fee, kits, who pays captains), frozen per-booking franchise share, settlement statement and payouts; Salary pages (manager + admin), Franchise page, captain My Pay. |

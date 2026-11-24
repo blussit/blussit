@@ -436,7 +436,7 @@ async def test_lost_before_photo_step_hands_the_photo_back(db, monkeypatch):
     svc = BookingService(db)
     real = svc._check_geofence
 
-    async def cancelled_meanwhile(booking, lat, lng):
+    async def cancelled_meanwhile(booking, lat, lng, *rest):
         result = await real(booking, lat, lng)
         await BookingService(db).cancel_booking(b["id"], BookingCancelRequest(reason="Customer not home"), s["mgr"]["id"], "manager", s["center_id"])
         return result

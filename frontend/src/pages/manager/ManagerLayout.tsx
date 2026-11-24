@@ -1,8 +1,11 @@
 import { Outlet } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Banknote, Building, CalendarDays, CalendarPlus, CalendarX2, CheckCircle2, CreditCard, Gift, Layers, LayoutDashboard, ListChecks, Package, SlidersHorizontal, Star, User, Users } from "lucide-react";
 import { DashboardShell, type NavItem } from "../../components/layout/DashboardShell";
 import { CustomerLookup } from "../../components/shared/CustomerLookup";
 import { useFranchisePaysCaptains } from "../../components/payroll/useFranchisePaysCaptains";
+import { bookingApi } from "../../api/booking";
+import { useAuth } from "../../context/AuthContext";
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/manager", icon: LayoutDashboard, end: true },
@@ -27,8 +30,21 @@ const navItems: NavItem[] = [
 export default function ManagerLayout() {
   // A center whose captains the franchise partner pays has no Salary page.
   const franchisePays = useFranchisePaysCaptains();
+  // A red count on Booking Queue while captains have finished steps from
+  // outside the boundary / without GPS that nobody has looked at yet. The key
+  // starts with "center-bookings", so every live booking ping refreshes it.
+  const { user } = useAuth();
+  const centerId = user?.service_center_id || "";
+  const warned = useQuery({
+    queryKey: ["center-bookings", centerId, "location-warnings-count"],
+    queryFn: () => bookingApi.forCenter(centerId, { scope: "location_warnings", page: 1, page_size: 1 }),
+    enabled: !!centerId,
+    select: (page) => page.meta.total,
+    refetchInterval: 120_000,
+  });
+  const items = navItems.map((i) => (i.to === "/manager/bookings" ? { ...i, badge: warned.data ?? 0 } : i));
   return (
-    <DashboardShell navItems={franchisePays ? navItems.filter((i) => i.to !== "/manager/salary") : navItems} portalLabel="Manager" headerRight={<CustomerLookup />}>
+    <DashboardShell navItems={franchisePays ? items.filter((i) => i.to !== "/manager/salary") : items} portalLabel="Manager" headerRight={<CustomerLookup />}>
       <Outlet />
     </DashboardShell>
   );

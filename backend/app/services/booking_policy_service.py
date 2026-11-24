@@ -25,10 +25,12 @@ Booking policy — the admin-configurable rules that keep scheduling honest:
   - captain_travel_buffer_minutes: minutes blocked out before AND after a
     captain's booking window, during which they cannot be assigned another
     job — models real travel time between jobs (default 15).
-  - photo_geofence_radius_m: how far a before/after photo's GPS can be from
-    the booking address before it gets flagged for manager review, rather
-    than blocked outright (default 300m — service addresses aren't
-    pinpoint-accurate, so this stays generous).
+  - photo_geofence_radius_m: the boundary around the customer's pin: how far
+    the captain's GPS can be when he enters the service code, starts and
+    finishes before the manager gets a red location warning. It NEVER blocks
+    the captain (default 500m since 2026-11-24 — service addresses aren't
+    pinpoint-accurate, so this stays generous; allowed distance = radius +
+    min(phone accuracy, geo_accuracy_cap_m)).
   - late_start_grace_minutes: how long past a booking's expected start
     (estimated_start_at, or the slot end for the hard "severely late"
     boundary) a captain can still start before the penalty escalates.
@@ -67,6 +69,7 @@ Stored in the `settings` collection under key "booking_policy", same
 pattern as PricingService's "pricing_config".
 """
 import time
+from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -94,11 +97,12 @@ DEFAULT_BOOKING_POLICY = {
     "max_advance_days": 7,
     "delay_tolerance_minutes": 20,
     "captain_travel_buffer_minutes": 15,
-    "photo_geofence_radius_m": 300,
+    "photo_geofence_radius_m": 500,
     # Captain GPS integrity (geo_integrity_service). The radius above is the
     # geofence for arrived / start / complete; these decide which fixes are
-    # believable. Allowed distance = radius + min(reported accuracy, cap).
-    "geo_accuracy_cap_m": 100,       # a fix worse than this is refused
+    # believable — a fix that fails any of them is FLAGGED to the manager,
+    # never refused. Allowed distance = radius + min(reported accuracy, cap).
+    "geo_accuracy_cap_m": 100,       # a fix worse than this is flagged (never refused)
     "geo_max_fix_age_s": 120,        # an older fix is stale
     "geo_future_tolerance_s": 60,    # a fix this far in the future = bad clock
     "geo_ping_max_age_s": 600,       # late/offline pings older than this are dropped
@@ -228,3 +232,48 @@ class BookingPolicyService:
                 )
             affected.append(str(center["_id"]))
         return affected
+
+
+GEOFENCE_RADIUS_OLD_DEFAULT = 300
+GEOFENCE_RADIUS_NEW_DEFAULT = 500
+
+
+async def migrate_geofence_radius_to_500(db: AsyncIOMotorDatabase) -> dict:
+    """Boot migration (idempotent, worker-run): the boundary default moved
+    from 300 m to 500 m (founder, 2026-11-24). A stored booking_policy
+    carries every key — saving ANY policy field once wrote the old default
+    300 next to it — so a stored 300 is moved to 500 only when no admin ever
+    CHANGED the radius: settings_history has no row where the radius went
+    from a real value to something else. (A first save from "nothing" to 300
+    is just the default being materialised.) A radius an admin set to any
+    other number, or typed back to 300 over another value, is left alone."""
+    setting = await db["settings"].find_one({"key": "booking_policy"})
+    if not setting:
+        return {"migrated": False, "reason": "no stored policy"}
+    value = dict(setting.get("value") or {})
+    if value.get("photo_geofence_radius_m") != GEOFENCE_RADIUS_OLD_DEFAULT:
+        return {"migrated": False, "reason": "not at the old default"}
+    edited = await db["settings_history"].find_one({
+        "key": "booking_policy",
+        "changes.photo_geofence_radius_m.from": {"$nin": [None, GEOFENCE_RADIUS_OLD_DEFAULT]},
+    })
+    edited = edited or await db["settings_history"].find_one({
+        "key": "booking_policy",
+        "changes.photo_geofence_radius_m.from": GEOFENCE_RADIUS_OLD_DEFAULT,
+        "changed_by": {"$ne": "system:geofence-500"},
+    })
+    if edited:
+        return {"migrated": False, "reason": "an admin changed it"}
+    value["photo_geofence_radius_m"] = GEOFENCE_RADIUS_NEW_DEFAULT
+    won = await db["settings"].update_one(
+        {"_id": setting["_id"], "value.photo_geofence_radius_m": GEOFENCE_RADIUS_OLD_DEFAULT},
+        {"$set": {"value.photo_geofence_radius_m": GEOFENCE_RADIUS_NEW_DEFAULT}},
+    )
+    if won.modified_count:
+        await db["settings_history"].insert_one({
+            "key": "booking_policy",
+            "changes": {"photo_geofence_radius_m": {"from": GEOFENCE_RADIUS_OLD_DEFAULT, "to": GEOFENCE_RADIUS_NEW_DEFAULT}},
+            "changed_by": "system:geofence-500", "changed_at": datetime.now(timezone.utc),
+        })
+    _POLICY_CACHE["value"] = None
+    return {"migrated": bool(won.modified_count)}

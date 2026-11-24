@@ -223,8 +223,6 @@ export const hi = {
   "captain.visit.pick": "पहले यह करें",
   "captain.visit.total": "पूरे चक्कर का कुल",
   "captain.payment.vehicles": "{n} गाड़ियाँ",
-  "captain.error.geoUnsupported": "इस डिवाइस पर लोकेशन काम नहीं कर रही।",
-  "captain.error.geoFailed": "आपकी लोकेशन नहीं मिली। लोकेशन ऑन करके फिर से कोशिश करो।",
   "captain.modal.explainWhy": "वजह बताओ।",
 
   // Captain app v2 (Today · Jobs · Earnings · Profile)
@@ -296,6 +294,7 @@ export const hi = {
   "captain.v2.tapPhoto": "फ़ोटो लेने के लिए दबाओ",
   "captain.v2.locating": "लोकेशन ले रहे हैं…",
   "captain.v2.retake": "दोबारा लो",
+  "captain.v2.photoReady": "फोटो तैयार",
   "captain.v2.gpsTagged": "लोकेशन सेव हुई",
   "captain.v2.step.arrived": "पहुँचे · कोड चेक हुआ",
   "captain.v2.step.washStarted": "पहले की फ़ोटो · धुलाई शुरू",

@@ -1409,6 +1409,12 @@ _OPTIONAL_BOOT_TASKS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (("app.services.admin_inbox_service", "backfill_inbox_seen"),),
     ),
     (
+        # SETTINGS: the captain location boundary default moved 300 m -> 500 m
+        # (2026-11-24); a stored 300 that no admin ever edited becomes 500.
+        "location boundary 300 -> 500 m",
+        (("app.services.booking_policy_service", "migrate_geofence_radius_to_500"),),
+    ),
+    (
         # Account emails stored lower-case (login is case-insensitive).
         "lower-case account emails",
         (("app.repositories.user_repository", "lowercase_user_emails"),),

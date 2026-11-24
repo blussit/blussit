@@ -1,9 +1,13 @@
 """
-Captain GPS integrity (app/services/geo_integrity_service.py): arrived /
-start / complete are REFUSED — not just flagged — when the position is
-outside the geofence, missing, stale, inaccurate, replayed, or when the
-server-held breadcrumb trail does not agree with the claim. A manager of the
-center (or an admin) can approve ONE step of ONE job; a captain never can.
+Captain GPS integrity (app/services/geo_integrity_service.py).
+
+FOUNDER RULE 2026-11-24: LOCATION NEVER BLOCKS THE CAPTAIN. Arrived / start /
+complete are ACCEPTED when the position is outside the boundary (500 m),
+missing, stale, inaccurate, replayed, or when the server-held breadcrumb trail
+does not agree with the claim — the verdict is recorded as "unverified" with
+its evidence (geo_events, geo_refusals, geo_suspect for a fake-looking trail)
+and the manager gets a red location warning (tests/test_location_warning.py).
+Only the wrong service code itself and the `too_quick` time rule still refuse.
 """
 import inspect
 from datetime import datetime, timedelta, timezone
@@ -173,101 +177,126 @@ def test_ping_bursts_count_once():
 
 
 @pytest.mark.asyncio
-async def test_far_arrival_is_refused_not_just_flagged(rig, db):
+async def test_far_arrival_is_accepted_and_flagged_not_refused(rig, db):
     booking = await _on_the_way(rig, db)
-    exc = await _refused(_arrive(rig, db, booking, at=FAR))
-    assert "outside_geofence" in _codes(exc)
-    assert exc.details["can_request_approval"] is True
-    assert "At The Customer's Location To Mark Arrived" in exc.message
+    done = await _arrive(rig, db, booking, at=FAR)
+    assert done["vehicle_verified"] is True
     after = await db.bookings.find_one({"_id": booking["_id"]})
-    assert not after.get("vehicle_verified")
+    assert after["vehicle_verified"] is True
+    check = after["geo_checks"]["arrival"]
+    assert check["status"] == "unverified" and "outside_geofence" in check["reasons"]
     event = await db.geo_events.find_one({"booking_id": str(booking["_id"]), "step": "arrival"})
-    assert event and "outside_geofence" in event["reasons"]
+    assert event and "outside_geofence" in event["reasons"] and event["enforced"] is False
     assert after["geo_refusals"] == 1
+    assert after["location_warning"]["resolved"] is False
 
 
 @pytest.mark.asyncio
 async def test_arrival_distance_is_accuracy_aware(rig, db):
-    booking = await _on_the_way(rig, db)
-    # 350 m out with 80 m accuracy: allowed = 300 + 80 -> ok.
-    await _arrive(rig, db, booking, at=_north(350), accuracy_m=80)
+    # (He heads out from where he stands: a 550 m hop in seconds would read as a teleport.)
+    booking = await _on_the_way(rig, db, at=_north(550))
+    # 550 m out with 80 m accuracy: allowed = 500 + 80 -> verified, no warning.
+    await _arrive(rig, db, booking, at=_north(550), accuracy_m=80)
     done = await db.bookings.find_one({"_id": booking["_id"]})
     assert done["vehicle_verified"] is True and done["geo_checks"]["arrival"]["status"] == "verified"
+    assert not done.get("location_warning")
 
-    b2 = await _on_the_way(rig, db)
-    exc = await _refused(_arrive(rig, db, b2, at=_north(450), accuracy_m=80))
-    assert "outside_geofence" in _codes(exc)
+    # 650 m out with 80 m accuracy is beyond 580 -> still accepted, but unverified + warned.
+    b2 = await _on_the_way(rig, db, at=_north(650))
+    await _arrive(rig, db, b2, at=_north(650), accuracy_m=80)
+    after = await db.bookings.find_one({"_id": b2["_id"]})
+    assert after["vehicle_verified"] is True and after["geo_checks"]["arrival"]["status"] == "unverified"
+    assert "outside_geofence" in after["geo_checks"]["arrival"]["reasons"]
+    assert after["location_warning"]["resolved"] is False
 
 
 @pytest.mark.asyncio
 async def test_accuracy_slack_is_capped(rig, db):
-    booking = await _on_the_way(rig, db)
-    # 99 m accuracy buys at most 99 m; 420 m out is beyond 300 + 99.
-    exc = await _refused(_arrive(rig, db, booking, at=_north(420), accuracy_m=99))
-    assert "outside_geofence" in _codes(exc)
+    booking = await _on_the_way(rig, db, at=_north(620))
+    # 99 m accuracy buys at most 99 m; 620 m out is beyond 500 + 99 -> warned.
+    await _arrive(rig, db, booking, at=_north(620), accuracy_m=99)
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True and "outside_geofence" in after["geo_checks"]["arrival"]["reasons"]
 
 
 @pytest.mark.asyncio
-async def test_poor_accuracy_is_refused(rig, db):
+async def test_poor_accuracy_is_accepted_and_flagged(rig, db):
     booking = await _on_the_way(rig, db)
-    exc = await _refused(_arrive(rig, db, booking, at=NEAR, accuracy_m=180))
-    assert "poor_accuracy" in _codes(exc)
+    await _arrive(rig, db, booking, at=NEAR, accuracy_m=180)
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True
+    assert "poor_accuracy" in after["geo_checks"]["arrival"]["reasons"]
+    assert after["location_warning"]["reasons"] == ["poor_accuracy"]
 
 
 @pytest.mark.asyncio
-async def test_stale_and_future_fixes_are_refused(rig, db):
-    booking = await _on_the_way(rig, db, fix_at=_utc_now() - timedelta(seconds=60))
-    exc = await _refused(_arrive(rig, db, booking, fix_at=_utc_now() - timedelta(minutes=10)))
-    assert "stale_fix" in _codes(exc)
-    exc = await _refused(_arrive(rig, db, booking, fix_at=_utc_now() + timedelta(minutes=10)))
-    assert "future_fix" in _codes(exc)
-    # A fresh device timestamp passes.
-    await _arrive(rig, db, booking, fix_at=_utc_now() - timedelta(seconds=5))
+async def test_stale_and_future_fixes_are_accepted_and_flagged(rig, db):
+    b1 = await _on_the_way(rig, db, fix_at=_utc_now() - timedelta(seconds=60))
+    await _arrive(rig, db, b1, fix_at=_utc_now() - timedelta(minutes=10))
+    assert "stale_fix" in (await db.bookings.find_one({"_id": b1["_id"]}))["geo_checks"]["arrival"]["reasons"]
+    b2 = await _on_the_way(rig, db, fix_at=_utc_now() - timedelta(seconds=60))
+    await _arrive(rig, db, b2, fix_at=_utc_now() + timedelta(minutes=10))
+    assert "future_fix" in (await db.bookings.find_one({"_id": b2["_id"]}))["geo_checks"]["arrival"]["reasons"]
+    # A fresh device timestamp is verified.
+    b3 = await _on_the_way(rig, db, fix_at=_utc_now() - timedelta(seconds=60))
+    await _arrive(rig, db, b3, fix_at=_utc_now() - timedelta(seconds=5))
+    assert (await db.bookings.find_one({"_id": b3["_id"]}))["geo_checks"]["arrival"]["status"] == "verified"
 
 
 @pytest.mark.asyncio
-async def test_missing_fix_is_refused_on_a_pinned_address_only(rig, db):
+async def test_missing_fix_is_accepted_and_flagged(rig, db):
     booking = await _on_the_way(rig, db)
-    exc = await _refused(BookingService(db).verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(service_code=_code(booking)), rig["captain_id"]))
-    assert "no_fix" in _codes(exc)
-
-    # An address with no pin can't be geofenced: old behaviour (manager flag), not a dead end.
-    await db.addresses.update_one({"_id": ObjectId(rig["address_id"])}, {"$set": {"latitude": None, "longitude": None}})
-    await db.bookings.update_one({"_id": booking["_id"]}, {"$unset": {"address_snapshot": ""}})
     await BookingService(db).verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(service_code=_code(booking)), rig["captain_id"])
     after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True and after["arrival_no_gps"] is True
+    assert "no_fix" in after["geo_checks"]["arrival"]["reasons"]
+    assert "without sharing a location" in after["location_warning"]["message"]
+
+    # An address with no pin can't be geofenced: no distance, no 'no_fix' reason,
+    # but a 'reached' press with no position at all is still worth the manager's look.
+    b2 = await _on_the_way(rig, db)
+    await db.addresses.update_one({"_id": ObjectId(rig["address_id"])}, {"$set": {"latitude": None, "longitude": None}})
+    await db.bookings.update_one({"_id": b2["_id"]}, {"$unset": {"address_snapshot": ""}})
+    await BookingService(db).verify_vehicle(str(b2["_id"]), VerifyVehicleRequest(service_code=_code(b2)), rig["captain_id"])
+    after = await db.bookings.find_one({"_id": b2["_id"]})
     assert after["vehicle_verified"] is True and after["arrival_no_gps"] is True
 
 
 @pytest.mark.asyncio
-async def test_a_wrong_code_does_not_use_up_location_and_remote_guessing_is_blocked(rig, db):
+async def test_a_wrong_code_is_still_counted_and_locks_after_five(rig, db):
+    bs = BookingService(db)
     booking = await _on_the_way(rig, db)
-    exc = await _refused(BookingService(db).verify_vehicle(
-        str(booking["_id"]), VerifyVehicleRequest(service_code="0000", latitude=FAR[0], longitude=FAR[1]), rig["captain_id"],
-    ))
-    assert "outside_geofence" in _codes(exc)
-    after = await db.bookings.find_one({"_id": booking["_id"]})
-    assert not after.get("arrival_code_failures")  # never reached the code check
+    for tries in range(1, 5):
+        with pytest.raises(BadRequestException):
+            await bs.verify_vehicle(
+                str(booking["_id"]), VerifyVehicleRequest(service_code="0000", latitude=FAR[0], longitude=FAR[1]), rig["captain_id"],
+            )
+        assert (await db.bookings.find_one({"_id": booking["_id"]}))["arrival_code_failures"] == tries
+    with pytest.raises(BadRequestException):
+        await bs.verify_vehicle(str(booking["_id"]), VerifyVehicleRequest(service_code="0000", latitude=NEAR[0], longitude=NEAR[1]), rig["captain_id"])
+    locked = await db.bookings.find_one({"_id": booking["_id"]})
+    assert locked["arrival_code_locked"] is True and not locked.get("vehicle_verified")
+    # Even the RIGHT code is refused while locked (the manager unlocks it).
+    with pytest.raises(BadRequestException):
+        await _arrive(rig, db, booking)
 
 
 # ------------------------------------------------------ replay / ordering
 
 
 @pytest.mark.asyncio
-async def test_a_fix_cannot_be_reused_for_the_next_step(rig, db):
+async def test_a_reused_fix_is_flagged_suspect_but_the_step_goes_through(rig, db):
     booking = await _on_the_way(rig, db, fix_at=_utc_now() - timedelta(seconds=60))
     stamp = _utc_now() - timedelta(seconds=3)
     await _arrive(rig, db, booking, fix_at=stamp)
     photo = await _upload(db, rig, "before")
-    exc = await _refused(BookingService(db).capture_before_photo(
-        str(booking["_id"]), PhotoCaptureRequest(image_url=photo, latitude=NEAR[0], longitude=NEAR[1], fix_at=stamp), rig["captain_id"],
-    ))
-    assert "replayed_fix" in _codes(exc)
-    assert "geo_suspect" in (await db.bookings.find_one({"_id": booking["_id"]}))
-    # A newer fix is accepted.
     await BookingService(db).capture_before_photo(
-        str(booking["_id"]), PhotoCaptureRequest(image_url=photo, latitude=NEAR[0], longitude=NEAR[1], fix_at=_utc_now()), rig["captain_id"],
+        str(booking["_id"]), PhotoCaptureRequest(image_url=photo, latitude=NEAR[0], longitude=NEAR[1], fix_at=stamp), rig["captain_id"],
     )
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["status"] == "service_started"
+    assert "replayed_fix" in after["geo_checks"]["start"]["reasons"]
+    assert after["geo_suspect"] is True
 
 
 async def _upload(db, rig, label: str) -> str:
@@ -282,33 +311,38 @@ async def _upload(db, rig, label: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_teleporting_trail_is_refused_and_marks_the_job_suspect(rig, db):
+async def test_teleporting_trail_is_accepted_but_marks_the_job_suspect(rig, db):
     booking = await _on_the_way(rig, db, at=FAR)  # heading out from 33 km away
-    exc = await _refused(_arrive(rig, db, booking, at=NEAR))
-    assert "trail_teleport" in _codes(exc)
+    await _arrive(rig, db, booking, at=NEAR)
     after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True
     assert after["geo_suspect"] is True and "trail_teleport" in after["geo_suspect_reasons"]
     alert = await db.notifications.find_one({"user_id": rig["manager_id"], "title": {"$regex": "Suspicious Location"}})
     assert alert is not None
 
 
 @pytest.mark.asyncio
-async def test_missing_trail_blocks_after_the_grace_period_only(rig, db):
-    booking = await _on_the_way(rig, db)
+async def test_missing_trail_is_flagged_after_the_grace_period_only(rig, db):
     # Inside the 2-minute grace: no pings needed (bad network, short trip).
     b2 = await _on_the_way(rig, db)
     await _arrive(rig, db, b2)
+    assert (await db.bookings.find_one({"_id": b2["_id"]}))["geo_checks"]["arrival"]["status"] == "verified"
 
-    # 10 minutes after heading out with nothing but the heading point: refused ...
+    # 10 minutes after heading out with nothing but the heading point: accepted, flagged ...
+    booking = await _on_the_way(rig, db)
     await _backdate_heading(db, booking, 10)
-    exc = await _refused(_arrive(rig, db, booking))
-    assert "trail_missing" in _codes(exc)
-    assert "trail_missing" not in (await db.bookings.find_one({"_id": booking["_id"]})).get("geo_suspect_reasons", [])
+    await _arrive(rig, db, booking)
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True and "trail_missing" in after["geo_checks"]["arrival"]["reasons"]
+    assert "trail_missing" not in after.get("geo_suspect_reasons", [])
 
-    # ... two spaced pings on the way (one is the late, offline kind) and it passes.
+    # ... two spaced pings on the way (one is the late, offline kind) and it is verified.
+    b3 = await _on_the_way(rig, db)
+    await _backdate_heading(db, b3, 10)
     await _ping(db, rig, _north(2000), 240)
     await _ping(db, rig, _north(400), 40)
-    await _arrive(rig, db, booking)
+    await _arrive(rig, db, b3)
+    assert (await db.bookings.find_one({"_id": b3["_id"]}))["geo_checks"]["arrival"]["status"] == "verified"
 
 
 @pytest.mark.asyncio
@@ -317,9 +351,10 @@ async def test_frozen_moving_pings_are_suspect(rig, db):
     await _backdate_heading(db, booking, 10)
     for i in range(6):
         await _ping(db, rig, _north(1500), 300 - i * 25, speed=7.0)
-    exc = await _refused(_arrive(rig, db, booking))
-    assert "trail_frozen" in _codes(exc)
-    assert (await db.bookings.find_one({"_id": booking["_id"]}))["geo_suspect"] is True
+    await _arrive(rig, db, booking)
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["vehicle_verified"] is True and "trail_frozen" in after["geo_checks"]["arrival"]["reasons"]
+    assert after["geo_suspect"] is True
 
 
 @pytest.mark.asyncio
@@ -347,6 +382,7 @@ async def test_ping_endpoint_bounds_late_pings_and_rejects_future_ones(rig, db):
 
 @pytest.mark.asyncio
 async def test_completion_before_the_minimum_wash_time_is_refused(rig, db):
+    """`too_quick` is a TIME rule, not a location rule: it still refuses."""
     await BookingPolicyService(db).set_policy({"geo_min_service_seconds": 120})
     bs = BookingService(db)
     booking = await _on_the_way(rig, db)
@@ -359,6 +395,7 @@ async def test_completion_before_the_minimum_wash_time_is_refused(rig, db):
             str(booking["_id"]), PhotoCaptureRequest(image_url=await _upload(db, rig, "a"), latitude=NEAR[0], longitude=NEAR[1], fix_at=_utc_now()), rig["captain_id"],
         ))
         assert "too_quick" in _codes(exc)
+        assert exc.details["can_request_approval"] is False
         assert (await db.bookings.find_one({"_id": booking["_id"]}))["status"] == "service_started"
         # After the floor it completes.
         await db.bookings.update_one({"_id": booking["_id"]}, {"$set": {"service_started_at": now_ist() - timedelta(minutes=30)}})
@@ -371,80 +408,45 @@ async def test_completion_before_the_minimum_wash_time_is_refused(rig, db):
 
 
 @pytest.mark.asyncio
-async def test_far_completion_is_refused(rig, db):
+async def test_far_completion_is_accepted_and_flagged(rig, db):
     bs = BookingService(db)
     booking = await _on_the_way(rig, db)
     await _arrive(rig, db, booking)
     await bs.capture_before_photo(
         str(booking["_id"]), PhotoCaptureRequest(image_url=await _upload(db, rig, "b"), latitude=NEAR[0], longitude=NEAR[1], fix_at=_utc_now()), rig["captain_id"],
     )
-    exc = await _refused(bs.capture_after_photo_and_complete(
+    await db.bookings.update_one({"_id": booking["_id"]}, {"$set": {"service_started_at": now_ist() - timedelta(minutes=30)}})
+    await bs.capture_after_photo_and_complete(
         str(booking["_id"]), PhotoCaptureRequest(image_url=await _upload(db, rig, "a"), latitude=FAR[0], longitude=FAR[1], fix_at=_utc_now()), rig["captain_id"],
-    ))
-    assert "outside_geofence" in _codes(exc)
-    assert "Complete The Job" in exc.message
+    )
+    after = await db.bookings.find_one({"_id": booking["_id"]})
+    assert after["status"] == "completed"
+    assert after["geo_checks"]["complete"]["status"] == "unverified" and "outside_geofence" in after["geo_checks"]["complete"]["reasons"]
+    assert after["location_warning"]["step"] == "complete" and after["after_photo_flagged"] is True
 
 
-# ---------------------------------------------------------------- approvals
+# ------------------------------------------------- old approval endpoints
 
 
 @pytest.mark.asyncio
-async def test_manager_approval_lets_one_step_through_exactly_once(rig, db):
+async def test_old_approval_endpoints_answer_gracefully_and_write_nothing(rig, db):
+    """An old cached captain app / staff screen may still call them: nothing
+    is required any more, so they answer 'not_needed' and create no rows."""
     bs = BookingService(db)
     booking = await _on_the_way(rig, db)
     bid = str(booking["_id"])
-    await _refused(_arrive(rig, db, booking, at=FAR))
-
     ask = await bs.geo_request_approval(bid, "arrival", rig["captain_id"], "GPS is bad here")
-    assert ask["status"] == "pending"
-    note = await db.notifications.find_one({"user_id": rig["manager_id"], "title": {"$regex": "Location Approval Needed"}})
-    assert note is not None
-
-    # A decline keeps it blocked.
-    await bs.geo_decide(bid, "arrival", False, "Please go to the address", rig["manager_id"], "manager", rig["center_id"])
-    await _refused(_arrive(rig, db, booking, at=FAR))
-
-    await bs.geo_decide(bid, "arrival", True, "Customer confirmed on the phone", rig["manager_id"], "manager", rig["center_id"])
+    assert ask["status"] == "not_needed"
+    decided = await bs.geo_decide(bid, "arrival", True, "Customer confirmed on the phone", rig["manager_id"], "manager", rig["center_id"])
+    assert decided["status"] == "not_needed"
+    assert await db.geo_overrides.count_documents({"booking_id": bid}) == 0
+    # ...and the step is open without any approval.
     await _arrive(rig, db, booking, at=FAR)
-    done = await db.bookings.find_one({"_id": booking["_id"]})
-    assert done["vehicle_verified"] is True and done["geo_override"] is True
-    check = done["geo_checks"]["arrival"]
-    assert check["status"] == "override" and check["override_role"] == "manager" and check["override_reason"] == "Customer confirmed on the phone"
-    assert "outside_geofence" in check["reasons"]
-    history = await db.booking_status_history.find_one({"booking_id": bid, "note": {"$regex": "Location check approved"}})
-    assert history is not None
-
-    # The approval covered ARRIVAL only: the next step is checked afresh.
-    exc = await _refused(BookingService(db).capture_before_photo(
-        bid, PhotoCaptureRequest(image_url=await _upload(db, rig, "b"), latitude=FAR[0], longitude=FAR[1], fix_at=_utc_now()), rig["captain_id"],
-    ))
-    assert "outside_geofence" in _codes(exc)
-
-
-@pytest.mark.asyncio
-async def test_approval_is_single_use_and_expires(rig, db):
-    bs = BookingService(db)
-    booking = await _on_the_way(rig, db)
-    bid = str(booking["_id"])
-    await bs.geo_decide(bid, "arrival", True, "Approved in advance", rig["manager_id"], "manager", rig["center_id"])
-    await db.geo_overrides.update_one({"booking_id": bid}, {"$set": {"expires_at": _utc_now() - timedelta(minutes=1)}})
-    await _refused(_arrive(rig, db, booking, at=FAR))  # expired
-
-
-@pytest.mark.asyncio
-async def test_wrong_code_does_not_burn_the_approval(rig, db):
-    bs = BookingService(db)
-    booking = await _on_the_way(rig, db)
-    bid = str(booking["_id"])
-    await bs.geo_decide(bid, "arrival", True, "Approved", rig["manager_id"], "manager", rig["center_id"])
-    with pytest.raises(BadRequestException):
-        await bs.verify_vehicle(bid, VerifyVehicleRequest(service_code="0000", latitude=FAR[0], longitude=FAR[1]), rig["captain_id"])
-    await _arrive(rig, db, booking, at=FAR)  # the approval is still there
     assert (await db.bookings.find_one({"_id": booking["_id"]}))["vehicle_verified"] is True
 
 
 @pytest.mark.asyncio
-async def test_only_the_centers_manager_or_an_admin_can_approve(rig, db):
+async def test_only_the_centers_manager_or_an_admin_can_call_the_old_override(rig, db):
     bs = BookingService(db)
     booking = await _on_the_way(rig, db)
     bid = str(booking["_id"])
@@ -452,9 +454,7 @@ async def test_only_the_centers_manager_or_an_admin_can_approve(rig, db):
         await bs.geo_decide(bid, "arrival", True, "I am a captain", rig["captain_id"], "captain", rig["center_id"])
     with pytest.raises(ForbiddenException):
         await bs.geo_decide(bid, "arrival", True, "Other center", rig["other_manager"], "manager", rig["other_center"])
-    with pytest.raises(BadRequestException):  # step the job isn't waiting on
-        await bs.geo_decide(bid, "complete", True, "Wrong step here", rig["manager_id"], "manager", rig["center_id"])
-    await bs.geo_decide(bid, "arrival", True, "Admin says yes", "admin-id-1", "admin", None)
+    assert (await bs.geo_decide(bid, "arrival", True, "Admin says yes", "admin-id-1", "admin", None))["status"] == "not_needed"
 
 
 @pytest.mark.asyncio
@@ -499,15 +499,27 @@ def test_captain_tokens_cannot_reach_location_free_or_approval_routes():
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_records_but_never_refuses(rig, db, monkeypatch):
+async def test_kill_switch_switches_off_even_the_time_rule(rig, db, monkeypatch):
+    """GEOFENCE_ENFORCE=false: nothing refuses, not even `too_quick`."""
+    await BookingPolicyService(db).set_policy({"geo_min_service_seconds": 120})
     monkeypatch.setattr(settings, "GEOFENCE_ENFORCE", False)
-    booking = await _on_the_way(rig, db)
-    await _arrive(rig, db, booking, at=FAR)
-    done = await db.bookings.find_one({"_id": booking["_id"]})
-    assert done["vehicle_verified"] is True and done["arrival_flagged"] is True
-    assert done["geo_checks"]["arrival"]["status"] == "unverified"
-    assert "outside_geofence" in done["geo_checks"]["arrival"]["reasons"]
-    assert await db.geo_events.count_documents({"booking_id": str(booking["_id"]), "enforced": False}) == 1
+    bs = BookingService(db)
+    try:
+        booking = await _on_the_way(rig, db)
+        await _arrive(rig, db, booking, at=FAR)
+        done = await db.bookings.find_one({"_id": booking["_id"]})
+        assert done["vehicle_verified"] is True and done["arrival_flagged"] is True
+        assert done["geo_checks"]["arrival"]["status"] == "unverified"
+        assert await db.geo_events.count_documents({"booking_id": str(booking["_id"]), "enforced": False}) == 1
+        await bs.capture_before_photo(
+            str(booking["_id"]), PhotoCaptureRequest(image_url=await _upload(db, rig, "b"), latitude=NEAR[0], longitude=NEAR[1], fix_at=_utc_now()), rig["captain_id"],
+        )
+        await bs.capture_after_photo_and_complete(
+            str(booking["_id"]), PhotoCaptureRequest(image_url=await _upload(db, rig, "a"), latitude=NEAR[0], longitude=NEAR[1], fix_at=_utc_now()), rig["captain_id"],
+        )
+        assert (await db.bookings.find_one({"_id": booking["_id"]}))["status"] == "completed"
+    finally:
+        await BookingPolicyService(db).set_policy({"geo_min_service_seconds": settings.GEOFENCE_MIN_SERVICE_SECONDS})
 
 
 # ------------------------------------------------------------ visibility
@@ -519,14 +531,14 @@ async def test_geo_status_and_flag_counts(rig, db):
 
     bs = BookingService(db)
     booking = await _on_the_way(rig, db, at=FAR)
-    await _refused(_arrive(rig, db, booking, at=NEAR))
+    await _arrive(rig, db, booking, at=NEAR)
     status = await bs.geo_status(str(booking["_id"]), rig["manager_id"], "manager", rig["center_id"])
     assert status["suspect"] is True and "trail_teleport" in status["suspect_reasons"]
-    assert status["refusals"] == 1 and status["waiting_step"] == "arrival"
+    assert status["refusals"] == 1 and status["waiting_step"] is None
     # Customers never see any of it.
     from app.services.booking_service import _CUSTOMER_HIDDEN_FIELDS
 
-    assert {"geo_checks", "geo_suspect", "geo_override"} <= set(_CUSTOMER_HIDDEN_FIELDS)
+    assert {"geo_checks", "geo_suspect", "geo_override", "location_warning"} <= set(_CUSTOMER_HIDDEN_FIELDS)
     assert "flags_by_type" in inspect.getsource(StaffDirectoryService) and "geo_suspect" in inspect.getsource(StaffDirectoryService)
 
 

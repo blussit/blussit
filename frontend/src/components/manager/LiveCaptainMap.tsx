@@ -225,9 +225,15 @@ function GoogleLiveCaptainMap({
   const moveTo = (lat: number, lng: number, at: string) => {
     const { map, marker } = objectsRef.current;
     if (!map || !marker) return;
-    marker.position = { lat, lng };
-    map.panTo({ lat, lng });
-    if (map.getZoom() < 14) map.setZoom(14);
+    // A map that Google refused to authorise (key blocked, quota, outage) throws
+    // from the marker — that must never take the whole manager page down.
+    try {
+      marker.position = { lat, lng };
+      map.panTo({ lat, lng });
+      if (map.getZoom() < 14) map.setZoom(14);
+    } catch {
+      // keep the "Last Position" label ticking even without a drawn marker
+    }
     setCapturedAt(at);
   };
   useLiveChannel(`captain-location:${captainId}`, (message) => {

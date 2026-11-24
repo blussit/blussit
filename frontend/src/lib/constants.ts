@@ -51,6 +51,10 @@ export const needsCaptain = (b: Booking) => b.status === "pending" || b.status =
 // safety net for any older data). Shared between the booking queue and the
 // manager dashboard so a captain-not-started (etc.) flag shows up in both
 // places consistently.
+/** A step the captain finished from outside the boundary / without GPS — RED
+ * for the manager until they tap Ignore. Never blocks the captain. */
+export const hasLocationWarning = (b: Booking) => !!b.location_warning && b.location_warning.resolved === false;
+
 export const isOpenIssue = (b: Booking) => !!b.issue_flag && !b.issue_resolved && !["completed", "cancelled"].includes(b.status);
 
 /** The booking's vehicle in one short label — "Maruti Swift · MP09AB1234",
