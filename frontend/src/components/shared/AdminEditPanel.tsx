@@ -11,9 +11,10 @@ import { formatSlot } from "../../lib/date";
 import { Button, Input, Modal } from "../ui";
 import { SlotPicker } from "./SlotPicker";
 import { toTitle } from "../../lib/titleCase";
+import { CaptainMoneyPanel } from "./CaptainMoneyPanel";
 
 const REFRESH = /^(center-bookings|admin-center-bookings|admin-bookings|booking|staff-booking|manager-kpi|manager-dashboard|collections|customer-360|admin-dashboard)/;
-const SECTIONS = ["Customer & Location", "Services & Prices", "Schedule & Captain", "Money", "Status"] as const;
+const SECTIONS = ["Customer & Location", "Services & Prices", "Schedule & Captain", "Money", "Captain Money", "Status"] as const;
 type Section = (typeof SECTIONS)[number];
 const STATUSES = ["awaiting_payment", "pending", "assigned", "rescheduled", "captain_on_the_way", "service_started", "completed", "cancelled"] as const;
 const rupees = (n: unknown) => `₹${(Number(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -476,6 +477,13 @@ export function AdminEditPanel({ car, cars, open, onClose }: { car: StaffBooking
           </div>
         )}
 
+        {section === "Captain Money" && (
+          <div className="space-y-2">
+            <p className="text-xs text-[var(--color-text-secondary)]">Each button here saves straight away with its own reason — you don&apos;t need to press Save Changes.</p>
+            <CaptainMoneyPanel bookingId={car.id} />
+          </div>
+        )}
+
         {section === "Status" && (
           <div className="space-y-3">
             <div className="flex flex-wrap gap-2">
@@ -522,6 +530,8 @@ export function AdminEditPanel({ car, cars, open, onClose }: { car: StaffBooking
           </div>
         )}
 
+        {section !== "Captain Money" && (
+          <>
         <Input label="Reason For The Change" value={draft.reason} maxLength={300} onChange={(e) => set("reason", e.target.value)} placeholder="Customer called to fix the address pin" hint="At least 5 characters — kept in the booking's history." />
         {error && (
           <p role="alert" className="text-sm text-[var(--color-error)]">
@@ -536,6 +546,8 @@ export function AdminEditPanel({ car, cars, open, onClose }: { car: StaffBooking
             Save Changes
           </Button>
         </div>
+          </>
+        )}
       </div>
     </Modal>
   );

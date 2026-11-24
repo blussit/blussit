@@ -248,6 +248,51 @@ export interface CommissionRow {
   unsettled_paise?: number;
   invoice_numbers?: string[];
   invoice_ids?: string[];
+  /** Part of what is settled that was marked paid by hand (no invoice). */
+  marked_paise?: number;
+}
+
+export interface CashBooking {
+  booking_id: string;
+  booking_number: string;
+  completed_at?: string | null;
+  day?: string | null;
+  collected_paise: number;
+  returned_paise: number;
+  held_paise: number;
+}
+export interface CashReceipt {
+  id: string;
+  captain_id: string;
+  amount_paise: number;
+  kind: "received" | "pay_offset";
+  status: "active" | "void";
+  note?: string | null;
+  allocations: { booking_id: string; booking_number?: string | null; amount_paise: number }[];
+  actor_name?: string | null;
+  invoice_number?: string | null;
+  created_at: string;
+  void?: { at: string; by: string; reason: string } | null;
+  duplicate?: boolean;
+}
+export interface CashPosition {
+  captain_id: string;
+  captain_name?: string | null;
+  held_paise: number;
+  bookings: CashBooking[];
+  receipts: CashReceipt[];
+}
+export interface BookingCaptainMoney {
+  booking_id: string;
+  booking_number: string;
+  status: string;
+  captain_id?: string | null;
+  captain_name?: string | null;
+  basis?: PayBasis | null;
+  finance_impact: boolean;
+  commission: CommissionRow | null;
+  cash: (Pick<CashBooking, "collected_paise" | "returned_paise" | "held_paise"> & { captain_id: string; receipts: CashReceipt[] }) | null;
+  adjustments: LedgerEntry[];
 }
 
 export interface PayrollMe {
@@ -286,6 +331,8 @@ export interface AdjustmentInput {
   amount_paise: number;
   note: string;
   idempotency_key: string;
+  /** Ties the money to one booking (it shows on that booking's captain money). */
+  booking_id?: string;
 }
 
 export interface CommissionEditInput {
@@ -536,6 +583,17 @@ export const payrollApi = {
     apiClient.get<ApiPaginated<LedgerEntry>>(`/payroll/captains/${id}/ledger`, { params }).then((r) => r.data),
   commissions: (id: string, month: string) =>
     apiClient.get<ApiSuccess<CommissionRow[]>>(`/payroll/captains/${id}/commissions`, { params: { month } }).then((r) => r.data.data),
+
+  /** §7.15 — settle bookings that were paid another way (no money moves), and undo it. */
+  markPaid: (id: string, payload: { booking_ids?: string[]; month?: string; reason?: string }) =>
+    apiClient.post<ApiSuccess<{ count: number; amount_paise: number }>>(`/payroll/captains/${id}/commissions/mark-paid`, payload).then(withMessage),
+  markUnpaid: (id: string, payload: { booking_ids: string[]; reason: string }) =>
+    apiClient.post<ApiSuccess<{ count: number; amount_paise: number }>>(`/payroll/captains/${id}/commissions/mark-unpaid`, payload).then(withMessage),
+  cash: (id: string) => apiClient.get<ApiSuccess<CashPosition>>(`/payroll/captains/${id}/cash`).then((r) => r.data.data),
+  cashReceived: (id: string, payload: { amount_paise: number; booking_id?: string; note?: string; idempotency_key: string }) =>
+    apiClient.post<ApiSuccess<CashReceipt>>(`/payroll/captains/${id}/cash-received`, payload).then(withMessage),
+  voidCashReceipt: (receiptId: string, reason: string) => apiClient.post<ApiSuccess<CashReceipt>>(`/payroll/cash-receipts/${receiptId}/void`, { reason }).then(withMessage),
+  bookingCaptainMoney: (bookingId: string) => apiClient.get<ApiSuccess<BookingCaptainMoney>>(`/payroll/bookings/${bookingId}/captain-money`).then((r) => r.data.data),
 
   saveTerms: (id: string, payload: TermsInput) => apiClient.put<ApiSuccess<PayrollCaptainDetail>>(`/payroll/captains/${id}/terms`, payload).then(withMessage),
   pay: (id: string, payload: PaymentInput) => apiClient.post<ApiSuccess<LedgerEntry>>(`/payroll/captains/${id}/payments`, payload).then(withMessage),

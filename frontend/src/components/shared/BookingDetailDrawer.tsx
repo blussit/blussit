@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BadgePercent, Ban, Calendar, CalendarClock, Car, CheckCheck, Clock, CreditCard, Flag, HandCoins, LockOpen, MapPin, MapPinCheck, Navigation, Pencil, Plus, ShieldCheck, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
+import { AlertTriangle, BadgePercent, Ban, Calendar, CalendarClock, Car, CheckCheck, Clock, Coins, CreditCard, Flag, HandCoins, LockOpen, MapPin, MapPinCheck, Navigation, Pencil, Plus, ShieldCheck, Star, Trash2, User as UserIcon, WifiOff, Wrench } from "lucide-react";
 import { getErrorMessage } from "../../lib/api-client";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
@@ -13,6 +13,7 @@ import { PaybackDialog, paybackOption } from "./PaybackDialog";
 import { DiscountDialog } from "./DiscountDialog";
 import { RescheduleDialog } from "./RescheduleDialog";
 import { AdminEditPanel } from "./AdminEditPanel";
+import { CaptainMoneyDialog } from "./CaptainMoneyPanel";
 import { AdjustmentTimeline } from "./AdjustmentTimeline";
 import { Badge, Button, ErrorState, Modal, StatusBadge } from "../ui";
 import { reviewApi } from "../../api/engagement";
@@ -194,6 +195,7 @@ export function BookingDetailDrawer({
   const [discountOpen, setDiscountOpen] = useState(false);
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [adminEditOpen, setAdminEditOpen] = useState(false);
+  const [captainMoneyOpen, setCaptainMoneyOpen] = useState(false);
   const discountable = isStaff && !!car && car.status !== "cancelled" && (isAdmin || car.status !== "completed");
   const reschedulable = isStaff && !!car && ["awaiting_payment", "pending", "assigned", "rescheduled"].includes(car.status);
   const refundCars = cars.filter((c) => c.payment_status === "refund_due" || c.payment_status === "refunded");
@@ -267,6 +269,11 @@ export function BookingDetailDrawer({
               {isAdmin && (
                 <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setAdminEditOpen(true)} data-testid="drawer-admin-edit">
                   <ShieldCheck className="h-3.5 w-3.5" /> Edit Booking (Admin)
+                </Button>
+              )}
+              {isStaff && (!!car.captain_id || car.completed_by_role === "manager") && car.status !== "cancelled" && (
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0" onClick={() => setCaptainMoneyOpen(true)} data-testid="drawer-captain-money">
+                  <Coins className="h-3.5 w-3.5" /> Captain Money
                 </Button>
               )}
               {isStaff && car.status !== "cancelled" && (
@@ -814,6 +821,7 @@ export function BookingDetailDrawer({
       />
       {discountable && car && <DiscountDialog open={discountOpen} onClose={() => setDiscountOpen(false)} car={car} cars={cars.filter((c) => c.status !== "cancelled")} />}
       {reschedulable && car && <RescheduleDialog open={rescheduleOpen} onClose={() => setRescheduleOpen(false)} booking={car} />}
+      {isStaff && car && (car.captain_id || car.completed_by_role === "manager") && <CaptainMoneyDialog bookingId={car.id} bookingNumber={car.booking_number} open={captainMoneyOpen} onClose={() => setCaptainMoneyOpen(false)} />}
       {isAdmin && car && <AdminEditPanel open={adminEditOpen} onClose={() => setAdminEditOpen(false)} car={car} cars={cars} />}
       {isStaff && car && stuckMode && <StuckCaptainDialog mode={stuckMode} car={car} open onClose={() => setStuckMode(null)} />}
       {isStaff && booking?.customer_id && (

@@ -12,7 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.dependencies import CurrentUser, get_db, require_admin, require_captain, require_manager_or_admin, require_staff
 from app.core.responses import paginated, success
 from app.schemas.payroll_schema import (
-    AdjustmentCreate, AttendanceOverride, CommissionSet, DepositAction, FinalizeRequest, InvoicePay, KitReturn, KitUpdate, PaymentCreate,
+    AdjustmentCreate, AttendanceOverride, CashReceived, CommissionSet, DepositAction, FinalizeRequest, InvoicePay, KitReturn, KitUpdate, MarkPaidRequest, MarkUnpaidRequest, PaymentCreate,
     PayTermsUpdate, ReasonRequest,
 )
 from app.services.payroll_service import PayrollService
@@ -271,3 +271,48 @@ async def return_kit(
     captain_id: str, payload: KitReturn | None = None, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     return success(await _svc(db).return_kit(captain_id, payload or KitReturn(), current_user), "Kit marked returned")
+
+
+# ---------------------------------------------------------------- mark paid, cash from captain, one booking (§7.15)
+
+
+@router.post("/captains/{captain_id}/commissions/mark-paid")
+async def mark_commissions_paid(
+    captain_id: str, payload: MarkPaidRequest, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).mark_commissions_paid(captain_id, payload.booking_ids, payload.month, payload.reason, current_user)
+    return success(result, result["message"])
+
+
+@router.post("/captains/{captain_id}/commissions/mark-unpaid")
+async def mark_commissions_unpaid(
+    captain_id: str, payload: MarkUnpaidRequest, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).mark_commissions_unpaid(captain_id, payload.booking_ids, payload.reason, current_user)
+    return success(result, result["message"])
+
+
+@router.get("/captains/{captain_id}/cash")
+async def captain_cash(captain_id: str, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await _svc(db).cash_position(captain_id, current_user))
+
+
+@router.post("/captains/{captain_id}/cash-received")
+async def cash_received(
+    captain_id: str, payload: CashReceived, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).receive_cash(captain_id, payload.amount_paise, payload.booking_id, payload.note, payload.idempotency_key, current_user)
+    return success(result, "Cash already recorded" if result.get("duplicate") else "Cash received recorded")
+
+
+@router.post("/cash-receipts/{receipt_id}/void")
+async def void_cash_receipt(
+    receipt_id: str, payload: ReasonRequest, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    result = await _svc(db).void_receipt(receipt_id, payload.reason, current_user)
+    return success(result, "Already undone" if result.get("duplicate") else "Cash receipt undone")
+
+
+@router.get("/bookings/{booking_id}/captain-money")
+async def booking_captain_money(booking_id: str, current_user: CurrentUser = Depends(require_manager_or_admin), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return success(await _svc(db).booking_captain_money(booking_id, current_user))

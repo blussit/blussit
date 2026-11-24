@@ -14,7 +14,7 @@ export function rupeesText(paise?: number | null): string {
 /** What a person typed ("15,000", "₹ 15000") -> paise, or null when it isn't a whole-rupee number >= 0. */
 export function toPaise(input: string | number | null | undefined): number | null {
   if (input === null || input === undefined) return null;
-  const text = String(input).replace(/[₹,\s]/g, "");
+  const text = String(input).replace(/[₹,\s]/g, "").replace(/\.$/, "");
   if (!/^\d+$/.test(text)) return null;
   const rupees = Number(text);
   return Number.isSafeInteger(rupees) ? rupees * 100 : null;
@@ -27,7 +27,11 @@ export function rupeesInput(paise?: number | null): string {
 }
 
 /** Digits only, for an amount input. */
-export const cleanAmountInput = (raw: string) => raw.split(".")[0].replace(/\D/g, "").slice(0, 9);
+export const cleanAmountInput = (raw: string) => {
+  const whole = raw.split(".")[0].replace(/\D/g, "").slice(0, 9);
+  // A just-typed "." stays on screen until the next key, so "30.5" is read as 30 — never 305.
+  return raw.includes(".") && raw.indexOf(".") === raw.length - 1 && whole ? `${whole}.` : whole;
+};
 
 const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
 const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];

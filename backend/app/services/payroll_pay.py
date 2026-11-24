@@ -228,6 +228,9 @@ class PayMixin(InvoiceCore):
                     orig["captain_id"], -orig["cash_offset_paise"] / 100, None, "Cash offset reversed — payment voided", session=s,
                     key=f"cashoff-void:{ledger_id}",
                 )
+                receipt = await self.db.captain_cash_receipts.find_one({"invoice_id": orig.get("invoice_id"), "kind": "pay_offset", "status": "active"}, session=s)
+                if receipt:
+                    await self.undo_receipt_in(s, receipt, reason, who, post_wallet=False)
             if orig.get("invoice_id"):
                 await self.void_invoice_in(s, orig, reason, who)
             return await self.post({

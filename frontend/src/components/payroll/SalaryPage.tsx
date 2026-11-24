@@ -38,7 +38,8 @@ export function SalaryPage({ scope }: { scope: "manager" | "admin" }) {
     setParams(next, { replace: true });
   };
   const openId = params.get("captain");
-  const tabParam = params.get("tab") || "";
+  // Old links: deposit & kit moved under Terms, invoices live on each payment.
+  const tabParam = { deposit: "terms", invoices: "payments" }[params.get("tab") || ""] || params.get("tab") || "";
   const openTab: DrawerTab = TAB_KEYS.includes(tabParam) ? (tabParam as DrawerTab) : "summary";
   const setOpen = (id: string | null, tab?: DrawerTab) => {
     const next = new URLSearchParams(params);

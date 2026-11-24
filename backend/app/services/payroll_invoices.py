@@ -241,6 +241,11 @@ class InvoiceMixin(MonthsMixin):
                 warnings.append(f"{len(plan['not_set'])} booking(s) have no commission amount yet — set it in the Commissions tab to include them.")
             if any(c["kind"] == "revised" for c in plan["candidates"]):
                 warnings.append("Some bookings were paid before and their commission has changed since — the difference is on this invoice.")
+            if plan["gross_paise"] > 0 and (await self.repo.dues(captain_id))["dues_paise"] <= 0:
+                warnings.append(
+                    "This captain has nothing due right now — these bookings may already have been paid by an earlier payment. "
+                    "If so, cancel here and use Mark As Paid in the Commissions tab, so nothing is paid twice."
+                )
             if plan["truncated"]:
                 warnings.append(f"Only the first {MAX_COMMISSION_LINES} bookings of this period are shown — pick a shorter period.")
             return {
@@ -401,6 +406,11 @@ class InvoiceMixin(MonthsMixin):
             {"$match": {"captain_id": {"$in": captain_ids}}}, {"$group": {"_id": "$captain_id", "p": {"$sum": "$amount_paise"}}},
         ]).to_list(length=None):
             settle_rows[r["_id"]] = int(r["p"] or 0)
+        mark_rows: dict[str, int] = {}  # settled by hand (§7.15): no invoice, no money
+        for r in await self.db.payroll_settlements.aggregate([
+            {"$match": {"captain_id": {"$in": captain_ids}, "kind": {"$in": ["mark", "unmark"]}}}, {"$group": {"_id": "$captain_id", "p": {"$sum": "$amount_paise"}}},
+        ]).to_list(length=None):
+            mark_rows[r["_id"]] = int(r["p"] or 0)
         booking_settled: dict[str, int] = {}
         for r in await self.bookings.aggregate([
             {"$match": {"commission_settled_by": {"$exists": True}}}, {"$project": {"s": {"$objectToArray": "$commission_settled_by"}}},
@@ -432,7 +442,7 @@ class InvoiceMixin(MonthsMixin):
                 gone = i.get("ledger_id") in voided_ledger
                 if (i.get("status") == "void") != gone:
                     bad(cid, "invoice status follows its payment's void", 0, int(i.get("paid_paise") or 0), f"invoice {i.get('number')}")
-            lines_sum = sum(int(l.get("amount_paise") or 0) for i in live for l in i.get("lines") or [] if l.get("settle"))
+            lines_sum = sum(int(l.get("amount_paise") or 0) for i in live for l in i.get("lines") or [] if l.get("settle")) + mark_rows.get(cid, 0)
             if lines_sum != settle_rows.get(cid, 0) or lines_sum != booking_settled.get(cid, 0):
                 bad(cid, "settled commission", lines_sum, booking_settled.get(cid, 0), f"settlement rows {settle_rows.get(cid, 0)}")
         # Finance ↔ invoices, per center (franchise-managed centers write no Finance row).

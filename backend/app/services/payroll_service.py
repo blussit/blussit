@@ -19,7 +19,7 @@ from app.core.exceptions import NotFoundException
 from app.repositories.payroll_repository import DEPOSIT_KINDS, EARN_KINDS, PAID_KINDS
 from app.services import payroll_terms as pt
 from app.services.payroll_base import iso, ist_day, today_ist
-from app.services.payroll_invoices import InvoiceMixin
+from app.services.payroll_cash import CashMixin
 from app.services.payroll_months import _utc_bounds, check_month
 from app.services.payroll_salary import month_bounds
 from app.utils.csv_safe_finance import build_csv
@@ -28,7 +28,7 @@ MAX_CAPTAINS = 500
 LEDGER_PAGE_MAX = 100
 
 
-class PayrollService(InvoiceMixin):
+class PayrollService(CashMixin):
     # ---------- shapes ----------
 
     async def entry_view(self, row: dict, voided: bool | None = None) -> dict:
@@ -294,9 +294,11 @@ class PayrollService(InvoiceMixin):
                         if inv["number"] not in numbers[line["booking_id"]]:
                             numbers[line["booking_id"]].append(inv["number"])
                             invoice_ids[line["booking_id"]].append(str(inv["_id"]))
+        marked = await self._marked_totals(captain_id, ids) if ids else {}
         for row in rows:
             got, amount = settled.get(row["booking_id"], 0), int(row["amount_paise"])
             row["settled_paise"] = got
+            row["marked_paise"] = marked.get(row["booking_id"], 0)  # settled by hand, no invoice (§7.15)
             row["unsettled_paise"] = amount - got
             row["invoice_numbers"] = numbers.get(row["booking_id"], [])
             row["invoice_ids"] = invoice_ids.get(row["booking_id"], [])
@@ -304,7 +306,7 @@ class PayrollService(InvoiceMixin):
                 row["payment_state"] = "not_set"
             elif amount == 0 and got == 0:
                 row["payment_state"] = "none"
-            elif got == amount:
+            elif got == amount or (amount > 0 and got > amount):  # settled more than it is now worth: a later invoice recovers it
                 row["payment_state"] = "paid"
             elif got != 0:
                 row["payment_state"] = "part_paid"

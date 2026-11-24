@@ -44,8 +44,7 @@ export function CaptainSalaryGlance({ captainId, base }: { captainId: string; ba
         {link("attendance", "Attendance")}
         {link("commissions", "Commissions")}
         {link("payments", "Payments")}
-        {link("terms", "Edit Terms")}
-        {link("deposit", "Deposit & Kit")}
+        {link("terms", "Terms, Deposit & Kit")}
       </p>
     </div>
   );

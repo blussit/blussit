@@ -204,3 +204,32 @@ class KitReturn(_Strip):
 
 class KitUpdate(PayKitIn):
     pass
+
+
+class MarkPaidRequest(_Strip):
+    """POST /payroll/captains/{id}/commissions/mark-paid — settle bookings that were
+    already paid another way (no money moves). Name the bookings, or a month."""
+
+    booking_ids: Optional[list[str]] = Field(default=None, max_length=1000)
+    month: Optional[str] = Field(default=None, pattern=MONTH_PATTERN)
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _one_of(self):
+        if not self.booking_ids and not self.month:
+            raise ValueError("Pick the bookings, or a month.")
+        return self
+
+
+class MarkUnpaidRequest(_Strip):
+    booking_ids: list[str] = Field(min_length=1, max_length=1000)
+    reason: str = Field(min_length=3, max_length=200)
+
+
+class CashReceived(_Strip):
+    """POST /payroll/captains/{id}/cash-received — cash the captain handed in."""
+
+    amount_paise: int = Field(gt=0, le=MAX_PAYMENT_PAISE)
+    booking_id: Optional[str] = Field(default=None, max_length=40)
+    note: Optional[str] = Field(default=None, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9._:\-]+$")

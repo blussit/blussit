@@ -64,3 +64,9 @@ async def ensure_payroll_indexes(db: AsyncIOMotorDatabase) -> None:
     await st.create_index("key", unique=True, name="uniq_settlement_key")
     await st.create_index([("captain_id", 1), ("booking_id", 1)], name="settlement_captain_booking")
     await st.create_index("invoice_id", name="settlement_invoice")
+    # Cash handed in by captains (§7.15).
+    rc = db.captain_cash_receipts
+    await rc.create_index("key", unique=True, name="uniq_cash_receipt_key")
+    await rc.create_index([("captain_id", 1), ("created_at", -1)], name="receipt_captain_created")
+    await rc.create_index("invoice_id", name="receipt_invoice", sparse=True)
+    await rc.create_index("allocations.booking_id", name="receipt_booking", sparse=True)

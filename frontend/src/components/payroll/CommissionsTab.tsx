@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Pencil } from "lucide-react";
+import { CheckCircle2, Pencil, Undo2 } from "lucide-react";
 import { Badge, Button, EmptyState, ErrorState, Input, Modal } from "../ui";
 import { payrollApi, type CommissionRow, type PayrollCaptainDetail } from "../../api/payroll";
 import { getErrorMessage } from "../../lib/api-client";
@@ -10,11 +10,23 @@ import { cn } from "../../lib/cn";
 import { Banner, SkeletonRows, monthLabel } from "./payrollUi";
 import { InvoiceLink } from "./InvoiceLink";
 import { usePayrollWrite } from "./usePayrollWrite";
+import { useConfirm } from "../../context/ConfirmContext";
 
 /** Completed bookings with the commission each earned; edit one with a reason. */
 export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail; month: string }) {
   const [editing, setEditing] = useState<CommissionRow | null>(null);
+  const write = usePayrollWrite();
+  const confirm = useConfirm();
   const query = useQuery({ queryKey: ["payroll-commissions", detail.id, month], queryFn: () => payrollApi.commissions(detail.id, month) });
+
+  const mark = useMutation({
+    mutationFn: (v: { paid: boolean; ids?: string[] }) =>
+      v.paid
+        ? payrollApi.markPaid(detail.id, v.ids ? { booking_ids: v.ids, reason: "Already paid" } : { month, reason: "Already paid" })
+        : payrollApi.markUnpaid(detail.id, { booking_ids: v.ids || [], reason: "Marked unpaid from the Commissions tab" }),
+    onSuccess: (res) => write.ok("Done", res.message),
+    onError: (err) => write.fail(err),
+  });
 
   if (query.isLoading) return <SkeletonRows rows={4} />;
   if (query.isError) return <ErrorState message="Couldn't load commissions." busy={query.isFetching} onRetry={() => void query.refetch()} />;
@@ -22,6 +34,16 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
   const total = rows.reduce((s, r) => s + r.amount_paise, 0);
   const unset = rows.filter((r) => r.not_set).length;
   const unsetPlan = rows.filter((r) => r.not_set && r.plan_covered).length;
+  const unpaid = rows.filter((r) => (r.payment_state === "unpaid" || r.payment_state === "part_paid") && !r.not_set);
+  const markAllPaid = async () => {
+    const ok = await confirm({
+      title: `Mark ${unpaid.length} ${unpaid.length === 1 ? "Booking" : "Bookings"} As Paid?`,
+      message: `Use this when ${rupeesText(unpaid.reduce((n, r) => n + (r.unsettled_paise ?? r.amount_paise), 0))} was already paid some other way — an advance, cash in hand or a plain payment. No money moves; it only stops them being paid again. You can undo it.`,
+      confirmLabel: "Yes, Mark Paid",
+      tone: "default",
+    });
+    if (ok) mark.mutate({ paid: true });
+  };
 
   return (
     <div className="space-y-3">
@@ -33,9 +55,24 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
           {unsetPlan > 0 && ` ${unsetPlan} of them ${unsetPlan === 1 ? "was" : "were"} washes covered by a plan — a plan wash's commission is always set by you.`}
         </Banner>
       )}
+      {unpaid.length > 0 && detail.dues_paise <= 0 && (
+        <Banner tone="warning">
+          {unpaid.length} {unpaid.length === 1 ? "booking shows" : "bookings show"} Unpaid, yet this captain has nothing due — {unpaid.length === 1 ? "it was" : "they were"} most likely paid by an advance or a plain payment.
+          <button type="button" className="ml-1 font-semibold underline" onClick={() => void markAllPaid()}>
+            Mark {unpaid.length === 1 ? "It" : "Them"} As Paid
+          </button>
+        </Banner>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="text-sm text-[var(--color-text-secondary)]">
         {monthLabel(month)}: <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(total)}</span> from {rows.length} {rows.length === 1 ? "booking" : "bookings"}
       </p>
+      {unpaid.length > 0 && (
+        <Button size="sm" variant="outline" isLoading={mark.isPending} onClick={() => void markAllPaid()}>
+          <CheckCircle2 className="h-3.5 w-3.5" /> Mark All As Paid
+        </Button>
+      )}
+      </div>
 
       {!rows.length ? (
         <EmptyState title="No Completed Bookings" description="Commission shows up here as soon as this captain completes a booking." />
@@ -57,13 +94,25 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
                   </p>
                   {r.reason && <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">Reason: {r.reason}</p>}
                 </div>
-                <Button size="sm" variant="outline" aria-label={`Edit commission for ${r.booking_number}`} onClick={() => setEditing(r)}>
-                  <Pencil className="h-3.5 w-3.5" /> {r.not_set ? "Set Amount" : "Edit"}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  {(r.payment_state === "unpaid" || r.payment_state === "part_paid") && !r.not_set && (
+                    <Button size="sm" variant="ghost" aria-label={`Mark ${r.booking_number} as paid`} isLoading={mark.isPending} onClick={() => mark.mutate({ paid: true, ids: [r.booking_id] })}>
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Mark Paid
+                    </Button>
+                  )}
+                  {(r.marked_paise ?? 0) > 0 && (
+                    <Button size="sm" variant="ghost" aria-label={`Mark ${r.booking_number} as unpaid`} isLoading={mark.isPending} onClick={() => mark.mutate({ paid: false, ids: [r.booking_id] })}>
+                      <Undo2 className="h-3.5 w-3.5" /> Mark Unpaid
+                    </Button>
+                  )}
+                  <Button size="sm" variant="outline" aria-label={`Edit commission for ${r.booking_number}`} onClick={() => setEditing(r)}>
+                    <Pencil className="h-3.5 w-3.5" /> {r.not_set ? "Set Amount" : "Edit"}
+                  </Button>
+                </div>
               </div>
               <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
                 <Stat label="Booking Value" value={rupeesText(r.base_paise)} />
-                <Stat label="Rate" value={r.rate_percent != null ? `${r.rate_percent}%` : "—"} />
+                <Stat label="Rate" value={r.not_set ? "—" : r.edited || !r.rate_percent ? "Set By Hand" : `${r.rate_percent}%`} />
                 <Stat label="Commission" value={r.not_set ? "Not Set" : rupeesText(r.amount_paise)} strong />
               </dl>
             </li>
@@ -72,7 +121,7 @@ export function CommissionsTab({ detail, month }: { detail: PayrollCaptainDetail
       )}
 
       <Modal open={!!editing} onClose={() => setEditing(null)} title={editing ? `Commission — ${editing.booking_number}` : "Commission"}>
-        {editing && <EditForm row={editing} onClose={() => setEditing(null)} />}
+        {editing && <CommissionEditForm row={editing} onClose={() => setEditing(null)} />}
       </Modal>
     </div>
   );
@@ -82,7 +131,7 @@ function PaymentState({ row }: { row: CommissionRow }) {
   if (row.payment_state === "paid") {
     return (
       <Badge tone="success">
-        Paid — {row.invoice_numbers?.length ? <InvoiceLink numbers={row.invoice_numbers} ids={row.invoice_ids} /> : "Invoiced"}
+        Paid — {row.invoice_numbers?.length ? <InvoiceLink numbers={row.invoice_numbers} ids={row.invoice_ids} /> : row.marked_paise ? "Marked Paid" : "Invoiced"}
       </Badge>
     );
   }
@@ -100,7 +149,7 @@ function Stat({ label, value, strong }: { label: string; value: string; strong?:
   );
 }
 
-function EditForm({ row, onClose }: { row: CommissionRow; onClose: () => void }) {
+export function CommissionEditForm({ row, onClose }: { row: CommissionRow; onClose: () => void }) {
   const write = usePayrollWrite();
   const [by, setBy] = useState<"amount" | "percent">("amount");
   const plan = !!row.plan_covered;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { CalendarCheck, Coins, FileText, HandCoins, PackageCheck, Plus, Wallet } from "lucide-react";
+import { CalendarCheck, FileText, HandCoins, PackageCheck, Plus, Wallet } from "lucide-react";
 import { Button, ErrorState, Input, Modal } from "../ui";
 import { payrollApi, type PayrollCaptainDetail, type PayrollStatement } from "../../api/payroll";
 import { getErrorMessage } from "../../lib/api-client";
@@ -9,7 +9,7 @@ import { AttendanceTab } from "./AttendanceTab";
 import { CommissionsTab } from "./CommissionsTab";
 import { DepositKitTab } from "./DepositKitTab";
 import { AdjustmentModal, RecordPaymentModal } from "./PaymentModals";
-import { InvoicesTab } from "./InvoicesTab";
+import { CashFromCaptainCard } from "./CashFromCaptain";
 import { PayWizard } from "./PayWizard";
 import { PaymentsTab } from "./PaymentsTab";
 import { TermsTab } from "./TermsTab";
@@ -18,17 +18,15 @@ import { usePayrollWrite } from "./usePayrollWrite";
 
 export const DRAWER_TABS = [
   { key: "summary", label: "Summary" },
-  { key: "attendance", label: "Attendance" },
   { key: "commissions", label: "Commissions" },
   { key: "payments", label: "Payments" },
-  { key: "invoices", label: "Invoices" },
-  { key: "terms", label: "Terms" },
-  { key: "deposit", label: "Deposit & Kit" },
+  { key: "attendance", label: "Attendance" },
+  { key: "terms", label: "Terms & Kit" },
 ] as const;
 export type DrawerTab = (typeof DRAWER_TABS)[number]["key"];
 
 /**
- * One captain's pay, in a big dialog with six tabs. Used by the manager's
+ * One captain's pay, in a big dialog with five tabs (invoices live on each payment, deposit and kit sit under Terms). Used by the manager's
  * and the admin's Salary page alike — the server decides who may see whom.
  */
 export function CaptainPayDrawer({
@@ -92,9 +90,15 @@ function DrawerBody({ captainId, month, onMonthChange, initialTab }: { captainId
       {tab === "attendance" && <AttendanceTab detail={detail} month={month} statement={statementQuery} />}
       {tab === "commissions" && <CommissionsTab detail={detail} month={month} />}
       {tab === "payments" && <PaymentsTab detail={detail} />}
-      {tab === "invoices" && <InvoicesTab captainId={detail.id} />}
-      {tab === "terms" && <TermsTab detail={detail} />}
-      {tab === "deposit" && <DepositKitTab detail={detail} />}
+      {tab === "terms" && (
+        <div className="space-y-6">
+          <TermsTab detail={detail} />
+          <div className="border-t border-gray-100 pt-4">
+            <p className="mb-3 text-sm font-semibold text-[var(--color-text-primary)]">Deposit And Kit</p>
+            <DepositKitTab detail={detail} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -110,22 +114,30 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={() => setPaying(true)}>
-          <HandCoins className="h-4 w-4" /> Pay
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => setOther(true)}>
-          Advance Or Other
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => setAdjusting(true)}>
-          <Plus className="h-4 w-4" /> Add Adjustment
-        </Button>
-        {detail.pay.basis === "salary" && (
-          <Button size="sm" variant="outline" onClick={() => setFinalizing(true)}>
-            <FileText className="h-4 w-4" /> Finalize Month
+      <div className="rounded-2xl border border-gray-100 p-4" data-testid="pay-hero">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">{detail.dues_paise < 0 ? "Paid Ahead" : "To Pay The Captain Now"}</p>
+            <Dues paise={Math.abs(detail.dues_paise)} className="text-2xl" />
+            <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
+              {detail.dues_paise > 0 ? "Everything earned so far, minus what has been paid." : detail.dues_paise < 0 ? "Recovered from the next payment." : "Nothing is due right now."}
+            </p>
+          </div>
+          <Button onClick={() => setPaying(true)}>
+            <HandCoins className="h-4 w-4" /> {detail.dues_paise > 0 ? `Pay ${rupeesText(detail.dues_paise)}` : "Pay"}
           </Button>
-        )}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 border-t border-gray-100 pt-3">
+          <Button size="sm" variant="outline" onClick={() => setAdjusting(true)}>
+            <Plus className="h-4 w-4" /> Add Or Take Money
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setOther(true)}>
+            Give Advance Or Other
+          </Button>
+        </div>
       </div>
+
+      <CashFromCaptainCard captainId={detail.id} />
 
       {statement.isLoading ? (
         <SkeletonRows rows={2} />
@@ -133,15 +145,12 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
         <ErrorState message="Couldn't load this month." busy={statement.isFetching} onRetry={() => void statement.refetch()} />
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Fact label={`Earned In ${monthLabel(month)}`}>
               <span className="font-mono-num">{rupeesText(s.earned_paise)}</span>
             </Fact>
             <Fact label={`Paid In ${monthLabel(month)}`}>
               <span className="font-mono-num">{rupeesText(s.paid_paise)}</span>
-            </Fact>
-            <Fact label="Dues Right Now (All Time)">
-              <Dues paise={detail.dues_paise} className="text-base" />
             </Fact>
           </div>
           {detail.dues_paise < 0 && (
@@ -177,7 +186,10 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
                 <Row label="Worked Out From Attendance" value={rupeesText(s.salary.computed_paise)} />
                 {s.salary.finalized && s.salary.finalized_paise != null && <Row label="Finalized Amount" value={rupeesText(s.salary.finalized_paise)} strong />}
               </dl>
-              {!s.salary.finalized && <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Not finalized yet — finalize when the month is over so the salary is added to what the captain is owed.</p>}
+              {!s.salary.finalized && <p className="mt-2 text-xs text-[var(--color-text-secondary)]">Not added to what the captain is owed yet — paying the month does it for you, or add it now.</p>}
+              <Button size="sm" variant="outline" className="mt-2" onClick={() => setFinalizing(true)}>
+                <FileText className="h-4 w-4" /> {s.salary.finalized ? "Change This Month's Salary" : "Add This Month's Salary"}
+              </Button>
             </div>
           )}
 
@@ -212,11 +224,6 @@ function SummaryTab({ detail, month, statement, onGo }: { detail: PayrollCaptain
         <span className="inline-flex items-center gap-1">
           <PackageCheck className="h-3.5 w-3.5" /> Kit: <span className="font-semibold text-[var(--color-text-primary)]">{!detail.kit_provided ? "None" : detail.kit_returned ? "Returned" : "With Captain"}</span>
         </span>
-        {detail.cash_held_paise > 0 && (
-          <span className="inline-flex items-center gap-1">
-            <Coins className="h-3.5 w-3.5" /> Cash Held: <span className="font-mono-num font-semibold text-[var(--color-text-primary)]">{rupeesText(detail.cash_held_paise)}</span>
-          </span>
-        )}
       </div>
 
       <PayWizard captain={detail} open={paying} onClose={() => setPaying(false)} onOther={() => { setPaying(false); setOther(true); }} />

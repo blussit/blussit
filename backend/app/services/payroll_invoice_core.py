@@ -145,11 +145,11 @@ class InvoiceCore(CommissionMixin):
                 )
                 entry_id = entry["id"]
             if cash_offset_paise:
-                from app.services.wallet_service import WalletService
-
-                await WalletService(self.db).post_delta(
-                    captain_id, cash_offset_paise / 100, None, f"Cash handed over, set against pay ({label}, {number})", session=s,
-                    key=f"cashoff:{key}",
+                # The cash he holds is handed in against this pay: his wallet goes up and his
+                # bookings show it as handed over (a receipt keeps the trail, §7.15).
+                await self.return_cash_in(
+                    s, captain_id, cash_offset_paise, booking_id=None, kind="pay_offset", note=f"Cash handed over, set against pay ({label}, {number})",
+                    who=who, center_id=center_id, key=f"off:{key}", invoice_id=str(invoice_oid), invoice_number=number, strict=False,
                 )
             row = await self.post({
                 "_id": oid, "captain_id": captain_id, "service_center_id": center_id, "kind": ledger_kind, "payment_kind": kind,
